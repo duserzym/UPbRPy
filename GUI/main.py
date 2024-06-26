@@ -1,14 +1,48 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QScrollArea, QMenu, QListWidget, QAbstractItemView
-from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtWidgets import QApplication, QMainWindow
+from PyQt5.QtWidgets import QWidget, QPushButton, QLabel, QFileDialog, QScrollArea, QMenu, QListWidget
+from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
+from PyQt5.QtWidgets import QAbstractItemView, QTableView
+
+from PyQt5.QtCore import Qt, QPoint, QAbstractTableModel, QVariant
 from PyQt5.QtGui import QFont, QColor
+
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import RectangleSelector
-import pandas as pd
-import os
-import traceback
 
+import pandas as pd
+
+import traceback
+import util
+
+this_experiment = pd.DataFrame()
+
+class PandasTableModel(QAbstractTableModel):
+    def __init__(self, data):
+        super().__init__()
+        self._data = data
+
+    def data(self, index, role):
+        if role == Qt.DisplayRole:
+            value = self._data.iloc[index.row(), index.column()]
+            return str(value)
+        return QVariant()
+
+    def rowCount(self, index):
+        return self._data.shape[0]
+
+    def columnCount(self, index):
+        return self._data.shape[1]
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.DisplayRole:
+            if orientation == Qt.Horizontal:
+                return str(self._data.columns[section])
+            else:
+                return str(self._data.index[section])
+        return QVariant()
+    
 class CustomListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -25,7 +59,7 @@ class CustomListWidget(QListWidget):
         super().mousePressEvent(event)
 
 class PlotCanvas(FigureCanvas):
-    def __init__(self, parent=None, width=5, height=4, dpi=100):
+    def __init__(self, parent=None, width=8, height=6, dpi=150):
         fig = Figure(figsize=(width, height), dpi=dpi)
         self.axes = fig.add_subplot(111)
         super().__init__(fig)
@@ -40,7 +74,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LA-ICP-MS Data Visualization")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1000, 800)
 
         self.initUI()
 
@@ -114,17 +148,35 @@ class MainWindow(QMainWindow):
         self.channel_list.setContextMenuPolicy(Qt.CustomContextMenu)
         # add function to show the context menu
         self.channel_list.customContextMenuRequested.connect(self.show_context_menu)
-
-
-
+        # set fixed size for the channel list
+        self.channel_list.setFixedSize(200, 250)
 
         # now add a scrollable list widget for displaying the spot names
         self.spot_list_label = QLabel("Spots")
         self.spot_list_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
         self.spot_list = QListWidget()
+        # keep the spot list to be single selection
+        self.spot_list.setSelectionMode(QListWidget.SingleSelection)
+        # display the spot's data in the table view upon clicking
+        self.spot_list.itemClicked.connect(self.display_spot_data)
+        # do the same thing if it is keyboard selection
+        self.spot_list.itemSelectionChanged.connect(self.display_spot_data)
+        
+        # set fixed size for the spot list
+        self.spot_list.setFixedSize(200, 250)
+
+
+        # add a table view for displaying the spot data
+        self.table_view = QTableView()
+        self.model = PandasTableModel(pd.DataFrame())
+        self.table_view.setModel(self.model)
+        # set initial table view to be fixed size and have the same width as the canvas
+        self.table_view.setFixedSize(1200, 250)
+
 
         # put the channel list and spot list in a vertical layout
         self.v_layout = QVBoxLayout()
+        self.v_layout.addWidget(self.load_button)
         self.v_layout.addWidget(self.channel_list_label)
         self.v_layout.addWidget(self.channel_list)
         self.v_layout.addWidget(self.spot_list_label)
@@ -137,8 +189,21 @@ class MainWindow(QMainWindow):
 
         self.layout.addLayout(self.h_layout)
  
-        self.layout.addWidget(self.load_button)
+        self.layout.addWidget(self.table_view)
         self.layout.addWidget(self.scroll_area)
+
+    def display_spot_data(self):
+        global this_experiment
+        # get the spot name from the selected item
+        selected_items = self.spot_list.selectedItems()[0]
+        spot_name = selected_items.text()
+        # get the spot's path from the experiment dataframe
+        spot_path = this_experiment[this_experiment['spot_names'] == spot_name]['spot_paths'].values[0]
+        # get the spot's data from the experiment
+        spot_data = util.read_spot_data(spot_path)
+        # set the model of the table view to the spot's data
+        self.model = PandasTableModel(spot_data)
+        self.table_view.setModel(self.model)
 
 
     def show_context_menu(self, pos: QPoint):
@@ -161,11 +226,12 @@ class MainWindow(QMainWindow):
             item.setSelected(False)
 
     def load_data(self):
+            global this_experiment
             # make sure to only select folders
             options = QFileDialog.Options()
             directory = QFileDialog.getExistingDirectory(self, "Select Folder", "", options=options)
             try:
-                this_experiment, channels = read_experiment_data(directory)
+                this_experiment, channels = util.read_experiment_data(directory)
                 self.update_console(f'Loaded data from {this_experiment.shape[0]} spots from {directory}')
                 # update the channel list widget
                 self.channel_list.clear()
@@ -200,53 +266,6 @@ class MainWindow(QMainWindow):
             self.text_area.setText(text)
         else:
             self.text_area.setText(self.text_area.text() + '\n' + text)
-
-def read_experiment_data(directory):
-    '''
-    function for extracting spot names from files exported from Thermo iCap
-
-    You may follow the instruction on Iolite website below for guidance on generating the proper files from iCap
-    https://iolite.xyz/docs/import_prep/exporting_data_from_instruments.html
-
-    Parameters
-    ----------
-    directory : str
-        path to the folder containing the files
-        we assume that the files in the folders are in .csv format
-    
-    Returns
-    -------
-    spot_names : list
-        list of spot names extracted from the files
-    spot_paths : list
-        list of paths to the files
-    '''
-    spot_names = []
-    spot_paths = []
-    # use the first .csv file to get the channel names
-    first_file = open(os.path.join(directory,[f if f.endswith('.csv') else None for f in os.listdir(directory)][0])).readlines()
-
-    # now update the global variable channels
-    channels = first_file[13].split(',')[1:]
-
-    # loop through all the .csv files in the directory using io and get their first lines
-    for file in os.listdir(directory):
-        if file.endswith('.csv'):
-            this_path = os.path.join(directory, file)
-            spot_paths.append(this_path)
-            file = open(this_path)
-            lines = file.readlines()
-            spot_name = lines[0].split(':')[0]
-            spot_names.append(spot_name)
-            file.close()
-
-    # create a pandas dataframe to store the experiment data
-    experiment = pd.DataFrame()
-    experiment['spot_names'] = spot_names
-    experiment['spot_paths'] = spot_paths
-    
-    experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
-    return experiment, channels
 
 
 def main():
