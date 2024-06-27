@@ -4,12 +4,20 @@ from PyQt5.QtWidgets import QWidget, QPushButton, QLabel, QFileDialog, QScrollAr
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
 from PyQt5.QtWidgets import QAbstractItemView, QTableView
 
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+
 from PyQt5.QtCore import Qt, QPoint, QAbstractTableModel, QVariant
 from PyQt5.QtGui import QFont, QColor
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from matplotlib.widgets import RectangleSelector
+from bokeh.plotting import figure, output_file, save, show
+from bokeh.resources import INLINE
+from bokeh.embed import file_html
+from bokeh.models import ColumnDataSource
+from bokeh.io import push_notebook
+
+# from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+# from matplotlib.figure import Figure
+# from matplotlib.widgets import RectangleSelector
 
 import pandas as pd
 
@@ -59,32 +67,32 @@ class CustomListWidget(QListWidget):
                     item.setSelected(True)
         super().mousePressEvent(event)
 
-class PlotCanvas(FigureCanvas):
-    def __init__(self, parent=None, width=8, height=6, dpi=150):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = fig.add_subplot(111)
-        super().__init__(fig)
-        self.setParent(parent)
-        self.axes.set_xlabel('Time')
-        self.axes.set_ylabel('Counts/Intensity')
+# class PlotCanvas(FigureCanvas):
+#     def __init__(self, parent=None, width=8, height=6, dpi=150):
+#         fig = Figure(figsize=(width, height), dpi=dpi)
+#         self.axes = fig.add_subplot(111)
+#         super().__init__(fig)
+#         self.setParent(parent)
+#         self.axes.set_xlabel('Time')
+#         self.axes.set_ylabel('Counts/Intensity')
 
-    def scatter(self, x, y, **kwargs):
-        self.axes.scatter(x, y, **kwargs)
-        self.draw()
+#     def scatter(self, x, y, **kwargs):
+#         self.axes.scatter(x, y, **kwargs)
+#         self.draw()
 
-    def plot(self, x, y, **kwargs):
-        self.axes.plot(x, y, **kwargs)
-        self.draw()
+#     def plot(self, x, y, **kwargs):
+#         self.axes.plot(x, y, **kwargs)
+#         self.draw()
 
-    # function to clear the canvas
-    def clear(self):
-        self.axes.clear()
-        self.draw()
+#     # function to clear the canvas
+#     def clear(self):
+#         self.axes.clear()
+#         self.draw()
 
-    # function to show the legend
-    def show_legend(self):
-        self.axes.legend()
-        self.draw()
+#     # function to show the legend
+#     def show_legend(self):
+#         self.axes.legend()
+#         self.draw()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -136,7 +144,8 @@ class MainWindow(QMainWindow):
         self.layout = QVBoxLayout()
         self.main_widget.setLayout(self.layout)
 
-        self.plot_canvas = PlotCanvas(self, width=8, height=6)
+        # self.plot_canvas = PlotCanvas(self, width=8, height=6)
+        self.web_view = QWebEngineView()
 
         self.load_button = QPushButton("Load Data")
         self.load_button.clicked.connect(self.load_data)
@@ -199,12 +208,60 @@ class MainWindow(QMainWindow):
         # put the vertical layout and the canvas in a horizontal layout
         self.h_layout = QHBoxLayout()
         self.h_layout.addLayout(self.v_layout)
-        self.h_layout.addWidget(self.plot_canvas)
+        self.h_layout.addWidget(self.web_view)
+        # make sure the web_view is filled by the canvas
+        self.h_layout.setStretch(1, 1)
+
 
         self.layout.addLayout(self.h_layout)
  
         self.layout.addWidget(self.table_view)
         self.layout.addWidget(self.scroll_area)
+
+
+        self.initialize_plot()
+
+    def initialize_plot(self):
+        # function for initializing the plot with an empty canvas when first loading the data in the self.web_view
+        
+        plot = figure(title="Time Series data", 
+                      x_axis_label='Time', 
+                      y_axis_label='Counts/Intensity', 
+                      plot_width = 925, 
+                      plot_height = 550)
+        # center the title and make it big font
+        plot.title.align = 'center'
+        plot.title.text_font_size = '20pt'
+
+        plot.scatter([0,0], [0,0], color=None)
+        # show grids
+        plot.xgrid.grid_line_color = 'gray'
+        plot.ygrid.grid_line_color = 'gray'
+
+        # add x and y axis labels
+        plot.xaxis.axis_label_text_font_size = '12pt'
+        plot.yaxis.axis_label_text_font_size = '12pt'
+
+        html = file_html(plot, INLINE, "Time Series data")
+        self.web_view.setHtml(html)
+
+
+    # def create_plot(self, experiment):
+    #     global time_series_data_source
+    #     global time_series_data_handle
+    #     time_series_data_source = ColumnDataSource(data=dict(x=[], y=[]))
+    #     plot = figure(title="Time Series", x_axis_label='Time', y_axis_label='Counts/Intensity')
+    #     plot.scatter('x', 'y', source=time_series_data_source)
+    #     time_series_data_handle = show(plot, notebook_handle=True)
+    #     return plot
+
+    # # Update plot
+    # def update_plot(x, y):
+    #     global time_series_data_source
+    #     global time_series_data_handle
+    #     time_series_data_source.data = dict(x=x, y=y)
+    #     push_notebook(handle=time_series_data_handle)
+
 
     def display_spot_data(self):
         global this_experiment
@@ -229,18 +286,18 @@ class MainWindow(QMainWindow):
             highlighted_channels = self.get_highlighted_channels()
             print(highlighted_channels)
             # clear the canvas first
-            self.plot_canvas.clear()
-            for i, channel in enumerate(highlighted_channels):
-                self.plot_canvas.scatter(spot_data['Time'], spot_data[channel], s=5, color='C'+str(i), alpha=0.6)
-                self.plot_canvas.plot(spot_data['Time'], spot_data[channel], color='C'+str(i), label=channel)
-            self.plot_canvas.show_legend()
+            # self.plot_canvas.clear()
+            # for i, channel in enumerate(highlighted_channels):
+            #     self.plot_canvas.scatter(spot_data['Time'], spot_data[channel], s=5, color='C'+str(i), alpha=0.6)
+            #     self.plot_canvas.plot(spot_data['Time'], spot_data[channel], color='C'+str(i), label=channel)
+            # self.plot_canvas.show_legend()
             
     def get_highlighted_channels(self):
         highlighted_channels = []
         for i in range(self.channel_list.count()):
             item = self.channel_list.item(i)
             # if the item background is not default color
-            if item.background().color().name() != '#000000':
+            if item.background().color().name() not in ['#000000', '#ffffff']:
                 highlighted_channels.append(item.text())
         return highlighted_channels
 
@@ -256,6 +313,7 @@ class MainWindow(QMainWindow):
         # upon double clicking a channel, highlight the corresponding channel in the project if it was not already highlighted
         # if it was already highlighted, remove the highlight
         for item in self.channel_list.selectedItems():
+            print(item.background().color().name())
             if item.background().color() == QColor(Qt.yellow):
                 item.setBackground(QColor(Qt.white))
             else:
@@ -273,7 +331,7 @@ class MainWindow(QMainWindow):
                 self.channel_list.clear()
                 self.spot_list.clear()
                 self.table_view.setModel(PandasTableModel(pd.DataFrame()))
-                self.plot_canvas.clear()
+                # self.plot_canvas.clear()
                 self.update_console('Cleared previous data')
 
             # make sure to only select folders
