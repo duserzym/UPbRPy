@@ -34,7 +34,7 @@ def read_experiment_data(directory):
     first_file = open(os.path.join(directory,[f if f.endswith('.csv') else None for f in os.listdir(directory)][0])).readlines()
 
     # now update the global variable channels
-    channels = first_file[13].split(',')[1:]
+    channels = first_file[13].split(',')[1:-1]
 
     time_format = "%I:%M:%S %p"
 
@@ -76,6 +76,7 @@ def read_spot_data(spot_path):
     spot_data = pd.read_csv(spot_path, skiprows=13)
     spot_data = spot_data.iloc[1:].reset_index(drop=True)
     spot_data = spot_data.dropna(axis=1, how='all')
+    spot_data = spot_data.apply(pd.to_numeric, errors='coerce')
     return spot_data
 
 

@@ -17,6 +17,7 @@ import traceback
 import util
 
 this_experiment = pd.DataFrame()
+channels = []
 
 class PandasTableModel(QAbstractTableModel):
     def __init__(self, data):
@@ -64,10 +65,25 @@ class PlotCanvas(FigureCanvas):
         self.axes = fig.add_subplot(111)
         super().__init__(fig)
         self.setParent(parent)
+        self.axes.set_xlabel('Time')
+        self.axes.set_ylabel('Counts/Intensity')
 
-    def plot(self, data):
+    def scatter(self, x, y, **kwargs):
+        self.axes.scatter(x, y, **kwargs)
+        self.draw()
+
+    def plot(self, x, y, **kwargs):
+        self.axes.plot(x, y, **kwargs)
+        self.draw()
+
+    # function to clear the canvas
+    def clear(self):
         self.axes.clear()
-        self.axes.plot(data['x'], data['y'], 'r-')
+        self.draw()
+
+    # function to show the legend
+    def show_legend(self):
+        self.axes.legend()
         self.draw()
 
 class MainWindow(QMainWindow):
@@ -157,8 +173,6 @@ class MainWindow(QMainWindow):
         self.spot_list = QListWidget()
         # keep the spot list to be single selection
         self.spot_list.setSelectionMode(QListWidget.SingleSelection)
-        # display the spot's data in the table view upon clicking
-        self.spot_list.itemClicked.connect(self.display_spot_data)
         # do the same thing if it is keyboard selection
         self.spot_list.itemSelectionChanged.connect(self.display_spot_data)
         
@@ -194,17 +208,41 @@ class MainWindow(QMainWindow):
 
     def display_spot_data(self):
         global this_experiment
-        # get the spot name from the selected item
-        selected_items = self.spot_list.selectedItems()[0]
-        spot_name = selected_items.text()
-        # get the spot's path from the experiment dataframe
-        spot_path = this_experiment[this_experiment['spot_names'] == spot_name]['spot_paths'].values[0]
-        # get the spot's data from the experiment
-        spot_data = util.read_spot_data(spot_path)
-        # set the model of the table view to the spot's data
-        self.model = PandasTableModel(spot_data)
-        self.table_view.setModel(self.model)
+        # deal with the case where we are opening a new directory when there is already data
+        # which causes the spot list selection to be empty and the table view to be empty
+        if len(self.spot_list.selectedItems()) != 0:
+            # get the spot name from the selected item
+            selected_items = self.spot_list.selectedItems()[0]
+            spot_name = selected_items.text()
+            # get the spot's path from the experiment dataframe
+            spot_path = this_experiment[this_experiment['spot_names'] == spot_name]['spot_paths'].values[0]
+            # get the spot's data from the experiment
+            spot_data = util.read_spot_data(spot_path)
+            # set the model of the table view to the spot's data
+            self.model = PandasTableModel(spot_data)
+            self.table_view.setModel(self.model)
 
+        # we also update the canvas with the spot's data based on the selected channels
+        # if nothing in the channels is highlighted, we don't plot anything
+
+        if len(self.get_highlighted_channels()) != 0:
+            highlighted_channels = self.get_highlighted_channels()
+            print(highlighted_channels)
+            # clear the canvas first
+            self.plot_canvas.clear()
+            for i, channel in enumerate(highlighted_channels):
+                self.plot_canvas.scatter(spot_data['Time'], spot_data[channel], s=5, color='C'+str(i), alpha=0.6)
+                self.plot_canvas.plot(spot_data['Time'], spot_data[channel], color='C'+str(i), label=channel)
+            self.plot_canvas.show_legend()
+            
+    def get_highlighted_channels(self):
+        highlighted_channels = []
+        for i in range(self.channel_list.count()):
+            item = self.channel_list.item(i)
+            # if the item background is not default color
+            if item.background().color().name() != '#000000':
+                highlighted_channels.append(item.text())
+        return highlighted_channels
 
     def show_context_menu(self, pos: QPoint):
         contextMenu = QMenu(self)
@@ -227,6 +265,17 @@ class MainWindow(QMainWindow):
 
     def load_data(self):
             global this_experiment
+            global channels
+            # if we are opening a new directory, we need to clear the previous data
+            if this_experiment.shape[0] != 0:
+                this_experiment = pd.DataFrame()
+                channels = []
+                self.channel_list.clear()
+                self.spot_list.clear()
+                self.table_view.setModel(PandasTableModel(pd.DataFrame()))
+                self.plot_canvas.clear()
+                self.update_console('Cleared previous data')
+
             # make sure to only select folders
             options = QFileDialog.Options()
             directory = QFileDialog.getExistingDirectory(self, "Select Folder", "", options=options)
