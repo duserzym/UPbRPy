@@ -34,29 +34,47 @@ def read_experiment_data(directory):
     first_file = open(os.path.join(directory,[f if f.endswith('.csv') else None for f in os.listdir(directory)][0])).readlines()
 
     # now update the global variable channels
-    channels = first_file[13].split(',')[1:-1]
+    element_channels = first_file[13].split(',')[1:-1]
 
-    time_format = "%I:%M:%S %p"
+    time_format = "%m/%d/%Y %I:%M:%S %p"
+
+    # make a pandas dataframe that stitches all data of all spots together
+    total_data = pd.DataFrame()
 
     # loop through all the .csv files in the directory using io and get their first lines
     for file in os.listdir(directory):
         if file.endswith('.csv'):
+            # use os tools to get the time of start, spot name and path of the file
             this_path = os.path.join(directory, file)
             spot_paths.append(this_path)
             file = open(this_path)
             lines = file.readlines()
-            spot_names.append(lines[0].split(':')[0])
-            spot_starting_times.append(datetime.strptime(lines[0][-13:-2], time_format))
+            this_spot_name = lines[0].split(':')[0]
+            spot_names.append(this_spot_name)
+            this_starting_time = datetime.strptime(lines[0][-24:-2], time_format)
+            spot_starting_times.append(this_starting_time)
             file.close()
-
-    # create a pandas dataframe to store the experiment data
+        # create a pandas dataframe to store the experiment data
     experiment = pd.DataFrame()
     experiment['spot_names'] = spot_names
     experiment['spot_paths'] = spot_paths
     experiment['spot_starting_times'] = spot_starting_times
-    
+
+    experiment = experiment.sort_values(by='spot_starting_times').reset_index(drop=True)
+    for i in range(experiment.shape[0]):
+        # then use pandas to read csv files and append them to the total data
+        this_data = pd.read_csv(experiment['spot_paths'][i], skiprows=13)
+        this_data = this_data.iloc[1:].reset_index(drop=True)
+        this_data = this_data.dropna(axis=1, how='all')
+        this_data = this_data.apply(pd.to_numeric, errors='coerce')
+        # make sure to change the time column to datetime and add start time to all the times
+        this_data['Time'] = [experiment['spot_starting_times'][i] + timedelta(seconds=this_data['Time'][j]) for j in range(this_data.shape[0])]
+        this_data['spot_name'] = experiment['spot_names'][i]
+        total_data = pd.concat([total_data, this_data], axis=0)
+
     experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
-    return experiment, channels
+
+    return experiment, element_channels, total_data
 
 # read spot data
 def read_spot_data(spot_path):
@@ -78,31 +96,3 @@ def read_spot_data(spot_path):
     spot_data = spot_data.dropna(axis=1, how='all')
     spot_data = spot_data.apply(pd.to_numeric, errors='coerce')
     return spot_data
-
-
-
-# function for stiching the individual time series of all spots into one single time series
-def stitch_time_series(experiment):
-    '''
-    function for stiching the individual time series of all spots into one single time series
-
-    Parameters
-    ----------
-    experiment : pandas.DataFrame
-        a pandas dataframe containing the spot names and paths to the files
-    
-    Returns
-    -------
-
-    '''
-
-    spot_names = experiment['spot_names']
-    spot_paths = experiment['spot_paths']
-
-    for spot_name, spot_path in zip(spot_names, spot_paths):
-        # read the data from the file
-        data = pd.read_csv(spot_path, skiprows=13)
-        # add the spot name to the data
-        data['spot_name'] = spot_name
-        # add the data to the experiment dataframe
-        experiment = pd.concat([experiment, data], axis=0)
