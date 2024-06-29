@@ -16,6 +16,7 @@ from bokeh.models import ColumnDataSource, DatetimeTickFormatter
 from bokeh.io import push_notebook
 from bokeh.palettes import Category20, Category10
 from bokeh.models.tools import BoxZoomTool, WheelZoomTool  # Import zoom tools
+import bokeh
 
 import pandas as pd
 
@@ -199,7 +200,7 @@ class MainWindow(QMainWindow):
         # initialize the Bokeh plot canvas
         self.fig = figure(title="Time Series data", 
                       x_axis_label='Time', 
-                      y_axis_label='log Counts/Intensity', 
+                      y_axis_label='Counts/Intensity', 
                       x_axis_type='datetime',
                       plot_width = 925, 
                       plot_height = 500, 
@@ -247,7 +248,9 @@ class MainWindow(QMainWindow):
 
     def clear_plot(self):
         # make an efficient clear plot function that only clears the data source
-        self.fig.renderers = []
+        for renderer in self.fig.renderers:
+            self.fig.renderers.remove(renderer)
+        # self.fig.renderers = []
         self.display_plot()
 
     def display_plot(self):
@@ -273,6 +276,8 @@ class MainWindow(QMainWindow):
         # update the table view with the spot's data
         self.update_table(spot_data)
 
+        self.update_console(f' Viewing data of selected spot: {spot_name}')
+
         # changing spot selection does not involve changing the channels so all we do is to move the axis
         self.fig.x_range.start = total_data[total_data['spot_name'] == spot_name]['Time'].min()
         self.fig.x_range.end = total_data[total_data['spot_name'] == spot_name]['Time'].max()
@@ -293,7 +298,7 @@ class MainWindow(QMainWindow):
         contextMenu = QMenu(self)
 
         highlightAction = contextMenu.addAction("Highlight Selected")
-        highlightAction.triggered.connect(self.highlight_channel)
+        highlightAction.triggered.connect(self.highlight_channels)
 
         contextMenu.exec_(self.channel_list.mapToGlobal(pos))
 
@@ -313,7 +318,11 @@ class MainWindow(QMainWindow):
             self.clear_plot()
         else:
             self.clear_plot()
+            bokeh.io.curdoc().clear()  
+            bokeh.io.state.State().reset()
+            bokeh.io.reset_output()
             for i, channel in enumerate(highlighted_channels):
+                self.update_console(f'Plotting highlighted channel: {channel}')
                 self.fig.line(total_data['Time'], total_data[channel], color=Category10[10][i % 10], legend_label=channel)
             self.fig.x_range.start = total_data['Time'].min()
             self.fig.x_range.end = total_data['Time'].max()
