@@ -71,7 +71,7 @@ def read_experiment_data(directory):
         this_data['Time'] = [experiment['spot_starting_times'][i] + timedelta(seconds=this_data['Time'][j]) for j in range(this_data.shape[0])]
         this_data['spot_name'] = experiment['spot_names'][i]
         total_data = pd.concat([total_data, this_data], axis=0)
-
+    # total_data['Time'] = pd.to_datetime(total_data['Time'])
     experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
 
     return experiment, element_channels, total_data

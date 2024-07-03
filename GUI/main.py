@@ -27,6 +27,103 @@ import util
 this_experiment = pd.DataFrame()
 channels = []
 total_data = pd.DataFrame()
+total_data_cds = ColumnDataSource()
+
+
+from bokeh.models import ColumnDataSource
+from bokeh.plotting import figure
+from bokeh.embed import file_html
+from bokeh.resources import CDN
+import numpy as np
+
+class PlotCanvas:
+    def __init__(self, parent=None):
+        self.fig = figure(title="Time Series data", 
+                x_axis_label='Time', 
+                y_axis_label='Counts/Intensity', 
+                x_axis_type='datetime',
+                plot_width = 925, 
+                plot_height = 500, 
+                toolbar_location='below')
+        self.web_view = QWebEngineView(parent)
+        self.data_source = ColumnDataSource(data={})
+        self.time_series_color_index = -1
+        # function for initializing the plot with an empty canvas when first loading the data in the self.web_view
+        # center the title and make it big font
+        self.fig.title.align = 'center'
+        self.fig.title.text_font_size = '20pt'
+
+        # show grids
+        self.fig.xgrid.grid_line_color = 'gray'
+        self.fig.ygrid.grid_line_color = 'gray'
+
+        # add x and y axis labels
+        self.fig.xaxis.axis_label_text_font_size = '12pt'
+        self.fig.yaxis.axis_label_text_font_size = '12pt'
+
+              # Set x-axis format
+        self.fig.xaxis.formatter = DatetimeTickFormatter(
+            microseconds=["%m/%d/%Y\n%I:%M:%S %p"],
+            milliseconds=["%m/%d/%Y\n%I:%M:%S %p"],
+            seconds=["%m/%d/%Y\n%I:%M:%S %p"],
+            minsec=["%m/%d/%Y\n%I:%M:%S %p"],
+            minutes=["%m/%d/%Y\n%I:%M:%S %p"],
+            hourmin=["%m/%d/%Y\n%I:%M:%S %p"],
+            hours=["%m/%d/%Y\n%I:%M:%S %p"],
+            days=["%m/%d/%Y\n%I:%M:%S %p"],
+            months=["%m/%d/%Y\n%I:%M:%S %p"],
+            years=["%m/%d/%Y\n%I:%M:%S %p"]
+        )
+
+        self.display_plot()
+
+
+    def clear_plot(self):
+        # make an efficient clear plot function that only clears the data source
+        self.fig.renderers = []
+        # clear the legend
+        self.fig.legend.items = []
+        self.display_plot()
+
+    def display_plot(self):
+        self.html = file_html(self.fig, CDN, "Time Series data")
+        self.web_view.setHtml(self.html)
+
+    def add_line(self, x, y, color, line_id):
+        # print(self.data_source.data)
+        print(self.data_source.column_names)
+        self.fig.line('Time', '29Si', source=self.data_source, color=color, legend_label=line_id, name=line_id)
+        self.auto_range()
+        self.display_plot()
+
+    def remove_line(self, line_id):
+        renderers = self.fig.renderers
+        for renderer in renderers:
+            # print(renderer.name, line_id)
+            if renderer.name == line_id:
+                self.fig.renderers.remove(renderer)
+                break
+            # remove the line from the legend
+            self.fig.legend.items = [item for item in self.fig.legend.items if item.label['value'] != line_id]
+        self.auto_range()
+        self.display_plot()
+
+    def auto_range(self, highlighted_channels=[], selected_spot=None):
+        if selected_spot == None:
+            print(total_data['Time'].min(), total_data['Time'].max())
+            self.fig.x_range.start = total_data['Time'].min()
+            self.fig.x_range.end = total_data['Time'].max()
+
+            if len(highlighted_channels) != 0:
+                self.fig.y_range.start = total_data[highlighted_channels].min().min()
+                self.fig.y_range.end = total_data[highlighted_channels].max().max()*1.1
+        else:
+            self.fig.x_range.start = total_data[total_data['spot_name'] == selected_spot]['Time'].min()
+            self.fig.x_range.end = total_data[total_data['spot_name'] == selected_spot]['Time'].max()
+            if len(highlighted_channels) != 0:
+                self.fig.y_range.start = total_data[total_data['spot_name'] == selected_spot][highlighted_channels].min().min()
+                self.fig.y_range.end = total_data[total_data['spot_name'] == selected_spot][highlighted_channels].max().max()*1.1
+        self.display_plot()
 
 class PandasTableModel(QAbstractTableModel):
     def __init__(self, data):
@@ -118,8 +215,8 @@ class MainWindow(QMainWindow):
         self.layout = QVBoxLayout()
         self.main_widget.setLayout(self.layout)
 
-        # self.plot_canvas = PlotCanvas(self, width=8, height=6)
-        self.web_view = QWebEngineView()
+        # set self.fig 
+        self.plot_canvas = PlotCanvas()
 
         # button for loading experiment
         self.load_button = QPushButton("Load Data")
@@ -188,7 +285,7 @@ class MainWindow(QMainWindow):
         # put the vertical layout and the canvas in a horizontal layout
         self.h_layout = QHBoxLayout()
         self.h_layout.addLayout(self.v_layout)
-        self.h_layout.addWidget(self.web_view)
+        self.h_layout.addWidget(self.plot_canvas.web_view)
         # make sure the web_view is filled by the canvas
         self.h_layout.setStretch(1, 1)
 
@@ -197,65 +294,7 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(self.table_view)
         self.layout.addWidget(self.scroll_area)
 
-        # initialize the Bokeh plot canvas
-        self.fig = figure(title="Time Series data", 
-                      x_axis_label='Time', 
-                      y_axis_label='Counts/Intensity', 
-                      x_axis_type='datetime',
-                      plot_width = 925, 
-                      plot_height = 500, 
-                      toolbar_location='below')
-      # Set x-axis format
-        self.fig.xaxis.formatter = DatetimeTickFormatter(
-            microseconds=["%m/%d/%Y\n%I:%M:%S %p"],
-            milliseconds=["%m/%d/%Y\n%I:%M:%S %p"],
-            seconds=["%m/%d/%Y\n%I:%M:%S %p"],
-            minsec=["%m/%d/%Y\n%I:%M:%S %p"],
-            minutes=["%m/%d/%Y\n%I:%M:%S %p"],
-            hourmin=["%m/%d/%Y\n%I:%M:%S %p"],
-            hours=["%m/%d/%Y\n%I:%M:%S %p"],
-            days=["%m/%d/%Y\n%I:%M:%S %p"],
-            months=["%m/%d/%Y\n%I:%M:%S %p"],
-            years=["%m/%d/%Y\n%I:%M:%S %p"]
-        )
-        self.initialize_plot()
-        
 
-
-    def initialize_plot(self):
-        # function for initializing the plot with an empty canvas when first loading the data in the self.web_view
-        self.update_console('Initializing the plot canvas')
-        # center the title and make it big font
-        self.fig.title.align = 'center'
-        self.fig.title.text_font_size = '20pt'
-
-        initial_data_source = ColumnDataSource(data=dict(x=[0,0], y=[0,0]))
-        self.fig.scatter('x', 'y', source=initial_data_source, color=None)
-
-        # show grids
-        self.fig.xgrid.grid_line_color = 'gray'
-        self.fig.ygrid.grid_line_color = 'gray'
-
-        # add x and y axis labels
-        self.fig.xaxis.axis_label_text_font_size = '12pt'
-        self.fig.yaxis.axis_label_text_font_size = '12pt'
-
-        # Add zoom tools
-        self.fig.add_tools(BoxZoomTool())
-        self.fig.add_tools(WheelZoomTool())
-
-        self.display_plot()
-
-    def clear_plot(self):
-        # make an efficient clear plot function that only clears the data source
-        for renderer in self.fig.renderers:
-            self.fig.renderers.remove(renderer)
-        # self.fig.renderers = []
-        self.display_plot()
-
-    def display_plot(self):
-        html = file_html(self.fig, CDN, "Time Series data")
-        self.web_view.setHtml(html)
 
     def update_table(self, data):
         self.model = PandasTableModel(data)
@@ -263,7 +302,7 @@ class MainWindow(QMainWindow):
 
     def spot_selection_change(self):
         global this_experiment
-        highlighted_channels = self.get_highlighted_channels()
+        # highlighted_channels = self.get_highlighted_channels()
         # deal with the case where we are opening a new directory when there is already data
         # which causes the spot list selection to be empty and the table view to be empty
         # get the spot name from the selected item
@@ -278,12 +317,8 @@ class MainWindow(QMainWindow):
 
         self.update_console(f' Viewing data of selected spot: {spot_name}')
 
-        # changing spot selection does not involve changing the channels so all we do is to move the axis
-        self.fig.x_range.start = total_data[total_data['spot_name'] == spot_name]['Time'].min()
-        self.fig.x_range.end = total_data[total_data['spot_name'] == spot_name]['Time'].max()
-        self.fig.y_range.start = total_data[total_data['spot_name'] == spot_name][highlighted_channels].min().min()
-        self.fig.y_range.end = total_data[total_data['spot_name'] == spot_name][highlighted_channels].max().max()*1.1 # buffer the margin on top of the graph a little bit
-        self.display_plot()
+        self.plot_canvas.auto_range(self.get_highlighted_channels(), spot_name)
+        self.plot_canvas.display_plot()
             
     def get_highlighted_channels(self):
         highlighted_channels = []
@@ -308,27 +343,21 @@ class MainWindow(QMainWindow):
         for item in self.channel_list.selectedItems():
             if item.background().color() == QColor(Qt.yellow):
                 item.setBackground(QColor(Qt.white))
+                try:
+                    self.plot_canvas.remove_line(item.text())
+                except Exception as e:
+                    self.update_console(f'Error removing line: {e}')
             else:
                 item.setBackground(QColor(Qt.yellow))
+                self.plot_canvas.add_line(x='Time', y=item.text(), color=Category10[10][(self.plot_canvas.time_series_color_index+1) % 10], line_id=item.text())
+                # self.add_line(item.text(), 'Time', item.text(), color=Category10[10][(self.time_series_color_index+1) % 10])
+                self.plot_canvas.time_series_color_index += 1
             # then deselect the item
             item.setSelected(False)
-        
-        highlighted_channels = self.get_highlighted_channels()
-        if len(highlighted_channels) == 0:
-            self.clear_plot()
-        else:
-            self.clear_plot()
-            bokeh.io.curdoc().clear()  
-            bokeh.io.state.State().reset()
-            bokeh.io.reset_output()
-            for i, channel in enumerate(highlighted_channels):
-                self.update_console(f'Plotting highlighted channel: {channel}')
-                self.fig.line(total_data['Time'], total_data[channel], color=Category10[10][i % 10], legend_label=channel)
-            self.fig.x_range.start = total_data['Time'].min()
-            self.fig.x_range.end = total_data['Time'].max()
-            self.fig.y_range.start = total_data[highlighted_channels].min().min()
-            self.fig.y_range.end = total_data[highlighted_channels].max().max()
-            self.display_plot()
+
+        self.plot_canvas.auto_range()
+        self.plot_canvas.display_plot()
+
 
     def load_data(self):
             global this_experiment
@@ -341,7 +370,7 @@ class MainWindow(QMainWindow):
                 self.channel_list.clear()
                 self.spot_list.clear()
                 self.table_view.setModel(PandasTableModel(pd.DataFrame()))
-                # self.plot_canvas.clear()
+                self.plot_canvas.clear_plot()
                 self.update_console('Cleared previous data')
 
             # make sure to only select folders
@@ -356,7 +385,11 @@ class MainWindow(QMainWindow):
                 # update the spot list widget
                 self.spot_list.clear()
                 self.spot_list.addItems(this_experiment['spot_names'])
-                # plot the whole stitched time series data on the canvas
+
+                self.plot_canvas.data_source.data = total_data
+
+                self.plot_canvas.auto_range()
+                # self.plot_canvas.display_plot()
 
             except Exception as e:
                 # print out the entire error message in the console
