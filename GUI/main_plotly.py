@@ -1,13 +1,13 @@
 import sys
-import threading
 
-from PyQt5.QtWidgets import QApplication, QMainWindow
-from PyQt5.QtWidgets import QWidget, QPushButton, QLabel, QFileDialog, QScrollArea, QMenu, QListWidget, QComboBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QPushButton, QLabel, QFileDialog, QScrollArea, QMenu, QListWidget, QComboBox, QMessageBox
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
 from PyQt5.QtWidgets import QAbstractItemView, QTableView
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import Qt, QPoint, QAbstractTableModel, QVariant
 from PyQt5.QtGui import QFont, QColor
+
 
 import plotly.offline as po
 import plotly.graph_objs as go
@@ -15,9 +15,11 @@ import plotly.io as pio
 import plotly
 
 import pandas as pd
+import numpy as np
 
 import traceback
 import util
+from custom_widgets import *
 
 # initialize global variables
 this_experiment = pd.DataFrame()
@@ -26,119 +28,12 @@ total_data = pd.DataFrame()
 channel_colors = pd.Series()
 
 
-import numpy as np
-
-class PlotCanvas:
-    def __init__(self, parent=None):
-
-
-        self.web_view = QWebEngineView(parent)
-
-
-        self.layout = go.Layout(xaxis=dict(title='Time'), yaxis=dict(title='Count/Intensity'))
-        # set plot title
-        self.layout.update(title={'text':'Time Series Data', 'x': 0.5, 'xanchor': 'center'})
-        self.fig = go.Figure(data=[], layout=self.layout)
-        # Set x-axis format
-        self.fig.update_xaxes(tickformat="%m/%d/%Y\n%I:%M:%S %p")
-        # add legend
-        self.fig.update_layout(showlegend=True)
-
-        self.display_plot()
-
-
-    def clear_plot(self):
-        # clear the plot by removing all the renderers
-        self.fig.data = []
-
-        self.display_plot()
-
-    def display_plot(self):
-        # Convert Plotly figure to HTML
-        self.html = '<html><head><meta charset="utf-8" />'
-        self.html += '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script></head>'
-        self.html += '<body>'
-        self.html += pio.to_html(self.fig, full_html=False, include_plotlyjs=False)
-        # self.html += po.plot(self.fig, include_plotlyjs=False, output_type='div')
-        self.html += '</body></html>'
-        self.web_view.setHtml(self.html)
-
-    def add_line(self, x, y, color):
-        self.fig.add_trace(go.Scatter
-            (x=total_data[x], y=total_data[y], mode='lines', name=y, line=dict(color=color)))
-        
-        self.auto_range()
-        self.display_plot()
-
-    def remove_line(self, line_id):
-        # remove the line with the name of line_id
-        self.fig.data = [line for line in self.fig.data if line.name != line_id]
-
-        self.auto_range()
-        self.display_plot()
-
-    def auto_range(self, highlighted_channels=[], selected_spot=None):
-        if selected_spot == None:
-            # set plotly x range to be the min and max of the total data
-            self.fig.update_xaxes(range=[total_data['Time'].min(), total_data['Time'].max()])
-            # set plotly y range to be the min and max of the total data
-            self.fig.update_yaxes(range=[total_data[highlighted_channels].min().min(), total_data[highlighted_channels].max().max()*1.1])
-
-            if len(highlighted_channels) != 0:
-                self.fig.update_yaxes(range=[total_data[highlighted_channels].min().min(), total_data[highlighted_channels].max().max()*1.1])
-        else:
-            self.fig.update_xaxes(range=[total_data[total_data['spot_name'] == selected_spot]['Time'].min(), total_data[total_data['spot_name'] == selected_spot]['Time'].max()])
-
-            if len(highlighted_channels) != 0:
-                self.fig.update_yaxes(range=[total_data[total_data['spot_name'] == selected_spot][highlighted_channels].min().min(), total_data[total_data['spot_name'] == selected_spot][highlighted_channels].max().max()*1.1])
-        self.display_plot()
-
-class PandasTableModel(QAbstractTableModel):
-    def __init__(self, data):
-        super().__init__()
-        self._data = data
-
-    def data(self, index, role):
-        if role == Qt.DisplayRole:
-            value = self._data.iloc[index.row(), index.column()]
-            return str(value)
-        return QVariant()
-
-    def rowCount(self, index):
-        return self._data.shape[0]
-
-    def columnCount(self, index):
-        return self._data.shape[1]
-
-    def headerData(self, section, orientation, role):
-        if role == Qt.DisplayRole:
-            if orientation == Qt.Horizontal:
-                return str(self._data.columns[section])
-            else:
-                return str(self._data.index[section])
-        return QVariant()
-    
-class CustomListWidget(QListWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            modifiers = QApplication.keyboardModifiers()
-            if not (modifiers & Qt.ControlModifier or modifiers & Qt.ShiftModifier):
-                item = self.itemAt(event.pos())
-                if item is not None:
-                    self.clearSelection()
-                    item.setSelected(True)
-        super().mousePressEvent(event)
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LA-ICP-MS Data Visualization")
-        self.setGeometry(100, 100, 1000, 600)
-
+        self.setGeometry(100, 100, 800, 500)
+ 
         self.initUI()
 
     def initUI(self):
@@ -189,14 +84,27 @@ class MainWindow(QMainWindow):
         # button for loading experiment
         self.load_button = QPushButton("Load Data")
         self.load_button.clicked.connect(self.load_data)
-
-        # button for auto select baseline and peaks
-        self.auto_selection_button = QPushButton("Auto Detect\nBaseline and Peaks!")
-        self.auto_selection_button.clicked.connect(self.auto_selection)
+        self.load_button.setFixedSize(150, 40)
 
         # button for saving selections
         self.save_selection_button = QPushButton("Save Selections")
         self.save_selection_button.clicked.connect(self.save_selections)
+        self.save_selection_button.setFixedSize(150, 40)
+
+        # button for auto select baseline and peaks
+        self.auto_selection_button = QPushButton("Auto Detect\nBaseline and Peaks!")
+        self.auto_selection_button.clicked.connect(self.auto_selection)
+        self.auto_selection_button.setFixedSize(150, 50)
+
+        # button for opening up calibration stats window
+        self.calibration_button = QPushButton("Calibrate!")
+        self.calibration_button.clicked.connect(self.calibrate)
+        self.calibration_button.setFixedSize(150, 40)
+
+        # button for exporting data
+        self.export_button = QPushButton("Export Data")
+        # self.export_button.clicked.connect(self.export_data)
+        self.export_button.setFixedSize(150, 40)
 
         # add a scrollable text area for displaying the console output
         self.text_area = QLabel()
@@ -223,8 +131,16 @@ class MainWindow(QMainWindow):
         self.channel_list.setFixedSize(200, 200)
 
         self.primary_channel_label = QLabel("Primary Channel")
+        self.primary_channel_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
         # add a drop down menu for selecting the primary channel
         self.primary_channel = QComboBox()
+        self.primary_channel.setFixedWidth(150)
+
+        self.primary_standard_label = QLabel("Primary Standard")
+        self.primary_standard_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
+        # add a drop down menu for selecting the primary standard
+        self.primary_standard = QComboBox()
+        self.primary_standard.setFixedWidth(150)
 
         # now add a scrollable list widget for displaying the spot names
         self.spot_list_label = QLabel("Spots")
@@ -251,12 +167,20 @@ class MainWindow(QMainWindow):
         # set initial table view to be fixed size and have the same width as the canvas
         self.spot_table_view.setFixedSize(800, 250)
 
+        # put the buttons in one v layout 
+        self.button_v_layout = QVBoxLayout()
+        self.button_v_layout.addWidget(self.load_button)
+        self.button_v_layout.addWidget(self.auto_selection_button)
+        self.button_v_layout.addWidget(self.save_selection_button)
+        self.button_v_layout.addWidget(self.calibration_button)
+        self.button_v_layout.addWidget(self.export_button)
+        self.button_v_layout.addWidget(self.primary_channel_label)
+        self.button_v_layout.addWidget(self.primary_channel)
+        self.button_v_layout.addWidget(self.primary_standard_label)
+        self.button_v_layout.addWidget(self.primary_standard)
 
         # put the channel list and spot list in a vertical layout
         self.v_layout = QVBoxLayout()
-        self.v_layout.addWidget(self.load_button)
-        self.v_layout.addWidget(self.save_selection_button)
-        self.v_layout.addWidget(self.auto_selection_button)
         self.v_layout.addWidget(self.channel_list_label)
         self.v_layout.addWidget(self.channel_list)
         self.v_layout.addWidget(self.spot_list_label)
@@ -264,6 +188,7 @@ class MainWindow(QMainWindow):
 
         # put the vertical layout and the canvas in a horizontal layout
         self.h_layout = QHBoxLayout()
+        self.h_layout.addLayout(self.button_v_layout)
         self.h_layout.addLayout(self.v_layout)
         self.h_layout.addWidget(self.plot_canvas.web_view)
         # make sure the web_view is filled by the canvas
@@ -277,9 +202,54 @@ class MainWindow(QMainWindow):
 
         self.layout.addWidget(self.scroll_area)
 
+    def calibrate(self):
+        # function for opening up the calibration window
+        global this_experiment
+        global total_data
+
+        self.calibration_window = CalibrationWindow(this_experiment, total_data, self.primary_standard.currentText())
+
     def auto_selection(self):
-        self.primary_channel_name = self.primary_channel.currentText()
-        self.update_console(f'Auto selecting baseline and peaks based on primary channel: {self.primary_channel_name}')
+        global this_experiment
+
+        # if there are already selections in the experiment pop up a window that asks if the user wants to overwrite the selections
+        if this_experiment[['baseline_start_times', 'baseline_end_times', 'plateau_start_times', 'plateau_end_times']].notnull().all().all():
+            self.update_console('There are already selections in the experiment, do you want to overwrite them?')
+            # add a pop up window that asks if the user wants to overwrite the selections
+            # if the user clicks yes, then overwrite the selections
+            # if the user clicks no, then do nothing
+            # if the user clicks cancel, then do nothing
+
+            msg_box = QMessageBox()
+            msg_box.setWindowTitle("Auto Detect Baseline and Peaks")
+            msg_box.setText("Baseline and peaks have already been selected. Do you want to overwrite them?")
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+
+            # Show the message box and capture the response
+            response = msg_box.exec_()
+
+            if response == QMessageBox.No:
+                # do nothing
+                return
+            else: 
+                self.primary_channel_name = self.primary_channel.currentText()
+                self.update_console(f'Auto selecting baseline and peaks based on primary channel: {self.primary_channel_name}')
+                # we loop through all the spots and find the baseline and peaks
+                this_experiment = util.auto_select_baseline_peak(this_experiment, total_data, self.primary_channel_name)
+                self.update_experiment_table(this_experiment)
+                self.update_console('Auto selection complete')
+                # if there is currently selected channel and spot, plot the selection
+                self.update_selection()  
+        else:
+            self.primary_channel_name = self.primary_channel.currentText()
+            self.update_console(f'Auto selecting baseline and peaks based on primary channel: {self.primary_channel_name}')
+            # we loop through all the spots and find the baseline and peaks
+            this_experiment = util.auto_select_baseline_peak(this_experiment, total_data, self.primary_channel_name)
+            self.update_experiment_table(this_experiment)
+            self.update_console('Auto selection complete')
+            # if there is currently selected channel and spot, plot the selection
+            self.update_selection()
 
     def update_experiment_table(self, data):
         self.experiment_data_model = PandasTableModel(data)
@@ -291,22 +261,28 @@ class MainWindow(QMainWindow):
 
     def spot_selection_change(self):
         global this_experiment
+        global total_data
         # highlighted_channels = self.get_highlighted_channels()
         # deal with the case where we are opening a new directory when there is already data
         # which causes the spot list selection to be empty and the table view to be empty
         # get the spot name from the selected item
         selected_items = self.spot_list.selectedItems()[0]
         spot_name = selected_items.text()
-        # get the spot's path from the experiment dataframe
-        spot_path = this_experiment[this_experiment['spot_names'] == spot_name]['spot_paths'].values[0]
         # get the og spot's data from the experiment
-        spot_data = util.read_spot_data(spot_path)
+        spot_data = total_data[total_data['spot_name'] == spot_name].reset_index(drop=True)
         # update the table view with the spot's data
         self.update_spot_table(spot_data)
 
         self.update_console(f' Viewing data of selected spot: {spot_name}')
-
-        self.plot_canvas.auto_range(self.get_highlighted_channels(), spot_name)
+        # clear the plot
+        self.plot_canvas.clear_plot()
+        # add the lines for the highlighted channels
+        for i in range(self.channel_list.count()):
+            item = self.channel_list.item(i)
+            if item.background().color() == QColor(Qt.yellow):
+                self.plot_canvas.add_line(x='Time', y=item.text(), data=spot_data, color=channel_colors.loc[item.text()])
+        self.update_selection()
+        self.plot_canvas.auto_range(total_data, self.get_highlighted_channels(), spot_name)
         self.plot_canvas.display_plot()
             
     def get_highlighted_channels(self):
@@ -326,23 +302,62 @@ class MainWindow(QMainWindow):
 
         contextMenu.exec_(self.channel_list.mapToGlobal(pos))
 
+    def update_selection(self):
+        global this_experiment
+        # function for updating the selection boxes on the canvas
+        # if there are previously plotted selections, remove them
+        self.plot_canvas.remove_selection()
+        # if the primary channel is highlighted, plot the selection for the primary channel
+        if (self.primary_channel.currentText() in self.get_highlighted_channels()) and (len(self.spot_list.selectedItems()) != 0):
+            spot_name = self.spot_list.selectedItems()[0].text()
+            spot_data = total_data[total_data['spot_name'] == spot_name].reset_index(drop=True)
+            spot_selection = this_experiment[this_experiment['spot_names'] == spot_name]
+            # if there is selected baseline and plateau, draw them on the plot
+            if spot_selection[['baseline_start_times', 'baseline_end_times', 'plateau_start_times', 'plateau_end_times']].notnull().all().all():
+                # use the start and end times to filter for the baseline and plateau data
+                baseline_data = spot_data[(spot_data['Time'] >= spot_selection['baseline_start_times'].values[0]) & (spot_data['Time'] < spot_selection['baseline_end_times'].values[0])]
+                plateau_data = spot_data[(spot_data['Time'] >= spot_selection['plateau_start_times'].values[0]) & (spot_data['Time'] < spot_selection['plateau_end_times'].values[0])]
+                # get the mean and 2 standard deviations of the baseline and plateau
+                baseline_mean = baseline_data[self.primary_channel.currentText()].mean()
+                baseline_std2 = 2*baseline_data[self.primary_channel.currentText()].std()
+                plateau_mean = plateau_data[self.primary_channel.currentText()].mean()
+                plateau_std2 = 2*plateau_data[self.primary_channel.currentText()].std()
+                # draw the baseline and plateau on the plot
+                self.plot_canvas.draw_selection(spot_selection['baseline_start_times'].values[0], spot_selection['baseline_end_times'].values[0], baseline_mean, baseline_std2, 'blue', 'lightblue', mean_name='baseline mean')
+                self.plot_canvas.draw_selection(spot_selection['plateau_start_times'].values[0], spot_selection['plateau_end_times'].values[0], plateau_mean, plateau_std2, 'red', 'pink', mean_name='plateau mean')
+            
+
     def highlight_channels(self):
         # upon double clicking a channel, highlight the corresponding channel in the project if it was not already highlighted
         # if it was already highlighted, remove the highlight
+        global this_experiment
+        global total_data
         for item in self.channel_list.selectedItems():
             if item.background().color() == QColor(Qt.yellow):
                 item.setBackground(QColor(Qt.white))
                 try:
                     self.plot_canvas.remove_line(item.text())
+                    # if the de-highlighted channel is the primary channel, remove the selections as well
+                    if item.text() == self.primary_channel.currentText():
+                        self.plot_canvas.remove_selection()
+                    if len(self.spot_list.selectedItems()) != 0:
+                        self.plot_canvas.auto_range(total_data, self.get_highlighted_channels(), self.spot_list.selectedItems()[0].text())
                 except Exception as e:
                     self.update_console(f'Error removing line: {e}')
             else:
                 item.setBackground(QColor(Qt.yellow))
-                self.plot_canvas.add_line(x='Time', y=item.text(), color=channel_colors.loc[item.text()])
+                if len(self.spot_list.selectedItems()) == 0:
+                    self.update_console('No spot selected, auto range to the entire data set')
+                    self.plot_canvas.auto_range(total_data, self.get_highlighted_channels())
+                else:
+                    spot_name = self.spot_list.selectedItems()[0].text()
+                    spot_data = total_data[total_data['spot_name'] == spot_name].reset_index(drop=True)
+                    self.plot_canvas.add_line(x='Time', y=item.text(), data=spot_data, color=channel_colors.loc[item.text()])
+
+                    self.update_selection()
+                    self.plot_canvas.auto_range(total_data, self.get_highlighted_channels(), spot_name)
             # then deselect the item
             item.setSelected(False)
-
-        self.plot_canvas.auto_range(self.get_highlighted_channels(), self.spot_list.selectedItems()[0])
         self.plot_canvas.display_plot()
 
 
@@ -358,6 +373,7 @@ class MainWindow(QMainWindow):
                 self.channel_list.clear()
                 self.spot_list.clear()
                 self.spot_table_view.setModel(PandasTableModel(pd.DataFrame()))
+                self.experiment_table_view.setModel(PandasTableModel(pd.DataFrame()))
                 self.plot_canvas.clear_plot()
                 self.update_console('Cleared previous data')
 
@@ -383,7 +399,7 @@ class MainWindow(QMainWindow):
                 # show the experiment table view
                 self.update_experiment_table(this_experiment)
 
-                self.plot_canvas.auto_range()
+                self.plot_canvas.auto_range(total_data)
 
 
             except Exception as e:

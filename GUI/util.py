@@ -4,6 +4,7 @@ Python file with utility functions
 import os
 import pandas as pd
 from datetime import datetime, timedelta
+import numpy as np
 
 # function for reading LA-ICP-MS data
 # in the format of .csv files exported from Thermo iCap with each file representing a spot
@@ -71,8 +72,14 @@ def read_experiment_data(directory):
         this_data['Time'] = [experiment['spot_starting_times'][i] + timedelta(seconds=this_data['Time'][j]) for j in range(this_data.shape[0])]
         this_data['spot_name'] = experiment['spot_names'][i]
         total_data = pd.concat([total_data, this_data], axis=0)
-    # total_data['Time'] = pd.to_datetime(total_data['Time'])
+
     experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
+    #initialize the columns for the experiment dataframe with null values
+
+    experiment['plateau_start_times'] = None
+    experiment['plateau_end_times'] = None
+    experiment['baseline_start_times'] = None
+    experiment['baseline_end_times'] = None
 
     return experiment, element_channels, total_data
 
@@ -96,3 +103,70 @@ def read_spot_data(spot_path):
     spot_data = spot_data.dropna(axis=1, how='all')
     spot_data = spot_data.apply(pd.to_numeric, errors='coerce')
     return spot_data
+
+
+def select_baseline_peak(data, baseline_z_threshold=1.0, plateau_z_threshold=0.5):
+    '''
+    general function for selecting the baseline and peak regions in the data
+
+    by default, we skip the first and last point for both the baseline and peak regions
+
+    Parameters
+    ----------
+    data : a list or array of values 
+    
+    Returns
+    -------
+    baseline : list
+        a list containing the indices of the baseline region
+    peak : list
+        a list containing the indices of the peak region
+    '''
+    z_scores = (data - np.mean(data)) / np.std(data)
+
+    # Identify the start and end indices of the plateau region
+    plateau_indices_start = np.where(z_scores >= plateau_z_threshold)[0][1]
+    plateau_indices_end = np.where(z_scores >= plateau_z_threshold)[0][-2]
+
+    # Identify the start and end indices of the baseline region
+    baseline_indices = np.where(np.abs(z_scores) < baseline_z_threshold)[0]
+    baseline_indices = baseline_indices[baseline_indices < plateau_indices_start]
+    baseline_indices_start = baseline_indices[1]
+    baseline_indices_end = baseline_indices[-2]
+
+    return plateau_indices_start, plateau_indices_end, baseline_indices_start, baseline_indices_end
+
+
+def auto_select_baseline_peak(experiment, total_data, primary_channel, baseline_z_threshold=1.0, plateau_z_threshold=0.5):
+    '''
+    specific function for selecting the baseline and peak regions in the data given a parsed experiment dataframe
+
+    Parameters
+    ----------
+    experiment: pandas.DataFrame
+        a pandas dataframe containing the experiment metadata
+    total_data : pandas.DataFrame
+        a pandas dataframe containing the total data
+    baseline_z_threshold : float
+        the threshold for selecting the baseline region
+    plateau_z_threshold : float
+        the threshold for selecting the peak region
+    
+    Returns
+    -------
+    experiment : pandas.DataFrame
+        a pandas dataframe containing the spot data with the baseline and peak regions selected
+    '''
+    spot_names = total_data['spot_name'].unique()
+
+    for spot_name in spot_names:
+        spot_data = total_data[total_data['spot_name'] == spot_name]
+        values = spot_data[primary_channel].tolist()
+        plateau_indices_start, plateau_indices_end, baseline_indices_start, baseline_indices_end = select_baseline_peak(values, baseline_z_threshold, plateau_z_threshold)
+        experiment.loc[experiment['spot_names'] == spot_name, 'plateau_start_times'] = spot_data['Time'][plateau_indices_start]
+        experiment.loc[experiment['spot_names'] == spot_name, 'plateau_end_times'] = spot_data['Time'][plateau_indices_end]
+        experiment.loc[experiment['spot_names'] == spot_name, 'baseline_start_times'] = spot_data['Time'][baseline_indices_start]
+        experiment.loc[experiment['spot_names'] == spot_name, 'baseline_end_times'] = spot_data['Time'][baseline_indices_end]
+
+
+    return experiment
