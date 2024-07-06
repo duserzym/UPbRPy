@@ -36,9 +36,9 @@ class PlotCanvas:
         self.html += '</body></html>'
         self.web_view.setHtml(self.html)
 
-    def add_line(self, x, y, data, color, mode='lines'):
+    def add_line(self, x, y, data, color, mode='lines', **kwargs):
         self.fig.add_trace(go.Scatter
-            (x=data[x], y=data[y], mode=mode, name=y, line=dict(color=color)))
+            (x=data[x], y=data[y], mode=mode, name=y, line=dict(color=color), **kwargs))
         
         self.auto_range(data)
         self.display_plot()

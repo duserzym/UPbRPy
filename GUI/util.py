@@ -6,6 +6,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 import numpy as np
 
+# ratio of natural 238U/235U +/-0.045
+common_U238_U235 = 137.818
+
 # function for reading LA-ICP-MS data
 # in the format of .csv files exported from Thermo iCap with each file representing a spot
 def read_experiment_data(directory):
@@ -58,6 +61,7 @@ def read_experiment_data(directory):
         # create a pandas dataframe to store the experiment data
     experiment = pd.DataFrame()
     experiment['spot_names'] = spot_names
+    experiment['sample'] = [spot_name.split('_')[0] for spot_name in spot_names]
     experiment['spot_paths'] = spot_paths
     experiment['spot_starting_times'] = spot_starting_times
 
@@ -71,6 +75,7 @@ def read_experiment_data(directory):
         # make sure to change the time column to datetime and add start time to all the times
         this_data['Time'] = [experiment['spot_starting_times'][i] + timedelta(seconds=this_data['Time'][j]) for j in range(this_data.shape[0])]
         this_data['spot_name'] = experiment['spot_names'][i]
+        this_data['235U'] = this_data['238U'] / common_U238_U235
         total_data = pd.concat([total_data, this_data], axis=0)
 
     experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)

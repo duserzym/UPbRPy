@@ -20,20 +20,32 @@ import numpy as np
 import traceback
 import util
 from custom_widgets import *
+from calibration_window import CalibrationWindow
 
 # initialize global variables
 this_experiment = pd.DataFrame()
 channels = []
 total_data = pd.DataFrame()
 channel_colors = pd.Series()
-
+reference_materials_file_path = './reference_materials/RM.csv'
+reference_materials_df = pd.DataFrame()
+concentration_RM = pd.DataFrame()
+UPb_RM = pd.DataFrame()
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LA-ICP-MS Data Visualization")
         self.setGeometry(100, 100, 800, 500)
- 
+
+        global reference_materials_df
+        global concentration_RM
+        global UPb_RM
+
+        reference_materials_df = pd.read_csv(reference_materials_file_path)
+        concentration_RM = reference_materials_df[reference_materials_df['type'] == 'glass']
+        UPb_RM = reference_materials_df[reference_materials_df['type'] != 'glass']
+
         self.initUI()
 
     def initUI(self):
@@ -43,19 +55,15 @@ class MainWindow(QMainWindow):
         # add a menu bar
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
-        # add open project action
         open_action = file_menu.addAction("Open")
-        # add save project action
         save_action = file_menu.addAction("Save")
-        # add import data action
         import_action = file_menu.addAction("Import Data")
-        # add export data action
         export_action = file_menu.addAction("Export Data")
-        # add save .redo file action
         save_redo_action = file_menu.addAction("Save selections to a .redo file")
-        # add import .redo file action
         import_redo_action = file_menu.addAction("Import selections from a .redo file")
 
+        Reference_Material_menu = menu.addMenu("Reference Materials")
+        RM_setting_action = Reference_Material_menu.addAction("Reference Material Settings")
         # link open action to opening a project file with specific suffix of .UPbR
         open_action.triggered.connect(self.open_project)
 
@@ -73,7 +81,6 @@ class MainWindow(QMainWindow):
 
         # link import .redo file action to importing selections from a .redo file
         # import_redo_action.triggered.connect(self.import_redo)
-
 
         self.layout = QVBoxLayout()
         self.main_widget.setLayout(self.layout)
@@ -136,11 +143,17 @@ class MainWindow(QMainWindow):
         self.primary_channel = QComboBox()
         self.primary_channel.setFixedWidth(150)
 
-        self.primary_standard_label = QLabel("Primary Standard")
-        self.primary_standard_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
+        self.primary_UPb_standard_label = QLabel("Primary U-Pb\nStandard")
+        self.primary_UPb_standard_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
         # add a drop down menu for selecting the primary standard
-        self.primary_standard = QComboBox()
-        self.primary_standard.setFixedWidth(150)
+        self.primary_UPb_standard = QComboBox()
+        self.primary_UPb_standard.setFixedWidth(150)
+
+        self.primary_concentration_standard_label = QLabel("Primary Concentration\nStandard")
+        self.primary_concentration_standard_label.setFont(QFont("Dejavu Sans", 12, QFont.Bold))
+        # add a drop down menu for selecting the primary standard
+        self.primary_concentration_standard = QComboBox()
+        self.primary_concentration_standard.setFixedWidth(150)
 
         # now add a scrollable list widget for displaying the spot names
         self.spot_list_label = QLabel("Spots")
@@ -176,8 +189,10 @@ class MainWindow(QMainWindow):
         self.button_v_layout.addWidget(self.export_button)
         self.button_v_layout.addWidget(self.primary_channel_label)
         self.button_v_layout.addWidget(self.primary_channel)
-        self.button_v_layout.addWidget(self.primary_standard_label)
-        self.button_v_layout.addWidget(self.primary_standard)
+        self.button_v_layout.addWidget(self.primary_UPb_standard_label)
+        self.button_v_layout.addWidget(self.primary_UPb_standard)
+        self.button_v_layout.addWidget(self.primary_concentration_standard_label)
+        self.button_v_layout.addWidget(self.primary_concentration_standard)
 
         # put the channel list and spot list in a vertical layout
         self.v_layout = QVBoxLayout()
@@ -206,9 +221,15 @@ class MainWindow(QMainWindow):
         # function for opening up the calibration window
         global this_experiment
         global total_data
+        global reference_materials_df
 
-        self.calibration_window = CalibrationWindow(this_experiment, total_data, self.primary_standard.currentText())
-
+        self.calibration_window = CalibrationWindow(this_experiment, 
+                                                    total_data, 
+                                                    self.primary_UPb_standard.currentText(), 
+                                                    self.primary_concentration_standard.currentText(), 
+                                                    reference_materials_df)
+        self.calibration_window.show()
+        
     def auto_selection(self):
         global this_experiment
 
@@ -323,8 +344,8 @@ class MainWindow(QMainWindow):
                 plateau_mean = plateau_data[self.primary_channel.currentText()].mean()
                 plateau_std2 = 2*plateau_data[self.primary_channel.currentText()].std()
                 # draw the baseline and plateau on the plot
-                self.plot_canvas.draw_selection(spot_selection['baseline_start_times'].values[0], spot_selection['baseline_end_times'].values[0], baseline_mean, baseline_std2, 'blue', 'lightblue', mean_name='baseline mean')
-                self.plot_canvas.draw_selection(spot_selection['plateau_start_times'].values[0], spot_selection['plateau_end_times'].values[0], plateau_mean, plateau_std2, 'red', 'pink', mean_name='plateau mean')
+                self.plot_canvas.draw_selection(spot_selection['baseline_start_times'].values[0], spot_selection['baseline_end_times'].values[0], baseline_mean, baseline_std2, 'blue', 'lightblue', selection_type='baseline')
+                self.plot_canvas.draw_selection(spot_selection['plateau_start_times'].values[0], spot_selection['plateau_end_times'].values[0], plateau_mean, plateau_std2, 'red', 'pink', selection_type='plateau')
             
 
     def highlight_channels(self):
@@ -366,12 +387,19 @@ class MainWindow(QMainWindow):
             global channels
             global total_data
             global channel_colors
+            global reference_materials_df
+            global concentration_RM
+            global UPb_RM
+
             # if we are opening a new directory, we need to clear the previous data
             if this_experiment.shape[0] != 0:
                 this_experiment = pd.DataFrame()
                 channels = []
                 self.channel_list.clear()
                 self.spot_list.clear()
+                self.primary_channel.clear()
+                self.primary_UPb_standard.clear()
+                self.primary_concentration_standard.clear()
                 self.spot_table_view.setModel(PandasTableModel(pd.DataFrame()))
                 self.experiment_table_view.setModel(PandasTableModel(pd.DataFrame()))
                 self.plot_canvas.clear_plot()
@@ -389,6 +417,12 @@ class MainWindow(QMainWindow):
                 self.primary_channel.addItems(channels)
                 # add default selection to be the last channel
                 self.primary_channel.setCurrentIndex(len(channels)-1)
+
+                self.concentration_standards_used = [i for i in this_experiment['sample'].unique() if i in concentration_RM['sample'].unique()]
+                self.UPb_standards_used = [i for i in this_experiment['sample'].unique() if i in UPb_RM['sample'].unique()]
+                self.primary_concentration_standard.addItems(self.concentration_standards_used)
+                self.primary_UPb_standard.addItems(self.UPb_standards_used)
+
                 # update the spot list widget
                 self.spot_list.clear()
                 self.spot_list.addItems(this_experiment['spot_names'])
