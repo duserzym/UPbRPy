@@ -31,7 +31,7 @@ class PlotCanvas:
         self.html = '<html><head><meta charset="utf-8" />'
         self.html += '<script src="https://cdn.plot.ly/plotly-latest.min.js"></script></head>'
         self.html += '<body>'
-        self.html += pio.to_html(self.fig, full_html=False, include_plotlyjs=False)
+        self.html += pio.to_html(self.fig, full_html=False, include_plotlyjs=False, include_mathjax='cdn')
         # self.html += po.plot(self.fig, include_plotlyjs=False, output_type='div')
         self.html += '</body></html>'
         self.web_view.setHtml(self.html)

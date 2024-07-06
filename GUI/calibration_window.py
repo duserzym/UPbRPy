@@ -32,37 +32,36 @@ class CalibrationWindow(QMainWindow):
     
         # first plot shows the session wide primary standard fractionation of 6/8 ratios
         self.session_68_fractionation_plot = PlotCanvas()
-        self.session_68_fractionation_plot.fig.update_layout(title={'text':'Session Wide 206Pb/238U Fractionation', 
+        self.session_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
                                                                     'x': 0.5, 
                                                                     'xanchor': 'center'}, 
-                                                            yaxis=dict(title=r'$^{206}$Pb/$^{238}U ratio'), 
+                                                            yaxis=dict(title=r'$^{206}Pb/^{238}U$ ratio'), 
                                                             legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
 
         # second plot shows the session wide primary standard fractionation of 7/5 ratios
         self.session_75_fractionation_plot = PlotCanvas()
-        self.session_75_fractionation_plot.fig.update_layout(title={'text':'Session Wide 207Pb/235U Fractionation', 
+        self.session_75_fractionation_plot.fig.update_layout(title={'text':r'$Session Wide\ ^{207}Pb/^{235}U\ Fractionation$', 
                                                             'x': 0.5, 
                                                             'xanchor': 'center'}, 
-                                                    yaxis=dict(title=r'$^{206}$Pb/$^{238}U ratio'), 
+                                                    yaxis=dict(title=r'$^{207}Pb/^{235}U$ Ratio'), 
                                                     legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
         # third plot shows the aligned downhole fractionation of 6/8 ratios
         self.DH_68_fractionation_plot = PlotCanvas()
-        self.DH_68_fractionation_plot.fig.update_layout(title={'text':'Downhole 206Pb/238U Fractionation', 
+        self.DH_68_fractionation_plot.fig.update_layout(title={'text':r'$Downhole\ ^{206}Pb/^{238}U\ Fractionation$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
-                                                        yaxis=dict(title=r'$^{206}$Pb/$^{238}U ratio'),
-                                                        xaxis=dict(title='Seconds from start of analysis'))
-        self.DH_68_fractionation_plot.fig.update_xaxes(tickformat= "%S")
+                                                        yaxis=dict(title=r'$^{206}Pb/^{238}U\ ratio$'),
+                                                        xaxis=dict(title='Seconds from start of analysis', 
+                                                                   tickformat='.2f'))
         
         # fourth plot shows the aligned downhole fractionation of 7/5 ratios
         self.DH_75_fractionation_plot = PlotCanvas()
-        self.DH_75_fractionation_plot.fig.update_layout(title={'text':'Downhole 207Pb/235U Fractionation', 'x': 0.5, 'xanchor': 'center'})
-        self.DH_75_fractionation_plot.fig.update_layout(title={'text':'Downhole 207Pb/235U Fractionation', 
+        self.DH_75_fractionation_plot.fig.update_layout(title={'text':r'$Downhole\ ^{207}Pb/^{235}U\ Fractionation$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
-                                                        yaxis=dict(title=r'$^{207}$Pb/$^{235}U ratio'),
-                                                        xaxis=dict(title='Seconds from start of analysis'))
-        self.DH_75_fractionation_plot.fig.update_xaxes(tickformat= "%S")
+                                                        yaxis=dict(title=r'$^{207}Pb/^{235}U\ ratio$'),
+                                                        xaxis=dict(title='Seconds from start of analysis', 
+                                                                   tickformat='.2f'))
 
         # add ok and cancel button to save or cancel the calibration
         self.ok_button = QPushButton("OK")
@@ -95,6 +94,13 @@ class CalibrationWindow(QMainWindow):
         # generate a color pd series for the primary standard spots
         self.primary_UPb_standard_spot_colors = pd.Series([f'#{i:06x}' for i in np.random.randint(0, 0xFFFFFF, len(primary_UPb_standard_total_data['spot_name'].unique()))], index=primary_UPb_standard_total_data['spot_name'].unique())
 
+        session_standard_68_mean = []
+        session_standard_68_std = []
+        session_standard_75_mean = []
+        session_standard_75_std = []
+
+        session_standard_time_mean = []
+
         # filter for the selected plateau regions
         for spot_name in primary_UPb_standard_total_data['spot_name'].unique():
             spot_data = primary_UPb_standard_total_data[primary_UPb_standard_total_data['spot_name'] == spot_name]
@@ -108,32 +114,51 @@ class CalibrationWindow(QMainWindow):
             # more strictly, get selected plateau data for session wide fractionation calibration
             selected_plateau_data = spot_data[(spot_data['Time'] >= plateau_start_time) & (spot_data['Time'] < plateau_end_time)]
 
-            primary_UPb_standard_plateau_data = pd.concat([primary_UPb_standard_plateau_data, selected_plateau_data], axis=0)
+            session_standard_time_mean.append(selected_plateau_data['Time'].mean())
+            session_standard_68_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).mean())
+            session_standard_68_std.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).std())
+            session_standard_75_mean.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).mean())
+            session_standard_75_std.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).std())
 
-            print(DH_calibration_data['Time']-DH_calibration_data['Time'].min())
-            self.DH_68_fractionation_plot.fig.add_trace(go.Scatter(x=DH_calibration_data['Time']-DH_calibration_data['Time'].min(), 
+            primary_UPb_standard_plateau_data = pd.concat([primary_UPb_standard_plateau_data, selected_plateau_data], axis=0)
+                                                                        
+            self.DH_68_fractionation_plot.fig.add_trace(go.Scatter(x=(DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds(), 
                                                     y=DH_calibration_data['206Pb']/DH_calibration_data['238U'], 
                                                     line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]), 
                                                     mode='lines',
                                                     opacity=0.6,
                                                     name=spot_name))
-            self.DH_75_fractionation_plot.fig.add_trace(go.Scatter(x=DH_calibration_data['Time']-DH_calibration_data['Time'].min(),
+            self.DH_75_fractionation_plot.fig.add_trace(go.Scatter(x=(DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds(),
                                                     y=DH_calibration_data['207Pb']/DH_calibration_data['235U'],
                                                     line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]), 
                                                     mode='lines',
                                                     opacity=0.6,
                                                     name=spot_name))
-
+        print(session_standard_time_mean, session_standard_68_mean, session_standard_68_std, session_standard_75_mean, session_standard_75_std)
         self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'], 
                                                     y=primary_UPb_standard_plateau_data['206Pb']/primary_UPb_standard_plateau_data['238U'], 
                                                     line=dict(color='black'), mode='markers', 
                                                     opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} 206Pb/238U ratio'))
+                                                    name=f'{self.primary_UPb_standard} individual analyses'))
+
         self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'],
                                                     y=primary_UPb_standard_plateau_data['207Pb']/primary_UPb_standard_plateau_data['235U'],
                                                     line=dict(color='black'), mode='markers', 
                                                     opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} 207Pb/235U ratio'))
+                                                    name=f'{self.primary_UPb_standard} individual analyses'))
+        
+        self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
+                                                    y=session_standard_68_mean,
+                                                    error_y=dict(type='data', array=session_standard_68_std*2, visible=True),
+                                                    line=dict(color='red'),
+                                                    mode='markers',
+                                                    opacity=1))
+        self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
+                                                    y=session_standard_75_mean,
+                                                    error_y=dict(type='data', array=session_standard_75_std*2, visible=True),
+                                                    line=dict(color='red'),
+                                                    mode='markers',
+                                                    opacity=1))
         
         self.session_68_fractionation_plot.display_plot()
         self.session_75_fractionation_plot.display_plot()
