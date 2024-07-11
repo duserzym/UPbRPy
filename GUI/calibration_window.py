@@ -50,7 +50,7 @@ class CalibrationWindow(QMainWindow):
         self.DH_68_fractionation_plot.fig.update_layout(title={'text':r'$Downhole\ ^{206}Pb/^{238}U\ Fractionation$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
-                                                        yaxis=dict(title=r'$^{206}Pb/^{238}U\ ratio$'),
+                                                        yaxis=dict(title=r'$^{206}Pb/^{238}U\ \text{ratio}$'),
                                                         xaxis=dict(title='Seconds from start of analysis', 
                                                                    tickformat='.2f'))
         
@@ -59,7 +59,7 @@ class CalibrationWindow(QMainWindow):
         self.DH_75_fractionation_plot.fig.update_layout(title={'text':r'$Downhole\ ^{207}Pb/^{235}U\ Fractionation$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
-                                                        yaxis=dict(title=r'$^{207}Pb/^{235}U\ ratio$'),
+                                                        yaxis=dict(title=r'$^{207}Pb/^{235}U\ \text{ratio}$'),
                                                         xaxis=dict(title='Seconds from start of analysis', 
                                                                    tickformat='.2f'))
 
