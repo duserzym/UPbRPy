@@ -5,6 +5,7 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 import numpy as np
+from scipy.optimize import curve_fit
 
 # ratio of natural 238U/235U +/-0.045
 common_U238_U235 = 137.818
@@ -175,3 +176,122 @@ def auto_select_baseline_peak(experiment, total_data, primary_channel, baseline_
 
 
     return experiment
+
+
+def exponential(x, a, b, c):
+    return a + b * np.exp(c * x)
+    
+def exponential_fit(x, y):
+    '''
+    function for fitting an exponential function to the data
+
+    Parameters
+    ----------
+    x : list or array
+        x values
+    y : list or array
+        y values
+    
+    Returns
+    -------
+    popt : list
+        list of optimal parameters for the fit
+    pcov : list
+        list of the covariance of the optimal parameters
+    '''
+
+    popt, pcov = curve_fit(exponential, x, y)
+    return popt, pcov
+
+def linear(x, a, b):
+    '''
+    function for a linear function
+
+    Parameters
+    ----------
+    x : list or array
+        x values
+    b : float
+        slope of the line
+    a : float
+        y-intercept of the line
+    
+    Returns
+    -------
+    y : list
+        y values
+    '''
+    return a + b * x
+
+def linear_fit(x, y):
+    '''
+    function for fitting a linear function to the data
+
+    Parameters
+    ----------
+    x : list or array
+        x values
+    y : list or array
+        y values
+    
+    Returns
+    -------
+    popt : list
+        list of optimal parameters for the fit
+    pcov : list
+        list of the covariance of the optimal parameters
+    '''
+
+    popt, pcov = curve_fit(linear, x, y)
+    return popt, pcov
+
+
+def poly_fit(x, y, degree):
+    '''
+    function for fitting a polynomial function to the data
+
+    Parameters
+    ----------
+    x : list or array
+        x values
+    y : list or array
+        y values
+    degree : int
+        degree of the polynomial
+    
+    Returns
+    -------
+    popt : list
+        list of optimal parameters for the fit
+    pcov : list
+        list of the covariance of the optimal parameters
+    '''
+    popt, pcov = np.polyfit(x, y, degree, cov=True)
+    return popt, pcov
+
+def moving_average(x, y, window_size):
+    '''
+    function for calculating the moving average of the data
+
+    Parameters
+    ----------
+    data : list or array
+        data to calculate the moving average
+    window_size : int
+        size of the window for the moving average
+    
+    Returns
+    -------
+    moving_average : list
+        list of the moving average values
+    '''
+    # Define the moving average window size
+    window_size = 5
+    kernel = np.ones(window_size) / window_size
+
+    # Convolve the data with the kernel to compute the moving average
+    smoothed_y = np.convolve(y, kernel, mode='valid')
+
+    # Adjust the x values to match the 'valid' mode output length
+    x_smoothed = x[(window_size-1)//2:-(window_size-1)//2] if window_size % 2 == 1 else x[(window_size)//2:-(window_size)//2 + 1]
+    return x_smoothed, smoothed_y
