@@ -179,7 +179,7 @@ def auto_select_baseline_peak(experiment, total_data, primary_channel, baseline_
 
 
 def exponential(x, a, b, c):
-    return a + b * np.exp(c * x)
+    return a + b * np.exp(-c * x)
     
 def exponential_fit(x, y):
     '''
@@ -199,9 +199,12 @@ def exponential_fit(x, y):
     pcov : list
         list of the covariance of the optimal parameters
     '''
-
-    popt, pcov = curve_fit(exponential, x, y)
-    return popt, pcov
+    try:
+        popt, pcov = curve_fit(exponential, x, y, maxfev=2000, p0=[0, 1, 0])
+        return popt, pcov
+    except RuntimeError as e:
+        print(f"RuntimeError encountered: {e}")
+        return None, None
 
 def linear(x, a, b):
     '''
@@ -266,8 +269,12 @@ def poly_fit(x, y, degree):
     pcov : list
         list of the covariance of the optimal parameters
     '''
-    popt, pcov = np.polyfit(x, y, degree, cov=True)
-    return popt, pcov
+    try: 
+        popt, pcov = curve_fit(lambda x, *p: np.polyval(p, x), x, y, p0=np.random.rand(degree))
+        return popt, pcov
+    except RuntimeError as e:
+        print(f"RuntimeError encountered: {e}")
+        return None, None
 
 def moving_average(x, y, window_size):
     '''

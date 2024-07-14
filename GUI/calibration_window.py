@@ -296,10 +296,11 @@ class CalibrationWindow(QMainWindow):
             this_PR_67_DH_ratios = DH_calibration_data['206Pb']/DH_calibration_data['207Pb']
             this_PR_82_DH_ratios = DH_calibration_data['208Pb']/DH_calibration_data['232Th']
 
-            PR_68_DH_times.append(this_PR_68_DH_times)
-            PR_75_DH_times.append(this_PR_75_DH_times)
-            PR_67_DH_times.append(this_PR_67_DH_times)
-            PR_82_DH_times.append(this_PR_82_DH_times)
+            PR_68_DH_times = pd.concat([PR_68_DH_times, this_PR_68_DH_times])
+            PR_75_DH_times = pd.concat([PR_75_DH_times, this_PR_75_DH_times])
+            PR_67_DH_times = pd.concat([PR_67_DH_times, this_PR_67_DH_times])
+            PR_82_DH_times = pd.concat([PR_82_DH_times, this_PR_82_DH_times])
+
             PR_68_DH_ratios.extend(this_PR_68_DH_ratios)
             PR_75_DH_ratios.extend(this_PR_75_DH_ratios)
             PR_67_DH_ratios.extend(this_PR_67_DH_ratios)
@@ -409,18 +410,18 @@ class CalibrationWindow(QMainWindow):
                                 primary_UPb_standard_plateau_data['208Pb']/primary_UPb_standard_plateau_data['232Th']/primary_rad_82)
         
         # plot the default exponential fits of the downhole fractionation plots
-        # self.update_fit_curve('downhole 206Pb/238U', 
-        #                       PR_68_DH_times, 
-        #                       PR_68_DH_ratios)
-        # self.update_fit_curve('downhole 207Pb/235U',
-        #                         PR_75_DH_times,
-        #                         PR_75_DH_ratios)
-        # self.update_fit_curve('downhole 206Pb/207Pb',
-        #                         PR_67_DH_times,
-        #                         PR_67_DH_ratios)
-        # self.update_fit_curve('downhole 208Pb/232Th',
-        #                         PR_82_DH_times,
-        #                         PR_82_DH_ratios)
+        self.update_fit_curve('downhole 206Pb/238U', 
+                              PR_68_DH_times, 
+                              PR_68_DH_ratios)
+        self.update_fit_curve('downhole 207Pb/235U',
+                                PR_75_DH_times,
+                                PR_75_DH_ratios)
+        self.update_fit_curve('downhole 206Pb/207Pb',
+                                PR_67_DH_times,
+                                PR_67_DH_ratios)
+        self.update_fit_curve('downhole 208Pb/232Th',
+                                PR_82_DH_times,
+                                PR_82_DH_ratios)
         
 
         
@@ -468,9 +469,8 @@ class CalibrationWindow(QMainWindow):
         if this_fractionation.startswith('session'):
             reference_total_seconds = (x-reference_time).apply(lambda x: x.total_seconds())
         else:
-            reference_total_seconds = x
+            reference_total_seconds = x.to_numpy()
 
-        # print(reference_total_seconds,y)
         if this_fit_type == 'Linear':
             self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Linear'
             self.calibration_df.loc[this_fractionation, 'Fit equation'] = 'y = a + bx'
@@ -495,14 +495,19 @@ class CalibrationWindow(QMainWindow):
             self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
 
             popt, pcov = exponential_fit(reference_total_seconds, y)
-            self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-            this_fig.add_trace(go.Scatter(x=x, y=exponential(reference_total_seconds, *popt), line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
+            print(popt, pcov)
+            if popt is None:
+                self.calibration_df.loc[this_fractionation, 'Quality'] = None
+            else:
+                self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
+                this_fig.add_trace(go.Scatter(x=x, y=exponential(reference_total_seconds, *popt), line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
             # add text showing the fit equation
             # this_fig.add_annotation(x=0.5, y=0.9, 
             #                         xref='paper', yref='paper', 
             #                         showarrow=False, 
             #                         text=f'y = {popt[0]:.2f} + {popt[1]:.2f}*exp(-{popt[2]:.2f}*x)', 
             #                         font=dict(size=12))
+
         elif this_fit_type == 'Polynomial':
             self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Polynomial'
             degree = self.calibration_df.loc[this_fractionation, 'Polynomial degree']
@@ -511,8 +516,11 @@ class CalibrationWindow(QMainWindow):
             self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
 
             popt, pcov = poly_fit(reference_total_seconds, y, degree)
-            self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-            this_fig.add_trace(go.Scatter(x=x, y=np.polyval(popt, reference_total_seconds), line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
+            if popt is None: # this means the algorithm failed to fit the polynomial
+                self.calibration_df.loc[this_fractionation, 'Quality'] = None
+            else:
+                self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
+                this_fig.add_trace(go.Scatter(x=x, y=np.polyval(popt, reference_total_seconds), line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
             # add text showing the fit equation
             # equation_text = 'y = '
             # for i in range(degree, 0, -1):
