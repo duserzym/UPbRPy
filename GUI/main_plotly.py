@@ -221,10 +221,12 @@ class MainWindow(QMainWindow):
         # function for opening up the calibration window
         global this_experiment
         global total_data
+        global channels
         global reference_materials_df
 
         self.calibration_window = CalibrationWindow(this_experiment, 
                                                     total_data, 
+                                                    channels,
                                                     self.primary_UPb_standard.currentText(), 
                                                     self.primary_concentration_standard.currentText(), 
                                                     reference_materials_df)
