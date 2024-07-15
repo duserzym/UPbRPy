@@ -37,7 +37,7 @@ class CalibrationWindow(QMainWindow):
             baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
             this_spot_baseline = this_spot_data[(this_spot_data['Time'] >= baseline_start_time) & (this_spot_data['Time'] < baseline_end_time)]
             for channel in self.channels:
-                this_spot_data[channel] = this_spot_data[channel] - this_spot_baseline[channel].mean()
+                this_spot_data.loc[:, channel] = this_spot_data[channel] - this_spot_baseline[channel].mean()
             self.baseline_corrected_data = pd.concat([self.baseline_corrected_data, this_spot_data])
             # .loc[this_spot_data.index, self.channels] = this_spot_data[self.channels]
         # print(self.baseline_corrected_data)
@@ -267,10 +267,10 @@ class CalibrationWindow(QMainWindow):
         session_standard_time_mean = []
 
         # lists to store the downhole ratios of the primary standards
-        PR_68_DH_times = pd.Series()
-        PR_75_DH_times = pd.Series()
-        PR_67_DH_times = pd.Series()
-        PR_82_DH_times = pd.Series()
+        PR_68_DH_times = pd.Series(dtype='float64')
+        PR_75_DH_times = pd.Series(dtype='float64')
+        PR_67_DH_times = pd.Series(dtype='float64')
+        PR_82_DH_times = pd.Series(dtype='float64')
         PR_68_DH_ratios = []
         PR_75_DH_ratios = []
         PR_67_DH_ratios = []
@@ -416,35 +416,32 @@ class CalibrationWindow(QMainWindow):
                                                     opacity=1))
         
         # plot the default polynomial degree 3 fits of the session wide fractionation plots
-        # self.update_fit_curve('session 206Pb/238U', 
-        #                       session_standard_time_mean, 
-        #                       session_standard_68_fractionation_mean)
-        # self.update_fit_curve('session 207Pb/235U',
-        #                         session_standard_time_mean,
-        #                         session_standard_75_fractionation_mean)
-        # self.update_fit_curve('session 206Pb/207Pb',
-        #                         session_standard_time_mean,
-        #                         session_standard_67_fractionation_mean)
-        # self.update_fit_curve('session 208Pb/232Th',
-        #                         session_standard_time_mean,
-        #                         session_standard_82_fractionation_mean)
+        self.update_fit_curve('session 206Pb/238U', 
+                              session_standard_time_mean, 
+                              session_standard_68_fractionation_mean)
+        self.update_fit_curve('session 207Pb/235U',
+                                session_standard_time_mean,
+                                session_standard_75_fractionation_mean)
+        self.update_fit_curve('session 206Pb/207Pb',
+                                session_standard_time_mean,
+                                session_standard_67_fractionation_mean)
+        self.update_fit_curve('session 208Pb/232Th',
+                                session_standard_time_mean,
+                                session_standard_82_fractionation_mean)
         
         # plot the default exponential fits of the downhole fractionation plots
-        # self.update_fit_curve('downhole 206Pb/238U', 
-        #                       PR_68_DH_times, 
-        #                       PR_68_DH_ratios)
-        # self.update_fit_curve('downhole 207Pb/235U',
-        #                         PR_75_DH_times,
-        #                         PR_75_DH_ratios)
-        # self.update_fit_curve('downhole 206Pb/207Pb',
-        #                         PR_67_DH_times,
-        #                         PR_67_DH_ratios)
-        # self.update_fit_curve('downhole 208Pb/232Th',
-        #                         PR_82_DH_times,
-        #                         PR_82_DH_ratios)
-        
-
-        
+        self.update_fit_curve('downhole 206Pb/238U', 
+                              PR_68_DH_times, 
+                              PR_68_DH_ratios)
+        self.update_fit_curve('downhole 207Pb/235U',
+                                PR_75_DH_times,
+                                PR_75_DH_ratios)
+        self.update_fit_curve('downhole 206Pb/207Pb',
+                                PR_67_DH_times,
+                                PR_67_DH_ratios)
+        self.update_fit_curve('downhole 208Pb/232Th',
+                                PR_82_DH_times,
+                                PR_82_DH_ratios)
 
         self.moving_average_window_setting.setMaximum(max_moving_average_window)
 
@@ -487,10 +484,10 @@ class CalibrationWindow(QMainWindow):
         this_fit_type = self.calibration_df.loc[this_fractionation, 'Fit type'] 
 
         if this_fractionation.startswith('session'):
-            reference_total_seconds = [(t- reference_time).total_seconds() for t in x]
+            reference_total_seconds = np.array([(t- reference_time).total_seconds() for t in x])
         else:
             reference_total_seconds = x.to_numpy()
-        print(reference_total_seconds, y)
+        # print(reference_total_seconds, y)
         if this_fit_type == 'Linear':
             self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Linear'
             self.calibration_df.loc[this_fractionation, 'Fit equation'] = 'y = a + bx'
@@ -500,7 +497,8 @@ class CalibrationWindow(QMainWindow):
             popt, pcov = linear_fit(reference_total_seconds, y)
             self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
             
-            this_fig.add_trace(go.Scatter(x=x, y=linear(reference_total_seconds, *popt), line=dict(color='red', dash='dash'), mode='lines', name='Linear fit'))
+            this_fig.add_trace(go.Scatter(x=np.sort(x), y=linear(np.sort(reference_total_seconds), *popt), 
+                                          line=dict(color='red', dash='dash'), mode='lines', name='Linear fit'))
 
 
         elif this_fit_type == 'Exponential':
@@ -510,13 +508,14 @@ class CalibrationWindow(QMainWindow):
             self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
 
             popt, pcov = exponential_fit(reference_total_seconds, y)
-            print(popt, pcov)
+            # print(popt, pcov)
             if popt is None:
                 self.calibration_df.loc[this_fractionation, 'Quality'] = None
             else:
                 self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-                this_fig.add_trace(go.Scatter(x=x, y=exponential(reference_total_seconds, *popt), line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
-
+                this_fig.add_trace(go.Scatter(x=np.sort(x), y=exponential(np.sort(reference_total_seconds), *popt), 
+                                              line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
+                print(list(x), list(exponential(reference_total_seconds, *popt)))
 
         elif this_fit_type == 'Polynomial':
             self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Polynomial'
@@ -530,7 +529,8 @@ class CalibrationWindow(QMainWindow):
                 self.calibration_df.loc[this_fractionation, 'Quality'] = None
             else:
                 self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-                this_fig.add_trace(go.Scatter(x=x, y=np.polyval(popt, reference_total_seconds), line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
+                this_fig.add_trace(go.Scatter(x=np.sort(x), y=np.polyval(popt, np.sort(reference_total_seconds)), 
+                                              line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
 
             
         elif this_fit_type == 'Moving Average':
@@ -540,8 +540,12 @@ class CalibrationWindow(QMainWindow):
             self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = None
             self.calibration_df.loc[this_fractionation, 'Moving average window'] = window_size
 
+            # sort reference total seconds and y together based on reference total seconds
+            reference_total_seconds, y = zip(*sorted(zip(reference_total_seconds, y)))
+
             x_moving_average, y_moving_average = moving_average(reference_total_seconds, y, window_size)
-            this_fig.add_trace(go.Scatter
-                            (x=reference_time+pd.Timedelta(seconds=x_moving_average), y=y_moving_average, line=dict(color='red', dash='dash'), mode='lines', name='Moving average fit'))
+            this_fig.add_trace(go.Scatter(x=reference_time+pd.Timedelta(seconds=x_moving_average), y=y_moving_average, 
+                                          line=dict(color='red', dash='dash'), mode='lines', name='Moving average fit'))
+
 
             
