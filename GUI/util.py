@@ -200,7 +200,7 @@ def exponential_fit(x, y):
         list of the covariance of the optimal parameters
     '''
     try:
-        popt, pcov = curve_fit(exponential, x, y, maxfev=2000, p0=[0, 1, 0])
+        popt, pcov = curve_fit(exponential, x, y, maxfev=2000, p0=[1, -1, 0])
         return popt, pcov
     except RuntimeError as e:
         print(f"RuntimeError encountered: {e}")

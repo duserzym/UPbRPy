@@ -95,7 +95,8 @@ class CalibrationWindow(QMainWindow):
         self.moving_average_window_setting = QSpinBox()
         self.moving_average_window_setting.setMinimum(1)
 
-        self.quality_label = QLabel('Quality of fit')
+        self.quality_label = QLabel('Standard error of fit')
+        self.quality_label_text = QLabel('R squared value of fit: 0.0')
         
         # first plot on top shows the session wide primary standard fractionation of 6/8 ratios
         self.session_68_fractionation_plot = PlotCanvas()
@@ -183,8 +184,8 @@ class CalibrationWindow(QMainWindow):
                                         self.DH_82_fractionation_plot]
         
         # add ok and cancel button to save or cancel the calibration
-        self.ok_button = QPushButton("OK")
-        self.cancel_button = QPushButton("Cancel")
+        self.apply_button = QPushButton("Apply")
+        self.export_button = QPushButton("Export data")
 
         self.layout = QHBoxLayout()
         self.main_widget.setLayout(self.layout)
@@ -220,8 +221,8 @@ class CalibrationWindow(QMainWindow):
         self.all_plots_layout.addLayout(self.session_layout)
         self.all_plots_layout.addLayout(self.DH_layout)
 
-        self.manual_calibration_layout.addWidget(self.ok_button)
-        self.manual_calibration_layout.addWidget(self.cancel_button)
+        self.manual_calibration_layout.addWidget(self.apply_button)
+        self.manual_calibration_layout.addWidget(self.export_button)
 
         # self.button_layout.addWidget(self.ok_button)
         # self.button_layout.addWidget(self.cancel_button)
@@ -255,26 +256,26 @@ class CalibrationWindow(QMainWindow):
             return
         
         # lists to store the mean and standard deviation of the session wide fractionation
-        session_standard_68_fractionation_mean = []
-        session_standard_68_fractionation_std = []
-        session_standard_75_fractionation_mean = []
-        session_standard_75_fractionation_std = []
-        session_standard_67_fractionation_mean = []
-        session_standard_67_fractionation_std = []
-        session_standard_82_fractionation_mean = []
-        session_standard_82_fractionation_std = []
+        self.session_standard_68_fractionation_mean = []
+        self.session_standard_68_fractionation_std = []
+        self.session_standard_75_fractionation_mean = []
+        self.session_standard_75_fractionation_std = []
+        self.session_standard_67_fractionation_mean = []
+        self.session_standard_67_fractionation_std = []
+        self.session_standard_82_fractionation_mean = []
+        self.session_standard_82_fractionation_std = []
 
-        session_standard_time_mean = []
+        self.session_standard_time_mean = []
 
         # lists to store the downhole ratios of the primary standards
-        PR_68_DH_times = pd.Series(dtype='float64')
-        PR_75_DH_times = pd.Series(dtype='float64')
-        PR_67_DH_times = pd.Series(dtype='float64')
-        PR_82_DH_times = pd.Series(dtype='float64')
-        PR_68_DH_ratios = []
-        PR_75_DH_ratios = []
-        PR_67_DH_ratios = []
-        PR_82_DH_ratios = []
+        self.PR_68_DH_times = pd.Series(dtype='float64')
+        self.PR_75_DH_times = pd.Series(dtype='float64')
+        self.PR_67_DH_times = pd.Series(dtype='float64')
+        self.PR_82_DH_times = pd.Series(dtype='float64')
+        self.PR_68_DH_ratios = []
+        self.PR_75_DH_ratios = []
+        self.PR_67_DH_ratios = []
+        self.PR_82_DH_ratios = []
 
 
         max_moving_average_window = 1
@@ -293,15 +294,15 @@ class CalibrationWindow(QMainWindow):
             # more strictly, get selected plateau data for session wide fractionation calibration
             selected_plateau_data = spot_data[(spot_data['Time'] >= plateau_start_time) & (spot_data['Time'] < plateau_end_time)]
             
-            session_standard_time_mean.append(selected_plateau_data['Time'].mean())
-            session_standard_68_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).mean()/primary_rad_68)
-            session_standard_68_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).std()/primary_rad_68)
-            session_standard_75_fractionation_mean.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).mean()/primary_rad_75)
-            session_standard_75_fractionation_std.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).std()/primary_rad_75)
-            session_standard_67_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).mean()/primary_rad_67)
-            session_standard_67_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).std()/primary_rad_67)
-            session_standard_82_fractionation_mean.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).mean()/primary_rad_82)
-            session_standard_82_fractionation_std.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).std()/primary_rad_82)
+            self.session_standard_time_mean.append(selected_plateau_data['Time'].mean())
+            self.session_standard_68_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).mean()/primary_rad_68)
+            self.session_standard_68_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).std()/primary_rad_68)
+            self.session_standard_75_fractionation_mean.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).mean()/primary_rad_75)
+            self.session_standard_75_fractionation_std.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).std()/primary_rad_75)
+            self.session_standard_67_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).mean()/primary_rad_67)
+            self.session_standard_67_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).std()/primary_rad_67)
+            self.session_standard_82_fractionation_mean.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).mean()/primary_rad_82)
+            self.session_standard_82_fractionation_std.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).std()/primary_rad_82)
             
             primary_UPb_standard_plateau_data = pd.concat([primary_UPb_standard_plateau_data, selected_plateau_data], axis=0)
 
@@ -316,15 +317,15 @@ class CalibrationWindow(QMainWindow):
             this_PR_67_DH_ratios = DH_calibration_data['206Pb']/DH_calibration_data['207Pb']
             this_PR_82_DH_ratios = DH_calibration_data['208Pb']/DH_calibration_data['232Th']
 
-            PR_68_DH_times = pd.concat([PR_68_DH_times, this_PR_68_DH_times])
-            PR_75_DH_times = pd.concat([PR_75_DH_times, this_PR_75_DH_times])
-            PR_67_DH_times = pd.concat([PR_67_DH_times, this_PR_67_DH_times])
-            PR_82_DH_times = pd.concat([PR_82_DH_times, this_PR_82_DH_times])
+            self.PR_68_DH_times = pd.concat([self.PR_68_DH_times, this_PR_68_DH_times])
+            self.PR_75_DH_times = pd.concat([self.PR_75_DH_times, this_PR_75_DH_times])
+            self.PR_67_DH_times = pd.concat([self.PR_67_DH_times, this_PR_67_DH_times])
+            self.PR_82_DH_times = pd.concat([self.PR_82_DH_times, this_PR_82_DH_times])
 
-            PR_68_DH_ratios.extend(this_PR_68_DH_ratios)
-            PR_75_DH_ratios.extend(this_PR_75_DH_ratios)
-            PR_67_DH_ratios.extend(this_PR_67_DH_ratios)
-            PR_82_DH_ratios.extend(this_PR_82_DH_ratios)
+            self.PR_68_DH_ratios.extend(this_PR_68_DH_ratios)
+            self.PR_75_DH_ratios.extend(this_PR_75_DH_ratios)
+            self.PR_67_DH_ratios.extend(this_PR_67_DH_ratios)
+            self.PR_82_DH_ratios.extend(this_PR_82_DH_ratios)
 
 
             # add downhole 68 ratios
@@ -383,65 +384,49 @@ class CalibrationWindow(QMainWindow):
         
 
         # plot the mean and standard deviation of the primary standard's 68 fractionation
-        self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
-                                                    y=session_standard_68_fractionation_mean,
-                                                    error_y=dict(type='data', array=session_standard_68_fractionation_std*2, visible=True),
+        self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
+                                                    y=self.session_standard_68_fractionation_mean,
+                                                    error_y=dict(type='data', array=self.session_standard_68_fractionation_mean*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
                                                     showlegend=False,
                                                     opacity=1))
         # plot the mean and standard deviation of the primary standard's 75 fractionation
-        self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
-                                                    y=session_standard_75_fractionation_mean,
-                                                    error_y=dict(type='data', array=session_standard_75_fractionation_std*2, visible=True),
+        self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
+                                                    y=self.session_standard_75_fractionation_mean,
+                                                    error_y=dict(type='data', array=self.session_standard_75_fractionation_std*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
                                                     showlegend=False,
                                                     opacity=1))
         # plot the mean and standard deviation of the primary standard's 67 fractionation
-        self.session_67_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
-                                                    y=session_standard_67_fractionation_mean,
-                                                    error_y=dict(type='data', array=session_standard_67_fractionation_std*2, visible=True),
+        self.session_67_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
+                                                    y=self.session_standard_67_fractionation_mean,
+                                                    error_y=dict(type='data', array=self.session_standard_67_fractionation_std*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
                                                     showlegend=False,
                                                     opacity=1))
         # plot the mean and standard deviation of the primary standard's 82 fractionation
-        self.session_82_fractionation_plot.fig.add_trace(go.Scatter(x=session_standard_time_mean,
-                                                    y=session_standard_82_fractionation_mean,
-                                                    error_y=dict(type='data', array=session_standard_82_fractionation_std*2, visible=True),
+        self.session_82_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
+                                                    y=self.session_standard_82_fractionation_mean,
+                                                    error_y=dict(type='data', array=self.session_standard_82_fractionation_std*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
                                                     showlegend=False,
                                                     opacity=1))
         
         # plot the default polynomial degree 3 fits of the session wide fractionation plots
-        self.update_fit_curve('session 206Pb/238U', 
-                              session_standard_time_mean, 
-                              session_standard_68_fractionation_mean)
-        self.update_fit_curve('session 207Pb/235U',
-                                session_standard_time_mean,
-                                session_standard_75_fractionation_mean)
-        self.update_fit_curve('session 206Pb/207Pb',
-                                session_standard_time_mean,
-                                session_standard_67_fractionation_mean)
-        self.update_fit_curve('session 208Pb/232Th',
-                                session_standard_time_mean,
-                                session_standard_82_fractionation_mean)
+        self.update_fit_curve('session 206Pb/238U')
+        self.update_fit_curve('session 207Pb/235U')
+        self.update_fit_curve('session 206Pb/207Pb')
+        self.update_fit_curve('session 208Pb/232Th')
         
         # plot the default exponential fits of the downhole fractionation plots
-        self.update_fit_curve('downhole 206Pb/238U', 
-                              PR_68_DH_times, 
-                              PR_68_DH_ratios)
-        self.update_fit_curve('downhole 207Pb/235U',
-                                PR_75_DH_times,
-                                PR_75_DH_ratios)
-        self.update_fit_curve('downhole 206Pb/207Pb',
-                                PR_67_DH_times,
-                                PR_67_DH_ratios)
-        self.update_fit_curve('downhole 208Pb/232Th',
-                                PR_82_DH_times,
-                                PR_82_DH_ratios)
+        self.update_fit_curve('downhole 206Pb/238U')
+        self.update_fit_curve('downhole 207Pb/235U')
+        self.update_fit_curve('downhole 206Pb/207Pb')
+        self.update_fit_curve('downhole 208Pb/232Th')
 
         self.moving_average_window_setting.setMaximum(max_moving_average_window)
 
@@ -476,7 +461,33 @@ class CalibrationWindow(QMainWindow):
 
 
 
-    def update_fit_curve(self, this_fractionation, x, y):
+    def update_fit_curve(self, this_fractionation):
+        # let's assign the x and y values based on the selected fractionation
+        if this_fractionation == 'session 206Pb/238U':
+            x = self.session_standard_time_mean
+            y = self.session_standard_68_fractionation_mean
+        elif this_fractionation == 'session 207Pb/235U':
+            x = self.session_standard_time_mean
+            y = self.session_standard_75_fractionation_mean
+        elif this_fractionation == 'session 206Pb/207Pb':
+            x = self.session_standard_time_mean
+            y = self.session_standard_67_fractionation_mean
+        elif this_fractionation == 'session 208Pb/232Th':
+            x = self.session_standard_time_mean
+            y = self.session_standard_82_fractionation_mean
+        elif this_fractionation == 'downhole 206Pb/238U':
+            x = self.PR_68_DH_times
+            y = self.PR_68_DH_ratios
+        elif this_fractionation == 'downhole 207Pb/235U':
+            x = self.PR_75_DH_times
+            y = self.PR_75_DH_ratios
+        elif this_fractionation == 'downhole 206Pb/207Pb':
+            x = self.PR_67_DH_times
+            y = self.PR_67_DH_ratios
+        elif this_fractionation == 'downhole 208Pb/232Th':
+            x = self.PR_82_DH_times
+            y = self.PR_82_DH_ratios
+
         reference_time = self.baseline_corrected_data['Time'].min()
         # first clear out previous fit curves and legends
         this_fig = self.calibration_df.loc[this_fractionation, 'Plot'].fig
@@ -484,68 +495,83 @@ class CalibrationWindow(QMainWindow):
         this_fit_type = self.calibration_df.loc[this_fractionation, 'Fit type'] 
 
         if this_fractionation.startswith('session'):
-            reference_total_seconds = np.array([(t- reference_time).total_seconds() for t in x])
+            reference_total_seconds = np.array([(t - reference_time).total_seconds() for t in x])
         else:
             reference_total_seconds = x.to_numpy()
-        # print(reference_total_seconds, y)
+        print(reference_total_seconds, y)
         if this_fit_type == 'Linear':
-            self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Linear'
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] = 'y = a + bx'
-            self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = None
-            self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
-
             popt, pcov = linear_fit(reference_total_seconds, y)
-            self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.2f} + {popt[1]:.2f}*x'
+            self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
+            self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - linear(reference_total_seconds, *popt))**2) / np.sum((y - np.mean(y))**2)
+            self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
             
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=linear(np.sort(reference_total_seconds), *popt), 
                                           line=dict(color='red', dash='dash'), mode='lines', name='Linear fit'))
 
 
         elif this_fit_type == 'Exponential':
-            self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Exponential'
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] = 'y = a + b*exp(-c*x)'
-            self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = None
-            self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
-
             popt, pcov = exponential_fit(reference_total_seconds, y)
-            # print(popt, pcov)
-            if popt is None:
-                self.calibration_df.loc[this_fractionation, 'Quality'] = None
-            else:
-                self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-                this_fig.add_trace(go.Scatter(x=np.sort(x), y=exponential(np.sort(reference_total_seconds), *popt), 
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.2f} + {popt[1]:.2f}*exp(-{popt[2]:.2f}*x)'
+            self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
+            self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - exponential(reference_total_seconds, *popt))**2) / np.sum((y - np.mean(y))**2)
+            self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
+            
+            this_fig.add_trace(go.Scatter(x=np.sort(x), y=exponential(np.sort(reference_total_seconds), *popt), 
                                               line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
-                print(list(x), list(exponential(reference_total_seconds, *popt)))
+
 
         elif this_fit_type == 'Polynomial':
-            self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Polynomial'
             degree = self.calibration_df.loc[this_fractionation, 'Polynomial degree']
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = a_{degree}*x^{degree} + ... + a_0'
-            self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = degree
-            self.calibration_df.loc[this_fractionation, 'Moving average window'] = None
 
             popt, pcov = poly_fit(reference_total_seconds, y, degree)
-            if popt is None: # this means the algorithm failed to fit the polynomial
-                self.calibration_df.loc[this_fractionation, 'Quality'] = None
-            else:
-                self.calibration_df.loc[this_fractionation, 'Quality'] = np.sqrt(np.diag(pcov)).mean()
-                this_fig.add_trace(go.Scatter(x=np.sort(x), y=np.polyval(popt, np.sort(reference_total_seconds)), 
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = '
+            for i in range(degree-1, 0, -1):
+                self.calibration_df.loc[this_fractionation, 'Fit equation'] += f'{popt[i]:.2f}*x^{i} + '
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] += f'{popt[0]:.2f}'
+            self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
+            self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - np.polyval(popt, reference_total_seconds))**2) / np.sum((y - np.mean(y))**2)
+            self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
+
+            this_fig.add_trace(go.Scatter(x=np.sort(x), y=np.polyval(popt, np.sort(reference_total_seconds)), 
                                               line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
 
             
         elif this_fit_type == 'Moving Average':
-            self.calibration_df.loc[this_fractionation, 'Fit type'] = 'Moving Average'
+
             window_size = self.calibration_df.loc[this_fractionation, 'Moving average window']
             self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'Moving average with window size {window_size} seconds'
-            self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = None
-            self.calibration_df.loc[this_fractionation, 'Moving average window'] = window_size
 
             # sort reference total seconds and y together based on reference total seconds
             reference_total_seconds, y = zip(*sorted(zip(reference_total_seconds, y)))
 
             x_moving_average, y_moving_average = moving_average(reference_total_seconds, y, window_size)
+            # now interpolate the moving average to the original x values
+            y_moving_average = np.interp(reference_total_seconds, x_moving_average, y_moving_average)
+            self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - y_moving_average)**2) / np.sum((y - np.mean(y))**2)
+            self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
+
             this_fig.add_trace(go.Scatter(x=reference_time+pd.Timedelta(seconds=x_moving_average), y=y_moving_average, 
                                           line=dict(color='red', dash='dash'), mode='lines', name='Moving average fit'))
 
+    def on_change_fractionation_dropdown(self):
+        this_fractionation = self.fractionation_dropdown.currentText()
+        # change the fit type to the one stored in the calibration dataframe
+        self.fit_type_dropdown.setCurrentText(self.calibration_df.loc[this_fractionation, 'Fit type'])
+        self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
+        
+        if self.calibration_df.loc[this_fractionation, 'Fit type'] == 'Polynomial':
+            self.poly_degree_setting.setValue(self.calibration_df.loc[this_fractionation, 'Polynomial degree'])
+        elif self.calibration_df.loc[this_fractionation, 'Fit type'] == 'Moving Average':
+            self.moving_average_window_setting.setValue(self.calibration_df.loc[this_fractionation, 'Moving average window'])
 
-            
+    def on_click_apply_button(self):
+        this_fractionation = self.fractionation_dropdown.currentText()
+        self.calibration_df.loc[this_fractionation, 'Fit type'] = self.fit_type_dropdown.currentText()
+        if self.fit_type_dropdown.currentText() == 'Polynomial':
+            self.calibration_df.loc[this_fractionation, 'Polynomial degree'] = self.poly_degree_setting.value()
+        elif self.fit_type_dropdown.currentText() == 'Moving Average':
+            self.calibration_df.loc[this_fractionation, 'Moving average window'] = self.moving_average_window_setting.value()
+        self.update_fit_curve(this_fractionation, 
+                              self.baseline_corrected_data['Time'], 
+                              self.baseline_corrected_data[this_fractionation])

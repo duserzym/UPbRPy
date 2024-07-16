@@ -58,7 +58,6 @@ class MainWindow(QMainWindow):
         open_action = file_menu.addAction("Open")
         save_action = file_menu.addAction("Save")
         import_action = file_menu.addAction("Import Data")
-        export_action = file_menu.addAction("Export Data")
         save_redo_action = file_menu.addAction("Save selections to a .redo file")
         import_redo_action = file_menu.addAction("Import selections from a .redo file")
 
@@ -72,9 +71,6 @@ class MainWindow(QMainWindow):
 
         # link import data action to loading data from a folder
         import_action.triggered.connect(self.load_data)
-
-        # link export data action to exporting data to a folder
-        # export_action.triggered.connect(self.export_data)
 
         # link save .redo file action to saving selections to a .redo file
         # save_redo_action.triggered.connect(self.save_redo)
@@ -108,10 +104,6 @@ class MainWindow(QMainWindow):
         self.calibration_button.clicked.connect(self.calibrate)
         self.calibration_button.setFixedSize(150, 40)
 
-        # button for exporting data
-        self.export_button = QPushButton("Export Data")
-        # self.export_button.clicked.connect(self.export_data)
-        self.export_button.setFixedSize(150, 40)
 
         # add a scrollable text area for displaying the console output
         self.text_area = QLabel()
@@ -186,7 +178,6 @@ class MainWindow(QMainWindow):
         self.button_v_layout.addWidget(self.auto_selection_button)
         self.button_v_layout.addWidget(self.save_selection_button)
         self.button_v_layout.addWidget(self.calibration_button)
-        self.button_v_layout.addWidget(self.export_button)
         self.button_v_layout.addWidget(self.primary_channel_label)
         self.button_v_layout.addWidget(self.primary_channel)
         self.button_v_layout.addWidget(self.primary_UPb_standard_label)
