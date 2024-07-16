@@ -385,7 +385,7 @@ class CalibrationWindow(QMainWindow):
 
         # plot the mean and standard deviation of the primary standard's 68 fractionation
         self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
-                                                    y=self.session_standard_68_fractionation_mean,
+                                                    y=self.session_standard_68_fractionation_std,
                                                     error_y=dict(type='data', array=self.session_standard_68_fractionation_mean*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
