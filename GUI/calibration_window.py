@@ -105,7 +105,7 @@ class CalibrationWindow(QMainWindow):
                                                                     'xanchor': 'center'}, 
                                                             yaxis=dict(title=r'$^{206}Pb/^{238}U$ ratio', title_font=dict(size=14)), 
                                                             xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                            legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
+                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
 
         # second plot on top shows the session wide primary standard fractionation of 7/5 ratios
         self.session_75_fractionation_plot = PlotCanvas()
@@ -114,7 +114,7 @@ class CalibrationWindow(QMainWindow):
                                                             'xanchor': 'center'}, 
                                                     yaxis=dict(title=r'$^{207}Pb/^{235}U$ Ratio', title_font=dict(size=14)), 
                                                     xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                    legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
+                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
         
         # third plot on top shows the session wide primary standard fractionation of 6/8 ratios
         self.session_67_fractionation_plot = PlotCanvas()
@@ -123,7 +123,7 @@ class CalibrationWindow(QMainWindow):
                                                                     'xanchor': 'center'},
                                                             yaxis=dict(title=r'$^{206}Pb/^{207}Pb$ Ratio', title_font=dict(size=14)),
                                                             xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                            legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
+                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
         
         # fourth pllto on top shows the session wide primary standard fractionation of 208Pb 232Th ratios
         self.session_82_fractionation_plot = PlotCanvas()
@@ -132,7 +132,7 @@ class CalibrationWindow(QMainWindow):
                                                             'xanchor': 'center'}, 
                                                     yaxis=dict(title=r'$^{208}Pb/^{232}Th$ Ratio', title_font=dict(size=14)), 
                                                     xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                    legend=dict(x=0.5, xanchor='center', y=1.2, yanchor='top'))
+                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
         
         # first plot on bottom plot shows the aligned downhole fractionation of 6/8 ratios
         self.DH_68_fractionation_plot = PlotCanvas()
@@ -385,8 +385,8 @@ class CalibrationWindow(QMainWindow):
 
         # plot the mean and standard deviation of the primary standard's 68 fractionation
         self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
-                                                    y=self.session_standard_68_fractionation_std,
-                                                    error_y=dict(type='data', array=self.session_standard_68_fractionation_mean*2, visible=True),
+                                                    y=self.session_standard_68_fractionation_mean,
+                                                    error_y=dict(type='data', array=self.session_standard_68_fractionation_std*2, visible=True),
                                                     line=dict(color='black'),
                                                     mode='markers',
                                                     showlegend=False,
@@ -498,7 +498,7 @@ class CalibrationWindow(QMainWindow):
             reference_total_seconds = np.array([(t - reference_time).total_seconds() for t in x])
         else:
             reference_total_seconds = x.to_numpy()
-        print(reference_total_seconds, y)
+        # print(reference_total_seconds, y)
         if this_fit_type == 'Linear':
             popt, pcov = linear_fit(reference_total_seconds, y)
             self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.2f} + {popt[1]:.2f}*x'
