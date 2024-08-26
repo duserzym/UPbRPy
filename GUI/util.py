@@ -279,30 +279,48 @@ def poly_fit(x, y, degree):
 
 def moving_average(x, y, window_size):
     '''
-    function for calculating the moving average of the data
+    Function for calculating the moving average of the data with the window size
+    defined in the unit of the x values.
 
     Parameters
     ----------
-    data : list or array
-        data to calculate the moving average
-    window_size : int
-        size of the window for the moving average
+    x : list or array
+        The x values corresponding to the data points.
+    y : list or array
+        The y values to calculate the moving average.
+    window_size : float
+        The size of the window for the moving average, defined in the unit of x values.
     
     Returns
     -------
-    moving_average : list
-        list of the moving average values
+    x_smoothed : list or array
+        The x values corresponding to the moving average values.
+    smoothed_y : list or array
+        The list of the moving average values.
     '''
-    # Define the moving average window size
-    window_size = 5
-    kernel = np.ones(window_size) / window_size
-
-    # Convolve the data with the kernel to compute the moving average
-    smoothed_y = np.convolve(y, kernel, mode='valid')
-
-    # Adjust the x values to match the 'valid' mode output length
-    x_smoothed = x[(window_size-1)//2:-(window_size-1)//2] if window_size % 2 == 1 else x[(window_size)//2:-(window_size)//2 + 1]
-    return x_smoothed, smoothed_y
+    x = np.array(x)
+    y = np.array(y)
+    
+    smoothed_y = []
+    x_smoothed = []
+    
+    half_window = window_size / 2
+    
+    for i in range(len(x)):
+        # Define the range of x values that fall within the current window
+        left_bound = x[i] - half_window
+        right_bound = x[i] + half_window
+        
+        # Find the indices of points within this window
+        window_indices = np.where((x >= left_bound) & (x <= right_bound))[0]
+        
+        # Calculate the average of the y values within this window
+        if len(window_indices) > 0:
+            avg_y = np.mean(y[window_indices])
+            smoothed_y.append(avg_y)
+            x_smoothed.append(x[i])
+    
+    return np.array(x_smoothed), np.array(smoothed_y)
 
 def DH_ratio_correction(time, ratio, function_type='Polynomial', parameters=None):
     '''
@@ -310,9 +328,9 @@ def DH_ratio_correction(time, ratio, function_type='Polynomial', parameters=None
     
     parameters
     ----------
-    time : list or array
+    time : array
         time values in seconds
-    ratio : list or array
+    ratio : array
         isotope ratio values to be corrected 
     function type: str
         type of function to be used for the correction, 'Polynomial', 'Exponential' or 'Linear'
@@ -340,5 +358,35 @@ def DH_ratio_correction(time, ratio, function_type='Polynomial', parameters=None
 
     return corrected_ratio
 
+def session_ratio_correction(time, ratio, function_type='Polynomial', parameters=None):
+    '''
+    function for executing a session wide isotope ratio correction
+    this is where actually the fractionation correction happens, the DH correction is just for flattening the downhole ratios, which is on an relative scale
 
+    parameters
+    ----------
+    time : array
+        time values in seconds
+    ratio : array
+        isotope ratio values to be corrected
+    function type: str
+        type of function to be used for the correction, 'Polynomial', 'Exponential' or 'Linear'
+    parameters : list
+        list of parameters for the correction function
 
+    returns
+    -------
+    corrected_ratio : array
+        array of the corrected isotope ratio values    
+    '''
+
+    if function_type == 'Polynomial':
+        calibration_function = np.polyval(parameters, time)
+    elif function_type == 'Exponential':
+        calibration_function = exponential(time, *parameters)
+    elif function_type == 'Linear':
+        calibration_function = linear(time, *parameters)
+
+    corrected_ratio = ratio / calibration_function
+
+    return corrected_ratio

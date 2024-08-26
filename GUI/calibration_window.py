@@ -5,6 +5,10 @@ from PyQt5.QtWidgets import QWidget, QPushButton, QComboBox, QSpinBox, QLabel, Q
 import pandas as pd
 pd.options.mode.chained_assignment = None
 
+import warnings
+warnings.filterwarnings("ignore", message="The default dtype for empty Series will be 'object' instead of 'float64' in a future version.")
+
+
 import numpy as np
 import sys
 import plotly.graph_objects as go
@@ -192,6 +196,8 @@ class CalibrationWindow(QMainWindow):
         self.apply_button = QPushButton("Apply")
         self.export_button = QPushButton("Export data")
 
+        self.export_button.clicked.connect(self.on_click_export_button)
+
         self.layout = QHBoxLayout()
         self.main_widget.setLayout(self.layout)
 
@@ -300,7 +306,7 @@ class CalibrationWindow(QMainWindow):
             this_PR_75_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
             this_PR_67_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
             this_PR_82_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
-            print(this_PR_68_DH_times)
+
             # get the downhole ratios
             this_PR_68_DH_ratios = DH_calibration_data['206Pb']/DH_calibration_data['238U']
             this_PR_75_DH_ratios = DH_calibration_data['207Pb']/DH_calibration_data['235U']
@@ -320,30 +326,30 @@ class CalibrationWindow(QMainWindow):
             # add downhole 68 ratios
             self.DH_68_fractionation_plot.fig.add_trace(go.Scatter(x=this_PR_68_DH_times, 
                                                     y=this_PR_68_DH_ratios, 
-                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]), 
+                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name], width=1), 
                                                     mode='lines',
-                                                    opacity=0.6,
+                                                    opacity=0.5,
                                                     name=spot_name))
             # add downhole 75 ratios
             self.DH_75_fractionation_plot.fig.add_trace(go.Scatter(x=this_PR_68_DH_times,
                                                     y=this_PR_75_DH_ratios,
-                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]), 
+                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name], width=1), 
                                                     mode='lines',
-                                                    opacity=0.6,
+                                                    opacity=0.5,
                                                     name=spot_name))
             # add downhole 67 ratios
             self.DH_67_fractionation_plot.fig.add_trace(go.Scatter(x=this_PR_68_DH_times,
                                                     y=this_PR_67_DH_ratios,
-                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]),
+                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name], width=1),
                                                     mode='lines',
-                                                    opacity=0.6,
+                                                    opacity=0.5,
                                                     name=spot_name))
             # add downhole 82 ratios
             self.DH_82_fractionation_plot.fig.add_trace(go.Scatter(x=this_PR_68_DH_times,
                                                     y=this_PR_82_DH_ratios,
-                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name]),
+                                                    line=dict(color=self.primary_UPb_standard_spot_colors[spot_name], width=1),
                                                     mode='lines',
-                                                    opacity=0.6,
+                                                    opacity=0.5,
                                                     name=spot_name))
 
         # plot the default exponential fits of the downhole fractionation plots
@@ -353,7 +359,7 @@ class CalibrationWindow(QMainWindow):
         self.update_fit_curve('downhole 208Pb/232Th')
             
 
-        print(self.calibration_df)
+        # print(self.calibration_df)
 
         # then we need to use the downhole calibration functions to correct for the primary standard, before calculating the session wide fractionation
         for spot_name in primary_UPb_standard_total_data['spot_name'].unique():
@@ -539,7 +545,15 @@ class CalibrationWindow(QMainWindow):
         if this_fractionation.startswith('session'):
             reference_total_seconds = np.array([(t - reference_time).total_seconds() for t in x])
         else:
-            reference_total_seconds = x.to_numpy()
+            # else this will be the downhole fractionation plot
+            # first sort the x and y values based on x
+            x, y = zip(*sorted(zip(x.tolist(), y)))
+            # do a running mean
+            window_size = 0.5
+            x, y = moving_average(x, y, window_size)
+            this_fig.add_trace(go.Scatter(x=x, y=y, line=dict(color='black', width=2.5), mode='lines', opacity=0.8, name='running mean'))
+            reference_total_seconds = np.array(x)
+
         # print(reference_total_seconds, y)
         if this_fit_type == 'Linear':
             popt, pcov = linear_fit(reference_total_seconds, y)
@@ -550,7 +564,7 @@ class CalibrationWindow(QMainWindow):
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
             
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=linear(np.sort(reference_total_seconds), *popt), 
-                                          line=dict(color='red', dash='dash'), mode='lines', name='Linear fit'))
+                                          line=dict(color='red', dash='dash', width=2.5), mode='lines', name='Linear fit'))
 
         elif this_fit_type == 'Exponential':
             popt, pcov = exponential_fit(reference_total_seconds, y)
@@ -563,7 +577,7 @@ class CalibrationWindow(QMainWindow):
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
             
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=exponential(np.sort(reference_total_seconds), *popt), 
-                                              line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
+                                              line=dict(color='red', dash='dash', width=2.5), mode='lines', name='Exponential fit'))
 
         elif this_fit_type == 'Polynomial':
             degree = self.calibration_df.loc[this_fractionation, 'Polynomial degree']
@@ -578,7 +592,7 @@ class CalibrationWindow(QMainWindow):
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
 
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=np.polyval(popt, np.sort(reference_total_seconds)), 
-                                              line=dict(color='red', dash='dash'), mode='lines', name='Polynomial fit'))
+                                              line=dict(color='red', dash='dash', width=2.5), mode='lines', name='Polynomial fit'))
 
             
         elif this_fit_type == 'Moving Average':
@@ -596,7 +610,7 @@ class CalibrationWindow(QMainWindow):
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
 
             this_fig.add_trace(go.Scatter(x=reference_time+pd.Timedelta(seconds=x_moving_average), y=y_moving_average, 
-                                          line=dict(color='red', dash='dash'), mode='lines', name='Moving average fit'))
+                                          line=dict(color='red', dash='dash', width=2.5), mode='lines', name='Moving average fit'))
 
     def on_change_fractionation_dropdown(self):
         this_fractionation = self.fractionation_dropdown.currentText()
@@ -621,42 +635,132 @@ class CalibrationWindow(QMainWindow):
                               self.baseline_corrected_data[this_fractionation])
         
 
-    # def on_click_export_button(self):
-    #     # let's start with exporting the isotope ratios that we care about (those that we plot up downhole and session-wide calibrations)
-    #     # let's start with exporting the spot mean results
-    #     # first make a pop up window to ask for the directory and file name to save the calibration results
-    #     save_dialog = QFileDialog()
-    #     # we save a .csv file
-    #     save_dialog.setFileMode(QFileDialog.AnyFile)
-    #     save_dialog.setAcceptMode(QFileDialog.AcceptSave)
-    #     save_dialog.setNameFilter('CSV files (*.csv)')
-    #     # set default file name to be fractionation_correction_results.csv
-    #     save_dialog.selectFile('fractionation_correction_results.csv')
-    #     save_dialog.exec_()
+    def on_click_export_button(self):
+        # let's start with exporting the isotope ratios that we care about (those that we plot up downhole and session-wide calibrations)
+        # let's start with exporting the spot mean results
+        # first make a pop up window to ask for the directory to export to
+        save_dialog = QFileDialog()
+        save_dialog.setFileMode(QFileDialog.Directory)
+        save_dialog.setOption(QFileDialog.ShowDirsOnly)
+        save_dialog.exec_()
+        save_dir = save_dialog.selectedFiles()[0]
 
-    #     save_path = save_dialog.selectedFiles()[0]
+        # make a new folder called UPBR_results
+        save_dir = os.path.join(save_dir, 'UPBR_results')
+        os.makedirs(save_dir, exist_ok=True)
 
-    #     # once the user clicks save in the dialog, we start generating the calibration results
-    #     # loop through the baseline_corrected_data and apply the downhole calibration to each spot and apply the session-wide fractionation correction to each spot
+        # make a Time_series folder to store the time series data for each spot
+        time_series_dir = os.path.join(save_dir, 'Time_series')
+        os.makedirs(time_series_dir, exist_ok=True)
 
-    #     # initialize a dataframe to store the spot mean calibrated results
-    #     spot_mean_export_df = pd.DataFrame()
+        # make a UPbR_mean_result pandas dataframe to store the spot mean results
+        spot_mean_export_df = pd.DataFrame(columns=['Spot Name', 
+                                                    '207Pb/235U mean',
+                                                    '207Pb/235U se',
+                                                    '206Pb/238U mean', 
+                                                    '206Pb/238U se',
+                                                    '206Pb/207Pb mean', 
+                                                    '206Pb/207Pb se',
+                                                    '208Pb/232Th mean',
+                                                    '208Pb/232Th se'])
 
-    #     for spot_name in self.baseline_corrected_data['spot_name'].unique():
-    #         this_spot_data = self.baseline_corrected_data[self.baseline_corrected_data['spot_name'] == spot_name]
-    #         # get the spot total start and end time (which I define here to be fromthe end of the baseline to the end of the plateau)
-    #         baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
-    #         plateau_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
-    #         # chop the data to only include the total plateau region
-    #         this_spot_data = this_spot_data[(this_spot_data['Time'] > baseline_end_time) & (this_spot_data['Time'] < plateau_end_time)]
-    #         # shift the time to start from 0
-    #         this_spot_data['Time'] = (this_spot_data['Time'] - this_spot_data['Time'].min()).dt.total_seconds()
-    #         # calculate the relevant ratios for this spot
-    #         background_corrected_68_ratios = this_spot_data['206Pb']/this_spot_data['238U']
-    #         background_corrected_75_ratios = this_spot_data['207Pb']/this_spot_data['235U']
-    #         background_corrected_67_ratios = this_spot_data['206Pb']/this_spot_data['207Pb']
-    #         background_corrected_82_ratios = this_spot_data['208Pb']/this_spot_data['232Th']
+        reference_time = self.baseline_corrected_data['Time'].min()
 
-    #         # apply downhole calibration from the primary standard to this spot
-    #         DH_corrected_
+        # once the user clicks save in the dialog, we start generating the calibration results
+        # loop through the baseline_corrected_data and apply the downhole calibration to each spot and apply the session-wide fractionation correction to each spot
+        for spot_name in self.baseline_corrected_data['spot_name'].unique():
+            # get the spot data
+            this_spot_data = self.baseline_corrected_data[self.baseline_corrected_data['spot_name'] == spot_name]
 
+            # apply downhole calibration to each spot
+            plateau_start_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
+            plateau_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
+            baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
+
+            # get the total plateau data
+            selected_plateau_data = this_spot_data[(this_spot_data['Time'] > baseline_end_time) & (this_spot_data['Time'] < plateau_end_time)]
+
+            # get the time in seconds relative to the assumed start time point for the spot
+            selected_plateau_data_total_seconds = (selected_plateau_data['Time']-selected_plateau_data['Time'].min()).dt.total_seconds()
+
+            # apply downhole calibration by inverting the fitted downhole ratio functions
+            # we need to do this for each ratio
+            this_DH_corrected_68_ratio = DH_ratio_correction(selected_plateau_data_total_seconds, 
+                                                        selected_plateau_data['206Pb']/selected_plateau_data['238U'], 
+                                                        self.calibration_df.loc['downhole 206Pb/238U', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 206Pb/238U', 'Fit parameters'])
+            
+            this_DH_corrected_75_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['207Pb']/selected_plateau_data['235U'],
+                                                        self.calibration_df.loc['downhole 207Pb/235U', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 207Pb/235U', 'Fit parameters'])
+            
+            this_DH_corrected_67_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['206Pb']/selected_plateau_data['207Pb'],
+                                                        self.calibration_df.loc['downhole 206Pb/207Pb', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 206Pb/207Pb', 'Fit parameters'])
+            
+            this_DH_corrected_82_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['208Pb']/selected_plateau_data['232Th'],
+                                                        self.calibration_df.loc['downhole 208Pb/232Th', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 208Pb/232Th', 'Fit parameters'])
+            
+            # apply session wide fractionation correction to the DH corrected ratios
+            this_session_corrected_68_ratio = session_ratio_correction((selected_plateau_data['Time']-reference_time).dt.total_seconds(), 
+                                                                      this_DH_corrected_68_ratio,
+                                                                      self.calibration_df.loc['session 206Pb/238U', 'Fit type'],
+                                                                      self.calibration_df.loc['session 206Pb/238U', 'Fit parameters'])
+            
+            this_session_corrected_75_ratio = session_ratio_correction((selected_plateau_data['Time']-reference_time).dt.total_seconds(),
+                                                                        this_DH_corrected_75_ratio,
+                                                                        self.calibration_df.loc['session 207Pb/235U', 'Fit type'],
+                                                                        self.calibration_df.loc['session 207Pb/235U', 'Fit parameters'])
+            
+            this_session_corrected_67_ratio = session_ratio_correction((selected_plateau_data['Time']-reference_time).dt.total_seconds(),
+                                                                        this_DH_corrected_67_ratio,
+                                                                        self.calibration_df.loc['session 206Pb/207Pb', 'Fit type'],
+                                                                        self.calibration_df.loc['session 206Pb/207Pb', 'Fit parameters'])
+            
+            this_session_corrected_82_ratio = session_ratio_correction((selected_plateau_data['Time']-reference_time).dt.total_seconds(),
+                                                                        this_DH_corrected_82_ratio,
+                                                                        self.calibration_df.loc['session 208Pb/232Th', 'Fit type'],
+                                                                        self.calibration_df.loc['session 208Pb/232Th', 'Fit parameters'])
+            
+            
+            # write the time-series data to a csv file for this spot
+            time_series_filename = os.path.join(time_series_dir, f'{spot_name}_time_series.csv')
+            this_spot_time_series = pd.DataFrame({'Time': selected_plateau_data_total_seconds,   
+                                                    '206Pb/238U': this_session_corrected_68_ratio,
+                                                    '207Pb/235U': this_session_corrected_75_ratio,
+                                                    '206Pb/207Pb': this_session_corrected_67_ratio,
+                                                    '208Pb/232Th': this_session_corrected_82_ratio})
+            this_spot_time_series.to_csv(time_series_filename, index=False)
+
+            # calculate the spot mean ratios
+            spot_mean_68_ratio = this_session_corrected_68_ratio.mean()
+            spot_mean_75_ratio = this_session_corrected_75_ratio.mean()
+            spot_mean_67_ratio = this_session_corrected_67_ratio.mean()
+            spot_mean_82_ratio = this_session_corrected_82_ratio.mean()
+
+            # now let's calculate the standard errors of the mean
+            spot_mean_68_ratio_se = this_session_corrected_68_ratio.std()/np.sqrt(len(this_session_corrected_68_ratio))
+            spot_mean_75_ratio_se = this_session_corrected_75_ratio.std()/np.sqrt(len(this_session_corrected_75_ratio))
+            spot_mean_67_ratio_se = this_session_corrected_67_ratio.std()/np.sqrt(len(this_session_corrected_67_ratio))
+            spot_mean_82_ratio_se = this_session_corrected_82_ratio.std()/np.sqrt(len(this_session_corrected_82_ratio))
+
+            # concat the spot mean ratios to the spot_mean_export_df
+            spot_mean_export_df.loc[len(spot_mean_export_df)] = {'Spot Name': spot_name,
+                                                                '207Pb/235U mean': spot_mean_75_ratio,
+                                                                '207Pb/235U se': spot_mean_75_ratio_se,
+                                                                '206Pb/238U mean': spot_mean_68_ratio,
+                                                                '206Pb/238U se': spot_mean_68_ratio_se,
+                                                                '206Pb/207Pb mean': spot_mean_67_ratio,
+                                                                '206Pb/207Pb se': spot_mean_67_ratio_se,
+                                                                '208Pb/232Th mean': spot_mean_82_ratio, 
+                                                                '208Pb/232Th se': spot_mean_82_ratio_se}
+            
+        # write the spot mean ratios to a csv file
+        spot_mean_export_filename = os.path.join(save_dir, 'spot_mean_ratios.csv')
+        # sort the spot mean export dataframe based on spot name
+        spot_mean_export_df = spot_mean_export_df.sort_values(by='Spot Name', ignore_index=True)
+        spot_mean_export_df.to_csv(spot_mean_export_filename, index=False)
