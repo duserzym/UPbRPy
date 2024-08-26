@@ -138,6 +138,7 @@ def select_baseline_peak(data, baseline_z_threshold=1.0, plateau_z_threshold=0.5
     baseline_indices = np.where(np.abs(z_scores) < baseline_z_threshold)[0]
     baseline_indices = baseline_indices[baseline_indices < plateau_indices_start]
     baseline_indices_start = baseline_indices[1]
+    # chop off the last 2 indices to avoid the beginning of the plateau region
     baseline_indices_end = baseline_indices[-2]
 
     return plateau_indices_start, plateau_indices_end, baseline_indices_start, baseline_indices_end
@@ -200,7 +201,7 @@ def exponential_fit(x, y):
         list of the covariance of the optimal parameters
     '''
     try:
-        popt, pcov = curve_fit(exponential, x, y, maxfev=2000, p0=[1, -1, 0])
+        popt, pcov = curve_fit(exponential, x, y, maxfev=2000)
         return popt, pcov
     except RuntimeError as e:
         print(f"RuntimeError encountered: {e}")
@@ -270,7 +271,7 @@ def poly_fit(x, y, degree):
         list of the covariance of the optimal parameters
     '''
     try: 
-        popt, pcov = curve_fit(lambda x, *p: np.polyval(p, x), x, y, p0=np.random.rand(degree))
+        popt, pcov = curve_fit(lambda x, *p: np.polyval(p, x), x, y, p0=np.ones(degree))
         return popt, pcov
     except RuntimeError as e:
         print(f"RuntimeError encountered: {e}")
@@ -302,3 +303,42 @@ def moving_average(x, y, window_size):
     # Adjust the x values to match the 'valid' mode output length
     x_smoothed = x[(window_size-1)//2:-(window_size-1)//2] if window_size % 2 == 1 else x[(window_size)//2:-(window_size)//2 + 1]
     return x_smoothed, smoothed_y
+
+def DH_ratio_correction(time, ratio, function_type='Polynomial', parameters=None):
+    '''
+    function for executing a downhole isotope ratio correction
+    
+    parameters
+    ----------
+    time : list or array
+        time values in seconds
+    ratio : list or array
+        isotope ratio values to be corrected 
+    function type: str
+        type of function to be used for the correction, 'Polynomial', 'Exponential' or 'Linear'
+    parameters : list
+        list of parameters for the correction function
+
+    returns
+    -------
+    corrected_ratio : array
+        array of the corrected isotope ratio values
+    '''
+
+    # if I got this right, the constant in the fitted equation is the normalization factor
+    # in this package, we make is so that the constant is always the first parameter in the reported parameter list)
+    # print(time, ratio)
+
+    if function_type == 'Polynomial':
+        calibration_function = np.polyval(parameters, time)/parameters[0]
+    elif function_type == 'Exponential':
+        calibration_function = exponential(time, *parameters)/parameters[0]
+    elif function_type == 'Linear':
+        calibration_function = linear(time, *parameters)/parameters[0]
+
+    corrected_ratio = ratio / calibration_function
+
+    return corrected_ratio
+
+
+
