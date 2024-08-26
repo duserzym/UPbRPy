@@ -748,6 +748,21 @@ class CalibrationWindow(QMainWindow):
             spot_mean_67_ratio_se = this_session_corrected_67_ratio.std()/np.sqrt(len(this_session_corrected_67_ratio))
             spot_mean_82_ratio_se = this_session_corrected_82_ratio.std()/np.sqrt(len(this_session_corrected_82_ratio))
 
+            # let's calculate the std of the ratios
+            spot_mean_68_ratio_std = this_session_corrected_68_ratio.std()
+            spot_mean_75_ratio_std = this_session_corrected_75_ratio.std()
+            spot_mean_67_ratio_std = this_session_corrected_67_ratio.std()
+            spot_mean_82_ratio_std = this_session_corrected_82_ratio.std()
+
+            # let's calculate the variance of the mean
+            spot_mean_68_ratio_var = this_session_corrected_68_ratio.var()
+            spot_mean_75_ratio_var = this_session_corrected_75_ratio.var()
+            spot_mean_67_ratio_var = this_session_corrected_67_ratio.var()
+            spot_mean_82_ratio_var = this_session_corrected_82_ratio.var()
+
+            # let's do the 75-68 rho calculation
+            spot_mean_75_68_rho = (spot_mean_75_ratio_var+spot_mean_68_ratio_var-)
+
             # concat the spot mean ratios to the spot_mean_export_df
             spot_mean_export_df.loc[len(spot_mean_export_df)] = {'Spot Name': spot_name,
                                                                 '207Pb/235U mean': spot_mean_75_ratio,
