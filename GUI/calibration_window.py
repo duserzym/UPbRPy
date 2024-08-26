@@ -1,8 +1,10 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QApplication 
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
-from PyQt5.QtWidgets import QWidget, QPushButton, QComboBox, QSpinBox, QLabel
+from PyQt5.QtWidgets import QWidget, QPushButton, QComboBox, QSpinBox, QLabel, QFileDialog
 
 import pandas as pd
+pd.options.mode.chained_assignment = None
+
 import numpy as np
 import sys
 import plotly.graph_objects as go
@@ -15,7 +17,7 @@ from util import *
 class CalibrationWindow(QMainWindow):
     def __init__(self, experiment, total_data, channels, primary_UPb_standard, primary_concentration_standard, reference_materials_df):
         super().__init__()
-        self.setWindowTitle("LA-ICP-MS Standard Calibration Window")
+        self.setWindowTitle("LA-ICP-MS fractionation Calibration Window")
         self.setGeometry(100, 100, 1800, 800)
         self.experiment = experiment
         self.total_data = total_data
@@ -53,25 +55,28 @@ class CalibrationWindow(QMainWindow):
         # initialize the calibration dataframe to keep track of the calibration results
         self.calibration_df = pd.DataFrame()
         # set default fits to the session wide calibration to polynomial fits with degree 3
-        self.calibration_df.index = ['session 206Pb/238U', 'session 207Pb/235U', 'session 206Pb/207Pb', 'session 208Pb/232Th', 
-                                     'downhole 206Pb/238U', 'downhole 207Pb/235U', 'downhole 206Pb/207Pb', 'downhole 208Pb/232Th']
-        self.calibration_df['Fit type'] = ['Polynomial', 'Polynomial', 'Polynomial', 'Polynomial', 
-                                           'Exponential', 'Exponential', 'Exponential', 'Exponential']
+        self.calibration_df.index = ['downhole 206Pb/238U', 'downhole 207Pb/235U', 'downhole 206Pb/207Pb', 'downhole 208Pb/232Th', 
+                                     'session 206Pb/238U', 'session 207Pb/235U', 'session 206Pb/207Pb', 'session 208Pb/232Th']
+        self.calibration_df['Fit type'] = ['Exponential', 'Exponential', 'Exponential', 'Exponential', 
+                                           'Polynomial', 'Polynomial', 'Polynomial', 'Polynomial']
         self.calibration_df['Fit equation'] = None
-        self.calibration_df['Polynomial degree'] = [3,3,3,3,0,0,0,0]
+        self.calibration_df['Polynomial degree'] = [0,0,0,0,
+                                                    3,3,3,3]
         self.calibration_df['Moving average window'] = None
+        self.calibration_df['Fit parameters'] = None
+        self.calibration_df['Fit parameters'] = self.calibration_df['Fit parameters'].astype(object)
         self.calibration_df['Quality'] = None
 
         self.fractionation_dropdown_label = QLabel('Select a ratio to Calibrate')
         self.fractionation_dropdown = QComboBox()
-        self.fractionation_dropdown.addItem('session 206Pb/238U')
-        self.fractionation_dropdown.addItem('session 207Pb/235U')
-        self.fractionation_dropdown.addItem('session 206Pb/207Pb')
-        self.fractionation_dropdown.addItem('session 208Pb/232Th')
         self.fractionation_dropdown.addItem('downhole 206Pb/238U')
         self.fractionation_dropdown.addItem('downhole 207Pb/235U')
         self.fractionation_dropdown.addItem('downhole 206Pb/207Pb')
         self.fractionation_dropdown.addItem('downhole 208Pb/232Th')
+        self.fractionation_dropdown.addItem('session 206Pb/238U')
+        self.fractionation_dropdown.addItem('session 207Pb/235U')
+        self.fractionation_dropdown.addItem('session 206Pb/207Pb')
+        self.fractionation_dropdown.addItem('session 208Pb/232Th')
 
         self.fit_type_dropdown_label = QLabel('Select a fit type')
         self.fit_type_dropdown = QComboBox()
@@ -83,7 +88,6 @@ class CalibrationWindow(QMainWindow):
         # add a text box to show the type of fit with example equation
         self.fit_equation_label = QLabel('Fit Equation')
         self.fit_equation_text = QLabel('y = bx + a')
-
 
         self.poly_degree_label = QLabel('Polynomial fit degree')
         self.poly_degree_setting = QSpinBox()
@@ -98,45 +102,9 @@ class CalibrationWindow(QMainWindow):
         self.quality_label = QLabel('Standard error of fit')
         self.quality_label_text = QLabel('R squared value of fit: 0.0')
         
-        # first plot on top shows the session wide primary standard fractionation of 6/8 ratios
-        self.session_68_fractionation_plot = PlotCanvas()
-        self.session_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
-                                                                    'x': 0.5, 
-                                                                    'xanchor': 'center'}, 
-                                                            yaxis=dict(title=r'$^{206}Pb/^{238}U$ ratio', title_font=dict(size=14)), 
-                                                            xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
-
-        # second plot on top shows the session wide primary standard fractionation of 7/5 ratios
-        self.session_75_fractionation_plot = PlotCanvas()
-        self.session_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{207}Pb/^{235}U\ \text{Fractionation}$', 
-                                                            'x': 0.5, 
-                                                            'xanchor': 'center'}, 
-                                                    yaxis=dict(title=r'$^{207}Pb/^{235}U$ Ratio', title_font=dict(size=14)), 
-                                                    xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
-        
-        # third plot on top shows the session wide primary standard fractionation of 6/8 ratios
-        self.session_67_fractionation_plot = PlotCanvas()
-        self.session_67_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{207}Pb\ \text{Fractionation}$',
-                                                                    'x': 0.5,
-                                                                    'xanchor': 'center'},
-                                                            yaxis=dict(title=r'$^{206}Pb/^{207}Pb$ Ratio', title_font=dict(size=14)),
-                                                            xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
-        
-        # fourth pllto on top shows the session wide primary standard fractionation of 208Pb 232Th ratios
-        self.session_82_fractionation_plot = PlotCanvas()
-        self.session_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{208}Pb/^{232}Th\ \text{Fractionation}$',
-                                                            'x': 0.5, 
-                                                            'xanchor': 'center'}, 
-                                                    yaxis=dict(title=r'$^{208}Pb/^{232}Th$ Ratio', title_font=dict(size=14)), 
-                                                    xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
-                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
-        
-        # first plot on bottom plot shows the aligned downhole fractionation of 6/8 ratios
+        # first plot on top shows the aligned downhole fractionation of 6/8 ratios
         self.DH_68_fractionation_plot = PlotCanvas()
-        self.DH_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
+        self.DH_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{206}Pb/^{238}U\ \text{ratio}$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
                                                         yaxis=dict(title=r'$^{206}Pb/^{238}U\ \text{ratio}$', title_font=dict(size=14)),
@@ -146,7 +114,7 @@ class CalibrationWindow(QMainWindow):
         
         # second plot shows the aligned downhole fractionation of 7/5 ratios
         self.DH_75_fractionation_plot = PlotCanvas()
-        self.DH_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{207}Pb/^{235}U\ \text{Fractionation}$', 
+        self.DH_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{207}Pb/^{235}U\ \text{ratio}$', 
                                                                'x': 0.5, 
                                                                'xanchor': 'center'},
                                                         yaxis=dict(title=r'$^{207}Pb/^{235}U\ \text{ratio}$', title_font=dict(size=14)),
@@ -156,7 +124,7 @@ class CalibrationWindow(QMainWindow):
         
         # third plot shows the aligned downhole fractionation of 7/6 ratios
         self.DH_67_fractionation_plot = PlotCanvas()
-        self.DH_67_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{206}Pb/^{207}Pb\ \text{Fractionation}$',
+        self.DH_67_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{206}Pb/^{207}Pb\ \text{ratio}$',
                                                                 'x': 0.5,
                                                                 'xanchor': 'center'},
                                                         yaxis=dict(title=r'$^{206}Pb/^{207}Pb\ \text{ratio}$', title_font=dict(size=14)),
@@ -166,7 +134,7 @@ class CalibrationWindow(QMainWindow):
         
         # fourth plot shows the aligned downhole fractionation of 208Pb 232Th ratios
         self.DH_82_fractionation_plot = PlotCanvas()
-        self.DH_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{208}Pb/^{232}Th\ \text{Fractionation}$',
+        self.DH_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Downhole}\ ^{208}Pb/^{232}Th\ \text{ratio}$',
                                                                 'x': 0.5,
                                                                 'xanchor': 'center'},
                                                         yaxis=dict(title=r'$^{208}Pb/^{232}Th\ \text{ratio}$', title_font=dict(size=14)),
@@ -174,14 +142,51 @@ class CalibrationWindow(QMainWindow):
                                                                      tickformat='.2f'), 
                                                         legend=dict(font=dict(size=8)))
         
-        self.calibration_df['Plot'] = [self.session_68_fractionation_plot, 
-                                       self.session_75_fractionation_plot, 
-                                       self.session_67_fractionation_plot, 
-                                       self.session_82_fractionation_plot,
-                                        self.DH_68_fractionation_plot,
+        # first plot on bottom shows the session wide primary standard fractionation of 6/8 ratios
+        self.session_68_fractionation_plot = PlotCanvas()
+        self.session_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
+                                                                    'x': 0.5, 
+                                                                    'xanchor': 'center'}, 
+                                                            yaxis=dict(title=r'$^{206}Pb/^{238}U$ ratio', title_font=dict(size=14)), 
+                                                            xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
+                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
+
+        # second plot shows the session wide primary standard fractionation of 7/5 ratios
+        self.session_75_fractionation_plot = PlotCanvas()
+        self.session_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{207}Pb/^{235}U\ \text{Fractionation}$', 
+                                                            'x': 0.5, 
+                                                            'xanchor': 'center'}, 
+                                                    yaxis=dict(title=r'$^{207}Pb/^{235}U$ Ratio', title_font=dict(size=14)), 
+                                                    xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
+                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
+        
+        # third plot shows the session wide primary standard fractionation of 6/8 ratios
+        self.session_67_fractionation_plot = PlotCanvas()
+        self.session_67_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{207}Pb\ \text{Fractionation}$',
+                                                                    'x': 0.5,
+                                                                    'xanchor': 'center'},
+                                                            yaxis=dict(title=r'$^{206}Pb/^{207}Pb$ Ratio', title_font=dict(size=14)),
+                                                            xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
+                                                            legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
+        
+        # fourth pllto shows the session wide primary standard fractionation of 208Pb 232Th ratios
+        self.session_82_fractionation_plot = PlotCanvas()
+        self.session_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{208}Pb/^{232}Th\ \text{Fractionation}$',
+                                                            'x': 0.5, 
+                                                            'xanchor': 'center'}, 
+                                                    yaxis=dict(title=r'$^{208}Pb/^{232}Th$ Ratio', title_font=dict(size=14)), 
+                                                    xaxis=dict(title='Time', title_font=dict(size=12), tickfont=dict(size=10)),
+                                                    legend=dict(x=0.5, xanchor='center', y=0, yanchor='bottom'))
+        
+        
+        self.calibration_df['Plot'] = [self.DH_68_fractionation_plot,
                                         self.DH_75_fractionation_plot,
                                         self.DH_67_fractionation_plot,
-                                        self.DH_82_fractionation_plot]
+                                        self.DH_82_fractionation_plot,
+                                        self.session_68_fractionation_plot, 
+                                       self.session_75_fractionation_plot, 
+                                       self.session_67_fractionation_plot, 
+                                       self.session_82_fractionation_plot]
         
         # add ok and cancel button to save or cancel the calibration
         self.apply_button = QPushButton("Apply")
@@ -218,8 +223,9 @@ class CalibrationWindow(QMainWindow):
         self.DH_layout.addWidget(self.DH_67_fractionation_plot.web_view)
         self.DH_layout.addWidget(self.DH_82_fractionation_plot.web_view)
 
-        self.all_plots_layout.addLayout(self.session_layout)
         self.all_plots_layout.addLayout(self.DH_layout)
+        self.all_plots_layout.addLayout(self.session_layout)
+        
 
         self.manual_calibration_layout.addWidget(self.apply_button)
         self.manual_calibration_layout.addWidget(self.export_button)
@@ -255,6 +261,17 @@ class CalibrationWindow(QMainWindow):
             print(f'Primary standard {self.primary_UPb_standard} radiogenic isotope ratios not found in reference materials dataframe')
             return
         
+    
+        # lists to store the downhole ratios of the primary standards
+        self.PR_68_DH_times = pd.Series(dtype='float64')
+        self.PR_75_DH_times = pd.Series(dtype='float64')
+        self.PR_67_DH_times = pd.Series(dtype='float64')
+        self.PR_82_DH_times = pd.Series(dtype='float64')
+        self.PR_68_DH_ratios = []
+        self.PR_75_DH_ratios = []
+        self.PR_67_DH_ratios = []
+        self.PR_82_DH_ratios = []
+
         # lists to store the mean and standard deviation of the session wide fractionation
         self.session_standard_68_fractionation_mean = []
         self.session_standard_68_fractionation_std = []
@@ -267,51 +284,24 @@ class CalibrationWindow(QMainWindow):
 
         self.session_standard_time_mean = []
 
-        # lists to store the downhole ratios of the primary standards
-        self.PR_68_DH_times = pd.Series(dtype='float64')
-        self.PR_75_DH_times = pd.Series(dtype='float64')
-        self.PR_67_DH_times = pd.Series(dtype='float64')
-        self.PR_82_DH_times = pd.Series(dtype='float64')
-        self.PR_68_DH_ratios = []
-        self.PR_75_DH_ratios = []
-        self.PR_67_DH_ratios = []
-        self.PR_82_DH_ratios = []
-
-
         max_moving_average_window = 1
 
         # filter for the selected plateau regions
         for spot_name in primary_UPb_standard_total_data['spot_name'].unique():
             spot_data = primary_UPb_standard_total_data[primary_UPb_standard_total_data['spot_name'] == spot_name]
             
-            plateau_start_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
             plateau_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
-            baseline_start_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_start_times'].values[0]
             baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
 
             # get data between end of baseline indices and end of plateau indices for DH fractionation calibration
             DH_calibration_data = spot_data[(spot_data['Time'] > baseline_end_time) & (spot_data['Time'] < plateau_end_time)]
-            # more strictly, get selected plateau data for session wide fractionation calibration
-            selected_plateau_data = spot_data[(spot_data['Time'] >= plateau_start_time) & (spot_data['Time'] < plateau_end_time)]
-            
-            self.session_standard_time_mean.append(selected_plateau_data['Time'].mean())
-            self.session_standard_68_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).mean()/primary_rad_68)
-            self.session_standard_68_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['238U']).std()/primary_rad_68)
-            self.session_standard_75_fractionation_mean.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).mean()/primary_rad_75)
-            self.session_standard_75_fractionation_std.append((selected_plateau_data['207Pb']/selected_plateau_data['235U']).std()/primary_rad_75)
-            self.session_standard_67_fractionation_mean.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).mean()/primary_rad_67)
-            self.session_standard_67_fractionation_std.append((selected_plateau_data['206Pb']/selected_plateau_data['207Pb']).std()/primary_rad_67)
-            self.session_standard_82_fractionation_mean.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).mean()/primary_rad_82)
-            self.session_standard_82_fractionation_std.append((selected_plateau_data['208Pb']/selected_plateau_data['232Th']).std()/primary_rad_82)
-            
-            primary_UPb_standard_plateau_data = pd.concat([primary_UPb_standard_plateau_data, selected_plateau_data], axis=0)
-
-            max_moving_average_window = max(max_moving_average_window, (DH_calibration_data['Time'].max()-DH_calibration_data['Time'].min()).total_seconds())
-
+            # get the time in seconds relative to the assumed start time point for the spot
             this_PR_68_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
             this_PR_75_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
             this_PR_67_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
             this_PR_82_DH_times = (DH_calibration_data['Time']-DH_calibration_data['Time'].min()).dt.total_seconds()
+            print(this_PR_68_DH_times)
+            # get the downhole ratios
             this_PR_68_DH_ratios = DH_calibration_data['206Pb']/DH_calibration_data['238U']
             this_PR_75_DH_ratios = DH_calibration_data['207Pb']/DH_calibration_data['235U']
             this_PR_67_DH_ratios = DH_calibration_data['206Pb']/DH_calibration_data['207Pb']
@@ -326,7 +316,6 @@ class CalibrationWindow(QMainWindow):
             self.PR_75_DH_ratios.extend(this_PR_75_DH_ratios)
             self.PR_67_DH_ratios.extend(this_PR_67_DH_ratios)
             self.PR_82_DH_ratios.extend(this_PR_82_DH_ratios)
-
 
             # add downhole 68 ratios
             self.DH_68_fractionation_plot.fig.add_trace(go.Scatter(x=this_PR_68_DH_times, 
@@ -356,32 +345,90 @@ class CalibrationWindow(QMainWindow):
                                                     mode='lines',
                                                     opacity=0.6,
                                                     name=spot_name))
+
+        # plot the default exponential fits of the downhole fractionation plots
+        self.update_fit_curve('downhole 206Pb/238U')
+        self.update_fit_curve('downhole 207Pb/235U')
+        self.update_fit_curve('downhole 206Pb/207Pb')
+        self.update_fit_curve('downhole 208Pb/232Th')
+            
+
+        print(self.calibration_df)
+
+        # then we need to use the downhole calibration functions to correct for the primary standard, before calculating the session wide fractionation
+        for spot_name in primary_UPb_standard_total_data['spot_name'].unique():
+            spot_data = primary_UPb_standard_total_data[primary_UPb_standard_total_data['spot_name'] == spot_name]
+            
+            plateau_start_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
+            plateau_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
+            baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
+
+            # more strictly, get selected plateau data for session wide fractionation calibration
+            selected_plateau_data = spot_data[(spot_data['Time'] > baseline_end_time) & (spot_data['Time'] < plateau_end_time)]
+            selected_plateau_data_total_seconds = (selected_plateau_data['Time']-selected_plateau_data['Time'].min()).dt.total_seconds()
+            # apply downhole calibration by inverting the fitted downhole ratio functions
+            # we need to do this for each ratio
+            this_DH_corrected_68_ratio = DH_ratio_correction(selected_plateau_data_total_seconds, 
+                                                        selected_plateau_data['206Pb']/selected_plateau_data['238U'], 
+                                                        self.calibration_df.loc['downhole 206Pb/238U', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 206Pb/238U', 'Fit parameters'])
+            this_DH_corrected_75_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['207Pb']/selected_plateau_data['235U'],
+                                                        self.calibration_df.loc['downhole 207Pb/235U', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 207Pb/235U', 'Fit parameters'])
+            this_DH_corrected_67_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['206Pb']/selected_plateau_data['207Pb'],
+                                                        self.calibration_df.loc['downhole 206Pb/207Pb', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 206Pb/207Pb', 'Fit parameters'])
+            this_DH_corrected_82_ratio = DH_ratio_correction(selected_plateau_data_total_seconds,
+                                                        selected_plateau_data['208Pb']/selected_plateau_data['232Th'],
+                                                        self.calibration_df.loc['downhole 208Pb/232Th', 'Fit type'],
+                                                        self.calibration_df.loc['downhole 208Pb/232Th', 'Fit parameters'])
+            
+            this_DH_corrected_68_ratio_mean = this_DH_corrected_68_ratio.mean()
+            this_DH_corrected_75_ratio_mean = this_DH_corrected_75_ratio.mean()
+            this_DH_corrected_67_ratio_mean = this_DH_corrected_67_ratio.mean()
+            this_DH_corrected_82_ratio_mean = this_DH_corrected_82_ratio.mean()
+            this_DH_corrected_68_ratio_std = this_DH_corrected_68_ratio.std()
+            this_DH_corrected_75_ratio_std = this_DH_corrected_75_ratio.std()
+            this_DH_corrected_67_ratio_std = this_DH_corrected_67_ratio.std()
+            this_DH_corrected_82_ratio_std = this_DH_corrected_82_ratio.std()
+
+            self.session_standard_time_mean.append(selected_plateau_data['Time'].mean())
+
+            self.session_standard_68_fractionation_mean.append(this_DH_corrected_68_ratio_mean/primary_rad_68)
+            self.session_standard_68_fractionation_std.append(this_DH_corrected_68_ratio_std/primary_rad_68)
+            self.session_standard_75_fractionation_mean.append(this_DH_corrected_75_ratio_mean/primary_rad_75)
+            self.session_standard_75_fractionation_std.append(this_DH_corrected_75_ratio_std/primary_rad_75)
+            self.session_standard_67_fractionation_mean.append(this_DH_corrected_67_ratio_mean/primary_rad_67)
+            self.session_standard_67_fractionation_std.append(this_DH_corrected_67_ratio_std/primary_rad_67)
+            self.session_standard_82_fractionation_mean.append(this_DH_corrected_82_ratio_mean/primary_rad_82)
+            self.session_standard_82_fractionation_std.append(this_DH_corrected_82_ratio_std/primary_rad_82)
+
+            
+            # primary_UPb_standard_plateau_data = pd.concat([primary_UPb_standard_plateau_data, selected_plateau_data], axis=0)
         
-        # plot session wide 68 fractionation 
-        self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'], 
-                                                    y=primary_UPb_standard_plateau_data['206Pb']/primary_UPb_standard_plateau_data['238U']/primary_rad_68, 
-                                                    line=dict(color='grey'), mode='markers', 
-                                                    opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} individual analyses'))
-        # plot session wide 75 fractionation
-        self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'],
-                                                    y=primary_UPb_standard_plateau_data['207Pb']/primary_UPb_standard_plateau_data['235U']/primary_rad_75,
-                                                    line=dict(color='grey'), mode='markers', 
-                                                    opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} individual analyses'))
-        # plot session wide 67 fractionation
-        self.session_67_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'],
-                                                    y=primary_UPb_standard_plateau_data['206Pb']/primary_UPb_standard_plateau_data['207Pb']/primary_rad_67,
-                                                    line=dict(color='grey'), mode='markers',
-                                                    opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} individual analyses'))
-        # plot session wide 82 fractionation
-        self.session_82_fractionation_plot.fig.add_trace(go.Scatter(x=primary_UPb_standard_plateau_data['Time'],
-                                                    y=primary_UPb_standard_plateau_data['208Pb']/primary_UPb_standard_plateau_data['232Th']/primary_rad_82,
-                                                    line=dict(color='grey'), mode='markers',
-                                                    opacity=0.6,
-                                                    name=f'{self.primary_UPb_standard} individual analyses'))
-        
+            # plot session wide 68 fractionation 
+            self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=selected_plateau_data['Time'], 
+                                                        y=this_DH_corrected_68_ratio/primary_rad_68, 
+                                                        line=dict(color='grey'), mode='markers', 
+                                                        opacity=0.6, showlegend=False))
+            # plot session wide 75 fractionation
+            self.session_75_fractionation_plot.fig.add_trace(go.Scatter(x=selected_plateau_data['Time'],
+                                                        y=this_DH_corrected_75_ratio/primary_rad_75,
+                                                        line=dict(color='grey'), mode='markers', 
+                                                        opacity=0.6, showlegend=False))
+            # plot session wide 67 fractionation
+            self.session_67_fractionation_plot.fig.add_trace(go.Scatter(x=selected_plateau_data['Time'],
+                                                        y=this_DH_corrected_67_ratio/primary_rad_67,
+                                                        line=dict(color='grey'), mode='markers',
+                                                        opacity=0.6, showlegend=False))
+            # plot session wide 82 fractionation
+            self.session_82_fractionation_plot.fig.add_trace(go.Scatter(x=selected_plateau_data['Time'],
+                                                        y=this_DH_corrected_82_ratio/primary_rad_82,
+                                                        line=dict(color='grey'), mode='markers',
+                                                        opacity=0.6, showlegend=False))
+            
 
         # plot the mean and standard deviation of the primary standard's 68 fractionation
         self.session_68_fractionation_plot.fig.add_trace(go.Scatter(x=self.session_standard_time_mean,
@@ -422,24 +469,19 @@ class CalibrationWindow(QMainWindow):
         self.update_fit_curve('session 206Pb/207Pb')
         self.update_fit_curve('session 208Pb/232Th')
         
-        # plot the default exponential fits of the downhole fractionation plots
-        self.update_fit_curve('downhole 206Pb/238U')
-        self.update_fit_curve('downhole 207Pb/235U')
-        self.update_fit_curve('downhole 206Pb/207Pb')
-        self.update_fit_curve('downhole 208Pb/232Th')
+
 
         self.moving_average_window_setting.setMaximum(max_moving_average_window)
-
-        self.session_68_fractionation_plot.display_plot()
-        self.session_75_fractionation_plot.display_plot()
-        self.session_67_fractionation_plot.display_plot()
-        self.session_82_fractionation_plot.display_plot()
 
         self.DH_68_fractionation_plot.display_plot()
         self.DH_75_fractionation_plot.display_plot()
         self.DH_67_fractionation_plot.display_plot()
         self.DH_82_fractionation_plot.display_plot()
 
+        self.session_68_fractionation_plot.display_plot()
+        self.session_75_fractionation_plot.display_plot()
+        self.session_67_fractionation_plot.display_plot()
+        self.session_82_fractionation_plot.display_plot()
 
     def update_fit_equation(self):
         fit_type = self.fit_type_dropdown.currentText()
@@ -501,7 +543,8 @@ class CalibrationWindow(QMainWindow):
         # print(reference_total_seconds, y)
         if this_fit_type == 'Linear':
             popt, pcov = linear_fit(reference_total_seconds, y)
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.2f} + {popt[1]:.2f}*x'
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.4f} + {popt[1]:.4f}*x'
+            self.calibration_df.at[this_fractionation, 'Fit parameters'] = popt
             self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
             self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - linear(reference_total_seconds, *popt))**2) / np.sum((y - np.mean(y))**2)
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
@@ -509,10 +552,12 @@ class CalibrationWindow(QMainWindow):
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=linear(np.sort(reference_total_seconds), *popt), 
                                           line=dict(color='red', dash='dash'), mode='lines', name='Linear fit'))
 
-
         elif this_fit_type == 'Exponential':
             popt, pcov = exponential_fit(reference_total_seconds, y)
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.2f} + {popt[1]:.2f}*exp(-{popt[2]:.2f}*x)'
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = {popt[0]:.4f} + {popt[1]:.4f}*exp({-popt[2]:.4f}*x)'
+
+            self.calibration_df.at[this_fractionation, 'Fit parameters'] = popt
+
             self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
             self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - exponential(reference_total_seconds, *popt))**2) / np.sum((y - np.mean(y))**2)
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
@@ -520,15 +565,14 @@ class CalibrationWindow(QMainWindow):
             this_fig.add_trace(go.Scatter(x=np.sort(x), y=exponential(np.sort(reference_total_seconds), *popt), 
                                               line=dict(color='red', dash='dash'), mode='lines', name='Exponential fit'))
 
-
         elif this_fit_type == 'Polynomial':
             degree = self.calibration_df.loc[this_fractionation, 'Polynomial degree']
-
             popt, pcov = poly_fit(reference_total_seconds, y, degree)
             self.calibration_df.loc[this_fractionation, 'Fit equation'] = f'y = '
             for i in range(degree-1, 0, -1):
-                self.calibration_df.loc[this_fractionation, 'Fit equation'] += f'{popt[i]:.2f}*x^{i} + '
-            self.calibration_df.loc[this_fractionation, 'Fit equation'] += f'{popt[0]:.2f}'
+                self.calibration_df.at[this_fractionation, 'Fit equation'] += f'{popt[i]:.4f}*x^{i} + '
+            self.calibration_df.at[this_fractionation, 'Fit parameters'] = popt
+            self.calibration_df.loc[this_fractionation, 'Fit equation'] += f'{popt[0]:.4f}'
             self.fit_equation_text.setText(self.calibration_df.loc[this_fractionation, 'Fit equation'])
             self.calibration_df.loc[this_fractionation, 'Quality'] = 1 - np.sum((y - np.polyval(popt, reference_total_seconds))**2) / np.sum((y - np.mean(y))**2)
             self.quality_label_text.setText(f'R squared value of fit: {self.calibration_df.loc[this_fractionation, "Quality"]:.3f}')
@@ -575,3 +619,44 @@ class CalibrationWindow(QMainWindow):
         self.update_fit_curve(this_fractionation, 
                               self.baseline_corrected_data['Time'], 
                               self.baseline_corrected_data[this_fractionation])
+        
+
+    # def on_click_export_button(self):
+    #     # let's start with exporting the isotope ratios that we care about (those that we plot up downhole and session-wide calibrations)
+    #     # let's start with exporting the spot mean results
+    #     # first make a pop up window to ask for the directory and file name to save the calibration results
+    #     save_dialog = QFileDialog()
+    #     # we save a .csv file
+    #     save_dialog.setFileMode(QFileDialog.AnyFile)
+    #     save_dialog.setAcceptMode(QFileDialog.AcceptSave)
+    #     save_dialog.setNameFilter('CSV files (*.csv)')
+    #     # set default file name to be fractionation_correction_results.csv
+    #     save_dialog.selectFile('fractionation_correction_results.csv')
+    #     save_dialog.exec_()
+
+    #     save_path = save_dialog.selectedFiles()[0]
+
+    #     # once the user clicks save in the dialog, we start generating the calibration results
+    #     # loop through the baseline_corrected_data and apply the downhole calibration to each spot and apply the session-wide fractionation correction to each spot
+
+    #     # initialize a dataframe to store the spot mean calibrated results
+    #     spot_mean_export_df = pd.DataFrame()
+
+    #     for spot_name in self.baseline_corrected_data['spot_name'].unique():
+    #         this_spot_data = self.baseline_corrected_data[self.baseline_corrected_data['spot_name'] == spot_name]
+    #         # get the spot total start and end time (which I define here to be fromthe end of the baseline to the end of the plateau)
+    #         baseline_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
+    #         plateau_end_time = self.experiment[self.experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
+    #         # chop the data to only include the total plateau region
+    #         this_spot_data = this_spot_data[(this_spot_data['Time'] > baseline_end_time) & (this_spot_data['Time'] < plateau_end_time)]
+    #         # shift the time to start from 0
+    #         this_spot_data['Time'] = (this_spot_data['Time'] - this_spot_data['Time'].min()).dt.total_seconds()
+    #         # calculate the relevant ratios for this spot
+    #         background_corrected_68_ratios = this_spot_data['206Pb']/this_spot_data['238U']
+    #         background_corrected_75_ratios = this_spot_data['207Pb']/this_spot_data['235U']
+    #         background_corrected_67_ratios = this_spot_data['206Pb']/this_spot_data['207Pb']
+    #         background_corrected_82_ratios = this_spot_data['208Pb']/this_spot_data['232Th']
+
+    #         # apply downhole calibration from the primary standard to this spot
+    #         DH_corrected_
+
