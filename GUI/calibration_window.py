@@ -148,7 +148,7 @@ class CalibrationWindow(QMainWindow):
         
         # first plot on bottom shows the session wide primary standard fractionation of 6/8 ratios
         self.session_68_fractionation_plot = PlotCanvas()
-        self.session_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
+        self.session_68_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session}\ ^{206}Pb/^{238}U\ \text{Fractionation}$', 
                                                                     'x': 0.5, 
                                                                     'xanchor': 'center'}, 
                                                             yaxis=dict(title=r'$^{206}Pb/^{238}U$ ratio', title_font=dict(size=14)), 
@@ -157,7 +157,7 @@ class CalibrationWindow(QMainWindow):
 
         # second plot shows the session wide primary standard fractionation of 7/5 ratios
         self.session_75_fractionation_plot = PlotCanvas()
-        self.session_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{207}Pb/^{235}U\ \text{Fractionation}$', 
+        self.session_75_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session}\ ^{207}Pb/^{235}U\ \text{Fractionation}$', 
                                                             'x': 0.5, 
                                                             'xanchor': 'center'}, 
                                                     yaxis=dict(title=r'$^{207}Pb/^{235}U$ Ratio', title_font=dict(size=14)), 
@@ -166,7 +166,7 @@ class CalibrationWindow(QMainWindow):
         
         # third plot shows the session wide primary standard fractionation of 6/8 ratios
         self.session_76_fractionation_plot = PlotCanvas()
-        self.session_76_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{207}Pb/^{206}Pb\ \text{Fractionation}$',
+        self.session_76_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session}\ ^{207}Pb/^{206}Pb\ \text{Fractionation}$',
                                                                     'x': 0.5,
                                                                     'xanchor': 'center'},
                                                             yaxis=dict(title=r'$^{207}Pb/^{206}Pb$ Ratio', title_font=dict(size=14)),
@@ -175,7 +175,7 @@ class CalibrationWindow(QMainWindow):
         
         # fourth pllto shows the session wide primary standard fractionation of 208Pb 232Th ratios
         self.session_82_fractionation_plot = PlotCanvas()
-        self.session_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session Wide}\ ^{208}Pb/^{232}Th\ \text{Fractionation}$',
+        self.session_82_fractionation_plot.fig.update_layout(title={'text':r'$\text{Session}\ ^{208}Pb/^{232}Th\ \text{Fractionation}$',
                                                             'x': 0.5, 
                                                             'xanchor': 'center'}, 
                                                     yaxis=dict(title=r'$^{208}Pb/^{232}Th$ Ratio', title_font=dict(size=14)), 
