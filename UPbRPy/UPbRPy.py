@@ -517,9 +517,9 @@ def propagate_raw_ratio_uncertaintys(nom, denom):
     # calculate the relative uncertainty of the numerator and denominator
     eR = np.sqrt(1/nom + 1/denom)
 
-    return 2 * eR # return 2 standard errors of the ratio
+    return 2 * eR # return 2 standard relative errors of the ratio, not in percentage format but in fraction format
 
-def calc_raw_ratios(experiment, total_data, baseline_subtracted_plateau_data):
+def calc_raw_ratios(experiment, total_data, baseline_subtracted_total_data):
     '''
     function for calculating raw isotope ratios (before downhole variability and fractionation correction) 
         based on the initial unprocessed total data and the background-subtracted data
@@ -554,15 +554,19 @@ def calc_raw_ratios(experiment, total_data, baseline_subtracted_plateau_data):
     plateau_data_with_raw_ratios = pd.DataFrame()
     # raw_ratios = pd.DataFrame()
 
-    for spot_name in baseline_subtracted_plateau_data['spot_name'].unique():
+    for spot_name in baseline_subtracted_total_data['spot_name'].unique():
         # get the baseline indices for this spot
         this_spot_baseline_start = experiment[experiment['spot_names'] == spot_name]['baseline_start_times'].values[0]
         this_spot_baseline_end = experiment[experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
+
+        # get the baseline subtracted plateau data for actual raw ratio calculations
+        this_spot_plateau_start_time = experiment[experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
+        this_spot_plateau_end_time = experiment[experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
+        this_spot_plateau_data = baseline_subtracted_total_data[(baseline_subtracted_total_data['Time'] >= this_spot_plateau_start_time) & (baseline_subtracted_total_data['Time'] < this_spot_plateau_end_time)]
+
         # get the uncorrected total data for baseline use
         this_spot_total_data = total_data[total_data['spot_name'] == spot_name]
         this_spot_baseline_total_data = this_spot_total_data[(this_spot_total_data['Time'] >= this_spot_baseline_start) & (this_spot_total_data['Time'] < this_spot_baseline_end)]
-        # get the baseline subtracted plateau data for actual raw ratio calculations
-        this_spot_plateau_data = baseline_subtracted_plateau_data[baseline_subtracted_plateau_data['spot_name'] == spot_name]
 
         # 206/204 ratio of means
         this_spot_baseline_202Hg_mean = this_spot_baseline_total_data['202Hg'].mean() # baseline 202Hg mean
@@ -572,8 +576,11 @@ def calc_raw_ratios(experiment, total_data, baseline_subtracted_plateau_data):
         # this_spot_plateau_204Pb_mean = this_spot_plateau_data['204Hg'].mean() # sample 204Pb mean
         # this_spot_plateau_202Hg_mean = this_spot_plateau_data['202Hg'].mean() # sample 202Hg mean
 
+        # 206/204 mean of ratios, replace all negative or inf values to be 0
         this_spot_R64 = this_spot_plateau_data['206Pb']/(this_spot_plateau_data['204Hg'] - this_spot_plateau_data['202Hg'] * (this_spot_baseline_204Pb_mean/this_spot_baseline_202Hg_mean))
-
+        this_spot_R64[this_spot_R64 < 0] = 0
+        this_spot_R64[this_spot_R64 == np.inf] = 0
+        
         # 208/232 mean of ratios
         this_spot_R82 = this_spot_plateau_data['208Pb'] / this_spot_plateau_data['232Th']
         this_spot_R82_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th'])
@@ -608,6 +615,7 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
         use this function when the dealing with a single known ratio value
 
     '''
+    primary_standard = primary_standard_ratios['sample'].unique()[0]
     # initialize a time variable and a ratio fractionation variable to store the interpolated time and fractionation for all primary standard spots
     all_times = [] # relative time within each spot, starts with zero
     all_ratios = [] # the fractionation of the measured ratio from the known standard ratio
@@ -623,7 +631,7 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
         all_times.append(this_spot['relative_time'].values)
         all_ratios.append(this_spot[ratio_name].values)
         # plot the fractionation
-        plot *= this_spot.hvplot(x='relative_time', y=ratio_name, color=Category20[20][i % 20], size=10, alpha=0.6, kind='line', line_width=1)
+        plot *= hv.Curve((this_spot['relative_time'].values, known_ratio/this_spot[ratio_name].values),label=spot_name).opts(color=Category20[20][i % 20], line_width=1, alpha=0.6, show_legend=True)
 
     # now interpolate the time and fractionation for all spots, unify the time axis, and calculate the mean and std * student's t multiplier
     min_time = 0
@@ -639,13 +647,18 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     mean_ratio = np.mean(interpolated_ratios, axis=0)
     # calculate the fractionation factor as known ratio / mean_ratio
     mean_fractionation_factor = known_ratio / mean_ratio
-    std_fractionation_factor = np.std(mean_fractionation_factor, axis=0)
-    # t_multiplier = t.ppf(0.975, len(all_times)-1) # the degree of freedom is the number of sweeps - 1
-    # std_t_multiplier = std_ratio * t_multiplier
+    # construct the downhole fractionation function
+    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
+
+    # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
+    all_times_array = np.array(all_times).flatten()
+    all_fractionations_array = known_ratio/np.array(all_ratios).flatten()
+    # calculate the standard deviation of the mean_fractionation_factor
+    std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
 
     # plot the mean and std * student's t multiplier of the interpolated fractionation
-    plot *= hv.Curve((unified_time, mean_fractionation_factor), label='mean fractionation factor').opts(color='black', line_width=2, line_dash='dashed', show_legend=True)
-    plot *= hv.Curve((unified_time, mean_fractionation_factor + std_fractionation_factor), label='1 std').opts(color='grey', line_dash='dashed', line_width=1, show_legend=True)
+    plot *= hv.Curve((unified_time, mean_fractionation_factor), label='mean fractionation factor').opts(color='black', line_width=2, line_dash='dashed', show_legend=False)
+    plot *= hv.Curve((unified_time, mean_fractionation_factor + std_fractionation_factor), label='1 std').opts(color='grey', line_dash='dashed', line_width=1, show_legend=False)
     plot *= hv.Curve((unified_time, mean_fractionation_factor - std_fractionation_factor)).opts(color='grey', line_dash='dashed', line_width=1)
     # fill between the 95CI interval
     plot *= hv.Area((unified_time, mean_fractionation_factor - std_fractionation_factor, mean_fractionation_factor + std_fractionation_factor), vdims=['y', 'y2']).opts(color='grey', alpha=0.1)
@@ -653,11 +666,9 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     plot.opts(title=ratio_name + ' fractionation factor for primary standard '+ primary_standard, 
         xlabel='Time (s)', ylabel=ratio_name + '\nfractionation factor',
         fontsize={'xlabel':12, 'ylabel':12},
-        legend_position='right', show_legend = True,
+        legend_position='right', show_legend = False,
         width=800, height=400)
-    
-    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
-        
+            
     return plot, downhole_fractionation
 
 def calc_DH_fractionations_rad(primary_standard_ratios, standard_archive, fit='linear'):
@@ -761,7 +772,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ra
     return DH_correction_results
 
 
-def calc_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, projected_ratio_name):
+def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, projected_ratio_name):
     '''
     function for calculating dynamic fractionation, this is used for cases where we need to do TW projection to get
         the TW 86 ratios for each sweep and then calculate the projected ratios against the measured ratios
@@ -796,9 +807,11 @@ def calc_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, pro
     
     # calculate the stacked mean sweep-wise fractionation vs. relative time
     mean_fractionation_factor = np.mean(interpolated_fractionations, axis=0)
-    std_fractionation_factor = np.std(mean_fractionation_factor, axis=0)
-    # t_multiplier = t.ppf(0.975, len(all_times)-1) # the degree of freedom is the number of sweeps - 1
-    # std_t_multiplier = std_ratio * t_multiplier
+    # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
+    all_times_array = np.array(all_times).flatten()
+    all_fractionations_array = np.array(all_fractionations).flatten()
+    # calculate the standard deviation of the mean_fractionation_factor
+    std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
 
     # plot the mean and std * student's t multiplier of the interpolated fractionation
     plot *= hv.Curve((unified_time, mean_fractionation_factor), label='mean fractionation factor').opts(color='black', line_width=2, line_dash='dashed', show_legend=True)
@@ -1158,10 +1171,16 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
             final_ratios.loc[spot_name, isotope_ratio] = this_spot_fractionation_correction_mean
             final_ratios.loc[spot_name, isotope_ratio + '_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / np.sqrt(this_spot_data.shape[0]) / this_spot_fractionation_correction_mean * 100
             final_ratios.loc[spot_name, isotope_ratio + '_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 / np.sqrt(this_spot_data.shape[0])
+        # calculate the 207Pb/235U ratio and error
         final_ratios.loc[spot_name, '207Pb/235U'] = final_ratios.loc[spot_name,'207Pb/206Pb'] * final_ratios.loc[spot_name,'206Pb/238U'] * common_U238_U235
         final_ratios.loc[spot_name, '207Pb/235U_2e%'] = np.sqrt((final_ratios.loc[spot_name,'207Pb/206Pb_2e%']**2 + final_ratios.loc[spot_name,'206Pb/238U_2e%']**2))
         final_ratios.loc[spot_name, '207Pb/235U_2e'] = final_ratios.loc[spot_name, '207Pb/235U'] * final_ratios.loc[spot_name, '207Pb/235U_2e%'] / 100
         
+        # calculate the 238U/206Pb ratio and error where the 238U/206Pb ratio is the inverse of the 206Pb/238U ratio
+        final_ratios.loc[spot_name, '238U/206Pb'] = 1 / final_ratios.loc[spot_name, '206Pb/238U']
+        final_ratios.loc[spot_name, '238U/206Pb_2e%'] = final_ratios.loc[spot_name,'206Pb/238U_2e%'] * np.sqrt(1/final_ratios.loc[spot_name,'206Pb/238U'])
+        final_ratios.loc[spot_name, '238U/206Pb_2e'] = final_ratios.loc[spot_name, '238U/206Pb'] * final_ratios.loc[spot_name, '238U/206Pb_2e%'] / 100
+
         # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
         x = final_ratios.loc[spot_name,'207Pb/206Pb'] # 76 ratio
         u = final_ratios.loc[spot_name,'207Pb/235U']  # 75 ratio
@@ -1182,12 +1201,14 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
     first_columns = ['spot_name', 'sample', 
                      '207Pb/235U', '207Pb/235U_2e%', 
                      '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
-                     '207Pb/235U_2e', 
-                     '206Pb/238U_2e',
                      '238U/206Pb', '238U/206Pb_2e%',
                      '207Pb/206Pb', '207Pb/206Pb_2e%',
+                     '208Pb/232Th', '208Pb/232Th_2e%',
+                     '207Pb/235U_2e', 
+                     '206Pb/238U_2e',
                      '238U/206Pb_2e',  
-                     '207Pb/206Pb_2e']
+                     '207Pb/206Pb_2e',
+                     '208Pb/232Th_2e']
     other_columns = [i for i in final_ratios_columns if i not in first_columns]
     final_ratios = final_ratios[first_columns + other_columns]
     final_ratios = final_ratios.sort_values(by='spot_name').reset_index(drop=True)
