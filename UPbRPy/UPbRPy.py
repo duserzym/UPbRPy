@@ -1,4 +1,5 @@
 import os
+from importlib.resources import files
 import re
 from datetime import datetime, timedelta
 import pandas as pd
@@ -26,7 +27,8 @@ lambda_235 = 9.8485e-10 # decay constant for U235
 
 lambda_238 = 1.55125e-10 # decay constant for U238
 
-standard_archive = pd.read_csv('../data/standards.csv', index_col=0)
+# import the standard archive stored in the package folder
+standard_archive = pd.read_csv(files(__package__) / 'standards.csv', index_col=0)
 
 # I/O
 # -----------------------------------------------------------
@@ -425,7 +427,7 @@ def filter_concentration_outliers(NIST_data, primary_channel, n = 5):
             this_spot_data = this_spot_data[(this_spot_data[primary_channel] < this_post_channel_upper) & (this_spot_data[primary_channel] > this_post_channel_lower)]
         filtered_NIST_data = pd.concat([filtered_NIST_data, this_spot_data], ignore_index=True)
     return filtered_NIST_data
-    
+
 def calc_concentration_calibration_factor(NIST_data, channels, standard_archive):
     '''
     function for calculating the calibration factors for the elemental concentrations
@@ -435,11 +437,14 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         whose slope is the calibration factor for cps-ppm conversion
     '''
     calibration_factors = pd.Series()
-    effective_channels = [ i for i in channels if i in standard_archive.columns]
+    effective_channels = [i for i in channels if (i in standard_archive.columns) and (i !='29Si')]
     print('Analytes that can be calibrated for concentration measurements are: ', effective_channels)
-    for channel in effective_channels:
+
+    plot = hv.Overlay()
+    for i, channel in enumerate(effective_channels):
         this_channel_measured_cps = []
         this_channel_known_ppm = []
+        this_channel_color = Category20[20][i % 20]
         for spot in NIST_data['spot_name'].unique():
             this_spot_data = NIST_data[NIST_data['spot_name'] == spot]
             this_spot_mean = this_spot_data[channel].mean()
@@ -451,8 +456,14 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         this_channel_known_ppm = np.array(this_channel_known_ppm)
         slope = np.dot(this_channel_measured_cps, this_channel_known_ppm) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
         calibration_factors[channel] = slope
-    
-    return calibration_factors
+        # plot the data and the best-fit line
+        plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6)
+        plot *= hv.Curve(((0, this_channel_measured_cps.max()*slope), (0, this_channel_measured_cps.max())), label=channel + ' calibration factor').opts(color=this_channel_color, line_width=2, show_legend=True)
+        plot.opts(title='Calibration factor for concentration measurements', xlabel='True concentration (ppm)', ylabel='Measured cps', width=800, height=600)
+        # set xlim and ylim
+    # turn off legend
+    plot.opts(show_legend=False)
+    return calibration_factors, plot
 
 def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'):
     '''
@@ -484,10 +495,10 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
             filtered_cps_95CI = this_spot_data_filtered[channel].std() * t.ppf(0.975, this_spot_data_filtered.shape[0]-1)
             unknown_standard_ppm_df.loc[spot_name, element] = filtered_cps_mean * concentration_calibration[channel]
             unknown_standard_ppm_df.loc[spot_name, element + '_95CI'] = filtered_cps_95CI * concentration_calibration[channel]
-    unknown_standard_ppm_df['spot'] = unknown_standard_ppm_df.index
-    unknown_standard_ppm_df['sample'] = unknown_standard_ppm_df['spot'].str.split(sep).str[0]
+    unknown_standard_ppm_df['spot_name'] = unknown_standard_ppm_df.index
+    unknown_standard_ppm_df['sample'] = unknown_standard_ppm_df['spot_name'].str.split(sep).str[0]
     # now move the spot and sample columns up front
-    unknown_standard_ppm_df = unknown_standard_ppm_df[['spot', 'sample'] + [i for i in unknown_standard_ppm_df.columns if i not in ['spot', 'sample']]]
+    unknown_standard_ppm_df = unknown_standard_ppm_df[['spot_name', 'sample'] + [i for i in unknown_standard_ppm_df.columns if i not in ['spot_name', 'sample']]]
     return unknown_standard_ppm_df
 
 # ratio calibration
