@@ -7,8 +7,9 @@ import hvplot.pandas
 import numpy as np
 import panel as pn
 
-from scipy.stats import t
+from scipy.stats import chi2, norm, t
 from scipy.interpolate import interp1d
+from scipy.optimize import minimize 
 
 from bokeh.palettes import Category20
 
@@ -23,9 +24,9 @@ hv.output(backend="bokeh")
 common_U238_U235 = 137.818 # U238/U235 ratio
 old_common_U238_U235 = 137.88 # previous U238/U235 ratio
 
-lambda_235 = 9.8485e-10 # decay constant for U235
+lambda_235 = 9.8485e-10 # decay constant for U235, y-1
 
-lambda_238 = 1.55125e-10 # decay constant for U238
+lambda_238 = 1.55125e-10 # decay constant for U238, y-1
 
 # import the standard archive stored in the package folder
 standard_archive = pd.read_csv(files(__package__) / 'standards.csv', index_col=0)
@@ -762,7 +763,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ra
     # calculate the TW projections
     primary_68_standard_ratios['206Pb/238UTW_projected'] = 1 / ((primary_68_standard_ratios['207Pb/206Pb_DH_corrected'] - TW_upper_intercept) / TW_slope)
     # now calculate the fractionation factor for the 6/8 ratio
-    plot_68, downhole_fractionation_68 = calc_dynamic_fractionation(primary_68_standard_ratios, '206Pb/238U', '206Pb/238UTW_projected')
+    plot_68, downhole_fractionation_68 = calc_DH_dynamic_fractionation(primary_68_standard_ratios, '206Pb/238U', '206Pb/238UTW_projected')
     DH_correction_results.update({'206Pb/238U': {'plot': plot_68, 'interpolation': downhole_fractionation_68}})
 
     # add the 8/2 ratio correction
@@ -895,34 +896,42 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
     primary_standard = primary_standard_ratios['sample'].unique()[0]
     spot_mean_times = [] # spot mean time
     spot_mean_fractionation = [] # spot mean fractionation
+    spot_mean_fractionation_std = [] # spot mean fractionation std
     # now let's plot the measured sweep-wise fractionation for the primary standard
     for spot_name in primary_standard_ratios['spot_name'].unique():
         this_spot = primary_standard_ratios[primary_standard_ratios['spot_name'] == spot_name]
         # calculate mean time for the spot
         this_spot_mean_time = this_spot['Time'].mean()
-        this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
-        this_spot_mean_fractionation = known_ratio / this_spot_mean_ratio
+        # this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
+        # this_spot_mean_ratio_std = this_spot[ratio_name+'_DH_corrected'].std()
+        this_spot_mean_fractionations = known_ratio / this_spot[ratio_name+'_DH_corrected']
+        this_spot_mean_fractionation = np.mean(this_spot_mean_fractionations)
+        this_spot_mean_fractionation_std = np.std(this_spot_mean_fractionations)
+        # this_spot_mean_fractionation_std = known_ratio / this_spot_mean_ratio_std
 
         # store the calculated mean time and fractionation factors
         spot_mean_times.append(this_spot_mean_time)
         spot_mean_fractionation.append(this_spot_mean_fractionation)
+        spot_mean_fractionation_std.append(this_spot_mean_fractionation_std)
 
     # calculate a polynomial fit for the mean DH corrected ratios against time
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_fractionation = np.array(spot_mean_fractionation)
-
-    # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2
-    p = np.polyfit(spot_mean_times, spot_mean_fractionation, degree)
+    spot_mean_fractionation_std = np.array(spot_mean_fractionation_std)
+    spot_mean_fractionation_relative_std = np.array(spot_mean_fractionation)/ spot_mean_fractionation_std
+    spot_mean_fractionation_weights = 1/spot_mean_fractionation_relative_std**2
+    # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2, default is weighted by the standard deviation of each spot fractionation
+    p = np.polyfit(spot_mean_times, spot_mean_fractionation, degree, w=spot_mean_fractionation_weights)
 
     # calculate the standard deviation of the polynomial fit
-    p_std = np.std(spot_mean_fractionation - np.polyval(p, spot_mean_times))
+    residuals = spot_mean_fractionation - np.polyval(p, spot_mean_times)
+    p_std = np.sqrt(np.sum(spot_mean_fractionation_weights * residuals**2) / (len(residuals) - (degree + 1)))
     
     # calculate a fitted polynomial curve
     polynomial_values = np.polyval(p, np.linspace(spot_mean_times[0], spot_mean_times[-1], 100))
 
-    # now plot up the mean values and associated 95CI as errorbars 
+    # now plot up the mean values and associated std as errorbars 
     plot = hv.Scatter((spot_mean_times, spot_mean_fractionation), label='mean fractionation factor').opts(color='black', line_width=2)
-
     # plot the polynomial fit
     plot *= hv.Curve((np.linspace(spot_mean_times[0], spot_mean_times[-1], 100), polynomial_values), label='polynomial fit of degree {}\nto the fractionation factor'.format(degree)).opts(color='red', line_width=2)
     # plot the 1 std deviation envelope of the polynomial fit
@@ -1030,23 +1039,33 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
 
     spot_mean_times = [] # spot mean time
     spot_mean_68_fractionation = [] # spot mean fractionation
+    spot_mean_68_fractionation_std = [] # spot mean fractionation std
     for spot_name in primary_68_DH_ratios['spot_name'].unique():
         this_spot = primary_68_DH_ratios[primary_68_DH_ratios['spot_name'] == spot_name]
         # calculate mean time for the spot
         this_spot_mean_time = this_spot['Time'].mean()
+        this_spot_68_ratio = this_spot['206Pb/238U_DH_corrected']
         this_spot_mean_68_ratio = this_spot['206Pb/238U_DH_corrected'].mean()
-        this_spot_68_TW_projected = 1 / (this_spot_mean_68_ratio * (this_spot['207Pb/206Pb_session_corrected'].mean() - TW_upper_intercept) / TW_slope)
-        this_spot_mean_68_fractionation = this_spot_68_TW_projected/this_spot_mean_68_ratio
+        this_spot_68_TW_projected = 1 / (this_spot_68_ratio * (this_spot['207Pb/206Pb_session_corrected'] - TW_upper_intercept) / TW_slope)
+        this_spot_68_TW_mean_projected = 1 / (this_spot_mean_68_ratio * (this_spot['207Pb/206Pb_session_corrected'].mean() - TW_upper_intercept) / TW_slope)
+        this_spot_68_fractionation_std = np.std(this_spot_68_TW_projected/this_spot_68_ratio)
+        this_spot_mean_68_fractionation = this_spot_68_TW_mean_projected/this_spot_mean_68_ratio
         # store the calculated mean time and fractionation factors
         spot_mean_times.append(this_spot_mean_time)
         spot_mean_68_fractionation.append(this_spot_mean_68_fractionation)
+        spot_mean_68_fractionation_std.append(this_spot_68_fractionation_std)
     # calculate a polynomial fit for the mean DH corrected ratios against time
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_68_fractionation = np.array(spot_mean_68_fractionation)
+    spot_mean_68_fractionation_std = np.array(spot_mean_68_fractionation_std)
+    spot_mean_68_fractionation_relative_std = spot_mean_68_fractionation_std / spot_mean_68_fractionation
+    spot_mean_68_fractionation_weights = 1/spot_mean_68_fractionation_relative_std**2
     # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2
-    p_68 = np.polyfit(spot_mean_times, spot_mean_68_fractionation, degree)
+    p_68 = np.polyfit(spot_mean_times, spot_mean_68_fractionation, degree, w=spot_mean_68_fractionation_weights)
     # calculate the standard deviation of the polynomial fit
-    p_std_68 = np.std(spot_mean_68_fractionation - np.polyval(p_68, spot_mean_times))
+    residuals_68 = spot_mean_68_fractionation - np.polyval(p_68, spot_mean_times)
+    # calculate the std of the residuals
+    p_std_68 = np.sqrt(np.sum(spot_mean_68_fractionation_weights * residuals_68**2) / (len(residuals_68) - (degree + 1)))
     # calculate a fitted polynomial curve
     polynomial_values_68 = np.polyval(p_68, np.linspace(spot_mean_times[0], spot_mean_times[-1], 100))
     # now plot up the mean values and associated 95CI as errorbars
@@ -1134,7 +1153,7 @@ def calc_err_corr_quotient(x, sx, u, su, v, sv):
     '''
     return ((su/u)**2 + (sv/v)**2 - (sx/x)**2) * u * v /2 / (su * sv)
 
-def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
+def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correction_results, session_correction_results, sep='_'):
     '''
     function for calculating the mean isotope ratios and associated propagated uncertainties
         for highly radiogenic phases, we only consider the measurement ratio uncertainty (std) 
@@ -1153,19 +1172,20 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
         for isotope_ratio in session_correction_results.keys():
             # get the measured mean and std
             this_spot_measured_ratio_mean = this_spot_data[isotope_ratio + '_DH_corrected'].mean()
-            this_spot_measured_ratio_std = this_spot_data[isotope_ratio + '_DH_corrected'].std()
+            # use the original measured ratio std for the uncertainty propagation
+            this_spot_measured_ratio_se = this_spot_data[isotope_ratio].std() / np.sqrt(this_spot_data.shape[0]) # standard error of the mean
 
             # get the session-wide fractionation correction mean using the mean spot time and the polynomial fit
             this_spot_this_ratio_fractionation_fit = session_correction_results[isotope_ratio]['fit']
             this_spot_this_ratio_fractionation_mean = np.polyval(this_spot_this_ratio_fractionation_fit, this_spot_data['Time'].mean())
-            # get the session-wide fractionation correction std
-            this_ratio_fractionation_std = session_correction_results[isotope_ratio]['std']
+            # get the session-wide fractionation correction se
+            this_ratio_fractionation_se = session_correction_results[isotope_ratio]['std']
             # later will add mean and std of the blank correction
 
             # get the fractionation corrected mean
             this_spot_fractionation_correction_mean = this_spot_data[isotope_ratio + '_fractionation_corrected'].mean()
             # calculate the propagated uncertainty
-            this_spot_this_ratio_propagated_uncertainty = this_spot_fractionation_correction_mean * np.sqrt((this_spot_measured_ratio_std/this_spot_measured_ratio_mean)**2 + (this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean)**2)
+            this_spot_this_ratio_propagated_uncertainty = this_spot_fractionation_correction_mean * np.sqrt((this_spot_measured_ratio_se/this_spot_measured_ratio_mean)**2 + (this_ratio_fractionation_se/this_spot_this_ratio_fractionation_mean)**2)
             # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
             # save results
             final_ratios.loc[spot_name, isotope_ratio] = this_spot_fractionation_correction_mean
@@ -1244,4 +1264,427 @@ def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     else:
         return final_x # final 86 ratio
     
+def construct_final_df(final_concentration_df, final_isotope_ratio_df):
+    '''
+    function for constructing the final dataframe that contains both the concentrations and the isotope ratios
+        we need to merge by spot_name and only keep one sample name column
+    '''
+    # first drop the sample column from the concentration dataframe
+    final_concentration_df = final_concentration_df.drop(columns=['sample'])
+    final_df = pd.merge(final_concentration_df, final_isotope_ratio_df, on='spot_name')
+    final_df.sort_values(by='spot_name', inplace=True, ignore_index=True)
+    
+    return final_df
 
+# concordia diagram plotting functions
+# -----------------------------------------------------------
+
+def calc_75_date(X):
+    '''
+    return age in Ma
+    '''
+    age = np.log(X+1)/lambda_235
+    return age/1e6
+
+def calc_68_date(Y):
+    '''
+    return age in Ma
+    '''
+    age = np.log(Y+1)/lambda_238
+    return age/1e6
+
+def calc_76_date(ratio,x0=1e6, tol=1e-8):
+    '''
+    calcualtes 207Pb/206Pb date given a 207Pb/206Pb ratio
+    
+    do not take a list of values
+    
+    Required Parameters:
+    ---------------------
+    ratio: the measured 76 ratio
+    
+    Optional Parameters:
+    ---------------------
+    x0: initial guess of the age for optimization
+    tol: tolerance bounds for optimization procedure
+    
+    Return:
+    ---------------------
+    age in Ma
+    
+    '''
+    def ratio_diff(t):
+        return abs(ratio-(np.exp(lambda_235*t)-1)/(np.exp(lambda_238*t)-1)/common_U238_U235)
+    
+    return minimize(ratio_diff, x0=x0, tol=tol, method='Nelder-Mead').x[0]/1e6
+
+def get_wetherill_point(age):
+    '''
+    get wetherill coordinates given an age or a list of ages
+    age in Ma
+    
+    Return:
+    ---------------------
+    Pb207_U235, Pb206_U238 single value or two arrays
+    '''
+    age = age*1e6
+    Pb206_U238 = np.exp(lambda_238*age)-1
+    Pb207_U235 = np.exp(lambda_235*age)-1
+    
+    return Pb207_U235, Pb206_U238
+
+def get_tera_wasserburg_point(age):
+    '''
+    get concordia coordinates given an age or a list of ages
+    age in Ma
+    
+    Return:
+    ---------------------
+    Pb207_U235, Pb206_U238 single value or two arrays
+    '''
+    age = age*1e6
+    Pb206_U238 = np.exp(lambda_238*age)-1
+    Pb207_U235 = np.exp(lambda_235*age)-1
+    
+    return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
+
+def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
+                age_min=None, age_max=None, xlim=None, ylim=None,
+                concordia_color='grey', concordia_lw=1, concordia_alpha=0.5,
+                ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
+                ellipse_fill_color='green', ellipse_fill_alpha=0.2, 
+                ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1):
+    '''
+    function for plotting the U-Pb ellipses on a concordia diagram
+    '''
+    if type == 'Wetherill':
+        x, y, sx, sy, err_corr = data['207Pb/235U'], data['206Pb/238U'], data['207Pb/235U_2e']/2, data['206Pb/238U_2e']/2, data['err_corr']
+    elif type == 'TW':
+        x, y, sx, sy = data['238U/206Pb'], data['207Pb/206Pb'], data['238U/206Pb_2e']/2, data['207Pb/206Pb_2e']/2
+        err_corr = np.zeros(x.shape[0])
+    else:
+        raise ValueError('type must be either Wetherill or TW')
+    
+    ages_68 = calc_68_date(y)
+    ages_75 = calc_75_date(x)
+
+    # first estimate the x and y axis limits based on the given data
+    if age_min is None:
+        # age_min be the min of either the 68 or 75 date
+        age_min = min(np.min(ages_68), np.min(ages_75))
+    if age_max is None:
+        # age_max be the max of either the 68 or 75 date
+        age_max = max(np.max(ages_68), np.max(ages_75))
+    # now based on the differences between the min and max ages decide the age interval to label
+    age_difference = max(np.mean(sy) * 4, np.mean(sx) * 4, age_max - age_min)
+    if age_difference < 1: # within 1 Myr
+        age_interval = 10
+    if age_difference < 10: # within 10 Myr
+        age_interval = 20
+    elif age_difference < 20: # within 20 Myr
+        age_interval = 30
+    elif age_difference < 50: # within 50 Myr
+        age_interval = 50
+    elif age_difference < 100: # within 100 Myr
+        age_interval = 100
+    elif age_difference < 500: # within 500 Myr
+        age_interval = 200
+    else:
+        age_interval = 500
+
+    # now set the x and y axis limits
+    if type == 'Wetherill':
+        xmin, ymin = get_wetherill_point(max(0, age_min-2*age_interval))
+        xmax, ymax = get_wetherill_point(min(age_max+2*age_interval, 4500))
+    elif type == 'TW':
+        xmin, ymin = get_tera_wasserburg_point(max(0, age_min-2*age_interval))
+        xmax, ymax = get_tera_wasserburg_point(min(age_max+2*age_interval, 4500))
+    if xlim is None:
+        xlim = (xmin, xmax)
+    if ylim is None:
+        ylim = (ymin, ymax)
+
+    # initiate the plot
+    plot = hv.Overlay()
+    curve_min_age = max(0, age_min-2*age_interval)
+    curve_max_age = min(age_max+2*age_interval, 4500)
+    # put the concordia curve on the plot
+    if type == 'Wetherill':
+        plot *= hv.Curve(get_wetherill_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
+    elif type == 'TW':
+        plot *= hv.Curve(get_tera_wasserburg_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
+    
+    # add labels through the age intervals between the min and max x limits
+    # convert the x limits to ages
+    x_min_age = calc_75_date(xlim[0]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
+    x_max_age = calc_75_date(xlim[1]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
+    # convert to the nearest multiples of the age interval
+    x_min_age = (int(x_min_age / age_interval)-1) * age_interval
+    x_max_age = (int(x_max_age / age_interval)+1) * age_interval
+    # given the age_interval, calculate the number of labels to add
+    num_labels = int((x_max_age - x_min_age) / age_interval)
+    # add the labels
+    for i in range(num_labels+1):
+        age = x_min_age + i * age_interval
+        if type == 'Wetherill':
+            x_label, y_label = get_wetherill_point(age)
+            # place the label with offset based on age_interval
+            xlabel_offset = 0.15 * get_wetherill_point(age_interval)[0]
+            ylabel_offset = 0.075 * get_wetherill_point(age_interval)[1]
+        elif type == 'TW':
+            x_label, y_label = get_tera_wasserburg_point(age)
+            # place the label with offset based on age_interval
+            xlabel_offset = 0.15 * get_tera_wasserburg_point(age_interval)[0]
+            ylabel_offset = 0.075 * get_tera_wasserburg_point(age_interval)[1]
+
+        plot *= hv.Scatter((x_label, y_label)).opts(color='black', size=5, alpha=0.5)
+        plot *= hv.Text(x_label-xlabel_offset, y_label+ylabel_offset, str(int(age))).opts(text_color='black', text_font_size='10pt', text_align='center', text_baseline='middle')
+
+    # plot data ellipses
+    for i in range(len(x)):
+        # calculate the ellipse points
+        ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
+        # plot filled ellipses
+        plot *= hv.Polygons((ell_x, ell_y)).opts(fill_color=ellipse_fill_color, alpha=ellipse_fill_alpha)
+        plot *= hv.Curve((ell_x, ell_y)).opts(color=ellipse_line_color, line_width=ellipse_line_width, alpha=ellipse_line_alpha)
+    # plot the data points
+    plot *= hv.Scatter((x, y), label='Data').opts(color=ellipse_center_color, alpha=ellipse_center_alpha, size=ellipse_center_size, marker=ellipse_center_marker)
+
+    if type == 'Wetherill':
+        plot.opts(xlim=xlim, ylim=ylim, xlabel='207Pb/235U', ylabel='206Pb/238U', title='Wetherill Concordia Diagram', width=800, height=600)
+    elif type == 'TW':
+        plot.opts(xlim=xlim, ylim=ylim, xlabel='238U/206Pb', ylabel='207Pb/206Pb', title='Tera-Wasserburg Concordia Diagram', width=800, height=600)
+    return plot
+
+def cor2cov2(sx,sy,rxy):
+
+    covmat = np.empty(shape=(2,2))
+    covmat[0][0] = sx**2
+    covmat[1][1] = sy**2
+    covmat[0][1] = covmat[1][0] = rxy*sx*sy
+    return covmat
+
+def calc_concordia_ellipse(x,y,sx,sy,rxy, alpha=0.05, n=100):
+    '''
+    function for calculating error ellipses for Wetherill concordia diagram
+    
+    Required Parameters:
+    ---------------------
+    X: a list or array of x axis
+    sX: the one sigma standard error of the x axis
+    Y: a list or array of y axis
+    sY: the one sigma standard error of the y axis
+    
+    Required Parameters:
+    ---------------------
+    alpha: (1-alpha)*100% confidence range
+    n: number of points to calculate on the ellipse to smooth the shape
+    '''
+    cov_mat = cor2cov2(sx, sy, rxy)
+    cutoff = chi2.ppf(1-alpha,2)
+    eigen = np.linalg.eig(cov_mat)
+
+    a = np.sqrt(cutoff*abs(eigen[0][1])) # major axis
+    b = np.sqrt(cutoff*abs(eigen[0][0])) # minor axis
+    v = eigen[1][0] # larger eigenvector
+    beta = np.arctan(v[0]/v[1]) # rotation angle of the ellipse
+    theta = np.linspace(0, 2 * np.pi, n)
+    
+    ell_x = x + a * np.cos(theta) * np.cos(beta) - b * np.sin(theta) * np.sin(beta)
+    ell_y = y + a * np.cos(theta) * np.sin(beta) + b * np.sin(theta) * np.cos(beta)
+    
+    return ell_x, ell_y
+
+def york_fit(X, Y, dX, dY, ri=0.0, maxIter=1e6, tol=1e-8):
+    '''
+    Make a linear bivariate fit to X, Y data using York et al. (2004).
+    This is an implementation of the line fitting algorithm presented in:
+    York, D et al., Unified equations for the slope, intercept, and standard
+    errors of the best straight line, American Journal of Physics, 2004, 72,
+    3, 367-375, doi = 10.1119/1.1632486
+
+    Required Parameters:
+    -----------------------
+    X, Y      x and y data points
+    dX, dY    errors for the data points X, Y
+      
+    Optional Parameters:
+    -----------------------
+    ri          correlation coefficient for the weights
+    maxIter     float, maXmum allowed number of iterations
+    tol: tolerance for the precision of the slope
+      
+    Returns:
+    -----------------------
+    a           y-intercept, y = a + bx
+    b           slope
+    sigma_a     standard error of a
+    sigma_b     standard error of b
+    x_bar       x coordinate of the centroid of the best fit line
+    y_bar       y coordinate of the centroid of the best fit line
+    S           goodness-of-fit estimate
+    cov_matrix  covariant matrix of the fit
+    
+    Usage:
+    [a, b] = bivariate_fit( X, Y, dX, dY, ri, b0, maxIter)
+    '''
+    # (1) Choose an approXmate initial value of b based on ols
+    b = np.polyfit(X, Y, 1)[1]
+    
+    # (2) Determine the weights wX, wY, for each point.
+    wX = 1.0 / dX**2.0
+    wY = 1.0 / dY**2.0
+
+    alphai = (wX * wY)**0.5
+    b_diff = 999.0
+
+    # tolerance for the fit, when b changes by less than tol for two
+    # consecutive iterations, fit is considered found
+    tol = tol
+
+    # iterate until b changes less than tol
+    iIter = 1
+    while (abs(b_diff) >= tol) & (iIter <= maxIter):
+
+        b_prev = b
+
+        # (3) Use these weights wX, wY to evaluate Wi for each point.
+        Wi = (wX * wY) / (wX + b**2.0 * wY - 2.0*b*ri*alphai)
+
+        # (4) Use the observed points (X ,Y) and Wi to calculate x_bar and
+        # y_bar, from which Ui and Vi , and hence betai can be evaluated for
+        # each point
+        x_bar = np.sum(Wi * X) / np.sum(Wi)
+        y_bar = np.sum(Wi * Y) / np.sum(Wi)
+
+        Ui = X - x_bar
+        Vi = Y - y_bar
+
+        betai = Wi * (Ui / wY + b*Vi / wX - (b*Ui + Vi) * ri / alphai)
+
+        # (5) Use Wi, Ui, Vi, and betai to calculate an improved estimate of b
+        b = np.sum(Wi * betai * Vi) / np.sum(Wi * betai * Ui)
+
+        # (6) Use the new b and repeat steps (3), (4), and (5) until successive
+        # estimates of b agree within some desired tolerance tol
+        b_diff = b - b_prev
+
+        iIter += 1
+
+    # (7) From this final value of b, together with the final x_bar and y_bar,
+    # calculate a from
+    a = y_bar - b * x_bar
+    
+    # Goodness of fit
+    S = np.sum(Wi * (Y - b*X - a)**2.0)
+
+    # (8) For each point (X, Y), calculate the adjusted values X_adj
+    X_adj = x_bar + betai
+
+    # (9) Use X_adj, together with Wi, to calculate X_adj_bar and thence ui
+    X_adj_bar = np.sum(Wi * X_adj) / np.sum(Wi)
+    ui = X_adj - X_adj_bar
+
+    # (10) From Wi , X_adj_bar and ui, calculate sigma_b, and then sigma_a
+    # (the standard uncertainties of the fitted parameters)
+    sigma_b = np.sqrt(1.0 / np.sum(Wi * ui**2))
+    sigma_a = np.sqrt(1.0 / np.sum(Wi) + X_adj_bar**2 * sigma_b**2)
+
+    # calculate covariance matrix of b and a (York et al., Section II)
+    cov = -X_adj_bar * sigma_b**2
+    # [[var(b), cov], [cov, var(a)]]
+    cov_matrix = np.array(
+        [[sigma_b**2, cov], [cov, sigma_a**2]])
+    
+    X2 = np.sum(Wi*(Y-b*X-a)**2)
+    mswd = X2/(len(X)-2)
+    p_value = 1-chi2.cdf(X2, len(X)-2)
+    if iIter <= maxIter:
+        return {'a':a, 'b':b, 
+                'sigma_a':sigma_a, 'sigma_b':sigma_b, 
+                'x_bar':X_adj_bar, 'y_bar':y_bar, 
+                'S':S, 'cov_matrix':cov_matrix, 
+                'mswd':mswd, 'p_value':p_value}
+    else:
+        print("bivariate_fit.py exceeded maXmum number of iterations, " +
+              "maxIter = {:}".format(maxIter))
+        return np.nan, np.nan, np.nan, np.nan
+    
+def york_fit_zero_intercept(X, Y, sX, sY):
+    '''
+    function for getting York fit for a fit anchored at origin
+    
+    Required Parameters:
+    ---------------------
+    X: a list or array of x axis
+    sX: the one sigma standard error of the x axis
+    Y: a list or array of y axis
+    sY: the one sigma standard error of the y axis
+    
+    Return:
+    ---------------------
+    b          slope of the fit
+    sigma_b     standard error of b
+    x_bar       x coordinate of the centroid of the best fit line
+    y_bar       y coordinate of the centroid of the best fit line
+    S           goodness-of-fit estimate    
+    '''
+    X, Y, sX, sY = np.array(X), np.array(Y), np.array(sX), np.array(sY)
+    b, _, _, _ = np.linalg.lstsq(X[:,np.newaxis], Y, rcond=None) # initial guess
+    wX = 1/sX**2
+    wY = 1/sY**2
+    for i in range(10):
+        W = wX*wY/(wX+wY*b**2)
+        Xbar = sum(W*X)/sum(W)
+        Ybar = sum(W*Y)/sum(W)
+        b = Ybar/Xbar
+        
+    U = X-Xbar
+    V = Y-Ybar
+    sigma_b = np.sum(W*(b*U-V)**2)/np.sum(W*U**2)/(len(X)-1)
+    # Goodness of fit
+    S = np.sum(W * (Y - b*X - a)**2.0)
+    
+    return {'b':b, 'sigma_b':sigma_b, 'x_bar':Xbar, 'y_bar':Ybar, 'S':S}
+
+def weightedmean(X,sX,alpha=0.05, valid=[True]):
+    '''
+    calculates 1-D weighted mean of a dataset with ONE SIGMA error
+    and then convert the weighted mean and error to ages following 
+    Schmitz and Schone, 2007 G-cubed
+    
+    **note this function is independent of data type - meaning one can send in
+        either isotopic ratios or calculated ages
+    **note that Boise lab prefer to calculate weighted mean of the isotope ratio
+    
+    Required Parameters:
+    ---------------------
+    X: a list or array of dataset
+    sX: the one sigma standard error of the dataset
+    alpha: 1 minus the desired error range, default is 95% uncertainty
+    valid: a list of boolean for data selection
+    
+    '''
+    assert len(X)==len(sX)
+    ns = len(X)
+    X = X[valid]
+    sX = sX[valid]
+
+    if (len(X)<=1):
+        mean = {'t': X,'s[t]':sX,'ci[t]':ntfact(alpha)*sX, 'disp[t]':None} 
+        mswd = 0
+        pvalue = 1
+        return {'mean':mean, 'mswd':mswd, 'p_value':p_value}
+
+    df = len(X)-1 # degrees of freedom for the homogeneity test
+
+    mean = {'t': None,'s[t]':None,'ci[t]':None, 'disp[t]':None, 'n':sum(valid), 'df':df}
+    w = (1/sX)**2
+    mean['t'] = sum(w*X)/sum(w)
+    mean['s[t]'] = np.sqrt(1/sum(w))
+    SS = np.sum(((X-mean['t'])/sX)**2)
+    mswd = SS/df
+    p_value = 1-chi2.cdf(SS,df)
+    mean['ci[t]'] = ntfact(alpha)*mean['s[t]']
+
+    return {'mean':mean, 'mswd':mswd, 'p_value':p_value}
