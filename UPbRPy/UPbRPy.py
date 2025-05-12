@@ -1831,3 +1831,77 @@ def weighted_mean(dates, sigma, student_T=True):
     else:
         return weighted_mean, 2*weighted_mean_sigma
     
+
+def plot_sample_weighted_mean(means, uncertainties, student_T = True, 
+                              line_color='k', line_width=1, mean_alpha=0.5,
+                              color='green', alpha=0.3, edgecolor='k',
+                              figsize=(6,6)):
+    '''
+    function for plotting weighted mean results for grains of a sample
+
+    Parameters
+    ----------
+    means: list of means for each grain
+    uncertainties: list of 2σ uncertainties for each grain
+    student_T: if True, report the 95% confidence interval by multiplying the
+        standard error of the mean by the student T value for n-1 degrees of freedom
+    line_color: color of the mean line
+    line_width: width of the mean line
+    mean_alpha: alpha of the mean line
+    color: color of the grain rectangles
+    alpha: alpha of the grain rectangles
+    edgecolor: edge color of the grain rectangles
+    figsize: figure size
+
+    Returns
+    -------
+    fig: figure object
+    '''
+    # sort the means and uncertainties
+    means, uncertainties = zip(*sorted(zip(means, uncertainties)))
+    # first calculate the weighted mean and 95% confidence interval
+    sample_weighted_mean, sample_mean_2sigma = weighted_mean(means, uncertainties, student_T)
+
+    grain_spacing = 1
+    grain_width=0.3
+    start_x = 1
+    # initialize current x
+    current_x = start_x
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # number of zircons in sample
+    n_grains = len(means)
+
+    # sample width
+    sample_width = grain_spacing*n_grains
+
+    rectangle = matplotlib.patches.Rectangle((current_x-1, sample_weighted_mean-sample_mean_2sigma),\
+                                                sample_width+1, sample_mean_2sigma*2, color='lightgrey', alpha=mean_alpha)
+    ax.add_patch(rectangle)
+
+    # the mean age
+
+    ax.hlines(sample_weighted_mean, current_x-1, current_x+sample_width, color=line_color, lw=line_width)
+
+    # legend control
+    marked = False
+
+    # iterate over each zircon
+    for j in range(n_grains):
+        this_rectangle = matplotlib.patches.Rectangle((current_x-grain_width/2, 
+                                                       means[j]-uncertainties[j]), 
+                                                       grain_width, uncertainties[j]*2, 
+                                                       facecolor=color, alpha=alpha, edgecolor=edgecolor)
+        ax.add_patch(this_rectangle)
+
+        current_x = current_x + grain_spacing
+
+    ax.set_title(str(np.round(sample_weighted_mean, 3))+ r'$\pm$'+str(np.round(float(sample_mean_2sigma), 3)) +str(' Ma'), fontdict={'size': 12})
+
+    # tick the x to the next sample
+    current_x = current_x + grain_spacing
+    ax.set_xlabel('Grain Number', fontdict={'size': 12})
+    ax.set_ylabel('Age (Ma)', fontdict={'size': 12})
+    ax.set_xticks(range(1, n_grains+1), range(1, n_grains+1))
+    return fig, ax
