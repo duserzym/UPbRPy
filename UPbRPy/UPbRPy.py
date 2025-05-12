@@ -7,6 +7,9 @@ import hvplot.pandas
 import numpy as np
 import panel as pn
 
+import matplotlib
+import matplotlib.pyplot as plt
+
 from scipy.stats import chi2, norm, t
 from scipy.interpolate import interp1d
 from scipy.optimize import minimize 
@@ -1419,7 +1422,7 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
     x_min_age = calc_75_date(xlim[0]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
     x_max_age = calc_75_date(xlim[1]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
     # convert to the nearest multiples of the age interval
-    x_min_age = (int(x_min_age / age_interval)-1) * age_interval
+    x_min_age = (int(x_min_age / age_interval)) * age_interval
     x_max_age = (int(x_max_age / age_interval)+1) * age_interval
     # given the age_interval, calculate the number of labels to add
     num_labels = int((x_max_age - x_min_age) / age_interval)
@@ -1447,8 +1450,16 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
         # plot filled ellipses
         plot *= hv.Polygons((ell_x, ell_y)).opts(fill_color=ellipse_fill_color, alpha=ellipse_fill_alpha)
         plot *= hv.Curve((ell_x, ell_y)).opts(color=ellipse_line_color, line_width=ellipse_line_width, alpha=ellipse_line_alpha)
+    
     # plot the data points
-    plot *= hv.Scatter((x, y), label='Data').opts(color=ellipse_center_color, alpha=ellipse_center_alpha, size=ellipse_center_size, marker=ellipse_center_marker)
+    plot *= hv.Scatter(data, kdims=['207Pb/235U'], vdims=['206Pb/238U', 'sample', '207Pb/235U_age', '206Pb/238U_age'], label='Data').opts(color=ellipse_center_color, 
+                                                                                            alpha=ellipse_center_alpha, 
+                                                                                            size=ellipse_center_size, 
+                                                                                            marker=ellipse_center_marker,
+                                                                                            tools=['hover'],
+                                                                                            hover_tooltips=[("sample", "@sample"),
+                                                                                                    ("207Pb/235U_age", "@{207Pb/235U_age}"),
+                                                                                                    ("206Pb/238U_age", "@{206Pb/238U_age}")])
 
     if type == 'Wetherill':
         plot.opts(xlim=xlim, ylim=ylim, xlabel='207Pb/235U', ylabel='206Pb/238U', title='Wetherill Concordia Diagram', width=800, height=600)
@@ -1643,48 +1654,180 @@ def york_fit_zero_intercept(X, Y, sX, sY):
     V = Y-Ybar
     sigma_b = np.sum(W*(b*U-V)**2)/np.sum(W*U**2)/(len(X)-1)
     # Goodness of fit
-    S = np.sum(W * (Y - b*X - a)**2.0)
+    S = np.sum(W * (Y - b*X)**2.0)
     
     return {'b':b, 'sigma_b':sigma_b, 'x_bar':Xbar, 'y_bar':Ybar, 'S':S}
 
-def weightedmean(X,sX,alpha=0.05, valid=[True]):
-    '''
-    calculates 1-D weighted mean of a dataset with ONE SIGMA error
-    and then convert the weighted mean and error to ages following 
-    Schmitz and Schone, 2007 G-cubed
+def plot_dates(zircon_means, zircon_2sigmas, include, 
+               sample_means, sample_2sigmas, colors, labels,
+               legend=True, figsize=None, ylim=None, lineweight=None, 
+               bbox_to_anchor=None, plot_zircons=True):
+    """
+    Make a date distribution plot.
     
-    **note this function is independent of data type - meaning one can send in
-        either isotopic ratios or calculated ages
-    **note that Boise lab prefer to calculate weighted mean of the isotope ratio
+    inputs:
+    - zircon_means = list of numpy arrays containing mean dates (each array being a sample)
+    - zircon_2sigmas = list of numpy arrays containing 2sigmas (each array being a sample)
+    - include = list of 'yes' or 'no' array for inclusion in mean (each array being a sample)
+    - sample_means = list of sample mean dates (one per sample)
+    - sample_2sigmas = list of sample 2sigmas (one per sample)
+    - colors = list of colors (one per sample)
+    - labels = list of labels (one per sample)
+    - figsize = figure size (optional)
+    - ylim = ylim (optional)
+    - linewidth = zircon linewidth (optional)
+    - bbox_to_anchor = for the legend (optional)
+    """
+    # formatting constants
+    zircon_spacing = 0.9
+    sample_spacing = 5.75 - zircon_spacing
+    start_x = 3
+    yes_alpha = 0.8
+    no_alpha = 0.2
+    x_positions = []
+    if lineweight==None:
+        lineweight=3
     
-    Required Parameters:
-    ---------------------
-    X: a list or array of dataset
-    sX: the one sigma standard error of the dataset
-    alpha: 1 minus the desired error range, default is 95% uncertainty
-    valid: a list of boolean for data selection
+    # initialize current x
+    current_x = start_x
     
-    '''
-    assert len(X)==len(sX)
-    ns = len(X)
-    X = X[valid]
-    sX = sX[valid]
+    # number of samples
+    n_samples = len(zircon_means)
+    
+    # plot
+    if figsize == None:
+        fig, ax = plt.subplots()
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+    
+    if plot_zircons == False:
+        for i in range(n_samples):
+            sample_width = 20
 
-    if (len(X)<=1):
-        mean = {'t': X,'s[t]':sX,'ci[t]':ntfact(alpha)*sX, 'disp[t]':None} 
-        mswd = 0
-        pvalue = 1
-        return {'mean':mean, 'mswd':mswd, 'p_value':p_value}
+            rectangle = matplotlib.patches.Rectangle((current_x-1, sample_means[i]-sample_2sigmas[i]),\
+                                                     sample_width+1, sample_2sigmas[i]*2, color='lightgrey')
+            ax.add_patch(rectangle)
 
-    df = len(X)-1 # degrees of freedom for the homogeneity test
+            # the mean age
 
-    mean = {'t': None,'s[t]':None,'ci[t]':None, 'disp[t]':None, 'n':sum(valid), 'df':df}
-    w = (1/sX)**2
-    mean['t'] = sum(w*X)/sum(w)
-    mean['s[t]'] = np.sqrt(1/sum(w))
-    SS = np.sum(((X-mean['t'])/sX)**2)
-    mswd = SS/df
-    p_value = 1-chi2.cdf(SS,df)
-    mean['ci[t]'] = ntfact(alpha)*mean['s[t]']
+            ax.hlines(sample_means[i], current_x-1, current_x+sample_width)
+            
+            current_x = current_x + 25
+        
+    if plot_zircons == True:
+        # iterate over each sample
+        for i in range(n_samples):
 
-    return {'mean':mean, 'mswd':mswd, 'p_value':p_value}
+            # number of zircons in sample
+            n_zircons = len(zircon_means[i])
+
+            # sample width
+            sample_width = zircon_spacing*n_zircons
+
+            rectangle = matplotlib.patches.Rectangle((current_x-1, sample_means[i]-sample_2sigmas[i]),\
+                                                     sample_width+1, sample_2sigmas[i]*2, color='lightgrey')
+            ax.add_patch(rectangle)
+
+            # the mean age
+
+            ax.hlines(sample_means[i], current_x-1, current_x+sample_width)
+
+            # legend control
+            marked = False
+
+            # iterate over each zircon
+            for j in range(n_zircons):
+
+                if marked:
+                    if include[i][j] == 'yes':
+                        ax.vlines(current_x, zircon_means[i][j]-zircon_2sigmas[i][j], zircon_means[i][j]+zircon_2sigmas[i][j],\
+                                  colors=colors[i], lw=lineweight, alpha=yes_alpha)
+                    else:
+                        ax.vlines(current_x, zircon_means[i][j]-zircon_2sigmas[i][j], zircon_means[i][j]+zircon_2sigmas[i][j],\
+                                  colors=colors[i], lw=lineweight, alpha=no_alpha)
+                else:
+                    if include[i][j] == 'yes':
+                        ax.vlines(current_x, zircon_means[i][j]-zircon_2sigmas[i][j], zircon_means[i][j]+zircon_2sigmas[i][j],\
+                                  colors=colors[i], lw=lineweight, alpha=yes_alpha, label=labels[i])
+                        marked = True
+                    else:
+                        ax.vlines(current_x, zircon_means[i][j]-zircon_2sigmas[i][j], zircon_means[i][j]+zircon_2sigmas[i][j],\
+                                  colors=colors[i], lw=lineweight, alpha=no_alpha)
+
+                # tick the x to the next zircon
+                current_x = current_x + zircon_spacing
+
+            # tick the x to the next sample
+            current_x = current_x + sample_spacing
+            x_positions.append(current_x-sample_spacing)
+    
+    # prettify
+    ax.invert_yaxis()
+    ax.set_ylabel('$^{206}$Pb/$^{238}$U date (Ma)',fontsize=13)
+    if legend == True:
+        if bbox_to_anchor == None:
+            ax.legend(bbox_to_anchor=(1.8,1), fontsize=12)
+        else:
+            ax.legend(bbox_to_anchor=bbox_to_anchor, fontsize=12)
+    if ylim != None:
+        ax.set_ylim(ylim)
+        
+    return fig, ax, x_positions
+
+
+def weighted_mean(dates, sigma, student_T=True):
+    
+    """
+    calculated a weighted mean from dates and uncertainities
+    
+    input parameters
+    ----------------
+    dates: date of individual grains
+    sigma: 2σ uncertainty associated with dates
+    student_T: if True, report the 95% confidence interval by multiplying the
+        standard error of the mean by the student T value for n-1 degrees of freedom
+    
+    returns
+    ----------------
+    weighted_mean, 2σ uncertainty
+    
+    """
+    sigma = np.array(sigma)/2
+    inverse_variance=[]
+    alpha=[]
+    weighted_mean_calc=[]
+    
+    for n in range(0,len(dates)):
+        value = 1/sigma[n]**2
+        inverse_variance.append(value)
+    inverse_variance_sum = np.sum(inverse_variance)
+    
+    for n in range(0,len(dates)):
+        value = (1/sigma[n]**2)/inverse_variance_sum
+        alpha.append(value)
+        
+    #calculate the weights for each date    
+    for n in range(0,len(dates)):
+        value = alpha[n]*dates[n]
+        weighted_mean_calc.append(value)
+    
+    #take the sum of the weights multiplied by the dates to get the weighted
+    #mean (equation 64 of McLean et al., 2011)
+    weighted_mean = np.sum(weighted_mean_calc)
+    
+    #the variance of the weighted mean is simply the inverse of the sum of
+    #the inverse variances of each date (equation 66 of McLean et al., 2011)
+    variance = 1/inverse_variance_sum
+    
+    weighted_mean_sigma = np.sqrt(variance)
+    
+    n = len(dates)
+    
+    if student_T:
+        # calculate the student T value for n-1 degrees of freedom
+        this_t = t.ppf(0.975, n-1)
+        weighted_mean_sigma = weighted_mean_sigma * this_t
+        return weighted_mean, weighted_mean_sigma
+    else:
+        return weighted_mean, 2*weighted_mean_sigma
+    
