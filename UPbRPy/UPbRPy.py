@@ -1363,9 +1363,10 @@ def get_tera_wasserburg_point(age):
     
     return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
 
+
 def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
                 age_min=None, age_max=None, xlim=None, ylim=None,
-                concordia_color='grey', concordia_lw=1, concordia_alpha=0.5,
+                concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
                 ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
                 ellipse_fill_color='green', ellipse_fill_alpha=0.2, 
                 ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1):
@@ -1426,9 +1427,20 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
     # put the concordia curve on the plot
     if type == 'Wetherill':
         plot *= hv.Curve(get_wetherill_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
+        if concordia_uncertainty:
+            Pb207_U235s, lower_68, upper_68 = get_Wetherill_concordia_uncertainty()
+            plot *= hv.Area((Pb207_U235s, lower_68, upper_68), vdims=['y', 'y2']).opts(color='grey',
+                                                                                                alpha=0.25,
+                                                                                                line_alpha=0  # Optional: hide edge line
+                                                                                            )
     elif type == 'TW':
         plot *= hv.Curve(get_tera_wasserburg_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
-    
+        if concordia_uncertainty:
+            U238_Pb206s, lower_76, upper_76 = get_TW_concordia_uncertainty()
+            plot *= hv.Area((U238_Pb206s, lower_76, upper_76), vdims=['y', 'y2']).opts(color='grey',
+                                                                                        alpha=0.25,
+                                                                                        line_alpha=1  # Optional: hide edge line
+                                                                                    )
     # add labels through the age intervals between the min and max x limits
     # convert the x limits to ages
     x_min_age = calc_75_date(xlim[0]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
@@ -1483,14 +1495,14 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
                   title='Wetherill Concordia Diagram', 
                   hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
                   xlabel='207Pb/235U', ylabel='206Pb/238U', 
-                  fontsize={'xlabel':12, 'ylabel':12},
+                  fontsize={'xlabel':12, 'ylabel':12, 'title':16},
                   width=800, height=600)
     elif type == 'TW':
         plot.opts(xlim=xlim, ylim=ylim, 
                   title='Tera-Wasserburg Concordia Diagram',
                   hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
-                  xlabel='238U/206Pb', ylabel='207Pb/206Pb', 
-                  fontsize={'xlabel':12, 'ylabel':12},
+                  xlabel='238U/206Pb', ylabel=r'207Pb/206Pb', 
+                  fontsize={'xlabel':12, 'ylabel':12, 'title':16},
                   width=800, height=600)
     return plot
 
@@ -1542,7 +1554,7 @@ def get_TW_concordia_uncertainty():
         lower_76.append(np.percentile(all_Pb207_Pb206, 2.5))
         upper_76.append(np.percentile(all_Pb207_Pb206, 97.5))
     return U238_Pb206s, lower_76, upper_76
-    
+
 def cor2cov2(sx,sy,rxy):
 
     covmat = np.empty(shape=(2,2))
