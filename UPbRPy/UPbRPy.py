@@ -28,8 +28,9 @@ common_U238_U235 = 137.818 # U238/U235 ratio
 old_common_U238_U235 = 137.88 # previous U238/U235 ratio
 
 lambda_235 = 9.8485e-10 # decay constant for U235, y-1
-
+sigma_235 = lambda_235 * 0.14 / 100 / 2 
 lambda_238 = 1.55125e-10 # decay constant for U238, y-1
+sigma_238 = lambda_238 * 0.11 / 100 / 2
 
 # import the standard archive stored in the package folder
 standard_archive = pd.read_csv(files(__package__) / 'standards.csv', index_col=0)
@@ -463,7 +464,15 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         # plot the data and the best-fit line
         plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6)
         plot *= hv.Curve(((0, this_channel_measured_cps.max()*slope), (0, this_channel_measured_cps.max())), label=channel + ' calibration factor').opts(color=this_channel_color, line_width=2, show_legend=True)
-        plot.opts(title='Calibration factor for concentration measurements', xlabel='True concentration (ppm)', ylabel='Measured cps', width=800, height=600)
+        plot.opts(title='Calibration factor for concentration measurements',
+                    fontsize={'title': '16pt'},
+                    hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
+                    width=800,
+                    height=600,
+                    xlabel='True concentration (ppm)',
+                    ylabel='Measured cps'
+                    )
+
         # set xlim and ylim
     # turn off legend
     plot.opts(show_legend=False)
@@ -613,6 +622,7 @@ def calc_raw_ratios(experiment, total_data, baseline_subtracted_total_data):
         
     return plateau_data_with_raw_ratios
 
+
 def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_name):
     '''
     function for calculating nominal fractionation factor by comparing a given known ratio with the measured ratio
@@ -635,7 +645,7 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
         all_times.append(this_spot['relative_time'].values)
         all_ratios.append(this_spot[ratio_name].values)
         # plot the fractionation
-        plot *= hv.Curve((this_spot['relative_time'].values, known_ratio/this_spot[ratio_name].values),label=spot_name).opts(color=Category20[20][i % 20], line_width=1, alpha=0.6, show_legend=True)
+        plot *= hv.Curve((this_spot['relative_time'].values, known_ratio/this_spot[ratio_name].values)).opts(color=Category20[20][i % 20], line_width=1, alpha=0.6, show_legend=False)
 
     # now interpolate the time and fractionation for all spots, unify the time axis, and calculate the mean and std * student's t multiplier
     min_time = 0
@@ -661,19 +671,21 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
 
     # plot the mean and std * student's t multiplier of the interpolated fractionation
-    plot *= hv.Curve((unified_time, mean_fractionation_factor), label='mean fractionation factor').opts(color='black', line_width=2, line_dash='dashed', show_legend=False)
-    plot *= hv.Curve((unified_time, mean_fractionation_factor + std_fractionation_factor), label='1 std').opts(color='grey', line_dash='dashed', line_width=1, show_legend=False)
+    plot *= hv.Curve((unified_time, mean_fractionation_factor), label='mean fractionation factor').opts(color='black', line_width=2, line_dash='dashed', show_legend=True)
+    plot *= hv.Curve((unified_time, mean_fractionation_factor + std_fractionation_factor)).opts(color='grey', line_dash='dashed', line_width=1, show_legend=True)
     plot *= hv.Curve((unified_time, mean_fractionation_factor - std_fractionation_factor)).opts(color='grey', line_dash='dashed', line_width=1)
     # fill between the 95CI interval
-    plot *= hv.Area((unified_time, mean_fractionation_factor - std_fractionation_factor, mean_fractionation_factor + std_fractionation_factor), vdims=['y', 'y2']).opts(color='grey', alpha=0.1)
+    plot *= hv.Area((unified_time, mean_fractionation_factor - std_fractionation_factor, mean_fractionation_factor + std_fractionation_factor), vdims=['y', 'y2'], label='1 std evelope').opts(color='grey', alpha=0.1, show_legend=True)
 
     plot.opts(title=ratio_name + ' fractionation factor for primary standard '+ primary_standard, 
+        hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
         xlabel='Time (s)', ylabel=ratio_name + '\nfractionation factor',
         fontsize={'xlabel':12, 'ylabel':12},
-        legend_position='right', show_legend = False,
+        legend_position='top_right', show_legend = True,
         width=800, height=400)
             
     return plot, downhole_fractionation
+
 
 def calc_DH_fractionations_rad(primary_standard_ratios, standard_archive, fit='linear'):
     '''
@@ -1452,21 +1464,85 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
         plot *= hv.Curve((ell_x, ell_y)).opts(color=ellipse_line_color, line_width=ellipse_line_width, alpha=ellipse_line_alpha)
     
     # plot the data points
-    plot *= hv.Scatter(data, kdims=['207Pb/235U'], vdims=['206Pb/238U', 'sample', '207Pb/235U_age', '206Pb/238U_age'], label='Data').opts(color=ellipse_center_color, 
-                                                                                            alpha=ellipse_center_alpha, 
-                                                                                            size=ellipse_center_size, 
-                                                                                            marker=ellipse_center_marker,
-                                                                                            tools=['hover'],
-                                                                                            hover_tooltips=[("sample", "@sample"),
-                                                                                                    ("207Pb/235U_age", "@{207Pb/235U_age}"),
-                                                                                                    ("206Pb/238U_age", "@{206Pb/238U_age}")])
+    plot *= hv.Scatter(data, kdims=['207Pb/235U'], 
+                             vdims=['206Pb/238U', 
+                                    'sample', 
+                                    '207Pb/235U_age', 
+                                    '206Pb/238U_age'], 
+                                    label='Data').opts(color=ellipse_center_color, 
+                                                        alpha=ellipse_center_alpha, 
+                                                        size=ellipse_center_size, 
+                                                        marker=ellipse_center_marker,
+                                                        tools=['hover'],
+                                                        hover_tooltips=[("sample", "@sample"),
+                                                                ("207Pb/235U_age", "@{207Pb/235U_age}"),
+                                                                ("206Pb/238U_age", "@{206Pb/238U_age}")])
 
     if type == 'Wetherill':
-        plot.opts(xlim=xlim, ylim=ylim, xlabel='207Pb/235U', ylabel='206Pb/238U', title='Wetherill Concordia Diagram', width=800, height=600)
+        plot.opts(xlim=xlim, ylim=ylim, 
+                  title='Wetherill Concordia Diagram', 
+                  hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
+                  xlabel='207Pb/235U', ylabel='206Pb/238U', 
+                  fontsize={'xlabel':12, 'ylabel':12},
+                  width=800, height=600)
     elif type == 'TW':
-        plot.opts(xlim=xlim, ylim=ylim, xlabel='238U/206Pb', ylabel='207Pb/206Pb', title='Tera-Wasserburg Concordia Diagram', width=800, height=600)
+        plot.opts(xlim=xlim, ylim=ylim, 
+                  title='Tera-Wasserburg Concordia Diagram',
+                  hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
+                  xlabel='238U/206Pb', ylabel='207Pb/206Pb', 
+                  fontsize={'xlabel':12, 'ylabel':12},
+                  width=800, height=600)
     return plot
 
+def get_Wetherill_concordia_uncertainty():
+    Pb207_U235s = np.linspace(0.001,80, 1000)
+
+    # resample Lambdas
+    lambda_235s = np.random.normal(lambda_235, sigma_235, 1000)
+    lambda_238s = np.random.normal(lambda_238, sigma_238, 1000)
+
+    lower_68 = []
+    upper_68 = []
+
+    for i in range(len(Pb207_U235s)):
+        Pb207_U235 = Pb207_U235s[i]
+    
+        all_Pb206_U238 = []
+        for l_235, l_238 in zip(lambda_235s, lambda_238s):
+            age = np.log(Pb207_U235+1)/l_235
+            this_Pb206_U238 = np.exp(l_238*age)-1
+            
+            all_Pb206_U238.append(this_Pb206_U238)
+        all_Pb206_U238 = np.array(all_Pb206_U238)
+        lower_68.append(np.percentile(all_Pb206_U238, 2.5))
+        upper_68.append(np.percentile(all_Pb206_U238, 97.5))
+
+    return Pb207_U235s, lower_68, upper_68
+
+def get_TW_concordia_uncertainty():
+    U238_Pb206s = np.linspace(1, 100, 1000)
+
+    # resample Lambdas
+    lambda_235s = np.random.normal(lambda_235, sigma_235, 1000)
+    lambda_238s = np.random.normal(lambda_238, sigma_238, 1000)
+
+    lower_76 = []
+    upper_76 = []
+
+    for i in range(len(U238_Pb206s)):
+        U238_Pb206 = U238_Pb206s[i]
+    
+        all_Pb207_Pb206 = []
+        for l_235, l_238 in zip(lambda_235s, lambda_238s):
+            age = np.log(1/U238_Pb206+1)/l_238
+            this_Pb207_U235 = np.exp(l_235*age)-1
+            this_Pb207_Pb206 = this_Pb207_U235 * U238_Pb206 / common_U238_U235
+            all_Pb207_Pb206.append(this_Pb207_Pb206)
+        all_Pb207_Pb206 = np.array(all_Pb207_Pb206)
+        lower_76.append(np.percentile(all_Pb207_Pb206, 2.5))
+        upper_76.append(np.percentile(all_Pb207_Pb206, 97.5))
+    return U238_Pb206s, lower_76, upper_76
+    
 def cor2cov2(sx,sy,rxy):
 
     covmat = np.empty(shape=(2,2))
