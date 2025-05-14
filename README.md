@@ -13,11 +13,23 @@ UPbRPy is developed with a goal of providing a Python-based reproducible data re
 **6) export depth profile data**\
 **7) making publication-ready figures**
 
-### Elemental concentration calibration
 
+### interactive time series visualization
+<img src="./examples/example_time_series.png" alt="Interactive time series visualization" width="600">
+
+### Elemental concentration calibration
 <img src="./examples/example_concentration_calibration.png" alt="Elemental concentration calibration" width="550">
 
-An interactive plot can be viewed here: [Elemental concentration calibration](./examples/example_concentration_calibration.html). 
+### Dowwhole fractionation characterization and correction
+<img src="./examples/example_downhole_fractionation.png" alt="Dowwhole fractionation characterization and correction" width="600">
+
+### Session-wide fractionation correction
+<img src="./examples/example_session_correction.png" alt="Session-wide fractionation correction" width="600">
+
+### Concordia diagram visualization
+- example Plešovice zircon LA-ICP-MS data
+
+<img src="./examples/example_Wetherill_concordia.png" alt="Wetherill Concordia diagram" width="500">
 
 ## Installation
 pip release will be made available. During the development stage, you can download or clone this repository and add the path to the `UPbRPy` folder to your Python path by adding the following lines to your script:
