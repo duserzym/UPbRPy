@@ -520,7 +520,7 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
 def propagate_raw_ratio_uncertaintys(nom, denom):
     '''
     function for propagating the uncertainty of the raw ratios
-        using Possion distribution relative uncertainty where
+        using Poisson distribution relative uncertainty where
         uncertainty of each individual analyte is sqrt(cps)/cps
         and the uncertainty of the ratio is given by the following formula:
         relative uncertainty of the ratio = sqrt(1/nom + 1/denom)
@@ -596,15 +596,15 @@ def calc_raw_ratios(experiment, total_data, baseline_subtracted_total_data):
         
         # 208/232 mean of ratios
         this_spot_R82 = this_spot_plateau_data['208Pb'] / this_spot_plateau_data['232Th']
-        this_spot_R82_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th'])
+        this_spot_R82_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th']) * this_spot_R82
 
         # 206/238 mean of ratios
         this_spot_R68 = this_spot_plateau_data['206Pb'] / this_spot_plateau_data['238U']
-        this_spot_R68_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['206Pb'], this_spot_plateau_data['238U'])
+        this_spot_R68_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['206Pb'], this_spot_plateau_data['238U']) * this_spot_R68
 
         # 207/206 mean of ratios
         this_spot_R76 = this_spot_plateau_data['207Pb'] / this_spot_plateau_data['206Pb']
-        this_spot_R76_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['207Pb'], this_spot_plateau_data['206Pb'])
+        this_spot_R76_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['207Pb'], this_spot_plateau_data['206Pb']) * this_spot_R76
 
         this_spot_plateau_data['206Pb/204Pb'] = this_spot_R64
         this_spot_plateau_data['206Pb/238U'] = this_spot_R68
@@ -687,7 +687,10 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     return plot, downhole_fractionation
 
 
-def calc_DH_fractionations_rad(primary_standard_ratios, standard_archive, fit='linear'):
+def calc_DH_fractionations_rad(primary_standard_ratios, 
+                                standard_archive, 
+                                ratio_names = ['206Pb/238U', '207Pb/206Pb', '208Pb/232Th'], 
+                                fit='linear'):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
         interpolating the ratio as a function of relative time within each spot analysis
@@ -718,7 +721,7 @@ def calc_DH_fractionations_rad(primary_standard_ratios, standard_archive, fit='l
     # store the plots and interpolations in a dictionary
     DH_correction_results = dict()
 
-    for ratio_name in ['206Pb/238U', '207Pb/206Pb', '208Pb/232Th']:
+    for ratio_name in ratio_names:
         known_PR_ratio = standard_archive.loc[primary_standard, ratio_name+'*'] # for highly radiogenic primary standards
         plot, downhole_fractionation = calc_DH_nominal_fractionation(known_PR_ratio, primary_standard_ratios, ratio_name)
         # append the results to the dictionary
@@ -871,6 +874,7 @@ def apply_DH_correction(plateau_data_with_raw_ratios, DH_correction_results):
         for isotope_ratio in DH_correction_results.keys():
             this_spot_DH_correction = DH_correction_results[isotope_ratio]['interpolation']
             this_spot_data[isotope_ratio + '_DH_corrected'] = this_spot_data[isotope_ratio] / this_spot_DH_correction(this_spot_data['Time'] - this_spot_data['Time'].iloc[0])
+
         corrected_plateau_data = pd.concat([corrected_plateau_data, this_spot_data])
 
     return corrected_plateau_data
@@ -961,7 +965,10 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
     
     return plot, p, p_std
 
-def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios, standard_archive, degree=2):
+def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios, 
+                                    standard_archive, 
+                                    ratio_names=['206Pb/238U', '207Pb/206Pb', '208Pb/232Th'], 
+                                    degree=2):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
         after applying a given downhole correction based on the primary standards
@@ -990,7 +997,7 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios, standar
     primary_standard = primary_standard_DH_corrected_ratios['sample'].unique()[0]
     session_correction_results = dict()
 
-    for ratio_name in ['206Pb/238U', '207Pb/206Pb', '208Pb/232Th']:
+    for ratio_name in ratio_names:
         known_PR_ratio = standard_archive.loc[primary_standard, ratio_name+'*'] # at this stage we only compare radiogenic vs. radiogenic
         plot, p, p_std = calc_session_nominal_fractionation(known_PR_ratio, primary_standard_DH_corrected_ratios, ratio_name, degree)
         # append the results to the dictionary
@@ -1168,7 +1175,35 @@ def calc_err_corr_quotient(x, sx, u, su, v, sv):
     '''
     return ((su/u)**2 + (sv/v)**2 - (sx/x)**2) * u * v /2 / (su * sv)
 
-def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correction_results, session_correction_results, sep='_'):
+def calc_68_76_discordance(t68, t76, s68, s76):
+    '''
+    function for calculating the discordance between 68 and 76 ratios
+
+    Parameters
+    ----------
+    t68 : float
+        the 68 ratio
+    t76 : float
+        the 76 ratio
+    s68 : float
+        the uncertainty of the 68 ratio
+    s76 : float
+        the uncertainty of the 76 ratio
+
+    Returns
+    -------
+    discordance : float
+        the discordance between the 68 and 76 ratios in percent
+    discordance_2s : float
+        the propagated relative 2 standard error of the discordance
+    '''
+    disc = 1 - (t68 / t76)
+    # calculate the propagated uncertainty of the discordance
+    s = np.sqrt((1/t76)**2 * s68**2 + (t68/t76**2)**2 * s76**2)
+
+    return disc * 100, s * 2 / disc * 100
+
+def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
     '''
     function for calculating the mean isotope ratios and associated propagated uncertainties
         for highly radiogenic phases, we only consider the measurement ratio uncertainty (std) 
@@ -1186,7 +1221,7 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
         this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name]
         for isotope_ratio in session_correction_results.keys():
             # get the measured mean and std
-            this_spot_measured_ratio_mean = this_spot_data[isotope_ratio + '_DH_corrected'].mean()
+            this_spot_measured_ratio_mean = this_spot_data[isotope_ratio].mean()
             # use the original measured ratio std for the uncertainty propagation
             this_spot_measured_ratio_se = this_spot_data[isotope_ratio].std() / np.sqrt(this_spot_data.shape[0]) # standard error of the mean
 
@@ -1204,8 +1239,8 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
             # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
             # save results
             final_ratios.loc[spot_name, isotope_ratio] = this_spot_fractionation_correction_mean
-            final_ratios.loc[spot_name, isotope_ratio + '_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / np.sqrt(this_spot_data.shape[0]) / this_spot_fractionation_correction_mean * 100
-            final_ratios.loc[spot_name, isotope_ratio + '_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 / np.sqrt(this_spot_data.shape[0])
+            final_ratios.loc[spot_name, isotope_ratio + '_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_correction_mean * 100
+            final_ratios.loc[spot_name, isotope_ratio + '_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
         # calculate the 207Pb/235U ratio and error
         final_ratios.loc[spot_name, '207Pb/235U'] = final_ratios.loc[spot_name,'207Pb/206Pb'] * final_ratios.loc[spot_name,'206Pb/238U'] * common_U238_U235
         final_ratios.loc[spot_name, '207Pb/235U_2e%'] = np.sqrt((final_ratios.loc[spot_name,'207Pb/206Pb_2e%']**2 + final_ratios.loc[spot_name,'206Pb/238U_2e%']**2))
@@ -1215,6 +1250,25 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
         final_ratios.loc[spot_name, '238U/206Pb'] = 1 / final_ratios.loc[spot_name, '206Pb/238U']
         final_ratios.loc[spot_name, '238U/206Pb_2e%'] = final_ratios.loc[spot_name,'206Pb/238U_2e%'] * np.sqrt(1/final_ratios.loc[spot_name,'206Pb/238U'])
         final_ratios.loc[spot_name, '238U/206Pb_2e'] = final_ratios.loc[spot_name, '238U/206Pb'] * final_ratios.loc[spot_name, '238U/206Pb_2e%'] / 100
+        
+        # calculate the 207Pb/235U age
+        final_ratios.loc[spot_name, '207Pb/235U_age'] = calc_75_date(final_ratios.loc[spot_name, '207Pb/235U'])
+        final_ratios.loc[spot_name, '207Pb/235U_age_2e%'] = final_ratios.loc[spot_name, '207Pb/235U_2e%']
+        final_ratios.loc[spot_name, '207Pb/235U_age_2e'] = final_ratios.loc[spot_name, '207Pb/235U'] * final_ratios.loc[spot_name, '207Pb/235U_age_2e%'] / 100
+
+        # calculate the 206Pb/238U age
+        final_ratios.loc[spot_name, '206Pb/238U_age'] = calc_68_date(final_ratios.loc[spot_name, '206Pb/238U'])
+        final_ratios.loc[spot_name, '206Pb/238U_age_2e%'] = final_ratios.loc[spot_name, '206Pb/238U_2e%']
+        final_ratios.loc[spot_name, '206Pb/238U_age_2e'] = final_ratios.loc[spot_name, '206Pb/238U'] * final_ratios.loc[spot_name, '206Pb/238U_age_2e%'] / 100
+
+        # calculate the 207Pb/206Pb age
+        final_ratios.loc[spot_name, '207Pb/206Pb_age'] = calc_76_date(final_ratios.loc[spot_name, '207Pb/206Pb'])
+        final_ratios.loc[spot_name, '207Pb/206Pb_age_2e%'] = final_ratios.loc[spot_name, '207Pb/206Pb_2e%']
+        final_ratios.loc[spot_name, '207Pb/206Pb_age_2e'] = final_ratios.loc[spot_name, '207Pb/206Pb'] * final_ratios.loc[spot_name, '207Pb/206Pb_age_2e%'] / 100
+
+        # calculate discordance and uncertainty
+        final_ratios.loc[spot_name, 'disc%'], final_ratios.loc[spot_name, 'disc_2e%'] = calc_68_76_discordance(final_ratios.loc[spot_name, '206Pb/238U_age'], final_ratios.loc[spot_name, '207Pb/206Pb_age'], final_ratios.loc[spot_name, '206Pb/238U_age_2e']/2, final_ratios.loc[spot_name, '207Pb/206Pb_age_2e']/2)
+
 
         # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
         x = final_ratios.loc[spot_name,'207Pb/206Pb'] # 76 ratio
@@ -1229,6 +1283,7 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
 
         final_ratios.loc[spot_name, 'err_corr'] = this_75_68_err_corr
 
+
     final_ratios['sample'] = final_ratios.index.str.split(sep).str[0]
     final_ratios['spot_name'] = final_ratios.index
     # now let's reorganize the columns
@@ -1236,6 +1291,9 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
     first_columns = ['spot_name', 'sample', 
                      '207Pb/235U', '207Pb/235U_2e%', 
                      '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
+                     '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
+                     '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
+                     'disc%', 'disc_2e%',
                      '238U/206Pb', '238U/206Pb_2e%',
                      '207Pb/206Pb', '207Pb/206Pb_2e%',
                      '208Pb/232Th', '208Pb/232Th_2e%',
@@ -1244,10 +1302,13 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, DH_correctio
                      '238U/206Pb_2e',  
                      '207Pb/206Pb_2e',
                      '208Pb/232Th_2e']
+
+
     other_columns = [i for i in final_ratios_columns if i not in first_columns]
     final_ratios = final_ratios[first_columns + other_columns]
     final_ratios = final_ratios.sort_values(by='spot_name').reset_index(drop=True)
     return final_ratios
+
     
 def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     '''
@@ -1364,7 +1425,7 @@ def get_tera_wasserburg_point(age):
     return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
 
 
-def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
+def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
                 age_min=None, age_max=None, xlim=None, ylim=None,
                 concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
                 ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
@@ -1467,18 +1528,51 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
         plot *= hv.Scatter((x_label, y_label)).opts(color='black', size=5, alpha=0.5)
         plot *= hv.Text(x_label-xlabel_offset, y_label+ylabel_offset, str(int(age))).opts(text_color='black', text_font_size='10pt', text_align='center', text_baseline='middle')
 
-    # plot data ellipses
-    for i in range(len(x)):
-        # calculate the ellipse points
-        ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
-        # plot filled ellipses
-        plot *= hv.Polygons((ell_x, ell_y)).opts(fill_color=ellipse_fill_color, alpha=ellipse_fill_alpha)
-        plot *= hv.Curve((ell_x, ell_y)).opts(color=ellipse_line_color, line_width=ellipse_line_width, alpha=ellipse_line_alpha)
-    
+    if color_by is None:
+        # plot data ellipses
+        for i in range(len(x)):
+            # calculate the ellipse points
+            ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
+            # plot filled ellipses
+            plot *= hv.Polygons((ell_x, ell_y)).opts(fill_color=ellipse_fill_color, alpha=ellipse_fill_alpha)
+            plot *= hv.Curve((ell_x, ell_y)).opts(color=ellipse_line_color, line_width=ellipse_line_width, alpha=ellipse_line_alpha)
+    else:
+        polys = []
+        color_values = []
+        for i in range(len(x)):
+            ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
+            color_value = data[color_by].iloc[i]
+
+            poly_df = pd.DataFrame({
+                'x': ell_x,
+                'y': ell_y,
+            })
+
+            poly_df['value'] = color_value  # constant per polygon
+
+            polys.append(poly_df)
+            color_values.append(color_value)
+
+        # Create a Holoviews Polygons element from a list of DataFrames
+        polygons = hv.Polygons(polys)
+
+        # Assign color mapping using colorbar
+        polygons = polygons.opts(
+            fill_color='value',
+            cmap='Viridis_r',
+            colorbar=True,
+            line_color='black',
+            alpha=ellipse_fill_alpha,
+            clim=(min(color_values), max(color_values))
+        )
+
+        plot *= polygons
+
     # plot the data points
     plot *= hv.Scatter(data, kdims=['207Pb/235U'], 
                              vdims=['206Pb/238U', 
                                     'sample', 
+                                    'Time',
                                     '207Pb/235U_age', 
                                     '206Pb/238U_age'], 
                                     label='Data').opts(color=ellipse_center_color, 
@@ -1487,6 +1581,7 @@ def concordia(data, type='Wetherill', discordia_fit=False, discordia_anchor=None
                                                         marker=ellipse_center_marker,
                                                         tools=['hover'],
                                                         hover_tooltips=[("sample", "@sample"),
+                                                                ("Time", "@Time"),
                                                                 ("207Pb/235U_age", "@{207Pb/235U_age}"),
                                                                 ("206Pb/238U_age", "@{206Pb/238U_age}")])
 
