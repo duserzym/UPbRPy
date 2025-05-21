@@ -465,7 +465,7 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6)
         plot *= hv.Curve(((0, this_channel_measured_cps.max()*slope), (0, this_channel_measured_cps.max())), label=channel + ' calibration factor').opts(color=this_channel_color, line_width=2, show_legend=True)
         plot.opts(title='Calibration factor for concentration measurements',
-                    fontsize={'title': '16pt'},
+                    fontsize={'title': '16pt', 'xlabel': '12pt', 'ylabel': '12pt'},
                     hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
                     width=800,
                     height=600,
@@ -1552,19 +1552,89 @@ def get_tera_wasserburg_point(age):
     return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
 
 
-def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
-                age_min=None, age_max=None, xlim=None, ylim=None,
-                concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
-                ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
-                ellipse_fill_color='green', ellipse_fill_alpha=0.2, 
-                ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1):
+
+def concordia(data, type='Wetherill', 
+              r75='207Pb/235U', r68='206Pb/238U', 
+              r86='238U/206Pb', r76='207Pb/206Pb',
+              s75='207Pb/235U_2e', s68='206Pb/238U_2e', 
+              s86='238U/206Pb_2e', s76='207Pb/206Pb_2e',
+              rho='err_corr',
+              color_by=None, color_map='viridis_r', 
+              discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
+              age_min=None, age_max=None, xlim=None, ylim=None,
+              concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
+              ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
+              ellipse_fill_color='green', ellipse_fill_alpha=0.2, 
+              ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1):
     '''
     function for plotting the U-Pb ellipses on a concordia diagram
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        a pandas dataframe containing the data to be plotted
+    type : str, optional
+        the type of concordia diagram to be plotted, either 'Wetherill' or 'TW', by default 'Wetherill'
+    r75, r68, r86, r76 : str, optional
+        the names of the columns in the data to be used for the 75, 68, 86, and 76 ratios, respectively, by default '207Pb/235U', '206Pb/238U', '238U/206Pb', '207Pb/206Pb'
+    s75, s68, s86, s76 : str, optional
+        the names of the columns in the data to be used for the 75, 68, 86, and 76 ratio uncertainties, respectively, by default '207Pb/235U_2e', '206Pb/238U_2e', '238U/206Pb_2e', '207Pb/206Pb_2e'
+    rho : str, optional
+        the name of the error correlation column in the data, by default 'err_corr'
+    color_by : str, optional
+        the name of the column in the data to color the points by, by default None
+    color_map : str, optional
+        the name of the color map to use, by default 'viridis_r'
+    discordia_fit : bool, optional
+        whether to fit a discordia line to the data, by default False
+    discordia_anchor : str, optional
+        the name of the column in the data to use as the anchor point for the discordia line, by default None
+    discordia_anchor_age : float, optional
+        the age of the anchor point for the discordia line, by default None
+    age_min : float, optional
+        the minimum age to plot, by default None
+    age_max : float, optional
+        the maximum age to plot, by default None
+    xlim : tuple, optional
+        the x-axis limits, by default None
+    ylim : tuple, optional
+        the y-axis limits, by default None
+    concordia_color : str, optional
+        the color of the concordia line, by default 'grey'
+    concordia_lw : float, optional
+        the line width of the concordia line, by default 1
+    concordia_alpha : float, optional
+        the alpha value of the concordia line, by default 0.5
+    concordia_uncertainty : bool, optional
+        whether to plot the concordia uncertainty, by default False
+    ellipse_center_color : str, optional
+        the color of the ellipse center, by default 'black'
+    ellipse_center_alpha : float, optional
+        the alpha value of the ellipse center, by default 0.5
+    ellipse_center_size : float, optional
+        the size of the ellipse center, by default 5
+    ellipse_center_marker : str, optional
+        the marker style of the ellipse center, by default 'o'
+    ellipse_fill_color : str, optional
+        the color of the ellipse fill, by default 'green'
+    ellipse_fill_alpha : float, optional
+        the alpha value of the ellipse fill, by default 0.2
+    ellipse_line_color : str, optional
+        the color of the ellipse line, by default 'black'
+    ellipse_line_width : float, optional
+        the line width of the ellipse line, by default 1
+    ellipse_line_alpha : float, optional
+        the alpha value of the ellipse line, by default 1
+
+    Returns
+    -------
+    hv.Overlay
+        a holoviews overlay object containing the concordia diagram
     '''
     if type == 'Wetherill':
-        x, y, sx, sy, err_corr = data['207Pb/235U'], data['206Pb/238U'], data['207Pb/235U_2e']/2, data['206Pb/238U_2e']/2, data['err_corr']
+        x, y, sx, sy, err_corr = data[r75], data[r68], data[s75]/2, data[s68]/2, data[rho]
     elif type == 'TW':
-        x, y, sx, sy = data['238U/206Pb'], data['207Pb/206Pb'], data['238U/206Pb_2e']/2, data['207Pb/206Pb_2e']/2
+        x, y, sx, sy = data[r86], data[r76], data[s86]/2, data[s76]/2
         err_corr = np.zeros(x.shape[0])
     else:
         raise ValueError('type must be either Wetherill or TW')
@@ -1610,7 +1680,7 @@ def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', disc
 
     # initiate the plot
     plot = hv.Overlay()
-    curve_min_age = max(0, age_min-2*age_interval)
+    curve_min_age = max(0.01, age_min-2*age_interval)
     curve_max_age = min(age_max+2*age_interval, 4500)
     # put the concordia curve on the plot
     if type == 'Wetherill':
@@ -1688,6 +1758,7 @@ def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', disc
             fill_color='value',
             cmap='Viridis_r',
             colorbar=True,
+            colorbar_opts={'title': color_by, 'location': 'right'},
             line_color='black',
             alpha=ellipse_fill_alpha,
             clim=(min(color_values), max(color_values))
@@ -1695,24 +1766,21 @@ def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', disc
 
         plot *= polygons
 
-    # plot the data points
-    plot *= hv.Scatter(data, kdims=['207Pb/235U'], 
-                             vdims=['206Pb/238U', 
-                                    'sample', 
-                                    'Time',
-                                    '207Pb/235U_age', 
-                                    '206Pb/238U_age'], 
-                                    label='Data').opts(color=ellipse_center_color, 
-                                                        alpha=ellipse_center_alpha, 
-                                                        size=ellipse_center_size, 
-                                                        marker=ellipse_center_marker,
-                                                        tools=['hover'],
-                                                        hover_tooltips=[("sample", "@sample"),
-                                                                ("Time", "@Time"),
-                                                                ("207Pb/235U_age", "@{207Pb/235U_age}"),
-                                                                ("206Pb/238U_age", "@{206Pb/238U_age}")])
-
     if type == 'Wetherill':
+        # plot the data points
+        plot *= hv.Scatter(data, kdims=[r75], 
+                                vdims=[r68, 
+                                        'sample', 
+                                        '207Pb/235U_age', 
+                                        '206Pb/238U_age'], 
+                                        label='Data').opts(color=ellipse_center_color, 
+                                                            alpha=ellipse_center_alpha, 
+                                                            size=ellipse_center_size, 
+                                                            marker=ellipse_center_marker,
+                                                            tools=['hover'],
+                                                            hover_tooltips=[("sample", "@sample"),
+                                                                    ("207Pb/235U_age", "@{207Pb/235U_age}"),
+                                                                    ("206Pb/238U_age", "@{206Pb/238U_age}")])
         plot.opts(xlim=xlim, ylim=ylim, 
                   title='Wetherill Concordia Diagram', 
                   hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
@@ -1720,6 +1788,20 @@ def concordia(data, type='Wetherill', color_by=None, color_map='viridis_r', disc
                   fontsize={'xlabel':12, 'ylabel':12, 'title':16},
                   width=800, height=600)
     elif type == 'TW':
+        # plot the data points
+        plot *= hv.Scatter(data, kdims=[r86], 
+                                vdims=[r76, 
+                                        'sample', 
+                                        '207Pb/235U_age', 
+                                        '206Pb/238U_age'], 
+                                        label='Data').opts(color=ellipse_center_color, 
+                                                            alpha=ellipse_center_alpha, 
+                                                            size=ellipse_center_size, 
+                                                            marker=ellipse_center_marker,
+                                                            tools=['hover'],
+                                                            hover_tooltips=[("sample", "@sample"),
+                                                                    ("207Pb/235U_age", "@{207Pb/235U_age}"),
+                                                                    ("206Pb/238U_age", "@{206Pb/238U_age}")])
         plot.opts(xlim=xlim, ylim=ylim, 
                   title='Tera-Wasserburg Concordia Diagram',
                   hooks=[lambda plot, element: setattr(plot.state.title, 'align', 'center')],
@@ -1791,11 +1873,12 @@ def calc_concordia_ellipse(x,y,sx,sy,rxy, alpha=0.05, n=100):
     
     Required Parameters:
     ---------------------
-    X: a list or array of x axis
-    sX: the one sigma standard error of the x axis
-    Y: a list or array of y axis
-    sY: the one sigma standard error of the y axis
-    
+    x: a list or array of x axis
+    sx: the one sigma standard error of the x axis
+    y: a list or array of y axis
+    sy: the one sigma standard error of the y axis
+    rxy: the correlation coefficient between the x and y axis
+
     Required Parameters:
     ---------------------
     alpha: (1-alpha)*100% confidence range
@@ -1808,7 +1891,12 @@ def calc_concordia_ellipse(x,y,sx,sy,rxy, alpha=0.05, n=100):
     a = np.sqrt(cutoff*abs(eigen[0][1])) # major axis
     b = np.sqrt(cutoff*abs(eigen[0][0])) # minor axis
     v = eigen[1][0] # larger eigenvector
-    beta = np.arctan(v[0]/v[1]) # rotation angle of the ellipse
+    if rxy != 0:
+        beta = np.arctan(v[0]/v[1]) # rotation angle of the ellipse
+    else:
+        # for LAICPMS TW plots, we typically ignore correlation
+        # so in this case, we set the angle to 0
+        beta = np.pi/2
     theta = np.linspace(0, 2 * np.pi, n)
     
     ell_x = x + a * np.cos(theta) * np.cos(beta) - b * np.sin(theta) * np.sin(beta)
