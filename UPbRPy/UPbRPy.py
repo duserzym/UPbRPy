@@ -1203,6 +1203,62 @@ def calc_68_76_discordance(t68, t76, s68, s76):
 
     return disc * 100, s * 2 / disc * 100
 
+def calc_depth_profile(fractionation_corrected_ratios, session_correction_results):
+    depthpro_ratios = pd.DataFrame()
+    for spot_name in fractionation_corrected_ratios['spot_name'].unique()[:1]:
+        print(spot_name)
+        this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name]
+        for isotope_ratio in session_correction_results.keys():
+            # get the measured mean and std
+            this_spot_measured_ratio = this_spot_data[isotope_ratio]
+            # use the original measured ratio std for the uncertainty propagation
+            this_spot_measured_ratio_se = this_spot_data[isotope_ratio+'_2e']/2 # sweep-wise Poisson error
+
+            # get the session-wide fractionation correction mean using the mean spot time and the polynomial fit
+            this_spot_this_ratio_fractionation_fit = session_correction_results[isotope_ratio]['fit']
+            this_spot_this_ratio_fractionation_mean = np.polyval(this_spot_this_ratio_fractionation_fit, this_spot_data['Time'].mean())
+            # get the session-wide fractionation correction se
+            this_ratio_fractionation_se = session_correction_results[isotope_ratio]['std']
+
+            # get the fractionation corrected mean
+            this_spot_fractionation_corrected = this_spot_data[isotope_ratio + '_fractionation_corrected']
+            # calculate the propagated uncertainty
+            this_spot_this_ratio_propagated_uncertainty = this_spot_fractionation_corrected * np.sqrt((this_spot_measured_ratio_se/this_spot_measured_ratio)**2 + (this_ratio_fractionation_se/this_spot_this_ratio_fractionation_mean)**2)
+
+            # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
+            # save results
+            this_spot_data[isotope_ratio + '_fractionation_corrected_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_corrected * 100
+            this_spot_data[isotope_ratio + '_fractionation_corrected_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
+        depthpro_ratios = pd.concat([depthpro_ratios, this_spot_data])
+    # depthpro_ratios = depthpro_ratios.sort_values(by='Time').reset_index(drop=True)
+
+    # calculate the 207Pb/235U ratio and error based on the 206Pb/238U and 207Pb/206Pb raw ratio calculations
+    depthpro_ratios['207Pb/235U_fractionation_corrected'] = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] * depthpro_ratios['206Pb/238U_fractionation_corrected'] * common_U238_U235
+    depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] = np.sqrt((depthpro_ratios['207Pb/206Pb_fractionation_corrected_2e%']**2 + depthpro_ratios['206Pb/238U_fractionation_corrected_2e%']**2))
+    depthpro_ratios['207Pb/235U_fractionation_corrected_2e'] = depthpro_ratios['207Pb/235U_fractionation_corrected'] * depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] / 100
+    
+    # calculate the 238U/206Pb ratio and error based on the 206Pb/238U ratio and error
+    depthpro_ratios['238U/206Pb_fractionation_corrected'] = 1 / depthpro_ratios['206Pb/238U_fractionation_corrected']
+    depthpro_ratios['238U/206Pb_fractionation_corrected_2e%'] = depthpro_ratios['206Pb/238U_fractionation_corrected_2e%'] * np.sqrt(1/depthpro_ratios['206Pb/238U_fractionation_corrected'])
+    depthpro_ratios['238U/206Pb_fractionation_corrected_2e'] = depthpro_ratios['238U/206Pb_fractionation_corrected'] * depthpro_ratios['238U/206Pb_fractionation_corrected_2e%'] / 100
+
+    # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
+    x = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] # 76 ratio
+    u = depthpro_ratios['207Pb/235U_fractionation_corrected']  # 75 ratio
+    v = depthpro_ratios['206Pb/238U_fractionation_corrected']  # 68 ratio
+
+    sx = depthpro_ratios['207Pb/206Pb_fractionation_corrected_2e']/2 # 76 std
+    su = depthpro_ratios['207Pb/235U_fractionation_corrected_2e']/2 # 75 std
+    sv = depthpro_ratios['206Pb/238U_fractionation_corrected_2e']/2 # 68 std
+
+    depthpro_ratios['err_corr'] = calc_err_corr_quotient(x, sx, u, su, v, sv)
+
+    # age calculations
+    depthpro_ratios['207Pb/235U_age'] = calc_75_date(depthpro_ratios['207Pb/235U_fractionation_corrected'])
+    depthpro_ratios['206Pb/238U_age'] = calc_68_date(depthpro_ratios['206Pb/238U_fractionation_corrected'])
+
+    return depthpro_ratios
+    
 def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
     '''
     function for calculating the mean isotope ratios and associated propagated uncertainties
@@ -1288,21 +1344,35 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
     final_ratios['spot_name'] = final_ratios.index
     # now let's reorganize the columns
     final_ratios_columns = final_ratios.columns.tolist()
-    first_columns = ['spot_name', 'sample', 
-                     '207Pb/235U', '207Pb/235U_2e%', 
-                     '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
-                     '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
-                     '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
-                     'disc%', 'disc_2e%',
-                     '238U/206Pb', '238U/206Pb_2e%',
-                     '207Pb/206Pb', '207Pb/206Pb_2e%',
-                     '208Pb/232Th', '208Pb/232Th_2e%',
-                     '207Pb/235U_2e', 
-                     '206Pb/238U_2e',
-                     '238U/206Pb_2e',  
-                     '207Pb/206Pb_2e',
-                     '208Pb/232Th_2e']
 
+    if '208Pb/232Th' in session_correction_results.keys():
+        first_columns = ['spot_name', 'sample', 
+                        '207Pb/235U', '207Pb/235U_2e%', 
+                        '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
+                        '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
+                        '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
+                        'disc%', 'disc_2e%',
+                        '238U/206Pb', '238U/206Pb_2e%',
+                        '207Pb/206Pb', '207Pb/206Pb_2e%',
+                        '208Pb/232Th', '208Pb/232Th_2e%',
+                        '207Pb/235U_2e', 
+                        '206Pb/238U_2e',
+                        '238U/206Pb_2e',  
+                        '207Pb/206Pb_2e',
+                        '208Pb/232Th_2e']
+    else:
+        first_columns = ['spot_name', 'sample', 
+                '207Pb/235U', '207Pb/235U_2e%', 
+                '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
+                '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
+                '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
+                'disc%', 'disc_2e%',
+                '238U/206Pb', '238U/206Pb_2e%',
+                '207Pb/206Pb', '207Pb/206Pb_2e%',
+                '207Pb/235U_2e', 
+                '206Pb/238U_2e',
+                '238U/206Pb_2e',  
+                '207Pb/206Pb_2e',]
 
     other_columns = [i for i in final_ratios_columns if i not in first_columns]
     final_ratios = final_ratios[first_columns + other_columns]
@@ -2088,3 +2158,134 @@ def plot_sample_weighted_mean(means, uncertainties, student_T = True,
     ax.set_ylabel('Age (Ma)', fontdict={'size': 12})
     ax.set_xticks(range(1, n_grains+1), range(1, n_grains+1))
     return fig, ax
+
+# ----------------------------------------------------
+# Thermometry functions
+def Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2=1, method='Kohn2017'):
+    '''
+    function for calculating Zr in rutile thermometer after Kohn, 2020
+
+    Parameters
+    ----------
+    Zr_ppm : float
+        Zr concentration in rutile in ppm
+    pressure : float
+        pressure in GPa
+
+    Returns
+    -------
+    float
+        temperature in degree Celsius
+    '''
+    R = 8.314
+    if method == 'Kohn2017':
+        pressure = pressure * 1e4 # convert to bar
+        T_K = (71360 + 0.378 * pressure - 0.130 * Zr_ppm) / (130.66 - R*np.log(Zr_ppm)) 
+    elif method == 'FW2007':
+        T_K = 4530 / (7.420 - np.log10(a_SiO2) - np.log10(Zr_ppm))
+    return np.round(T_K - 273.15, 2)
+
+def Ti_in_zircon_thermometry(Ti_ppm, a_SiO2, Zr_ppm):
+    '''
+    function for calculating Ti in zircon thermometer after Ferry and Watson (2007)
+    
+    Parameters
+    ----------
+    Ti_ppm : float
+        Ti concentration in zircon in ppm
+    a_SiO2 : float
+        activity of SiO2
+    a_TiO2 : float
+        activity of TiO2
+
+    Returns
+    -------
+    float
+        temperature in degree Celsius
+
+    '''
+
+    T_K = 4800 / (5.711 - np.log10(a_SiO2) + np.log10(a_TiO2) - np.log10(Ti_ppm))
+
+    return np.round(T_K - 273.15, 2)
+
+def Ti_in_zircon_thermometry_uncertainty(Ti_ppm, a_SiO2_list, a_TiO2_list):
+    '''
+    function for calculating Ti in zircon thermometer uncertainty
+    
+    Parameters
+    ----------
+    Ti_ppm : float
+        Ti concentration in zircon in ppm
+    a_SiO2_list : list
+        list of activity of SiO2
+    a_TiO2_list : list
+        list of activity of TiO2
+
+    Returns
+    -------
+    float
+        temperature in degree Celsius
+
+    '''
+
+    T_list = []
+    for a_SiO2, a_TiO2 in zip(a_SiO2_list, a_TiO2_list):
+        T_list.append(Ti_in_zircon_thermometry(Ti_ppm, a_SiO2, a_TiO2))
+    upper, lower = np.percentile(T_list, [97.5, 2.5])
+    return upper, lower
+
+
+def Zr_in_titanite_thermometry(Zr_ppm, a_SiO2, a_TiO2, pressure):
+    '''
+    function for calculating Zr in titanite thermometer after Ferry and Watson (2007)
+    
+    Parameters
+    ----------
+    Zr_ppm : float
+        Zr concentration in titanite in ppm
+    a_SiO2 : float
+        activity of SiO2
+    a_TiO2 : float
+        activity of TiO2
+    pressure : float
+        pressure in GPa
+
+    Returns
+    -------
+    float
+        temperature in degree Celsius
+
+    '''
+
+    T_K = (7708 + 960 * pressure) / (10.52 - np.log10(Zr_ppm) - np.log10(a_TiO2) - np.log10(a_SiO2))
+
+    return round(T_K - 273.15, 2)
+
+def Zr_in_titanite_thermometry_uncertainty(Zr_ppm, a_SiO2_list, a_TiO2_list, pressure_list):
+    '''
+    function for calculating Zr in titanite thermometer uncertainty 
+    
+    Parameters
+    ----------
+    Zr_ppm : float
+        Zr concentration in titanite in ppm
+    a_SiO2_list : list
+        list of activity of SiO2
+    a_TiO2_list : list
+        list of activity of TiO2
+    pressure : float
+        pressure in GPa
+
+    Returns
+    -------
+    float
+        temperature in degree Celsius
+
+    '''
+
+    T_list = []
+    for a_SiO2, a_TiO2, pressure in zip(a_SiO2_list, a_TiO2_list, pressure_list):
+        T_list.append(Zr_in_titanite_thermometry(Zr_ppm, a_SiO2, a_TiO2, pressure))
+    upper, lower = np.percentile(T_list, [97.5, 2.5])
+    return upper, lower
