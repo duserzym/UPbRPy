@@ -483,14 +483,13 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
     function for calculating the elemental concentrations in the unknown and standard samples
         after the construction of the calibration factors stored in the concentration calibration pandas series
 
-    when calculating the unknonwns, aftern constructing the mean and standard deviation multiplied by a student's t multiplier with n-1 degrees of freedom
+    when calculating the unknonwns, after constructing the mean and standard deviation multiplied by a student's t multiplier with n-1 degrees of freedom
         we exclude the data that fall outside of the 95% confidence interval
     '''
     element_channels = concentration_calibration.index
 
     # strip the isotope mass number from the channel name as we already aligned the isotope signals to the total elemental concentration 
     elements = [re.sub(r'\d+', '', channel) for channel in element_channels]
-    # unknown_standard_ppm_df = pd.DataFrame(columns=elements)
     unknown_standard_ppm_df = pd.DataFrame()
 
     for spot_name in unknown_standard_data['spot_name'].unique():
@@ -513,6 +512,34 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
     # now move the spot and sample columns up front
     unknown_standard_ppm_df = unknown_standard_ppm_df[['spot_name', 'sample'] + [i for i in unknown_standard_ppm_df.columns if i not in ['spot_name', 'sample']]]
     return unknown_standard_ppm_df
+
+
+def calc_concentration_depth_profile(unknown_standard_data, concentration_calibration, sep='_'):
+    '''
+    function for calculating the elemental concentrations in the unknown and standard samples
+        after the construction of the calibration factors stored in the concentration calibration pandas series
+        while we do 95% confidence interval filtering when calculating the spot mean concentrations, we do not do this when exporting the sweep-wise depth profile data
+        for each sweep the concentration uncertainties are propagated using Poisson statistics on the raw counting data and the calibration factors uncertainties are ignored
+    '''
+    depthpro_concentration_df = pd.DataFrame()
+    # get all the calibrated element channels
+    element_channels = concentration_calibration.index
+    
+    # strip the isotope mass number from the channel name as we already aligned the isotope signals to the total elemental concentration 
+    elements = [re.sub(r'\d+', '', channel) for channel in element_channels]
+
+    depthpro_concentration_df['Time'] = unknown_standard_data['Time']
+    depthpro_concentration_df['sample'] = unknown_standard_data['sample']
+    depthpro_concentration_df['spot_name'] = unknown_standard_data['spot_name']
+
+    for channel, element in zip(element_channels, elements):
+
+        depthpro_concentration_df[element] = unknown_standard_data[channel] * concentration_calibration[channel]
+        # replace negative values with NaN
+        depthpro_concentration_df[element]  = depthpro_concentration_df[element].mask(depthpro_concentration_df[element]  < 0, np.nan)
+        depthpro_concentration_df[element + '_95CI'] = np.sqrt(depthpro_concentration_df[element]) # propagate uncertainty using Poisson statistics, ignore calibration uncertainty
+
+    return depthpro_concentration_df
 
 # ratio calibration
 # -----------------------------------------------------------
@@ -1204,9 +1231,27 @@ def calc_68_76_discordance(t68, t76, s68, s76):
     return disc * 100, s * 2 / disc * 100
 
 def calc_depth_profile(fractionation_corrected_ratios, session_correction_results):
+    '''
+    function for calculating the depth profile of the ratios 
+        for each sweep, the 68 and 76 ratios are the downhole and session fractionation corrected ratios
+        the associated uncertainties of the ratios are calculated based on propagating raw ratio uncertainties 
+        assuming Poisson error of the counting statistics of each analyte, times the session fractionation correction uncertainties
+        the downhole fractionation correction is treated as a systematic error and is thus not propagated for depth profile ratios
+
+    Parameters
+    ----------
+    fractionation_corrected_ratios : pandas.DataFrame
+        a pandas dataframe containing the fractionation corrected ratios
+    session_correction_results : dict
+        a dictionary containing the session-wide fractionation correction plots and fits for each isotope ratio
+
+    Returns
+    -------
+    depthpro_ratios : pandas.DataFrame
+        a pandas dataframe containing the depth profile ratios and their associated uncertainties
+    '''
     depthpro_ratios = pd.DataFrame()
-    for spot_name in fractionation_corrected_ratios['spot_name'].unique()[:1]:
-        print(spot_name)
+    for spot_name in fractionation_corrected_ratios['spot_name'].unique():
         this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name]
         for isotope_ratio in session_correction_results.keys():
             # get the measured mean and std
@@ -1258,7 +1303,7 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     depthpro_ratios['206Pb/238U_age'] = calc_68_date(depthpro_ratios['206Pb/238U_fractionation_corrected'])
 
     return depthpro_ratios
-    
+
 def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
     '''
     function for calculating the mean isotope ratios and associated propagated uncertainties
@@ -1410,6 +1455,18 @@ def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     else:
         return final_x # final 86 ratio
     
+def construct_final_depthpro_df(depthpro_concentration_df, depthpro_ratios_df):
+    '''
+    function for constructing the final depth profile dataframe that contains both the concentrations and the isotope ratios
+        we need to merge by Time column so that the profiles are aligned
+    '''
+    # first drop the sample column from the concentration dataframe
+    depthpro_ratios_df = depthpro_ratios_df.drop(columns=['sample', 'spot_name'])
+    final_depthpro_df = pd.merge(depthpro_concentration_df, depthpro_ratios_df, on='Time')
+    final_depthpro_df.sort_values(by='Time', inplace=True, ignore_index=True)
+    
+    return final_depthpro_df
+
 def construct_final_df(final_concentration_df, final_isotope_ratio_df):
     '''
     function for constructing the final dataframe that contains both the concentrations and the isotope ratios
