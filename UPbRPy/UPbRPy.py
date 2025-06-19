@@ -970,7 +970,7 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_fractionation = np.array(spot_mean_fractionation)
     spot_mean_fractionation_std = np.array(spot_mean_fractionation_std)
-    spot_mean_fractionation_relative_std = np.array(spot_mean_fractionation)/ spot_mean_fractionation_std
+    spot_mean_fractionation_relative_std = spot_mean_fractionation/ spot_mean_fractionation_std
     spot_mean_fractionation_weights = 1/spot_mean_fractionation_relative_std**2
     # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2, default is weighted by the standard deviation of each spot fractionation
     p = np.polyfit(spot_mean_times, spot_mean_fractionation, degree, w=spot_mean_fractionation_weights)
@@ -1038,7 +1038,8 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
 
     return session_correction_results
 
-def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, standard_archive, degree=2):
+
+def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, primary_82_DH_ratios, standard_archive, degree=2):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
         after applying a given downhole correction scheme to the primary standard ratios
@@ -1069,7 +1070,7 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
     # first get the known standard ratios from the standard archive
     primary_68_standard = primary_68_DH_ratios['sample'].unique()[0]
     primary_76_standard = primary_76_DH_ratios['sample'].unique()[0]
-
+    primary_82_standard = primary_82_DH_ratios['sample'].unique()[0]
     # store the plots and interpolations in a dictionary
     session_correction_results = dict()
 
@@ -1083,7 +1084,7 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
     primary_68_DH_ratios['207Pb/206Pb_session_corrected'] = primary_68_DH_ratios['207Pb/206Pb_DH_corrected'] * np.polyval(p_76, primary_68_DH_ratios['Time'])
     
     # horizontally project the corrected 7/6 ratio to get the TW intercept point
-    PR_68_rad = standard_archive.loc[primary_68_standard, '238U/206Pb*'] # for the radiogenic 68 ratio
+    PR_68_rad = standard_archive.loc[primary_68_standard, '206Pb/238U*'] # for the radiogenic 68 ratio
     PR_86_rad = 1/PR_68_rad # for the radiogenic 86 ratio
     PR_76_i = standard_archive.loc[primary_68_standard, '207Pb/206Pb_i'] # for the initial 76 ratio
     PR_76_rad = standard_archive.loc[primary_68_standard, '207Pb/206Pb*'] # for the radiogenic 76 ratio
@@ -1101,8 +1102,8 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
         this_spot_mean_time = this_spot['Time'].mean()
         this_spot_68_ratio = this_spot['206Pb/238U_DH_corrected']
         this_spot_mean_68_ratio = this_spot['206Pb/238U_DH_corrected'].mean()
-        this_spot_68_TW_projected = 1 / (this_spot_68_ratio * (this_spot['207Pb/206Pb_session_corrected'] - TW_upper_intercept) / TW_slope)
-        this_spot_68_TW_mean_projected = 1 / (this_spot_mean_68_ratio * (this_spot['207Pb/206Pb_session_corrected'].mean() - TW_upper_intercept) / TW_slope)
+        this_spot_68_TW_projected = 1 / ((this_spot['207Pb/206Pb_session_corrected'] - TW_upper_intercept) / TW_slope)
+        this_spot_68_TW_mean_projected = 1 / ((this_spot['207Pb/206Pb_session_corrected'].mean() - TW_upper_intercept) / TW_slope)
         this_spot_68_fractionation_std = np.std(this_spot_68_TW_projected/this_spot_68_ratio)
         this_spot_mean_68_fractionation = this_spot_68_TW_mean_projected/this_spot_mean_68_ratio
         # store the calculated mean time and fractionation factors
@@ -1113,7 +1114,7 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_68_fractionation = np.array(spot_mean_68_fractionation)
     spot_mean_68_fractionation_std = np.array(spot_mean_68_fractionation_std)
-    spot_mean_68_fractionation_relative_std = spot_mean_68_fractionation_std / spot_mean_68_fractionation
+    spot_mean_68_fractionation_relative_std = spot_mean_68_fractionation / spot_mean_68_fractionation_std
     spot_mean_68_fractionation_weights = 1/spot_mean_68_fractionation_relative_std**2
     # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2
     p_68 = np.polyfit(spot_mean_times, spot_mean_68_fractionation, degree, w=spot_mean_68_fractionation_weights)
@@ -1140,11 +1141,12 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, st
     session_correction_results.update({'206Pb/238U': {'plot': plot_68, 'fit': p_68, 'std': p_std_68}})
 
     # add the 8/2 ratio correction
-    known_PR_82_ratio = standard_archive.loc[primary_68_standard, '208Pb/232Th*'] # for the radiogenic 82 ratio
-    plot_82, p_82, p_std_82 = calc_session_nominal_fractionation(known_PR_82_ratio, primary_68_DH_ratios, '208Pb/232Th', degree)
+    known_PR_82_ratio = standard_archive.loc[primary_82_standard, '208Pb/232Th*'] # for the radiogenic 82 ratio
+    plot_82, p_82, p_std_82 = calc_session_nominal_fractionation(known_PR_82_ratio, primary_82_DH_ratios, '208Pb/232Th', degree)
     session_correction_results.update({'208Pb/232Th': {'plot': plot_82, 'fit': p_82, 'std': p_std_82}})
 
     return session_correction_results
+
 
 def apply_session_correction(DH_corrected_ratios, session_correction_results):
     '''
@@ -1391,7 +1393,7 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
         final_ratios.loc[spot_name, 'err_corr'] = this_75_68_err_corr
 
 
-    final_ratios['sample'] = final_ratios.index.str.split(sep).str[0]
+        final_ratios.loc[spot_name, 'sample'] = this_spot_data['sample'].unique()[0] # get the sample name from the first row of the spot data
     final_ratios['spot_name'] = final_ratios.index
     # now let's reorganize the columns
     final_ratios_columns = final_ratios.columns.tolist()
@@ -1482,7 +1484,9 @@ def construct_final_df(final_concentration_df, final_isotope_ratio_df):
     final_concentration_df = final_concentration_df.drop(columns=['sample'])
     final_df = pd.merge(final_concentration_df, final_isotope_ratio_df, on='spot_name')
     final_df.sort_values(by='spot_name', inplace=True, ignore_index=True)
-    
+    # move the sample column to the front
+    cols = ['sample'] + [col for col in final_df.columns if col != 'sample']
+    final_df = final_df[cols]
     return final_df
 
 # concordia diagram plotting functions
