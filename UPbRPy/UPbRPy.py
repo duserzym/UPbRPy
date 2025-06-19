@@ -462,7 +462,7 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         slope = np.dot(this_channel_measured_cps, this_channel_known_ppm) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
         calibration_factors[channel] = slope
         # plot the data and the best-fit line
-        plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6)
+        plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6).opts(tools=['hover'], hover_cols=['sample', 'spot_name', channel])
         plot *= hv.Curve(((0, this_channel_measured_cps.max()*slope), (0, this_channel_measured_cps.max())), label=channel + ' calibration factor').opts(color=this_channel_color, line_width=2, show_legend=True)
         plot.opts(title='Calibration factor for concentration measurements',
                     fontsize={'title': '16pt', 'xlabel': '12pt', 'ylabel': '12pt'},
@@ -755,7 +755,11 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
         DH_correction_results.update({ratio_name: {'plot': plot, 'interpolation': downhole_fractionation}})
     return DH_correction_results
 
-def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ratios, standard_archive, fit='linear'):
+
+def calc_DH_fractionations_TW(primary_68_standard_ratios, 
+                                primary_76_standard_ratios, 
+                                primary_82_standard_ratios, 
+                                standard_archive, fit='linear'):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
         interpolating the ratio as a function of relative time within each spot analysis
@@ -785,6 +789,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ra
     # first get the known standard ratios from the standard archive
     primary_68_standard = primary_68_standard_ratios['sample'].unique()[0]
     primary_76_standard = primary_76_standard_ratios['sample'].unique()[0]
+    primary_82_standard = primary_82_standard_ratios['sample'].unique()[0]
 
     # store the plots and interpolations in a dictionary
     DH_correction_results = dict()
@@ -795,9 +800,10 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ra
     DH_correction_results.update({'207Pb/206Pb': {'plot': plot_76, 'interpolation': downhole_fractionation_76}})
 
     # then use this fractionation factor to correct the 7/6 ratio of the primary 68 standard
-    primary_68_standard_ratios['207Pb/206Pb_DH_corrected'] = primary_68_standard_ratios['207Pb/206Pb'] * downhole_fractionation_76(primary_68_standard_ratios['Time'] - primary_68_standard_ratios['Time'].iloc[0])
+    primary_68_standard_ratios = apply_DH_correction(primary_68_standard_ratios, DH_correction_results)
+
     # horizontally project the corrected 7/6 ratio to get the TW intercept point
-    PR_68_rad = standard_archive.loc[primary_68_standard, '238U/206Pb*'] # for the radiogenic 68 ratio
+    PR_68_rad = standard_archive.loc[primary_68_standard, '206Pb/238U*'] # for the radiogenic 68 ratio
     PR_86_rad = 1/PR_68_rad # for the radiogenic 86 ratio
     PR_76_i = standard_archive.loc[primary_68_standard, '207Pb/206Pb_i'] # for the initial 76 ratio
     PR_76_rad = standard_archive.loc[primary_68_standard, '207Pb/206Pb*'] # for the radiogenic 76 ratio
@@ -806,14 +812,14 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios, primary_76_standard_ra
     TW_slope = (PR_76_i - PR_76_rad) / (0 - PR_86_rad)
     TW_upper_intercept = PR_76_i
     # calculate the TW projections
-    primary_68_standard_ratios['206Pb/238UTW_projected'] = 1 / ((primary_68_standard_ratios['207Pb/206Pb_DH_corrected'] - TW_upper_intercept) / TW_slope)
+    primary_68_standard_ratios['206Pb/238U_TW_projected'] = 1/((primary_68_standard_ratios['207Pb/206Pb_DH_corrected'] - TW_upper_intercept) / TW_slope)
     # now calculate the fractionation factor for the 6/8 ratio
-    plot_68, downhole_fractionation_68 = calc_DH_dynamic_fractionation(primary_68_standard_ratios, '206Pb/238U', '206Pb/238UTW_projected')
+    plot_68, downhole_fractionation_68 = calc_DH_dynamic_fractionation(primary_68_standard_ratios, '206Pb/238U', '206Pb/238U_TW_projected')
     DH_correction_results.update({'206Pb/238U': {'plot': plot_68, 'interpolation': downhole_fractionation_68}})
 
     # add the 8/2 ratio correction
-    known_PR_82_ratio = standard_archive.loc[primary_68_standard, '208Pb/232Th*'] # for the radiogenic 82 ratio
-    plot_82, downhole_fractionation_82 = calc_DH_nominal_fractionation(known_PR_82_ratio, primary_68_standard_ratios, '208Pb/232Th')
+    known_PR_82_ratio = standard_archive.loc[primary_82_standard, '208Pb/232Th*'] # for the radiogenic 82 ratio
+    plot_82, downhole_fractionation_82 = calc_DH_nominal_fractionation(known_PR_82_ratio, primary_82_standard_ratios, '208Pb/232Th')
     DH_correction_results.update({'208Pb/232Th': {'plot': plot_82, 'interpolation': downhole_fractionation_82}})
     return DH_correction_results
 
@@ -856,6 +862,7 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
     # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
     all_times_array = np.array(all_times).flatten()
     all_fractionations_array = np.array(all_fractionations).flatten()
+    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
     # calculate the standard deviation of the mean_fractionation_factor
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
 
@@ -871,10 +878,9 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
         fontsize={'xlabel':12, 'ylabel':12},
         legend_position='right', show_legend = True,
         width=800, height=400)
-    
-    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
-        
+            
     return plot, downhole_fractionation
+
 
 def apply_DH_correction(plateau_data_with_raw_ratios, DH_correction_results):
     '''
