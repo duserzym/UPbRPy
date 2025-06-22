@@ -2316,9 +2316,9 @@ def plot_sample_weighted_mean(means, uncertainties, student_T = True,
 
 # ----------------------------------------------------
 # Thermometry functions
-def Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2=1, method='Kohn2017'):
+def Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2=1, method='Kohn2020'):
     '''
-    function for calculating Zr in rutile thermometer after Kohn, 2020
+    function for calculating Zr in rutile thermometer after Kohn (2020) or Ferry and Watson (2007)
 
     Parameters
     ----------
@@ -2326,6 +2326,10 @@ def Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2=1, method='Kohn2017'):
         Zr concentration in rutile in ppm
     pressure : float
         pressure in GPa
+    a_SiO2 : float
+        activity of SiO2
+    method : str
+        method for calculation, either 'Kohn2020' or 'FW2007'
 
     Returns
     -------
@@ -2333,14 +2337,44 @@ def Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2=1, method='Kohn2017'):
         temperature in degree Celsius
     '''
     R = 8.314
-    if method == 'Kohn2017':
+    if method == 'Kohn2020':
         pressure = pressure * 1e4 # convert to bar
         T_K = (71360 + 0.378 * pressure - 0.130 * Zr_ppm) / (130.66 - R*np.log(Zr_ppm)) 
     elif method == 'FW2007':
         T_K = 4530 / (7.420 - np.log10(a_SiO2) - np.log10(Zr_ppm))
     return np.round(T_K - 273.15, 2)
 
-def Ti_in_zircon_thermometry(Ti_ppm, a_SiO2, Zr_ppm):
+
+def Zr_in_rutile_thermometry_uncertainty(Zr_ppm, pressure_list, a_SiO2_list, method='Kohn2020'):
+    '''
+    function for calculating Zr in rutile thermometer uncertainty after Kohn (2020) or Ferry and Watson (2007)
+
+    Parameters
+    ----------
+    Zr_ppm : float
+        Zr concentration in rutile in ppm
+    pressure_list : list
+        list of pressure in GPa
+    a_SiO2_list : list
+        list of activity of SiO2
+    method : str
+        method for calculation, either 'Kohn2020' or 'FW2007'
+
+    Returns
+    -------
+    upper : float
+        the 97.5 percentile temperature in degree Celsius
+    lower : float
+        the 2.5 percentile temperature in degree Celsius
+    '''
+    T_list = []
+    for pressure, a_SiO2 in zip(pressure_list, a_SiO2_list):
+        T_list.append(Zr_in_rutile_thermometry(Zr_ppm, pressure, a_SiO2, method))
+    upper, lower = np.percentile(T_list, [97.5, 2.5])
+    return upper, lower
+
+
+def Ti_in_zircon_thermometry(Ti_ppm, a_SiO2, a_TiO2):
     '''
     function for calculating Ti in zircon thermometer after Ferry and Watson (2007)
     
@@ -2393,7 +2427,7 @@ def Ti_in_zircon_thermometry_uncertainty(Ti_ppm, a_SiO2_list, a_TiO2_list):
 
 def Zr_in_titanite_thermometry(Zr_ppm, a_SiO2, a_TiO2, pressure):
     '''
-    function for calculating Zr in titanite thermometer after Ferry and Watson (2007)
+    function for calculating Zr in titanite thermometer after Hayden et al., 2007
     
     Parameters
     ----------
