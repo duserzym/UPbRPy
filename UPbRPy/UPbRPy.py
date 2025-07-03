@@ -449,6 +449,8 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
     for i, channel in enumerate(effective_channels):
         this_channel_measured_cps = []
         this_channel_known_ppm = []
+        sample_list = []
+        spot_list = []
         this_channel_color = Category20[20][i % 20]
         for spot in NIST_data['spot_name'].unique():
             this_spot_data = NIST_data[NIST_data['spot_name'] == spot]
@@ -456,13 +458,25 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
             this_channel_measured_cps.append(this_spot_mean)
             this_spot_true_concentration = standard_archive.loc[this_spot_data['sample'].values[0], channel]
             this_channel_known_ppm.append(this_spot_true_concentration)
+            sample_list.append(this_spot_data['sample'].values[0])
+            spot_list.append(spot)
+
         # now calculate the calibration factor using the best-fit line anchored at the origin
         this_channel_measured_cps = np.array(this_channel_measured_cps)
         this_channel_known_ppm = np.array(this_channel_known_ppm)
         slope = np.dot(this_channel_measured_cps, this_channel_known_ppm) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
         calibration_factors[channel] = slope
         # plot the data and the best-fit line
-        plot *= hv.Scatter((this_channel_known_ppm, this_channel_measured_cps), label=channel).opts(color=this_channel_color, size=5, alpha=0.6).opts(tools=['hover'], hover_cols=['sample', 'spot_name', channel])
+        df = pd.DataFrame({'sample': sample_list,
+                           'spot_name': spot_list,
+                           'y': this_channel_measured_cps,
+                           'x': this_channel_known_ppm})
+        plot *= hv.Scatter(df, kdims=['x'], vdims=['y', 'sample', 'spot_name']).opts(
+                            color=this_channel_color,
+                            size=5,
+                            alpha=0.6,
+                            tools=['hover'],
+                        )
         plot *= hv.Curve(((0, this_channel_measured_cps.max()*slope), (0, this_channel_measured_cps.max())), label=channel + ' calibration factor').opts(color=this_channel_color, line_width=2, show_legend=True)
         plot.opts(title='Calibration factor for concentration measurements',
                     fontsize={'title': '16pt', 'xlabel': '12pt', 'ylabel': '12pt'},
