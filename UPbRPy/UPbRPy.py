@@ -558,7 +558,7 @@ def calc_concentration_depth_profile(unknown_standard_data, concentration_calibr
 # ratio calibration
 # -----------------------------------------------------------
 
-def propagate_raw_ratio_uncertaintys(nom, denom):
+def propagate_raw_ratio_uncertaintiess(nom, denom):
     '''
     function for propagating the uncertainty of the raw ratios
         using Poisson distribution relative uncertainty where
@@ -637,15 +637,15 @@ def calc_raw_ratios(experiment, total_data, baseline_subtracted_total_data):
         
         # 208/232 mean of ratios
         this_spot_R82 = this_spot_plateau_data['208Pb'] / this_spot_plateau_data['232Th']
-        this_spot_R82_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th']) * this_spot_R82
+        this_spot_R82_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th']) * this_spot_R82
 
         # 206/238 mean of ratios
         this_spot_R68 = this_spot_plateau_data['206Pb'] / this_spot_plateau_data['238U']
-        this_spot_R68_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['206Pb'], this_spot_plateau_data['238U']) * this_spot_R68
+        this_spot_R68_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['206Pb'], this_spot_plateau_data['238U']) * this_spot_R68
 
         # 207/206 mean of ratios
         this_spot_R76 = this_spot_plateau_data['207Pb'] / this_spot_plateau_data['206Pb']
-        this_spot_R76_2e = propagate_raw_ratio_uncertaintys(this_spot_plateau_data['207Pb'], this_spot_plateau_data['206Pb']) * this_spot_R76
+        this_spot_R76_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['207Pb'], this_spot_plateau_data['206Pb']) * this_spot_R76
 
         this_spot_plateau_data['206Pb/204Pb'] = this_spot_R64
         this_spot_plateau_data['206Pb/238U'] = this_spot_R68
@@ -1231,18 +1231,18 @@ def calc_68_76_discordance(t68, t76, s68, s76):
     Parameters
     ----------
     t68 : float
-        the 68 ratio
+        the 68 age
     t76 : float
-        the 76 ratio
+        the 76 age
     s68 : float
-        the uncertainty of the 68 ratio
+        the uncertainty of the 68 age
     s76 : float
-        the uncertainty of the 76 ratio
+        the uncertainty of the 76 age
 
     Returns
     -------
     discordance : float
-        the discordance between the 68 and 76 ratios in percent
+        the discordance between the 68 and 76 ages in percent
     discordance_2s : float
         the propagated relative 2 standard error of the discordance
     '''
