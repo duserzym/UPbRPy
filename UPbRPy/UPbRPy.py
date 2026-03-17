@@ -1522,7 +1522,7 @@ def calc_68_date(Y):
 
 def calc_76_date(ratio,x0=1e6, tol=1e-8):
     '''
-    calcualtes 207Pb/206Pb date given a 207Pb/206Pb ratio
+    calculates 207Pb/206Pb date given a 207Pb/206Pb ratio
     
     do not take a list of values
     
