@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
+
+@dataclass(frozen=True)
+class ThemeSpec:
+    name: str
+    window: str
+    window_alt: str
+    surface: str
+    surface_soft: str
+    input_bg: str
+    input_border: str
+    text: str
+    muted: str
+    accent: str
+    accent_soft: str
+    accent_hover: str
+    accent_strong: str
+    success: str
+    success_soft: str
+    plot_background: str
+    axis_text: str
+    axis_line: str
+    grid_alpha: float
+
+
+THEMES: dict[str, ThemeSpec] = {
+    "light": ThemeSpec(
+        name="light",
+        window="#edf3fb",
+        window_alt="#f5f9ff",
+        surface="#ffffff",
+        surface_soft="#f6faff",
+        input_bg="#ffffff",
+        input_border="#bfd0e3",
+        text="#102238",
+        muted="#4f6783",
+        accent="#1f63cf",
+        accent_soft="rgba(31, 99, 207, 0.10)",
+        accent_hover="rgba(31, 99, 207, 0.18)",
+        accent_strong="#0f55bf",
+        success="#19836d",
+        success_soft="rgba(25, 131, 109, 0.12)",
+        plot_background="#ffffff",
+        axis_text="#25435f",
+        axis_line="#7f97b3",
+        grid_alpha=0.17,
+    ),
+    "dark": ThemeSpec(
+        name="dark",
+        window="#07111c",
+        window_alt="#0a1726",
+        surface="#0d1c2d",
+        surface_soft="#11263a",
+        input_bg="#091523",
+        input_border="#2a4159",
+        text="#eaf2ff",
+        muted="#90a6c1",
+        accent="#69b4ff",
+        accent_soft="rgba(105, 180, 255, 0.12)",
+        accent_hover="rgba(105, 180, 255, 0.20)",
+        accent_strong="#8bd7ff",
+        success="#7ef7c9",
+        success_soft="rgba(126, 247, 201, 0.12)",
+        plot_background="#06111d",
+        axis_text="#edf4ff",
+        axis_line="#6d8298",
+        grid_alpha=0.13,
+    ),
+}
+
+
+def build_application(argv: list[str] | None = None, theme_mode: str = "light") -> QtWidgets.QApplication:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(argv or sys.argv)
+    app.setApplicationName("UPbRPy Studio")
+    app.setOrganizationName("UPbRPy")
+    app.setStyle("Fusion")
+    app.setFont(_pick_font(app))
+    apply_theme(app, theme_mode)
+    return app
+
+
+def resolve_theme_name(app: QtWidgets.QApplication, theme_mode: str) -> str:
+    if theme_mode == "system":
+        return system_theme_name(app)
+    return theme_mode if theme_mode in THEMES else "light"
+
+
+def system_theme_name(app: QtWidgets.QApplication) -> str:
+    try:
+        color_scheme = app.styleHints().colorScheme()
+    except AttributeError:
+        return "light"
+    return "dark" if color_scheme == QtCore.Qt.ColorScheme.Dark else "light"
+
+
+def active_theme(app: QtWidgets.QApplication | None = None) -> ThemeSpec:
+    resolved_name = "light"
+    application = app or QtWidgets.QApplication.instance()
+    if application is not None:
+        resolved_name = str(application.property("upbrpy.resolved_theme") or resolved_name)
+    return THEMES.get(resolved_name, THEMES["light"])
+
+
+def apply_theme(app: QtWidgets.QApplication, theme_mode: str) -> ThemeSpec:
+    resolved_name = resolve_theme_name(app, theme_mode)
+    theme = THEMES[resolved_name]
+    app.setPalette(_build_palette(theme))
+    app.setStyleSheet(_stylesheet(theme))
+    app.setProperty("upbrpy.theme_mode", theme_mode)
+    app.setProperty("upbrpy.resolved_theme", resolved_name)
+    return theme
+
+
+def _pick_font(app: QtWidgets.QApplication) -> QtGui.QFont:
+    database = QtGui.QFontDatabase()
+    for family in ["Avenir Next", "Helvetica Neue", "Segoe UI", "Arial"]:
+        if family in database.families():
+            font = QtGui.QFont(family)
+            font.setPointSizeF(10.5)
+            return font
+    font = app.font()
+    font.setPointSizeF(10.5)
+    return font
+
+
+def _build_palette(theme: ThemeSpec) -> QtGui.QPalette:
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(theme.window))
+    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(theme.input_bg))
+    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(theme.surface_soft))
+    palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(theme.text))
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(theme.text))
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(theme.text))
+    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(theme.surface))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(theme.accent))
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(theme.surface))
+    return palette
+
+
+def _stylesheet(theme: ThemeSpec) -> str:
+    scroll_track = "rgba(106, 128, 152, 0.12)" if theme.name == "light" else "rgba(173, 196, 219, 0.10)"
+    scroll_handle = "rgba(79, 103, 131, 0.42)" if theme.name == "light" else "rgba(173, 196, 219, 0.34)"
+    scroll_handle_hover = "rgba(52, 82, 117, 0.62)" if theme.name == "light" else "rgba(210, 228, 247, 0.52)"
+    return f"""
+    QWidget {{
+        color: {theme.text};
+    }}
+    QLabel {{
+        background: transparent;
+    }}
+    QMainWindow {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                    stop:0 {theme.window}, stop:1 {theme.window_alt});
+    }}
+    QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
+        background: transparent;
+        border: none;
+    }}
+    QMenuBar, QStatusBar {{
+        background: {theme.window_alt};
+        border-bottom: 1px solid {theme.input_border};
+    }}
+    QMenuBar::item {{
+        padding: 6px 10px;
+        background: transparent;
+    }}
+    QMenuBar::item:selected, QMenu {{
+        background: {theme.surface};
+    }}
+    QMenu::item:selected {{
+        background: {theme.accent_soft};
+    }}
+    #SidebarPanel, #InspectorPanel, #HeaderCard, #PlotCard, #MetricCard, #NotesCard, #SessionCard, #WorkflowCard, #SelectorCard, #WorkflowHintCard, #WorkflowActionsCard {{
+        background: {theme.surface};
+        border: 1px solid {theme.input_border};
+        border-radius: 20px;
+    }}
+    #WorkflowHintCard, #WorkflowActionsCard {{
+        background: {theme.surface_soft};
+        border-radius: 16px;
+    }}
+    #Brand {{
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+    }}
+    #HeroTitle {{
+        font-size: 28px;
+        font-weight: 700;
+    }}
+    #SectionTitle, #MetricLabel, #WorkflowLabel, #DetailLabel {{
+        color: {theme.muted};
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }}
+    #MetricValue {{
+        font-size: 19px;
+        font-weight: 650;
+    }}
+    #SecondaryText, #PanelBody {{
+        color: {theme.muted};
+    }}
+    #Pill, #StatusPill {{
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: {theme.accent_soft};
+        border: 1px solid {theme.input_border};
+    }}
+    #StatusPill {{
+        background: {theme.success_soft};
+        color: {theme.success};
+    }}
+    QPushButton, QToolButton[modeToggle="true"] {{
+        background: {theme.accent_soft};
+        border: 1px solid {theme.input_border};
+        border-radius: 12px;
+        padding: 10px 14px;
+        font-weight: 600;
+    }}
+    QPushButton:hover, QToolButton[modeToggle="true"]:hover {{
+        background: {theme.accent_hover};
+    }}
+    QPushButton:pressed, QToolButton[modeToggle="true"]:pressed {{
+        background: {theme.accent_hover};
+    }}
+    QPushButton[accent="true"], QToolButton[modeToggle="true"]:checked {{
+        background: {theme.accent};
+        color: #ffffff;
+        border-color: {theme.accent_strong};
+    }}
+    QListWidget, QComboBox, QTextEdit, QTextBrowser {{
+        background: {theme.input_bg};
+        border: 1px solid {theme.input_border};
+        border-radius: 14px;
+        padding: 8px;
+    }}
+    QTextEdit, QTextBrowser {{
+        selection-background-color: {theme.accent_soft};
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: 26px;
+    }}
+    QComboBox QAbstractItemView {{
+        background: {theme.surface};
+        border: 1px solid {theme.input_border};
+        selection-background-color: {theme.accent_soft};
+        selection-color: {theme.text};
+    }}
+    QListWidget::item {{
+        padding: 6px 4px;
+        border-radius: 8px;
+    }}
+    QListWidget::item:selected {{
+        background: {theme.accent_soft};
+        color: {theme.text};
+    }}
+    QAbstractItemView::item:selected {{
+        color: {theme.text};
+    }}
+    QToolTip {{
+        color: {theme.text};
+        background: {theme.surface};
+        border: 1px solid {theme.input_border};
+        padding: 6px 8px;
+    }}
+    QScrollBar:vertical {{
+        background: transparent;
+        width: 14px;
+        margin: 6px 4px 6px 0;
+    }}
+    QScrollBar:horizontal {{
+        background: transparent;
+        height: 14px;
+        margin: 0 6px 4px 6px;
+    }}
+    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+        background: {scroll_handle};
+        border-radius: 7px;
+        min-height: 36px;
+        min-width: 36px;
+    }}
+    QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+        background: {scroll_handle_hover};
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        background: transparent;
+        border: none;
+        width: 0px;
+        height: 0px;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+        background: {scroll_track};
+        border-radius: 7px;
+    }}
+    """

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 612 620">
+  <defs>
+    <style>
+      .st0, .st1 {
+        fill: none;
+      }
+
+      .st1 {
+        isolation: isolate;
+        opacity: .5;
+        stroke: #5a3f8f;
+        stroke-width: .7px;
+      }
+
+      .st1, .st2, .st3, .st4, .st5, .st6, .st7, .st8, .st9, .st10, .st11 {
+        stroke-miterlimit: 3.6;
+      }
+
+      .st2 {
+        fill-opacity: .2;
+      }
+
+      .st2, .st4, .st8 {
+        stroke-width: .6px;
+      }
+
+      .st2, .st6 {
+        fill: #c4aee0;
+      }
+
+      .st2, .st6, .st10 {
+        stroke: #8a6ac0;
+      }
+
+      .st3 {
+        fill: #e8dcfc;
+        stroke: #9070c8;
+      }
+
+      .st3, .st9 {
+        fill-opacity: .8;
+      }
+
+      .st3, .st9, .st10, .st11 {
+        stroke-width: .9px;
+      }
+
+      .st4 {
+        fill: #9b86c4;
+      }
+
+      .st4, .st7 {
+        stroke: #7a5fab;
+      }
+
+      .st4, .st8 {
+        fill-opacity: .2;
+      }
+
+      .st5, .st6, .st7 {
+        stroke-dasharray: 2.7 1.8;
+        stroke-width: .4px;
+      }
+
+      .st5, .st7 {
+        fill-opacity: .1;
+      }
+
+      .st5, .st8 {
+        fill: #8a6ac0;
+        stroke: #6045a0;
+      }
+
+      .st6 {
+        fill-opacity: .1;
+      }
+
+      .st7 {
+        fill: #b09dd4;
+      }
+
+      .st9 {
+        fill: #a888d0;
+        stroke: #7050a8;
+      }
+
+      .st10 {
+        fill: #d4c2f0;
+        fill-opacity: .7;
+      }
+
+      .st11 {
+        fill: #cdb8ec;
+        fill-opacity: .9;
+        stroke: #8060b8;
+      }
+    </style>
+  </defs>
+  <polygon class="st4" points="333 220 360 256 360 364 333 328 333 220"/>
+  <polygon class="st7" points="225 220 333 220 333 328 225 328 225 220"/>
+  <polygon class="st2" points="279 148 333 220 360 256 279 148"/>
+  <polygon class="st6" points="279 148 225 220 333 220 279 148"/>
+  <polygon class="st8" points="279 472 333 328 360 364 279 472"/>
+  <polygon class="st5" points="279 472 225 328 333 328 279 472"/>
+  <polygon class="st10" points="198 256 360 256 360 364 198 364 198 256"/>
+  <polygon class="st3" points="279 148 198 256 360 256 279 148"/>
+  <polygon class="st11" points="279 148 360 256 333 220 279 148"/>
+  <polygon class="st9" points="279 472 198 364 360 364 279 472"/>
+  <polyline class="st1" points="198 364 360 364 333 328 225 328 198 364"/>
+</svg>
