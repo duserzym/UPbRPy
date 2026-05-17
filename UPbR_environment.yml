@@ -1,4 +1,4 @@
-name: UPbR
+name: UPbRPy
 channels:
   - conda-forge
   - defaults
@@ -70,6 +70,8 @@ dependencies:
   - python-dateutil=2.9.0.post0=pyhff2d567_1
   - python-tzdata=2025.1=pyhd8ed1ab_0
   - python_abi=3.13=5_cp313
+  - pyside6=6.11.0
+  - pyqtgraph=0.14.0
   - pyyaml=6.0.2=py313h717bdf5_2
   - pyzmq=26.2.1=py313h2d45800_0
   - readline=8.2=h9e318b2_1
@@ -174,4 +176,3 @@ dependencies:
       - websocket-client==1.8.0
       - widgetsnbextension==4.0.13
       - xyzservices==2025.1.0
-prefix: ~/opt/anaconda3/envs/UPbR

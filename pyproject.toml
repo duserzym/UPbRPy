@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "UPbRPy"
+version = "0.1.0"
+description = "Python LA-ICP-MS U-Pb and trace-element reduction toolkit with an optional PySide6 desktop GUI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+  {name = "UPbRPy contributors"}
+]
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "scipy>=1.14",
+  "matplotlib>=3.9",
+  "bokeh>=3.6",
+  "datashader>=0.17",
+  "holoviews>=1.20",
+  "hvplot>=0.11",
+  "panel>=1.6",
+  "plotly>=6.0"
+]
+
+[project.optional-dependencies]
+gui = [
+  "PySide6>=6.7",
+  "pyqtgraph>=0.13.7"
+]
+
+[project.scripts]
+upbrpy-gui = "GUI.main:main"
+
+[tool.setuptools.packages.find]
+include = ["UPbRPy*", "GUI*"]
+
+[tool.setuptools.package-data]
+UPbRPy = ["standards.csv"]
