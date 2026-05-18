@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,6 +23,11 @@ from UPbRPy import (
     standard_archive,
     subtract_baseline,
 )
+
+
+DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "standards.csv")
+_active_standard_archive = standard_archive.copy()
+_active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
 
 
 CHANNEL_PALETTE = [
@@ -49,6 +55,34 @@ def build_channel_colors(channels: Iterable[str]) -> dict[str, str]:
         channel: CHANNEL_PALETTE[index % len(CHANNEL_PALETTE)]
         for index, channel in enumerate(channel_list)
     }
+
+
+def default_reference_material_library_path() -> str:
+    return DEFAULT_REFERENCE_LIBRARY_PATH
+
+
+def current_standard_archive() -> pd.DataFrame:
+    return _active_standard_archive
+
+
+def current_standard_archive_path() -> str:
+    return _active_standard_archive_path
+
+
+def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
+    global _active_standard_archive
+    global _active_standard_archive_path
+
+    if not path:
+        _active_standard_archive = standard_archive.copy()
+        _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
+        return _active_standard_archive
+
+    target_path = Path(path).expanduser().resolve()
+    loaded_archive = pd.read_csv(target_path, index_col=0)
+    _active_standard_archive = loaded_archive
+    _active_standard_archive_path = str(target_path)
+    return _active_standard_archive
 
 
 def load_session(
@@ -230,7 +264,7 @@ def ensure_normalized_plateau(session: ReductionSession, preset: WorkflowPreset)
         session.experiment.copy(),
         session.channels,
         baseline_subtracted.copy(),
-        standard_archive,
+        current_standard_archive(),
         material=preset.internal_material,
     )
     session.reduction_cache[cache_key] = normalized
@@ -251,7 +285,7 @@ def ensure_concentration_results(session: ReductionSession, preset: WorkflowPres
 
     _require_samples(session, preset.concentration_standards, "concentration standards")
     nist_data = normalized[normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
-    calibration, calibration_plot = calc_concentration_calibration_factor(nist_data, session.channels, standard_archive)
+    calibration, calibration_plot = calc_concentration_calibration_factor(nist_data, session.channels, current_standard_archive())
     unknown_standard_data = normalized[~normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
     final_concentration_df = calc_concentration(unknown_standard_data, calibration)
     results = {
@@ -292,7 +326,7 @@ def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -
 
     _require_samples(session, (preset.primary_standard,), "primary standard")
     primary_standard_ratios = raw_ratios[raw_ratios["sample"] == preset.primary_standard].reset_index(drop=True)
-    correction_results = calc_DH_fractionations_rad(primary_standard_ratios.copy(), standard_archive)
+    correction_results = calc_DH_fractionations_rad(primary_standard_ratios.copy(), current_standard_archive())
     corrected = apply_DH_correction(raw_ratios.copy(), correction_results)
     results = {"correction_results": correction_results, "corrected_ratios": corrected}
     session.reduction_cache[cache_key] = results
@@ -310,7 +344,7 @@ def ensure_session_corrected(session: ReductionSession, preset: WorkflowPreset) 
     primary_standard = corrected[corrected["sample"] == preset.primary_standard].reset_index(drop=True)
     session_results = calc_session_fractionation_rad(
         primary_standard.copy(),
-        standard_archive,
+        current_standard_archive(),
         degree=preset.session_polynomial_degree,
     )
     session_corrected = apply_session_correction(corrected.copy(), session_results)

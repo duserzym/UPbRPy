@@ -10,7 +10,9 @@ from GUI.services import (
     autopick_selection_regions,
     build_channel_colors,
     build_notes,
-    default_visible_channels,
+    clear_reduction_cache,
+    current_standard_archive_path,
+    default_reference_material_library_path,
     ensure_baseline_subtracted,
     ensure_concentration_results,
     ensure_downhole_results,
@@ -19,6 +21,7 @@ from GUI.services import (
     ensure_session_corrected,
     get_selection_regions,
     get_spot_data,
+    load_standard_archive_from_path,
     load_session,
     project_summary,
     reference_material_summary,
@@ -47,6 +50,11 @@ RATIO_COLORS = {
     "208Pb/232Th": "#19a188",
 }
 
+DEFAULT_REGION_COLORS = {
+    "baseline": "#8a4c34",
+    "plateau": "#2c5e87",
+}
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None) -> None:
@@ -61,14 +69,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.app_icon = app_icon or build_app_icon()
         self.sigma_level = 2
         self.selected_stats_channel: str | None = None
+        self._focused_spot_name: str | None = None
+        self._last_plot_mode: str | None = None
+        self.reference_library_path = default_reference_material_library_path()
+        self.default_reference_library_path = default_reference_material_library_path()
+        self._reference_library_notice: str | None = None
+        self.selection_colors = self._resolve_selection_colors()
 
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
-        self.resize(1560, 960)
-        self.setMinimumSize(1280, 820)
+        self.resize(1560, 1150)
+        self.setMinimumSize(1280, 1000)
 
         self._build_menu()
         self._build_ui()
+        self._initialize_reference_library()
         self._connect_system_theme_updates()
         self.apply_theme_mode(self.theme_mode, persist=False)
         self._show_placeholder_state()
@@ -145,6 +160,32 @@ class MainWindow(QtWidgets.QMainWindow):
         brand_row.addLayout(brand_copy, 1)
         layout.addLayout(brand_row)
 
+        self.import_button = QtWidgets.QPushButton("Import experiment directory")
+        self.import_button.setProperty("accent", True)
+        self.import_button.clicked.connect(self.choose_experiment_directory)
+        layout.addWidget(self.import_button)
+
+        library_card = QtWidgets.QFrame()
+        library_card.setObjectName("SessionCard")
+        library_layout = QtWidgets.QVBoxLayout(library_card)
+        library_layout.setContentsMargins(16, 16, 16, 16)
+        library_layout.setSpacing(8)
+        library_label = QtWidgets.QLabel("Reference material library")
+        library_label.setObjectName("SectionTitle")
+        self.reference_library_label = QtWidgets.QLabel()
+        self.reference_library_label.setWordWrap(True)
+        self.reference_library_label.setObjectName("SecondaryText")
+        self.reference_library_default_label = QtWidgets.QLabel()
+        self.reference_library_default_label.setWordWrap(True)
+        self.reference_library_default_label.setObjectName("SecondaryText")
+        self.reference_library_button = QtWidgets.QPushButton("Import reference material library")
+        self.reference_library_button.clicked.connect(self.choose_reference_material_library)
+        library_layout.addWidget(library_label)
+        library_layout.addWidget(self.reference_library_label)
+        library_layout.addWidget(self.reference_library_default_label)
+        library_layout.addWidget(self.reference_library_button)
+        layout.addWidget(library_card)
+
         preset_card = QtWidgets.QFrame()
         preset_card.setObjectName("SessionCard")
         preset_layout = QtWidgets.QVBoxLayout(preset_card)
@@ -179,29 +220,6 @@ class MainWindow(QtWidgets.QMainWindow):
         preset_layout.addWidget(appearance_label)
         preset_layout.addWidget(self.theme_combo)
         layout.addWidget(preset_card)
-
-        session_card = QtWidgets.QFrame()
-        session_card.setObjectName("SessionCard")
-        session_layout = QtWidgets.QVBoxLayout(session_card)
-        session_layout.setContentsMargins(16, 16, 16, 16)
-        session_layout.setSpacing(8)
-        header = QtWidgets.QLabel("Session")
-        header.setObjectName("SectionTitle")
-        self.project_name_label = QtWidgets.QLabel("No experiment loaded")
-        self.project_name_label.setWordWrap(True)
-        self.project_name_label.setStyleSheet("font-size: 18px; font-weight: 700;")
-        self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
-        self.project_spots_label.setObjectName("SecondaryText")
-        self.project_mode_label = QtWidgets.QLabel("Choose a notebook-derived mineral workflow")
-        self.project_mode_label.setObjectName("SecondaryText")
-        self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
-        self.project_engine_label.setObjectName("SecondaryText")
-        session_layout.addWidget(header)
-        session_layout.addWidget(self.project_name_label)
-        session_layout.addWidget(self.project_spots_label)
-        session_layout.addWidget(self.project_mode_label)
-        session_layout.addWidget(self.project_engine_label)
-        layout.addWidget(session_card)
 
         workflow_card = QtWidgets.QFrame()
         workflow_card.setObjectName("WorkflowCard")
@@ -245,10 +263,6 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_layout.addWidget(self.workflow_status_label)
         layout.addWidget(workflow_card, 1)
 
-        self.import_button = QtWidgets.QPushButton("Import experiment directory")
-        self.import_button.setProperty("accent", True)
-        self.import_button.clicked.connect(self.choose_experiment_directory)
-        layout.addWidget(self.import_button)
         layout.addStretch(1)
         scroll.setWidget(frame)
         return scroll
@@ -272,6 +286,31 @@ class MainWindow(QtWidgets.QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header_layout.addLayout(title_box)
+        header_layout.addStretch(1)
+
+        summary_box = QtWidgets.QVBoxLayout()
+        summary_box.setSpacing(4)
+        workspace_label = QtWidgets.QLabel("Workspace")
+        workspace_label.setObjectName("SectionTitle")
+        self.project_name_label = QtWidgets.QLabel("No experiment loaded")
+        self.project_name_label.setWordWrap(True)
+        self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.project_name_label.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
+        self.project_spots_label.setObjectName("SecondaryText")
+        self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.project_mode_label = QtWidgets.QLabel("Choose a notebook-derived mineral workflow")
+        self.project_mode_label.setObjectName("SecondaryText")
+        self.project_mode_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
+        self.project_engine_label.setObjectName("SecondaryText")
+        self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        summary_box.addWidget(workspace_label, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        summary_box.addWidget(self.project_name_label)
+        summary_box.addWidget(self.project_spots_label)
+        summary_box.addWidget(self.project_mode_label)
+        summary_box.addWidget(self.project_engine_label)
+        header_layout.addLayout(summary_box)
         layout.addWidget(header)
 
         metrics = QtWidgets.QHBoxLayout()
@@ -291,8 +330,8 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(12, 12, 12, 12)
         plot_layout.setSpacing(12)
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setSpacing(8)
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(8)
         self.plot_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.plot_mode_group = QtWidgets.QButtonGroup(self)
         self.plot_mode_group.setExclusive(True)
@@ -302,46 +341,127 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setCheckable(True)
             button.setProperty("modeToggle", True)
             button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                )
+            )
+            button.setMinimumWidth(self.fontMetrics().horizontalAdvance(label) + 32)
             button.clicked.connect(lambda _checked=False, plot_mode=key: self.set_plot_mode(plot_mode, refresh=True))
             self.plot_mode_group.addButton(button)
             self.plot_mode_buttons[key] = button
-            toolbar.addWidget(button)
+            mode_row.addWidget(button)
+        mode_row.addStretch(1)
+        plot_layout.addLayout(mode_row)
 
-        toolbar.addSpacing(8)
-        ratio_label = QtWidgets.QLabel("Ratio")
-        ratio_label.setObjectName("SectionTitle")
-        self.ratio_combo = QtWidgets.QComboBox()
-        for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
-            self.ratio_combo.addItem(ratio_name, ratio_name)
-        self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
-        self.ratio_combo.setMinimumWidth(150)
-        toolbar.addWidget(ratio_label)
-        toolbar.addWidget(self.ratio_combo)
-        sigma_label = QtWidgets.QLabel("Band")
-        sigma_label.setObjectName("SectionTitle")
-        self.sigma_toggle_button = QtWidgets.QToolButton()
-        self.sigma_toggle_button.setProperty("modeToggle", True)
-        self.sigma_toggle_button.setCheckable(True)
-        self.sigma_toggle_button.setChecked(True)
-        self.sigma_toggle_button.clicked.connect(self.on_sigma_toggle_clicked)
-        self._update_sigma_button_text()
-        toolbar.addWidget(sigma_label)
-        toolbar.addWidget(self.sigma_toggle_button)
-        toolbar.addStretch(1)
-        self.status_pill = QtWidgets.QLabel("Shared source engine")
-        self.status_pill.setObjectName("StatusPill")
-        toolbar.addWidget(self.status_pill)
-        plot_layout.addLayout(toolbar)
-
+        # ── Plot canvas ────────────────────────────────────────────────────
         self.trace_plot = TracePlotWidget()
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
         self.trace_plot.xWindowChanged.connect(self.on_trace_x_window_changed)
         plot_layout.addWidget(self.trace_plot)
 
+        plot_layout.addSpacing(0)
         self.session_overview_plot = SessionOverviewWidget()
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
         plot_layout.addWidget(self.session_overview_plot)
+
+        # ── Control bar below both plots ───────────────────────────────────
+        control_bar = QtWidgets.QFrame()
+        control_bar.setObjectName("PlotControlBar")
+        cb_layout = QtWidgets.QHBoxLayout(control_bar)
+        cb_layout.setContentsMargins(8, 6, 8, 6)
+        cb_layout.setSpacing(8)
+
+        drag_lbl = QtWidgets.QLabel("Drag")
+        drag_lbl.setObjectName("ControlBarLabel")
+        cb_layout.addWidget(drag_lbl)
+        self.interact_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self.interact_mode_group = QtWidgets.QButtonGroup(self)
+        self.interact_mode_group.setExclusive(True)
+        for imode, imode_label in [("zoom", "Box"), ("pan", "Pan")]:
+            ibtn = QtWidgets.QToolButton()
+            ibtn.setText(imode_label)
+            ibtn.setCheckable(True)
+            ibtn.setProperty("modeToggle", True)
+            ibtn.setSizePolicy(
+                QtWidgets.QSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                )
+            )
+            ibtn.clicked.connect(lambda _checked=False, selected_imode=imode: self.set_interaction_mode(selected_imode))
+            self.interact_mode_group.addButton(ibtn)
+            self.interact_mode_buttons[imode] = ibtn
+            cb_layout.addWidget(ibtn)
+        self.interact_mode_buttons["zoom"].setChecked(True)
+
+        _vsep_drag = QtWidgets.QFrame()
+        _vsep_drag.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        _vsep_drag.setObjectName("ControlBarDivider")
+        cb_layout.addWidget(_vsep_drag)
+
+        zoom_lbl = QtWidgets.QLabel("Zoom")
+        zoom_lbl.setObjectName("ControlBarLabel")
+        cb_layout.addWidget(zoom_lbl)
+        self.zoom_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self.zoom_mode_group = QtWidgets.QButtonGroup(self)
+        self.zoom_mode_group.setExclusive(True)
+        for mode, mode_label in [("xy", "XY"), ("x", "X only"), ("y", "Y only")]:
+            btn = QtWidgets.QToolButton()
+            btn.setText(mode_label)
+            btn.setCheckable(True)
+            btn.setProperty("modeToggle", True)
+            btn.setSizePolicy(
+                QtWidgets.QSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                )
+            )
+            btn.clicked.connect(lambda _checked=False, selected_mode=mode: self.set_zoom_mode(selected_mode))
+            self.zoom_mode_group.addButton(btn)
+            self.zoom_mode_buttons[mode] = btn
+            cb_layout.addWidget(btn)
+        self.zoom_mode_buttons["xy"].setChecked(True)
+
+        _vsep1 = QtWidgets.QFrame()
+        _vsep1.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        _vsep1.setObjectName("ControlBarDivider")
+        cb_layout.addWidget(_vsep1)
+
+        self.reset_scale_button = QtWidgets.QPushButton("Reset scale")
+        self.reset_scale_button.clicked.connect(self.restore_default_main_view)
+        cb_layout.addWidget(self.reset_scale_button)
+
+        _vsep2 = QtWidgets.QFrame()
+        _vsep2.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        _vsep2.setObjectName("ControlBarDivider")
+        cb_layout.addWidget(_vsep2)
+
+        ratio_lbl = QtWidgets.QLabel("Ratio")
+        ratio_lbl.setObjectName("ControlBarLabel")
+        cb_layout.addWidget(ratio_lbl)
+        self.ratio_combo = QtWidgets.QComboBox()
+        for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
+            self.ratio_combo.addItem(ratio_name, ratio_name)
+        self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
+        cb_layout.addWidget(self.ratio_combo)
+
+        _vsep3 = QtWidgets.QFrame()
+        _vsep3.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        _vsep3.setObjectName("ControlBarDivider")
+        cb_layout.addWidget(_vsep3)
+
+        self.sigma_toggle_button = QtWidgets.QToolButton()
+        self.sigma_toggle_button.setProperty("modeToggle", True)
+        self.sigma_toggle_button.setCheckable(True)
+        self.sigma_toggle_button.setChecked(True)
+        self.sigma_toggle_button.clicked.connect(self.on_sigma_toggle_clicked)
+        self._update_sigma_button_text()
+        cb_layout.addWidget(self.sigma_toggle_button)
+        cb_layout.addStretch(1)
+        plot_layout.addWidget(control_bar)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         content_splitter.setChildrenCollapsible(False)
@@ -366,7 +486,12 @@ class MainWindow(QtWidgets.QMainWindow):
         notes_layout.addWidget(self.notes_body)
         notes_layout.addStretch(1)
         notes_card.setMaximumHeight(220)
-        notes_card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        notes_card.setSizePolicy(
+            QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred,
+                QtWidgets.QSizePolicy.Policy.Maximum,
+            )
+        )
         lower.addWidget(notes_card, 1)
 
         log_card = QtWidgets.QFrame()
@@ -381,12 +506,17 @@ class MainWindow(QtWidgets.QMainWindow):
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_view)
         log_card.setMaximumHeight(220)
-        log_card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Maximum)
+        log_card.setSizePolicy(
+            QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred,
+                QtWidgets.QSizePolicy.Policy.Maximum,
+            )
+        )
         lower.addWidget(log_card, 1)
         content_splitter.addWidget(lower_container)
         content_splitter.setStretchFactor(0, 5)
         content_splitter.setStretchFactor(1, 2)
-        content_splitter.setSizes([640, 220])
+        content_splitter.setSizes([900, 200])
         layout.addWidget(content_splitter, 1)
         return widget
 
@@ -429,6 +559,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_color_button = QtWidgets.QPushButton("Set selected channel color")
         self.channel_color_button.clicked.connect(self.choose_channel_color)
         selector_layout.addWidget(self.channel_color_button)
+        selection_colors_row = QtWidgets.QHBoxLayout()
+        selection_colors_row.setSpacing(8)
+        self.baseline_color_button = QtWidgets.QPushButton("Baseline color")
+        self.baseline_color_button.clicked.connect(lambda: self.choose_region_color("baseline"))
+        self.plateau_color_button = QtWidgets.QPushButton("Plateau color")
+        self.plateau_color_button.clicked.connect(lambda: self.choose_region_color("plateau"))
+        selection_colors_row.addWidget(self.baseline_color_button)
+        selection_colors_row.addWidget(self.plateau_color_button)
+        selector_layout.addLayout(selection_colors_row)
         layout.addWidget(selector_card, 1)
         return frame
 
@@ -443,14 +582,59 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_placeholder_state(self) -> None:
         self._apply_project_summary(project_summary(self.session))
+        self._update_reference_library_labels()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
-        self.trace_plot.show_preview()
+        self.trace_plot.show_preview(self.selection_colors)
         self.session_overview_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         self.session_overview_plot.show_preview()
         self.notes_body.setText(self._compose_notes(None))
         self.log_view.setPlainText("Ready. Load an experiment directory to begin.\n")
+        if self._reference_library_notice:
+            self.append_log(self._reference_library_notice)
+            self._reference_library_notice = None
         self._sync_plot_mode_buttons()
         self._refresh_workflow_status()
+
+    def _initialize_reference_library(self) -> None:
+        saved_path = str(self.settings.value("reference_library_path", "", type=str) or "")
+        target_path = saved_path if saved_path else self.default_reference_library_path
+        try:
+            load_standard_archive_from_path(target_path)
+        except Exception as exc:
+            load_standard_archive_from_path(None)
+            self.settings.remove("reference_library_path")
+            self._reference_library_notice = f"Reference material library fallback to default after load failure: {exc}"
+        self.reference_library_path = current_standard_archive_path()
+        self._update_reference_library_labels()
+
+    def _update_reference_library_labels(self) -> None:
+        current_path = self.reference_library_path or current_standard_archive_path()
+        self.reference_library_label.setText(f"Current library: {current_path}")
+        self.reference_library_default_label.setText(f"Default library: {self.default_reference_library_path}")
+
+    def choose_reference_material_library(self) -> None:
+        start_directory = str(Path(self.reference_library_path).expanduser().parent) if self.reference_library_path else str(Path.home())
+        file_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select reference material library",
+            start_directory,
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+        try:
+            load_standard_archive_from_path(file_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Failed to load library", str(exc))
+            self.append_log(f"Reference material library load failed: {file_path}: {exc}")
+            return
+        self.reference_library_path = current_standard_archive_path()
+        self.settings.setValue("reference_library_path", self.reference_library_path)
+        self._update_reference_library_labels()
+        clear_reduction_cache(self.session)
+        self.append_log(f"Loaded reference material library: {self.reference_library_path}")
+        self.statusBar().showMessage(f"Reference material library loaded from {Path(self.reference_library_path).name}")
+        self.refresh_view()
 
     def choose_experiment_directory(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(
@@ -485,6 +669,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.restoreOverrideCursor()
 
         self.pending_region_updates.clear()
+        self._focused_spot_name = None
         self.channel_colors = self._resolve_channel_colors(self.session.channels)
         self._populate_selectors()
         self._set_default_ratio_for_preset()
@@ -507,6 +692,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_theme_controls()
         self.trace_plot.apply_theme(active_theme(app))
         self.trace_plot.set_sigma_level(self.sigma_level)
+        self.trace_plot.set_zoom_mode(self.trace_plot.zoom_mode())
         self.session_overview_plot.apply_theme(active_theme(app))
         self.refresh_view()
 
@@ -674,6 +860,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_channel_item_swatch(target_item, channel)
         self.refresh_view()
 
+    def choose_region_color(self, region_name: str) -> None:
+        current_color = QtGui.QColor(self.selection_colors.get(region_name, DEFAULT_REGION_COLORS[region_name]))
+        chosen = QtWidgets.QColorDialog.getColor(current_color, self, f"Select {region_name} region color")
+        if not chosen.isValid():
+            return
+        self.selection_colors[region_name] = chosen.name(QtGui.QColor.NameFormat.HexRgb)
+        self._persist_selection_colors()
+        self.refresh_view()
+
     def on_ratio_changed(self, _index: int) -> None:
         if self._is_populating:
             return
@@ -737,6 +932,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _persist_channel_colors(self) -> None:
         self.settings.setValue("channel_colors_json", json.dumps(self.channel_colors))
 
+    def _resolve_selection_colors(self) -> dict[str, str]:
+        colors = dict(DEFAULT_REGION_COLORS)
+        saved_text = str(self.settings.value("selection_colors_json", "{}", type=str) or "{}")
+        try:
+            saved_colors = json.loads(saved_text)
+        except json.JSONDecodeError:
+            saved_colors = {}
+        if isinstance(saved_colors, dict):
+            for key in colors:
+                value = saved_colors.get(key)
+                if isinstance(value, str) and value:
+                    colors[key] = value
+        return colors
+
+    def _persist_selection_colors(self) -> None:
+        self.settings.setValue("selection_colors_json", json.dumps(self.selection_colors))
+
     def _apply_channel_item_swatch(self, item: QtWidgets.QListWidgetItem, channel: str) -> None:
         color = self.channel_colors.get(channel, "#6177a2")
         pixmap = QtGui.QPixmap(14, 14)
@@ -755,6 +967,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if refresh:
             self.refresh_view()
 
+    def set_interaction_mode(self, mode: str) -> None:
+        self.trace_plot.set_interaction_mode(mode)
+        for key, button in self.interact_mode_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == self.trace_plot.interaction_mode())
+            button.blockSignals(False)
+
+    def set_zoom_mode(self, mode: str) -> None:
+        self.trace_plot.set_zoom_mode(mode)
+        for key, button in self.zoom_mode_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == self.trace_plot.zoom_mode())
+            button.blockSignals(False)
+
+    def restore_default_main_view(self) -> None:
+        if not self.session.loaded:
+            self.trace_plot.show_preview(self.selection_colors)
+            self.session_overview_plot.show_preview()
+            return
+        self._focus_selected_spot(self.current_spot_name())
+
     def _sync_plot_mode_buttons(self) -> None:
         for mode, button in self.plot_mode_buttons.items():
             button.blockSignals(True)
@@ -768,7 +1001,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_view(self) -> None:
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
-            self.trace_plot.show_preview()
+            self.trace_plot.show_preview(self.selection_colors)
             self.session_overview_plot.show_preview()
             self._apply_metrics(spot_metrics(self.session, None))
             self.notes_body.setText(self._compose_notes(None))
@@ -779,11 +1012,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not selected_spot and self.session.spot_names:
             selected_spot = self.session.spot_names[0]
         self.session.selected_spot = selected_spot
+        previous_x_range = self.trace_plot.visible_x_range()
+        previous_y_range = self.trace_plot.visible_y_range()
+        same_spot = bool(selected_spot) and selected_spot == self._focused_spot_name
+        same_mode = self.session.plot_mode == self._last_plot_mode
+        should_focus_spot = bool(selected_spot) and (not same_spot or not same_mode)
+        preserve_main_view = same_spot and same_mode
 
         visible_channels = self.checked_channels()
-        if not visible_channels:
-            visible_channels = default_visible_channels(self.session.channels, self.session.primary_channel)
-            self._apply_channel_checks(visible_channels)
         self.session.visible_channels = visible_channels
 
         spot_data = get_spot_data(self.session, selected_spot)
@@ -803,13 +1039,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 regions,
                 editable_regions=editable_regions,
                 stats_channel=self.current_stats_channel(),
+                region_colors=self.selection_colors,
             )
+        if should_focus_spot:
+            self._focus_selected_spot(selected_spot)
+        elif preserve_main_view and visible_channels:
+            self.trace_plot.set_x_window(previous_x_range)
+            self.trace_plot.set_y_window(previous_y_range)
         self._refresh_session_overview()
+        if should_focus_spot:
+            self._focused_spot_name = selected_spot
+        self._last_plot_mode = self.session.plot_mode
 
         self._apply_project_summary(project_summary(self.session))
         self._apply_metrics(spot_metrics(self.session, selected_spot))
         self.notes_body.setText(self._compose_notes(selected_spot))
-        self.status_pill.setText(f"{PLOT_MODE_LABELS.get(self.session.plot_mode, 'Preview')} · {len(visible_channels)} channels")
         self._refresh_workflow_status()
 
     def _refresh_session_overview(self) -> None:
@@ -828,6 +1072,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_overview_window_changed(self, bounds: tuple[float, float]) -> None:
         self.trace_plot.set_x_window(bounds)
+        if self.trace_plot.zoom_mode() == "xy":
+            self.trace_plot.fit_y_to_visible_data()
+
+    def _focus_selected_spot(self, spot_name: str | None) -> None:
+        if not spot_name:
+            return
+        spot_frame = get_spot_data(self.session, spot_name)
+        if spot_frame.empty or "Time" not in spot_frame:
+            return
+        start_time = float(spot_frame["Time"].min())
+        end_time = float(spot_frame["Time"].max())
+        padding = max(0.25, (end_time - start_time) * 0.04)
+        self.trace_plot.set_x_window((start_time - padding, end_time + padding))
+        self.trace_plot.fit_y_to_visible_data()
 
     def _render_current_plot(
         self,
@@ -846,6 +1104,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 regions,
                 editable_regions=editable_regions,
                 stats_channel=self.current_stats_channel(),
+                region_colors=self.selection_colors,
             )
             return
 
@@ -860,6 +1119,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 editable_regions=editable_regions,
                 y_label="Baseline-subtracted cps",
                 stats_channel=self.current_stats_channel(),
+                region_colors=self.selection_colors,
             )
             return
 
@@ -903,6 +1163,7 @@ class MainWindow(QtWidgets.QMainWindow):
             regions,
             editable_regions=editable_regions,
             stats_channel=self.current_stats_channel(),
+            region_colors=self.selection_colors,
         )
 
     def _apply_channel_checks(self, channels: list[str]) -> None:

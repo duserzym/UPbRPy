@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
+import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
@@ -47,9 +48,9 @@ THEMES: dict[str, ThemeSpec] = {
         success="#19836d",
         success_soft="rgba(25, 131, 109, 0.12)",
         plot_background="#ffffff",
-        axis_text="#25435f",
-        axis_line="#7f97b3",
-        grid_alpha=0.17,
+        axis_text="#243d5a",
+        axis_line="#a0b8cc",
+        grid_alpha=0.35,
     ),
     "dark": ThemeSpec(
         name="dark",
@@ -81,6 +82,7 @@ def build_application(argv: list[str] | None = None, theme_mode: str = "light") 
     app.setOrganizationName("UPbRPy")
     app.setStyle("Fusion")
     app.setFont(_pick_font(app))
+    pg.setConfigOptions(antialias=True)
     apply_theme(app, theme_mode)
     return app
 
@@ -184,6 +186,21 @@ def _stylesheet(theme: ThemeSpec) -> str:
     #WorkflowHintCard, #WorkflowActionsCard {{
         background: {theme.surface_soft};
         border-radius: 16px;
+    }}
+    #PlotControlBar {{
+        background: {theme.surface_soft};
+        border: 1px solid {theme.input_border};
+        border-radius: 12px;
+    }}
+    #ControlBarDivider {{
+        color: {theme.axis_line};
+        max-width: 1px;
+        margin: 0px 2px;
+    }}
+    #ControlBarLabel {{
+        color: {theme.muted};
+        font-size: 12px;
+        font-weight: 600;
     }}
     #Brand {{
         font-size: 24px;

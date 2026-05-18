@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pandas as pd
@@ -40,8 +39,13 @@ class TracePlotWidget(pg.PlotWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(420)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(200)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        )
         self.plot_item = self.getPlotItem()
         self._theme = ThemeSpec(
             name="dark",
@@ -67,11 +71,22 @@ class TracePlotWidget(pg.PlotWidget):
         self._region_overlays: dict[str, dict[str, object]] = {}
         self._hover_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._sigma_level = 2
+        self._zoom_mode = "xy"
+        self._interaction_mode = "zoom"
         self._suspend_x_window_signal = False
+        self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         self._hover_proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self._on_scene_mouse_moved)
         self.plot_item.vb.sigXRangeChanged.connect(self._on_x_range_changed)
         self._configure_plot()
         self.show_preview()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if not hasattr(self, "plot_item"):
+            return
+        self.plot_item.layout.setRowFixedHeight(3, 62)
+        self.plot_item.getAxis("bottom").setHeight(54)
+        self.plot_item.showAxis("bottom")
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -82,14 +97,14 @@ class TracePlotWidget(pg.PlotWidget):
         self.setBackground(self._theme.plot_background)
         self.showGrid(x=True, y=True, alpha=self._theme.grid_alpha)
         self.setMenuEnabled(False)
-        self.setMouseEnabled(x=True, y=True)
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
         self.setClipToView(True)
         self.plot_item.hideButtons()
-        self.plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
-        self.plot_item.setContentsMargins(20, 16, 20, 18)
-        self.plot_item.layout.setRowFixedHeight(3, 68)
+        self.plot_item.setContentsMargins(20, 16, 20, 8)
+        self.plot_item.layout.setRowFixedHeight(3, 62)
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
-        self.plot_item.setLabel("bottom", "Acquisition Time", units="s", **label_style)
+        self.plot_item.setLabel("bottom", "Acquisition Time (s)", **label_style)
         self.plot_item.setLabel("left", "Counts / cps", **label_style)
         tick_font = QtGui.QFont()
         tick_font.setPointSizeF(11.5)
@@ -102,7 +117,8 @@ class TracePlotWidget(pg.PlotWidget):
         left_axis.setStyle(tickFont=tick_font, tickTextOffset=10, autoExpandTextSpace=False)
         bottom_axis.setStyle(tickFont=tick_font, tickTextOffset=6, autoExpandTextSpace=True)
         left_axis.setWidth(88)
-        bottom_axis.setHeight(62)
+        bottom_axis.setHeight(54)
+        self.plot_item.showAxis("bottom")
 
     def _reset_items(self) -> None:
         legend = self.plot_item.legend
@@ -113,43 +129,54 @@ class TracePlotWidget(pg.PlotWidget):
         self._region_overlays = {}
         self._hover_series = {}
         self._configure_plot()
-        self.plot_item.addLegend(offset=(16, 8), labelTextColor=self._theme.axis_text, labelTextSize="14pt")
+        self.plot_item.addLegend(offset=(16, 8), labelTextColor=self._theme.axis_text, labelTextSize="14pt", colCount=2)
 
-    def show_preview(self) -> None:
+    def show_preview(self, region_colors: dict[str, str] | None = None) -> None:
         self._reset_items()
-        time_axis = np.array([index * 0.4 for index in range(300)], dtype=float)
+        colors = _resolved_region_colors(region_colors)
         previews = [
             ("238U", "#69e2ff", 1.0, 0.0),
             ("206Pb", "#ff8a5b", 0.72, 0.8),
             ("207Pb", "#ffe56b", 0.52, 1.7),
             ("29Si", "#7ef7c9", 0.34, 2.4),
         ]
+        n_spots = 4
+        spot_duration = 80.0
+        gap = 20.0
+        period = spot_duration + gap
+        total = n_spots * period
+        t_global = np.linspace(0.0, total, n_spots * 400)
+        t_local = t_global % period
+        in_spot = (t_local < spot_duration).astype(float)
+        rise = 1.0 / (1.0 + np.exp(-(t_local - 43.0) / 0.8))
+        fall = 1.0 / (1.0 + np.exp((t_local - 70.0) / 2.0))
+        plateau = 1450.0 * rise * fall * in_spot
+
         preview_stats: np.ndarray | None = None
         for name, color, scale, phase in previews:
-            values = []
-            for index, _time_value in enumerate(time_axis):
-                baseline = 500 + 120 * math.sin(index / 18.0 + phase)
-                peak = 1400 * math.exp(-((index - 145) ** 2) / 950.0)
-                ripple = 60 * math.sin(index / 4.0 + phase)
-                values.append((baseline + peak + ripple) * scale)
-            y_values = np.array(values, dtype=float)
-            curve = self.plot_item.plot(time_axis, y_values, pen=pg.mkPen(color, width=2.2), name=name)
+            baseline = 480.0 + 18.0 * np.sin(t_global / 2.7 + phase) + 10.0 * np.cos(t_global / 6.5 + phase * 0.6)
+            micro_ripple = 14.0 * np.sin(t_global / 1.9 + phase)
+            y_values = (baseline + plateau + micro_ripple) * scale
+            curve = self.plot_item.plot(t_global, y_values, pen=pg.mkPen(color, width=2.2), name=name)
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
-            self._hover_series[name] = (time_axis, y_values)
+            self._hover_series[name] = (t_global, y_values)
             if name == "238U":
                 preview_stats = y_values
 
+        # Regions pinned to first spot only
+        first_mask = t_global <= spot_duration
+        t_first = t_global[first_mask]
         preview_frame = pd.DataFrame(
             {
-                "Time": time_axis,
-                "238U": preview_stats if preview_stats is not None else np.zeros_like(time_axis),
+                "Time": t_first,
+                "238U": preview_stats[first_mask] if preview_stats is not None else np.zeros_like(t_first),
             }
         )
-        self._add_region("preview_baseline", (42.0, 54.0), "#ff8a5b", 18, movable=False, frame=preview_frame, stats_channel="238U")
-        self._add_region("preview_plateau", (54.0, 76.0), "#69e2ff", 20, movable=False, frame=preview_frame, stats_channel="238U")
-        self.setXRange(0, 120, padding=0)
-        self.setYRange(0, 2400, padding=0.02)
+        self._add_region("preview_baseline", (18.0, 42.0), colors["baseline"], 44, movable=False, frame=preview_frame, stats_channel="238U")
+        self._add_region("preview_plateau", (47.0, 62.0), colors["plateau"], 52, movable=False, frame=preview_frame, stats_channel="238U")
+        self.set_x_window((10.0, 80.0))  # zoom to first spot; user can pan to others
+        self.fit_y_to_visible_data()
 
     def show_spot(
         self,
@@ -161,9 +188,13 @@ class TracePlotWidget(pg.PlotWidget):
         editable_regions: bool = False,
         y_label: str = "Counts / cps",
         stats_channel: str | None = None,
+        region_colors: dict[str, str] | None = None,
     ) -> None:
-        if spot_data.empty or not channels:
+        if spot_data.empty:
             self.show_preview()
+            return
+        if not channels:
+            self.show_empty("Check one or more channels to display traces.", y_label=y_label)
             return
 
         self._reset_items()
@@ -173,6 +204,7 @@ class TracePlotWidget(pg.PlotWidget):
         y_min = None
         y_max = None
         region_channel = stats_channel or channels[0]
+        colors = _resolved_region_colors(region_colors)
 
         for channel in channels:
             if channel not in spot_data:
@@ -191,9 +223,9 @@ class TracePlotWidget(pg.PlotWidget):
                 y_max = current_max if y_max is None else max(y_max, current_max)
 
         if regions.get("baseline"):
-            self._add_region("baseline", regions["baseline"], "#ff8a5b", 18, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
+            self._add_region("baseline", regions["baseline"], colors["baseline"], 44, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
         if regions.get("plateau"):
-            self._add_region("plateau", regions["plateau"], "#69e2ff", 20, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
+            self._add_region("plateau", regions["plateau"], colors["plateau"], 52, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
 
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
         if y_min is not None and y_max is not None:
@@ -210,8 +242,11 @@ class TracePlotWidget(pg.PlotWidget):
         y_label: str,
         line_style: str = "line",
     ) -> None:
-        if frame.empty or not series_names:
+        if frame.empty:
             self.show_preview()
+            return
+        if not series_names:
+            self.show_empty("Check one or more channels to display traces.", y_label=y_label)
             return
 
         self._reset_items()
@@ -260,9 +295,27 @@ class TracePlotWidget(pg.PlotWidget):
             for name, region in self._region_overlays.items()
         }
 
+    def show_empty(self, message: str, *, y_label: str = "Counts / cps") -> None:
+        self._reset_items()
+        label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
+        self.plot_item.setLabel("left", y_label, **label_style)
+        self.plot_item.setLabel("bottom", "Acquisition Time", units="s", **label_style)
+        text_item = pg.TextItem(
+            html=f"<div style='color:{self._theme.muted}; font-size:13pt; font-weight:600'>{message}</div>",
+            anchor=(0.5, 0.5),
+        )
+        text_item.setPos(0.5, 0.5)
+        self.plot_item.addItem(text_item)
+        self.setXRange(0.0, 1.0, padding=0.0)
+        self.setYRange(0.0, 1.0, padding=0.0)
+
     def visible_x_range(self) -> tuple[float, float]:
         x_range, _y_range = self.plot_item.viewRange()
         return float(x_range[0]), float(x_range[1])
+
+    def visible_y_range(self) -> tuple[float, float]:
+        _x_range, y_range = self.plot_item.viewRange()
+        return float(y_range[0]), float(y_range[1])
 
     def set_x_window(self, bounds: tuple[float, float]) -> None:
         start_value, end_value = sorted(float(value) for value in bounds)
@@ -271,6 +324,68 @@ class TracePlotWidget(pg.PlotWidget):
             self.setXRange(start_value, end_value, padding=0.0)
         finally:
             self._suspend_x_window_signal = False
+
+    def set_y_window(self, bounds: tuple[float, float]) -> None:
+        lower, upper = sorted(float(value) for value in bounds)
+        self.setYRange(lower, upper, padding=0.0)
+
+    def fit_y_to_visible_data(self) -> None:
+        if not self._hover_series:
+            return
+        x_start, x_end = self.visible_x_range()
+        y_min: float | None = None
+        y_max: float | None = None
+
+        for x_values, y_values in self._hover_series.values():
+            mask = (x_values >= x_start) & (x_values <= x_end) & np.isfinite(y_values)
+            if not np.any(mask):
+                continue
+            local_values = y_values[mask]
+            if local_values.size >= 8:
+                local_min = float(np.quantile(local_values, 0.01))
+                local_max = float(np.quantile(local_values, 0.995))
+            else:
+                local_min = float(np.min(local_values))
+                local_max = float(np.max(local_values))
+            y_min = local_min if y_min is None else min(y_min, local_min)
+            y_max = local_max if y_max is None else max(y_max, local_max)
+
+        if y_min is None or y_max is None:
+            return
+        span = max(y_max - y_min, 1.0)
+        lower = y_min - span * 0.03
+        if y_min >= 0.0 and lower < span * 0.02:
+            lower = 0.0
+        upper = y_max + span * 0.10
+        self.setYRange(lower, upper, padding=0.0)
+
+    def set_zoom_mode(self, mode: str) -> None:
+        self._zoom_mode = mode if mode in {"xy", "x", "y"} else "xy"
+        self._apply_zoom_mode()
+
+    def zoom_mode(self) -> str:
+        return self._zoom_mode
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        self._apply_interaction_mode()
+
+    def interaction_mode(self) -> str:
+        return self._interaction_mode
+
+    def _apply_interaction_mode(self) -> None:
+        if self._interaction_mode == "pan":
+            self.plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
+        else:
+            self.plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+
+    def _apply_zoom_mode(self) -> None:
+        if self._zoom_mode == "x":
+            self.setMouseEnabled(x=True, y=False)
+        elif self._zoom_mode == "y":
+            self.setMouseEnabled(x=False, y=True)
+        else:
+            self.setMouseEnabled(x=True, y=True)
 
     def set_sigma_level(self, sigma_level: int) -> None:
         self._sigma_level = 1 if sigma_level <= 1 else 2
@@ -298,9 +413,9 @@ class TracePlotWidget(pg.PlotWidget):
             line.setPen(transparent_pen)
             line.setHoverPen(transparent_pen)
         region.setZValue(6)
-        mean_line = pg.PlotDataItem(pen=pg.mkPen(color, width=2.2))
-        upper_line = pg.PlotDataItem(pen=pg.mkPen(base_color.red(), base_color.green(), base_color.blue(), max(70, alpha * 4), width=0.8))
-        lower_line = pg.PlotDataItem(pen=pg.mkPen(base_color.red(), base_color.green(), base_color.blue(), max(70, alpha * 4), width=0.8))
+        mean_line = pg.PlotDataItem(pen=pg.mkPen(color, width=2.5))
+        upper_line = pg.PlotDataItem(pen=pg.mkPen(base_color.red(), base_color.green(), base_color.blue(), max(120, alpha * 4), width=1.3))
+        lower_line = pg.PlotDataItem(pen=pg.mkPen(base_color.red(), base_color.green(), base_color.blue(), max(120, alpha * 4), width=1.3))
         fill = pg.FillBetweenItem(upper_line, lower_line, brush=pg.mkBrush(base_color.red(), base_color.green(), base_color.blue(), alpha))
         fill.setZValue(3)
         mean_line.setZValue(4)
@@ -436,6 +551,7 @@ class SessionOverviewWidget(pg.PlotWidget):
         )
         self._window_region: pg.LinearRegionItem | None = None
         self._sync_guard = False
+        self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         self._configure_plot()
         self.show_preview()
 
@@ -453,7 +569,7 @@ class SessionOverviewWidget(pg.PlotWidget):
         self.setMenuEnabled(False)
         self.setMouseEnabled(x=False, y=False)
         self.plot_item.hideButtons()
-        self.plot_item.setContentsMargins(16, 4, 12, 10)
+        self.plot_item.setContentsMargins(16, 2, 12, 10)
         label_style = {"color": self._theme.axis_text, "font-size": "12px", "font-weight": "600"}
         self.plot_item.setLabel("bottom", "Session time", units="s", **label_style)
         self.plot_item.setLabel("left", "Counts", **label_style)
@@ -477,11 +593,31 @@ class SessionOverviewWidget(pg.PlotWidget):
 
     def show_preview(self) -> None:
         self._reset_items()
-        x_values = np.linspace(0.0, 120.0, 500)
-        y_values = 400.0 + 110.0 * np.sin(x_values / 9.0) + 60.0 * np.cos(x_values / 3.7)
-        self.plot_item.plot(x_values, y_values, pen=pg.mkPen("#6177a2", width=1.4))
-        self._ensure_window_region((20.0, 70.0))
-        self.setXRange(0.0, 120.0, padding=0.0)
+        previews = [
+            ("238U", "#69e2ff", 1.0, 0.0),
+            ("206Pb", "#ff8a5b", 0.72, 0.8),
+            ("207Pb", "#ffe56b", 0.52, 1.7),
+            ("29Si", "#7ef7c9", 0.34, 2.4),
+        ]
+        n_spots = 4
+        spot_duration = 80.0
+        gap = 20.0
+        period = spot_duration + gap  # 100 s per spot
+        total = n_spots * period
+        t_global = np.linspace(0.0, total, n_spots * 200)
+        t_local = t_global % period
+        in_spot = (t_local < spot_duration).astype(float)
+        rise = 1.0 / (1.0 + np.exp(-(t_local - 43.0) / 0.8))
+        fall = 1.0 / (1.0 + np.exp((t_local - 70.0) / 2.0))
+        plateau = 1450.0 * rise * fall * in_spot
+        for _name, color, scale, phase in previews:
+            baseline = 480.0 + 12.0 * np.sin(t_global / 12.0 + phase)
+            y = (baseline + plateau) * scale
+            curve = self.plot_item.plot(t_global, y, pen=pg.mkPen(color, width=1.0))
+            curve.setDownsampling(auto=True, method="peak")
+            curve.setClipToView(True)
+        self._ensure_window_region((10.0, 80.0))
+        self.setXRange(0.0, total, padding=0.01)
 
     def show_series(self, frame: pd.DataFrame, channel: str, color: str, current_window: tuple[float, float]) -> None:
         self._reset_items()
@@ -538,3 +674,13 @@ def make_list_item(text: str, checked: bool = False) -> QtWidgets.QListWidgetIte
     item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
     item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
     return item
+
+
+def _resolved_region_colors(region_colors: dict[str, str] | None) -> dict[str, str]:
+    colors = {
+        "baseline": "#8a4c34",
+        "plateau": "#2c5e87",
+    }
+    if region_colors:
+        colors.update({key: value for key, value in region_colors.items() if key in colors and value})
+    return colors

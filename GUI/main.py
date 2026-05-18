@@ -17,7 +17,8 @@ from GUI.theme import build_application
 
 def export_window(window: QtWidgets.QMainWindow, output_path: str) -> None:
     window.show()
-    QtWidgets.QApplication.processEvents()
+    for _ in range(4):
+        QtWidgets.QApplication.processEvents()
     window.grab().save(output_path)
 
 
