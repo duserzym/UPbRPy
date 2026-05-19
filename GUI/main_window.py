@@ -44,6 +44,15 @@ PLOT_MODE_LABELS = {
     "session_ratios": "Session",
 }
 
+_STAGE_CACHE_KEYS: dict[str, str | None] = {
+    "raw": None,
+    "baseline_subtracted": "baseline_subtracted_total_data",
+    "normalized_plateau": "normalized_plateau_data",
+    "raw_ratios": "plateau_data_with_raw_ratios",
+    "downhole_ratios": "downhole_results",
+    "session_ratios": "session_correction_results",
+}
+
 RATIO_COLORS = {
     "206Pb/238U": "#1f63cf",
     "207Pb/206Pb": "#ff8a5b",
@@ -204,21 +213,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_defaults_label.setWordWrap(True)
         self.workflow_defaults_label.setObjectName("SecondaryText")
 
-        appearance_label = QtWidgets.QLabel("Appearance")
-        appearance_label.setObjectName("SectionTitle")
-        self.theme_combo = QtWidgets.QComboBox()
-        self.theme_combo.addItem("Follow system", "system")
-        self.theme_combo.addItem("Light", "light")
-        self.theme_combo.addItem("Dark", "dark")
-        self.theme_combo.currentIndexChanged.connect(self.on_theme_combo_changed)
-
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.workflow_combo)
         preset_layout.addWidget(self.workflow_description_label)
         preset_layout.addWidget(self.workflow_defaults_label)
-        preset_layout.addSpacing(6)
-        preset_layout.addWidget(appearance_label)
-        preset_layout.addWidget(self.theme_combo)
         layout.addWidget(preset_card)
 
         workflow_card = QtWidgets.QFrame()
@@ -310,7 +308,27 @@ class MainWindow(QtWidgets.QMainWindow):
         summary_box.addWidget(self.project_spots_label)
         summary_box.addWidget(self.project_mode_label)
         summary_box.addWidget(self.project_engine_label)
-        header_layout.addLayout(summary_box)
+
+        header_right = QtWidgets.QVBoxLayout()
+        header_right.setSpacing(10)
+        header_right.addLayout(summary_box)
+        theme_row = QtWidgets.QHBoxLayout()
+        theme_row.setSpacing(4)
+        theme_row.addStretch(1)
+        self.theme_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
+        self.theme_mode_group = QtWidgets.QButtonGroup(self)
+        self.theme_mode_group.setExclusive(True)
+        for tmode, tlabel in [("system", "Auto"), ("light", "Light"), ("dark", "Dark")]:
+            tbtn = QtWidgets.QToolButton()
+            tbtn.setText(tlabel)
+            tbtn.setCheckable(True)
+            tbtn.setProperty("modeToggle", True)
+            tbtn.clicked.connect(lambda _checked=False, selected_tmode=tmode: self.apply_theme_mode(selected_tmode, persist=True))
+            self.theme_mode_group.addButton(tbtn)
+            self.theme_mode_buttons[tmode] = tbtn
+            theme_row.addWidget(tbtn)
+        header_right.addLayout(theme_row)
+        header_layout.addLayout(header_right)
         layout.addWidget(header)
 
         metrics = QtWidgets.QHBoxLayout()
@@ -353,6 +371,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.plot_mode_buttons[key] = button
             mode_row.addWidget(button)
         mode_row.addStretch(1)
+        ratio_row_lbl = QtWidgets.QLabel("Ratio")
+        ratio_row_lbl.setObjectName("ControlBarLabel")
+        mode_row.addWidget(ratio_row_lbl)
+        self.ratio_combo = QtWidgets.QComboBox()
+        for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
+            self.ratio_combo.addItem(ratio_name, ratio_name)
+        self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
+        mode_row.addWidget(self.ratio_combo)
         plot_layout.addLayout(mode_row)
 
         # ── Plot canvas ────────────────────────────────────────────────────
@@ -431,6 +457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout.addWidget(_vsep1)
 
         self.reset_scale_button = QtWidgets.QPushButton("Reset scale")
+        self.reset_scale_button.setStyleSheet("padding: 5px 9px; font-size: 10px;")
         self.reset_scale_button.clicked.connect(self.restore_default_main_view)
         cb_layout.addWidget(self.reset_scale_button)
 
@@ -438,20 +465,6 @@ class MainWindow(QtWidgets.QMainWindow):
         _vsep2.setFrameShape(QtWidgets.QFrame.Shape.VLine)
         _vsep2.setObjectName("ControlBarDivider")
         cb_layout.addWidget(_vsep2)
-
-        ratio_lbl = QtWidgets.QLabel("Ratio")
-        ratio_lbl.setObjectName("ControlBarLabel")
-        cb_layout.addWidget(ratio_lbl)
-        self.ratio_combo = QtWidgets.QComboBox()
-        for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
-            self.ratio_combo.addItem(ratio_name, ratio_name)
-        self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
-        cb_layout.addWidget(self.ratio_combo)
-
-        _vsep3 = QtWidgets.QFrame()
-        _vsep3.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-        _vsep3.setObjectName("ControlBarDivider")
-        cb_layout.addWidget(_vsep3)
 
         self.sigma_toggle_button = QtWidgets.QToolButton()
         self.sigma_toggle_button.setProperty("modeToggle", True)
@@ -703,19 +716,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_theme_controls(self) -> None:
         self._is_populating = True
         try:
-            for index in range(self.theme_combo.count()):
-                if self.theme_combo.itemData(index) == self.theme_mode:
-                    self.theme_combo.setCurrentIndex(index)
-                    break
+            for mode, button in self.theme_mode_buttons.items():
+                button.blockSignals(True)
+                button.setChecked(mode == self.theme_mode)
+                button.blockSignals(False)
             for mode, action in self.theme_actions.items():
                 action.setChecked(mode == self.theme_mode)
         finally:
             self._is_populating = False
-
-    def on_theme_combo_changed(self, index: int) -> None:
-        if self._is_populating or index < 0:
-            return
-        self.apply_theme_mode(str(self.theme_combo.itemData(index)), persist=True)
 
     def _sync_workflow_combo(self) -> None:
         self._is_populating = True
@@ -989,9 +997,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._focus_selected_spot(self.current_spot_name())
 
     def _sync_plot_mode_buttons(self) -> None:
+        cache = self.session.reduction_cache if self.session.loaded else {}
         for mode, button in self.plot_mode_buttons.items():
             button.blockSignals(True)
             button.setChecked(mode == self.session.plot_mode)
+            cache_key = _STAGE_CACHE_KEYS.get(mode)
+            if mode == "raw":
+                button.setEnabled(True)
+            elif not self.session.loaded:
+                button.setEnabled(False)
+            else:
+                button.setEnabled(cache_key is not None and cache_key in cache)
             button.blockSignals(False)
         self.ratio_combo.setEnabled(self.session.plot_mode in {"raw_ratios", "downhole_ratios", "session_ratios"})
 

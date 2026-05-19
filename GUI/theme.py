@@ -211,19 +211,29 @@ def _stylesheet(theme: ThemeSpec) -> str:
         font-size: 28px;
         font-weight: 700;
     }}
-    #SectionTitle, #MetricLabel, #WorkflowLabel, #DetailLabel {{
+    #SectionTitle, #MetricLabel, #DetailLabel {{
         color: {theme.muted};
         font-size: 11px;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.08em;
     }}
-    #MetricValue {{
-        font-size: 19px;
-        font-weight: 650;
+    #WorkflowLabel {{
+        color: {theme.text};
+        font-size: 12px;
+        font-weight: 700;
     }}
-    #SecondaryText, #PanelBody {{
+    #MetricValue {{
+        font-size: 22px;
+        font-weight: 700;
+    }}
+    #SecondaryText {{
         color: {theme.muted};
+    }}
+    #PanelBody {{
+        color: {theme.muted};
+        font-size: 12px;
+        line-height: 1.5;
     }}
     #Pill, #StatusPill {{
         padding: 6px 12px;
@@ -252,6 +262,11 @@ def _stylesheet(theme: ThemeSpec) -> str:
         background: {theme.accent};
         color: #ffffff;
         border-color: {theme.accent_strong};
+    }}
+    QPushButton:disabled, QToolButton[modeToggle="true"]:disabled {{
+        background: transparent;
+        color: {theme.muted};
+        border-color: {theme.input_border};
     }}
     QListWidget, QComboBox, QTextEdit, QTextBrowser {{
         background: {theme.input_bg};

@@ -15,15 +15,15 @@ class MetricCard(QtWidgets.QFrame):
         self.setObjectName("MetricCard")
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(6)
+        layout.setSpacing(2)
 
         label_widget = QtWidgets.QLabel(label)
         label_widget.setObjectName("MetricLabel")
         self.value_widget = QtWidgets.QLabel(value)
         self.value_widget.setObjectName("MetricValue")
         swatch = QtWidgets.QLabel()
-        swatch.setFixedHeight(4)
-        swatch.setStyleSheet(f"background: {tone}; border-radius: 2px;")
+        swatch.setFixedHeight(5)
+        swatch.setStyleSheet(f"background: {tone}; border-radius: 2px; margin-top: 6px;")
 
         layout.addWidget(label_widget)
         layout.addWidget(self.value_widget)

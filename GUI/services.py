@@ -31,14 +31,14 @@ _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
 
 
 CHANNEL_PALETTE = [
-    "#467489",
-    "#a35d4e",
-    "#9c8445",
-    "#4f8474",
-    "#7465a0",
-    "#a25c79",
-    "#5d8291",
-    "#6177a2",
+    "#2cb4c8",  # cyan-teal
+    "#e05c3a",  # orange-red
+    "#c89b20",  # amber-gold
+    "#2aab58",  # medium green
+    "#8b4fc8",  # medium purple
+    "#d44080",  # rose-pink
+    "#2870d4",  # medium blue
+    "#30a080",  # teal-green
 ]
 
 
