@@ -43,6 +43,7 @@ from GUI.widgets import (
     SessionFractionationWidget,
     SessionOverviewWidget,
     SpotTree,
+    StyledComboBox,
     TracePlotWidget,
     make_list_item,
 )
@@ -244,7 +245,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(library_card)
 
         # Mineral workflow combo — now part of workflow_card; description/defaults become tooltip
-        self.workflow_combo = QtWidgets.QComboBox()
+        self.workflow_combo = StyledComboBox()
         for key, preset in WORKFLOW_PRESETS.items():
             self.workflow_combo.addItem(preset.title, key)
         self.workflow_combo.currentIndexChanged.connect(self.on_workflow_preset_changed)
@@ -411,7 +412,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ratio_row_lbl = QtWidgets.QLabel("Ratio")
         ratio_row_lbl.setObjectName("ControlBarLabel")
         mode_row.addWidget(ratio_row_lbl)
-        self.ratio_combo = QtWidgets.QComboBox()
+        self.ratio_combo = StyledComboBox()
         for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
             self.ratio_combo.addItem(ratio_name, ratio_name)
         self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
@@ -608,7 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         primary_label = QtWidgets.QLabel("Primary channel")
         primary_label.setObjectName("SectionTitle")
-        self.primary_channel_combo = QtWidgets.QComboBox()
+        self.primary_channel_combo = StyledComboBox()
         self.primary_channel_combo.currentTextChanged.connect(self.on_primary_channel_changed)
         selector_layout.addWidget(primary_label)
         selector_layout.addWidget(self.primary_channel_combo)

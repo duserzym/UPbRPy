@@ -357,6 +357,11 @@ def _stylesheet(theme: ThemeSpec) -> str:
         border-right: 5px solid transparent;
         border-top: 6px solid {theme.muted};
     }}
+    QComboBoxPrivateContainer {{
+        background: transparent;
+        border: none;
+        padding: 0px;
+    }}
     QComboBox QAbstractItemView {{
         background: {theme.surface};
         border: 1px solid {theme.input_border};

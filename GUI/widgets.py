@@ -38,6 +38,86 @@ class SpotTree(QtWidgets.QTreeWidget):
             return
         super().keyPressEvent(event)
 
+
+class ComboPopupListView(QtWidgets.QListView):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        index = self.indexAt(event.position().toPoint())
+        if index.isValid() and index != self.currentIndex():
+            self.setCurrentIndex(index)
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        index = self.indexAt(event.position().toPoint())
+        if index.isValid():
+            self.setCurrentIndex(index)
+        super().mousePressEvent(event)
+
+
+class StyledComboBox(QtWidgets.QComboBox):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        popup_view = ComboPopupListView(self)
+        popup_view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        popup_view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        popup_view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        popup_view.setSpacing(0)
+        popup_view.setUniformItemSizes(True)
+        popup_view.viewport().setAutoFillBackground(False)
+        self.setView(popup_view)
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        self._sync_popup_current_index()
+        self._style_popup_container()
+
+    def _sync_popup_current_index(self) -> None:
+        view = self.view()
+        model = self.model()
+        current_row = self.currentIndex()
+        if view is None or model is None or current_row < 0:
+            return
+        index = model.index(current_row, self.modelColumn(), self.rootModelIndex())
+        if index.isValid():
+            view.setCurrentIndex(index)
+            view.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _style_popup_container(self) -> None:
+        view = self.view()
+        if view is None:
+            return
+        popup = view.window()
+        if popup is None:
+            return
+
+        popup.setObjectName("ComboPopupContainer")
+        popup.setContentsMargins(0, 0, 0, 0)
+        popup.setAutoFillBackground(False)
+        popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        base_color = view.palette().base().color().name()
+        border_color = view.palette().mid().color().name()
+        popup.setStyleSheet(
+            "QFrame#ComboPopupContainer {"
+            f"background: {base_color};"
+            f"border: 1px solid {border_color};"
+            "border-radius: 12px;"
+            "}"
+        )
+
+        rect = popup.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(rect.adjusted(0, 0, -1, -1)), 12, 12)
+        popup.setMask(QtGui.QRegion(path.toFillPolygon().toPolygon()))
+
 class ChipButton(QtWidgets.QPushButton):
     """QPushButton that also emits doubleClicked via mouseDoubleClickEvent."""
 
