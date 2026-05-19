@@ -149,6 +149,9 @@ def _stylesheet(theme: ThemeSpec) -> str:
     scroll_track = "rgba(106, 128, 152, 0.12)" if theme.name == "light" else "rgba(173, 196, 219, 0.10)"
     scroll_handle = "rgba(79, 103, 131, 0.42)" if theme.name == "light" else "rgba(173, 196, 219, 0.34)"
     scroll_handle_hover = "rgba(52, 82, 117, 0.62)" if theme.name == "light" else "rgba(210, 228, 247, 0.52)"
+    combo_popup_hover = "rgba(31, 99, 207, 0.14)" if theme.name == "light" else theme.accent_soft
+    combo_popup_selected = "rgba(31, 99, 207, 0.20)" if theme.name == "light" else theme.accent_hover
+    combo_popup_selected_text = "#123457" if theme.name == "light" else theme.text
     return f"""
     QWidget {{
         color: {theme.text};
@@ -301,6 +304,7 @@ def _stylesheet(theme: ThemeSpec) -> str:
         padding: 8px;
     }}
     QComboBox {{
+        combobox-popup: 0;
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                     stop:0 {theme.surface}, stop:1 {theme.input_bg});
         border: 1px solid {theme.input_border};
@@ -358,17 +362,33 @@ def _stylesheet(theme: ThemeSpec) -> str:
         border: 1px solid {theme.input_border};
         border-radius: 12px;
         padding: 6px;
-        selection-background-color: {theme.accent_soft};
-        selection-color: {theme.text};
+        selection-background-color: {combo_popup_selected};
+        selection-color: {combo_popup_selected_text};
+        color: {theme.text};
         outline: 0;
     }}
     QComboBox QAbstractItemView::item {{
         padding: 8px 10px;
         border-radius: 8px;
         min-height: 20px;
+        color: {theme.text};
+        background-color: {theme.surface};
     }}
     QComboBox QAbstractItemView::item:hover {{
-        background: {theme.accent_soft};
+        background-color: {combo_popup_hover};
+        color: {combo_popup_selected_text};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: {combo_popup_selected};
+        color: {combo_popup_selected_text};
+    }}
+    QComboBox QAbstractItemView::item:selected:active {{
+        background-color: {combo_popup_selected};
+        color: {combo_popup_selected_text};
+    }}
+    QComboBox QAbstractItemView::item:selected:!active {{
+        background-color: {combo_popup_selected};
+        color: {combo_popup_selected_text};
     }}
     QListWidget::item {{
         padding: 6px 4px;
