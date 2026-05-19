@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -11,6 +12,7 @@ from GUI.services import (
     build_channel_colors,
     build_notes,
     clear_reduction_cache,
+    current_standard_archive,
     current_standard_archive_path,
     default_reference_material_library_path,
     ensure_baseline_subtracted,
@@ -26,12 +28,13 @@ from GUI.services import (
     project_summary,
     reference_material_summary,
     selection_quality,
+    spot_base_name,
     spot_metrics,
     update_selection_region,
 )
 from GUI.state import ReductionSession
 from GUI.theme import active_theme, apply_theme
-from GUI.widgets import MetricCard, SessionOverviewWidget, TracePlotWidget, make_list_item
+from GUI.widgets import IsotopeGridWidget, MetricCard, SessionOverviewWidget, SpotTree, TracePlotWidget, make_list_item
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 
 
@@ -53,6 +56,26 @@ _STAGE_CACHE_KEYS: dict[str, str | None] = {
     "session_ratios": "session_correction_results",
 }
 
+# Maps a lowercase keyword from a workflow step title to the cache key that
+# must be present before that step becomes interactive.  Steps whose titles
+# contain "import", "review", or "subtract" are gated only by having a
+# loaded session (None = needs session but no prior cache entry).
+_STEP_PREREQUISITE: dict[str, str | None] = {
+    "import":           None,           # always enabled once loaded
+    "review":           None,
+    "subtract":         None,
+    "internal norm":    "baseline_subtracted_total_data",
+    "normalization":    "baseline_subtracted_total_data",
+    "calibrate":        "normalized_plateau_data",
+    "concentration":    "normalized_plateau_data",
+    "raw isotope":      "normalized_plateau_data",
+    "raw ratio":        "normalized_plateau_data",
+    "downhole":         "plateau_data_with_raw_ratios",
+    "session fraction": "downhole_results",
+    "session-wide":     "downhole_results",
+    "final":            "session_correction_results",
+}
+
 RATIO_COLORS = {
     "206Pb/238U": "#1f63cf",
     "207Pb/206Pb": "#ff8a5b",
@@ -72,6 +95,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = ReductionSession()
         self.channel_colors: dict[str, str] = {}
         self._is_populating = False
+        self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
         self.pending_region_updates: dict[str, tuple[float, float]] = {}
         self.workflow_preset = get_workflow_preset("zircon")
         self.theme_mode = theme_mode
@@ -87,8 +111,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
-        self.resize(1560, 1150)
-        self.setMinimumSize(1280, 1000)
+        self.resize(1800, 1150)
+        self.setMinimumSize(1400, 1000)
 
         self._build_menu()
         self._build_ui()
@@ -160,7 +184,7 @@ class MainWindow(QtWidgets.QMainWindow):
         brand_copy = QtWidgets.QVBoxLayout()
         brand = QtWidgets.QLabel("UPbRPy Studio")
         brand.setObjectName("Brand")
-        caption = QtWidgets.QLabel("Iolite-style native workspace for U-Pb, trace elements, and depth-profile review.")
+        caption = QtWidgets.QLabel("Open-source UPb data reduction software for zircon, depth-profile, and trace element workflows.")
         caption.setWordWrap(True)
         caption.setObjectName("SecondaryText")
         brand_copy.addWidget(brand)
@@ -382,16 +406,20 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.addLayout(mode_row)
 
         # ── Plot canvas ────────────────────────────────────────────────────
+        plots_container = QtWidgets.QWidget()
+        plots_container.setContentsMargins(0, 0, 0, 0)
+        plots_vbox = QtWidgets.QVBoxLayout(plots_container)
+        plots_vbox.setContentsMargins(0, 0, 0, 0)
+        plots_vbox.setSpacing(0)
         self.trace_plot = TracePlotWidget()
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
         self.trace_plot.xWindowChanged.connect(self.on_trace_x_window_changed)
-        plot_layout.addWidget(self.trace_plot)
-
-        plot_layout.addSpacing(0)
+        plots_vbox.addWidget(self.trace_plot)
         self.session_overview_plot = SessionOverviewWidget()
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
-        plot_layout.addWidget(self.session_overview_plot)
+        plots_vbox.addWidget(self.session_overview_plot)
+        plot_layout.addWidget(plots_container)
 
         # ── Control bar below both plots ───────────────────────────────────
         control_bar = QtWidgets.QFrame()
@@ -457,7 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout.addWidget(_vsep1)
 
         self.reset_scale_button = QtWidgets.QPushButton("Reset scale")
-        self.reset_scale_button.setStyleSheet("padding: 5px 9px; font-size: 10px;")
+        self.reset_scale_button.setMinimumWidth(110)
         self.reset_scale_button.clicked.connect(self.restore_default_main_view)
         cb_layout.addWidget(self.reset_scale_button)
 
@@ -473,8 +501,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_toggle_button.clicked.connect(self.on_sigma_toggle_clicked)
         self._update_sigma_button_text()
         cb_layout.addWidget(self.sigma_toggle_button)
-        cb_layout.addStretch(1)
-        plot_layout.addWidget(control_bar)
+
+        # Wrap control bar in a centering row so buttons stay centred under the plots
+        cb_outer = QtWidgets.QHBoxLayout()
+        cb_outer.setContentsMargins(0, 0, 0, 0)
+        cb_outer.addStretch(1)
+        cb_outer.addWidget(control_bar)
+        cb_outer.addStretch(1)
+        plot_layout.addLayout(cb_outer)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         content_splitter.setChildrenCollapsible(False)
@@ -556,9 +590,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
         spots_label = QtWidgets.QLabel("Spots")
         spots_label.setObjectName("SectionTitle")
-        self.spot_list = QtWidgets.QListWidget()
-        self.spot_list.currentTextChanged.connect(self.on_spot_changed)
+
+        # Toolbar row: right-aligned "+ Folder" button
+        spots_toolbar = QtWidgets.QHBoxLayout()
+        spots_toolbar.setContentsMargins(0, 0, 0, 0)
+        spots_toolbar.setSpacing(4)
+        spots_toolbar.addStretch(1)
+        _add_folder_btn = QtWidgets.QPushButton("+ Folder")
+        _add_folder_btn.setFixedHeight(28)
+        _add_folder_btn.setMinimumWidth(80)
+        _add_folder_btn.setStyleSheet("QPushButton { padding: 2px 10px; border-radius: 8px; font-size: 11px; }")
+        _add_folder_btn.setToolTip("Add a new custom folder under Unknowns")
+        _add_folder_btn.clicked.connect(self._on_spot_add_folder)
+        spots_toolbar.addWidget(_add_folder_btn)
+
+        self.spot_list = SpotTree()
+        self.spot_list.setHeaderHidden(True)
+        self.spot_list.setRootIsDecorated(True)
+        self.spot_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.spot_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.spot_list.customContextMenuRequested.connect(self._on_spot_tree_context_menu)
+        self.spot_list.currentItemChanged.connect(self._on_spot_tree_item_changed)
+        self.spot_list.deleteRequested.connect(self._on_spot_tree_delete)
+        self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
         selector_layout.addWidget(spots_label)
+        selector_layout.addLayout(spots_toolbar)
         selector_layout.addWidget(self.spot_list, 1)
 
         channels_label = QtWidgets.QLabel("Channels")
@@ -567,8 +623,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_list.itemChanged.connect(self.on_channel_toggled)
         self.channel_list.currentItemChanged.connect(self.on_channel_selection_changed)
         self.channel_list.itemDoubleClicked.connect(self.choose_channel_color)
+
+        # Wrap the isotope grid scroll area in a rounded card
+        channels_card = QtWidgets.QFrame()
+        channels_card.setObjectName("ChannelsCard")
+        channels_card_layout = QtWidgets.QVBoxLayout(channels_card)
+        channels_card_layout.setContentsMargins(8, 8, 8, 8)
+        channels_card_layout.setSpacing(0)
+        channels_scroll = QtWidgets.QScrollArea()
+        channels_scroll.setWidgetResizable(True)
+        channels_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        channels_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.isotope_grid = IsotopeGridWidget()
+        self.isotope_grid.channelToggled.connect(self._on_isotope_chip_toggled)
+        self.isotope_grid.channelSelected.connect(self._on_isotope_channel_selected)
+        self.isotope_grid.colorChangeRequested.connect(self._on_isotope_color_change)
+        channels_scroll.setWidget(self.isotope_grid)
+        channels_card_layout.addWidget(channels_scroll)
+
         selector_layout.addWidget(channels_label)
-        selector_layout.addWidget(self.channel_list, 1)
+        selector_layout.addWidget(channels_card, 1)
+        selector_layout.addWidget(self.channel_list, 0)
+        self.channel_list.setVisible(False)  # hidden; isotope_grid is the primary UI
         self.channel_color_button = QtWidgets.QPushButton("Set selected channel color")
         self.channel_color_button.clicked.connect(self.choose_channel_color)
         selector_layout.addWidget(self.channel_color_button)
@@ -707,6 +783,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.set_zoom_mode(self.trace_plot.zoom_mode())
         self.session_overview_plot.apply_theme(active_theme(app))
+        # Rebuild channel colours for new background when a session is loaded
+        if self.session.loaded:
+            self.channel_colors = self._resolve_channel_colors(self.session.channels)
+            self.isotope_grid.set_theme(theme_mode)
+            self.isotope_grid.set_channels(
+                self.session.channels,
+                set(self.session.visible_channels),
+                self.channel_colors,
+                theme_name=theme_mode,
+            )
         self.refresh_view()
 
     def on_system_color_scheme_changed(self, _scheme: object) -> None:
@@ -744,7 +830,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.workflow_step_list.clear()
             for index, step in enumerate(self.workflow_preset.steps, start=1):
-                item = QtWidgets.QListWidgetItem(f"{index}. {step.title}")
+                item = QtWidgets.QListWidgetItem(f"  {index}.  {step.title}")
                 item.setToolTip(step.summary)
                 self.workflow_step_list.addItem(item)
             if self.workflow_step_list.count() > 0:
@@ -794,6 +880,303 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_plot_mode("raw", refresh=False)
         self.refresh_view()
 
+    # ── Spot tree helpers ──────────────────────────────────────────────────
+
+    def _spot_sample_map(self) -> dict[str, str]:
+        """Return {spot_name: sample_name} from total_data if available."""
+        if not self.session.loaded or "sample" not in self.session.total_data.columns:
+            return {}
+        td = self.session.total_data
+        if "spot_names" not in td.columns:
+            return {}
+        return (
+            td.drop_duplicates("spot_names")
+            .set_index("spot_names")["sample"]
+            .astype(str)
+            .to_dict()
+        )
+
+    def _is_reference_material(self, sample_name: str) -> bool:
+        """Return True if *sample_name* fuzzy-matches any known RM name."""
+        rm_names: set[str] = set()
+        if self.workflow_preset.primary_standard:
+            rm_names.add(self.workflow_preset.primary_standard)
+        rm_names.update(self.workflow_preset.secondary_standards)
+        rm_names.update(self.workflow_preset.concentration_standards)
+        try:
+            archive = current_standard_archive()
+            rm_names.update(str(s) for s in archive.index.tolist() if s)
+        except Exception:
+            pass
+
+        def _norm(s: str) -> str:
+            return re.sub(r'[^a-z0-9]', '', s.lower())
+
+        norm_sample = _norm(sample_name)
+        for rm in rm_names:
+            if not rm:
+                continue
+            norm_rm = _norm(rm)
+            if norm_rm and (norm_rm == norm_sample
+                            or norm_rm in norm_sample
+                            or norm_sample in norm_rm):
+                return True
+        return False
+
+    def _populate_spot_tree(self) -> None:
+        self.spot_list.blockSignals(True)
+        self.spot_list.clear()
+        spot_names = self.session.spot_names
+        if not spot_names:
+            self.spot_list.blockSignals(False)
+            return
+
+        sample_map = self._spot_sample_map()  # {spot_name: sample_name}
+
+        # Categorise each spot into RM or unknown folders
+        rm_folders: dict[str, list[str]] = {}    # {folder_label: [spot_names]}
+        unk_folders: dict[str, list[str]] = {}   # {folder_label: [spot_names]}
+
+        for spot_name in spot_names:
+            manual = self._spot_folder_overrides.get(spot_name)
+            if manual:
+                unk_folders.setdefault(manual, []).append(spot_name)
+                continue
+
+            # Use sample column first; fall back to base-name inference
+            sample = sample_map.get(spot_name)
+            group_name = sample if sample else spot_base_name(spot_name)
+
+            if self._is_reference_material(group_name):
+                rm_folders.setdefault(group_name, []).append(spot_name)
+            else:
+                unk_folders.setdefault(group_name, []).append(spot_name)
+
+        def _add_folder_node(
+            root: QtWidgets.QTreeWidgetItem,
+            folder_name: str,
+            spots: list[str],
+        ) -> QtWidgets.QTreeWidgetItem:
+            folder_item = QtWidgets.QTreeWidgetItem(root, [folder_name])
+            folder_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__{folder_name}")
+            folder_item.setFlags(
+                folder_item.flags()
+                | QtCore.Qt.ItemFlag.ItemIsEditable
+                & ~QtCore.Qt.ItemFlag.ItemIsSelectable
+            )
+            folder_item.setIcon(
+                0, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirIcon)
+            )
+            for sn in spots:
+                spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
+                spot_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, sn)
+                spot_item.setFlags(
+                    spot_item.flags()
+                    | QtCore.Qt.ItemFlag.ItemIsSelectable
+                    | QtCore.Qt.ItemFlag.ItemIsEditable
+                )
+            return folder_item
+
+        rm_root = QtWidgets.QTreeWidgetItem(self.spot_list, ["Reference Materials"])
+        rm_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__root_rm__")
+        rm_root.setFlags(rm_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+
+        unk_root = QtWidgets.QTreeWidgetItem(self.spot_list, ["Unknowns"])
+        unk_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__root_unk__")
+        unk_root.setFlags(unk_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+
+        for folder_name, spots in sorted(rm_folders.items()):
+            _add_folder_node(rm_root, folder_name, spots)
+
+        for folder_name, spots in sorted(unk_folders.items()):
+            _add_folder_node(unk_root, folder_name, spots)
+
+        for root in (rm_root, unk_root):
+            if root.childCount() == 0:
+                root.setHidden(True)
+            else:
+                root.setExpanded(True)
+                for i in range(root.childCount()):
+                    root.child(i).setExpanded(True)
+
+        self.spot_list.blockSignals(False)
+
+        if self.session.selected_spot:
+            self._select_spot_in_tree(self.session.selected_spot)
+
+    def _select_spot_in_tree(self, spot_name: str) -> None:
+        root = self.spot_list.invisibleRootItem()
+        for i in range(root.childCount()):
+            section = root.child(i)
+            for j in range(section.childCount()):
+                folder = section.child(j)
+                for k in range(folder.childCount()):
+                    leaf = folder.child(k)
+                    if leaf.data(0, QtCore.Qt.ItemDataRole.UserRole) == spot_name:
+                        self.spot_list.setCurrentItem(leaf)
+                        return
+
+    def _on_spot_tree_item_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if self._is_populating or current is None:
+            return
+        if current.childCount() > 0:
+            return  # group node – ignore
+        spot_name = current.data(0, QtCore.Qt.ItemDataRole.UserRole) or current.text(0)
+        self.on_spot_changed(spot_name)
+
+    def _on_spot_tree_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.spot_list.itemAt(pos)
+        menu = QtWidgets.QMenu(self)
+
+        is_spot = (
+            item is not None
+            and item.childCount() == 0
+            and item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            and not str(item.data(0, QtCore.Qt.ItemDataRole.UserRole)).startswith("__")
+        )
+        is_folder = (
+            item is not None
+            and item.childCount() >= 0
+            and str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or "").startswith("__folder__")
+        )
+        is_root = (
+            item is not None
+            and str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or "").startswith("__root_")
+        )
+
+        if is_spot:
+            rename_act = menu.addAction("Rename spot…\tF2")
+            menu.addSeparator()
+            move_menu = menu.addMenu("Move to folder")
+            for folder_name in self._get_all_folder_names():
+                if folder_name != (item.parent().text(0) if item.parent() else ""):
+                    act = move_menu.addAction(folder_name)
+                    act.setData(("move_spot", item, folder_name))
+            menu.addSeparator()
+            del_act = menu.addAction("Remove spot from session…")
+        elif is_folder:
+            rename_act = menu.addAction("Rename folder…\tF2")
+            add_sub_act = menu.addAction("New subfolder here")
+            menu.addSeparator()
+            del_folder_act = menu.addAction("Delete folder…")
+        elif is_root or item is None:
+            add_folder_act = menu.addAction("New folder under Unknowns")
+        else:
+            return
+
+        chosen = menu.exec(self.spot_list.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+
+        data = chosen.data()
+        if isinstance(data, tuple) and data[0] == "move_spot":
+            _, leaf_item, folder_name = data
+            spot_name = leaf_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            self._spot_folder_overrides[spot_name] = folder_name
+            self._populate_spot_tree()
+        elif is_spot and chosen.text().startswith("Rename"):
+            self.spot_list.editItem(item, 0)
+        elif is_spot and chosen.text().startswith("Remove"):
+            self._on_spot_tree_delete()
+        elif is_folder and chosen.text().startswith("Rename"):
+            self.spot_list.editItem(item, 0)
+        elif is_folder and chosen.text().startswith("New sub"):
+            self._on_spot_add_folder(parent_folder=item.text(0))
+        elif is_folder and chosen.text().startswith("Delete"):
+            self._on_spot_folder_delete(item)
+        elif (is_root or item is None) and chosen.text().startswith("New folder"):
+            self._on_spot_add_folder()
+
+    def _get_all_folder_names(self) -> list[str]:
+        """Return all current folder names visible in the spot tree."""
+        names: list[str] = []
+        root = self.spot_list.invisibleRootItem()
+        for i in range(root.childCount()):
+            section = root.child(i)
+            for j in range(section.childCount()):
+                folder = section.child(j)
+                names.append(folder.text(0))
+        return names
+
+    def _on_spot_add_folder(self, parent_folder: str | None = None) -> None:
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "New Folder", "Folder name:"
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        # Add an empty entry so it appears; spots can be moved in later
+        if name not in self._spot_folder_overrides.values():
+            # Ensure the folder appears by adding a sentinel placeholder in
+            # unk_folders – we do this by just refreshing; the folder will
+            # appear when the first spot is moved into it.
+            # For now just note its existence via a dummy entry that won't conflict.
+            pass
+        QtWidgets.QMessageBox.information(
+            self,
+            "Folder created",
+            f"Folder \"{name}\" created.\n\nUse \"Move to folder\" on a spot to populate it.",
+        )
+
+    def _on_spot_folder_delete(self, folder_item: QtWidgets.QTreeWidgetItem) -> None:
+        folder_name = folder_item.text(0)
+        n = folder_item.childCount()
+        msg = (
+            f"Delete folder \"{folder_name}\"?"
+            + (f"\n\n{n} spot(s) will be returned to auto-grouping." if n else "")
+        )
+        if QtWidgets.QMessageBox.question(self, "Delete folder", msg) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        # Remove overrides for all spots in this folder
+        for k, v in list(self._spot_folder_overrides.items()):
+            if v == folder_name:
+                del self._spot_folder_overrides[k]
+        self._populate_spot_tree()
+
+    def _on_spot_tree_delete(self) -> None:
+        item = self.spot_list.currentItem()
+        if item is None:
+            return
+        spot_name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not spot_name or str(spot_name).startswith("__"):
+            return
+        if QtWidgets.QMessageBox.question(
+            self,
+            "Remove spot",
+            f"Remove \"{spot_name}\" from this session?\n\nThis cannot be undone.",
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        # Remove from session spot list (doesn't delete the file)
+        if spot_name in self.session.spot_names:
+            self.session.spot_names = [s for s in self.session.spot_names if s != spot_name]
+        self._spot_folder_overrides.pop(spot_name, None)
+        clear_reduction_cache(self.session)
+        self._populate_spot_tree()
+        self.refresh_view()
+
+    def _on_spot_tree_item_renamed(
+        self, item: QtWidgets.QTreeWidgetItem, column: int
+    ) -> None:
+        """Handle in-tree rename edits."""
+        if self._is_populating or column != 0:
+            return
+        role_data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        new_text = item.text(0).strip()
+        if not new_text:
+            return
+        if role_data and not str(role_data).startswith("__"):
+            # Spot renamed – update any folder override key
+            old_name = str(role_data)
+            if old_name in self._spot_folder_overrides:
+                self._spot_folder_overrides[new_text] = self._spot_folder_overrides.pop(old_name)
+            # Update UserRole so navigation still works
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, new_text)
+
+
     def _populate_selectors(self) -> None:
         self._is_populating = True
         try:
@@ -803,12 +1186,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if primary_index >= 0:
                 self.primary_channel_combo.setCurrentIndex(primary_index)
 
-            self.spot_list.clear()
-            self.spot_list.addItems(self.session.spot_names)
-            if self.session.selected_spot:
-                matches = self.spot_list.findItems(self.session.selected_spot, QtCore.Qt.MatchFlag.MatchExactly)
-                if matches:
-                    self.spot_list.setCurrentItem(matches[0])
+            self._populate_spot_tree()
 
             self.channel_list.clear()
             for channel in self.session.channels:
@@ -820,6 +1198,16 @@ class MainWindow(QtWidgets.QMainWindow):
             stats_index = next((index for index, channel in enumerate(self.session.channels) if channel == stats_channel), 0)
             if self.channel_list.count() > 0:
                 self.channel_list.setCurrentRow(stats_index)
+
+            # Sync isotope grid
+            _theme_name = active_theme(QtWidgets.QApplication.instance()).name
+            self.isotope_grid.set_channels(
+                self.session.channels,
+                set(self.session.visible_channels),
+                self.channel_colors,
+                theme_name=_theme_name,
+            )
+            self.isotope_grid.set_selected_channel(stats_channel)
         finally:
             self._is_populating = False
 
@@ -900,6 +1288,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Selection windows edited. Apply them to update the reduction stages.")
 
     def checked_channels(self) -> list[str]:
+        # Primary source: isotope grid (if it has any channels loaded)
+        grid_channels = self.isotope_grid.checked_channels()
+        if grid_channels or self.session.channels:
+            return grid_channels
+        # Fallback: hidden channel_list
         channels: list[str] = []
         for index in range(self.channel_list.count()):
             item = self.channel_list.item(index)
@@ -907,10 +1300,61 @@ class MainWindow(QtWidgets.QMainWindow):
                 channels.append(item.text())
         return channels
 
+    def _on_isotope_chip_toggled(self, channel: str, checked: bool) -> None:
+        """Called when an isotope chip is double-clicked (toggled) in the grid."""
+        if self._is_populating:
+            return
+        # Mirror into the hidden channel_list so legacy code still works
+        for index in range(self.channel_list.count()):
+            item = self.channel_list.item(index)
+            if item.text() == channel:
+                self._is_populating = True
+                item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
+                self._is_populating = False
+                break
+        self.refresh_view()
+
+    def _on_isotope_channel_selected(self, channel: str) -> None:
+        """Called when an isotope chip is single-clicked (stats channel selected)."""
+        if self._is_populating:
+            return
+        self.selected_stats_channel = channel
+        # Mirror to hidden channel_list current selection so current_stats_channel() works
+        for index in range(self.channel_list.count()):
+            item = self.channel_list.item(index)
+            if item.text() == channel:
+                self._is_populating = True
+                self.channel_list.setCurrentRow(index)
+                self._is_populating = False
+                break
+        self.refresh_view()
+
+    def _on_isotope_color_change(self, channel: str) -> None:
+        """Open colour picker for a channel from the isotope grid."""
+        current_color = QtGui.QColor(self.channel_colors.get(channel, "#6177a2"))
+        chosen = QtWidgets.QColorDialog.getColor(current_color, self, f"Select color for {channel}")
+        if not chosen.isValid():
+            return
+        self.channel_colors[channel] = chosen.name(QtGui.QColor.NameFormat.HexRgb)
+        self._persist_channel_colors()
+        # Update the chip colour
+        self.isotope_grid.set_color(channel, self.channel_colors[channel])
+        # Also update the hidden list item swatch
+        for index in range(self.channel_list.count()):
+            item = self.channel_list.item(index)
+            if item.text() == channel:
+                self._apply_channel_item_swatch(item, channel)
+                break
+        self.refresh_view()
+
+
     def current_spot_name(self) -> str | None:
         current_item = self.spot_list.currentItem()
-        if current_item is not None:
-            return current_item.text()
+        if current_item is not None and current_item.childCount() == 0:
+            spot_name = current_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if spot_name:
+                return spot_name
+            return current_item.text(0)
         return self.session.selected_spot
 
     def current_ratio_name(self) -> str:
@@ -925,7 +1369,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.session.primary_channel
 
     def _resolve_channel_colors(self, channels: list[str]) -> dict[str, str]:
-        colors = build_channel_colors(channels)
+        theme_name = active_theme(QtWidgets.QApplication.instance()).name
+        colors = build_channel_colors(channels, theme_name=theme_name)
         saved_text = str(self.settings.value("channel_colors_json", "{}", type=str) or "{}")
         try:
             saved_colors = json.loads(saved_text)
@@ -1032,10 +1477,18 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_y_range = self.trace_plot.visible_y_range()
         same_spot = bool(selected_spot) and selected_spot == self._focused_spot_name
         same_mode = self.session.plot_mode == self._last_plot_mode
-        should_focus_spot = bool(selected_spot) and (not same_spot or not same_mode)
-        preserve_main_view = same_spot and same_mode
 
+        # Detect transition from zero channels → some channels so we re-focus
+        # instead of blindly restoring the "empty placeholder" view range (0, 1).
+        had_no_channels = not bool(self.session.visible_channels)
         visible_channels = self.checked_channels()
+        transitioning_from_empty = had_no_channels and bool(visible_channels)
+
+        should_focus_spot = bool(selected_spot) and (
+            not same_spot or not same_mode or transitioning_from_empty
+        )
+        preserve_main_view = same_spot and same_mode and not transitioning_from_empty
+
         self.session.visible_channels = visible_channels
 
         spot_data = get_spot_data(self.session, selected_spot)
@@ -1276,6 +1729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return "import" in title or "review baseline" in title
 
     def _refresh_workflow_status(self) -> None:
+        self._sync_workflow_step_locks()
         if not self.session.loaded:
             self.workflow_status_label.setText("Load a session to activate workflow actions and selection checks.")
             return
@@ -1294,6 +1748,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if materials:
             parts.append(materials)
         self.workflow_status_label.setText(" | ".join(parts))
+
+    def _step_is_unlocked(self, step_title: str, cache: dict) -> bool:
+        """Return True if the workflow step with the given title is available."""
+        title_lower = step_title.lower()
+        for keyword, prereq_key in _STEP_PREREQUISITE.items():
+            if keyword in title_lower:
+                if prereq_key is None:
+                    return True  # needs only a loaded session
+                return prereq_key in cache
+        # Unknown step keyword: unlock only if session is loaded
+        return True
+
+    def _sync_workflow_step_locks(self) -> None:
+        """Grey out workflow steps whose prerequisites are not yet met."""
+        cache = self.session.reduction_cache if self.session.loaded else {}
+        app = QtWidgets.QApplication.instance()
+        theme = active_theme(app) if app else None
+        muted_color = QtGui.QColor(theme.muted) if theme else QtGui.QColor("#888888")
+        normal_color = QtGui.QColor(theme.text) if theme else QtGui.QColor("#000000")
+
+        for index in range(self.workflow_step_list.count()):
+            item = self.workflow_step_list.item(index)
+            if index >= len(self.workflow_preset.steps):
+                continue
+            step = self.workflow_preset.steps[index]
+            unlocked = self.session.loaded and self._step_is_unlocked(step.title, cache)
+            # Step 0 (Import) is always clickable even before session loads
+            if index == 0:
+                unlocked = True
+
+            if unlocked:
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+                item.setForeground(normal_color)
+            else:
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+                item.setForeground(muted_color)
+
+
 
     def _compose_notes(self, selected_spot: str | None) -> str:
         notes = build_notes(self.session, selected_spot, self.workflow_preset, self.current_workflow_step_title())

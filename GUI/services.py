@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,16 +31,111 @@ _active_standard_archive = standard_archive.copy()
 _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
 
 
-CHANNEL_PALETTE = [
-    "#2cb4c8",  # cyan-teal
-    "#e05c3a",  # orange-red
-    "#c89b20",  # amber-gold
-    "#2aab58",  # medium green
-    "#8b4fc8",  # medium purple
-    "#d44080",  # rose-pink
-    "#2870d4",  # medium blue
-    "#30a080",  # teal-green
+# ── Isotope channel parsing ────────────────────────────────────────────────
+
+_MASS_RE_SVC = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
+
+
+def _parse_channel_name(name: str) -> tuple[str, str] | None:
+    """Return (Element_Capitalized, mass_str) for '238U' or 'U238', else None."""
+    s = name.strip()
+    m = _MASS_RE_SVC.match(s)
+    if m:
+        return m.group(2).capitalize(), m.group(1)
+    m2 = re.match(r'^([A-Za-z]+)\s*(\d+)$', s)
+    if m2:
+        return m2.group(1).capitalize(), m2.group(2)
+    return None
+
+
+# ── Discrete element colour palette (tab10-inspired) ─────────────────────────
+#
+# Two variants optimised for dark and light backgrounds.  All isotopes of
+# the same element share the same base colour; visual distinction between
+# isotopes is provided by the chip border-style in the UI widget.
+
+_PALETTE_DARK: list[str] = [
+    "#5590f5",  # 0  vivid blue       U
+    "#f5c040",  # 1  gold             Pb
+    "#f07840",  # 2  orange           Th
+    "#b864f0",  # 3  violet           Hf
+    "#40c870",  # 4  green            Si
+    "#d04848",  # 5  red              Fe
+    "#40c8d8",  # 6  cyan             Ti / Zr
+    "#f060a8",  # 7  hot-pink         Sr / Na
+    "#b8d840",  # 8  lime             Ca / Al
+    "#f0a040",  # 9  amber            Mn / P
+    "#7090d8",  # 10 steel-blue       Nb / Ta
+    "#d090f0",  # 11 lavender         REE / misc
 ]
+
+_PALETTE_LIGHT: list[str] = [
+    "#1040c0",  # 0 deep blue
+    "#806010",  # 1 dark gold
+    "#a04010",  # 2 burnt orange
+    "#5810a0",  # 3 deep purple
+    "#0a6030",  # 4 forest green
+    "#900000",  # 5 crimson
+    "#0a6878",  # 6 dark teal
+    "#880860",  # 7 deep magenta
+    "#506818",  # 8 olive
+    "#804808",  # 9 dark amber
+    "#183878",  # 10 dark steel-blue
+    "#600878",  # 11 dark lavender
+]
+
+# Fixed palette-index per known element.  Unrecognised elements are assigned
+# indices dynamically by cycling through the palette.
+_ELEM_PALETTE_IDX: dict[str, int] = {
+    # Geochronology – must be maximally distinct
+    "U": 0, "Pb": 1, "Th": 2, "Hf": 3,
+    # Internal standards
+    "Si": 4, "Ca": 8, "Al": 8, "Mg": 4,
+    "Ti": 6, "Fe": 5, "Mn": 9, "P": 9, "Na": 7, "K": 7,
+    # REE + Y: cycle 4-11 to stay clear of geochronology colours (0-3)
+    "Y": 4, "La": 5, "Ce": 6, "Pr": 7, "Nd": 8, "Sm": 9, "Eu": 10,
+    "Gd": 11, "Tb": 4, "Dy": 5, "Ho": 6, "Er": 7, "Tm": 8, "Yb": 9, "Lu": 10,
+    # HFSE
+    "Zr": 6, "Nb": 10, "Ta": 10,
+    # Alkali / alkaline earth
+    "Sr": 7, "Ba": 9, "Rb": 2, "Li": 11, "Cs": 5,
+    # Others
+    "Hg": 6, "Bi": 3,
+}
+
+# Channel section definitions for the isotope grid UI.
+# Each entry is (label, ordered_element_list | None for catch-all).
+CHANNEL_SECTIONS: list[tuple[str, list[str] | None]] = [
+    ("Geochronology",
+     ["U", "Pb", "Th", "Hf"]),
+    ("Internal Standards",
+     ["Si", "Ca", "Al", "Ti", "Mg", "Fe", "Mn", "P", "Na", "K"]),
+    ("REE + Y",
+     ["Y", "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd",
+      "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu"]),
+    ("HFSE",
+     ["Zr", "Nb", "Ta"]),
+    ("Alkali / Alkaline Earth",
+     ["Sr", "Ba", "Rb", "Na", "K", "Li", "Cs"]),
+    ("Other",
+     None),
+]
+
+# Regex for stripping trailing spot-number suffixes.
+_SPOT_SUFFIX_SEP = re.compile(r'[\s\-_\.]+\d+[a-zA-Z]{0,2}$')
+_SPOT_SUFFIX_NOSEP = re.compile(r'(?<=[a-zA-Z])\d+[a-zA-Z]{0,1}$')
+
+
+def spot_base_name(name: str) -> str:
+    """Strip trailing spot-number suffixes: 'GJ1_001' -> 'GJ1'."""
+    s = name.strip()
+    stripped = _SPOT_SUFFIX_SEP.sub('', s)
+    if stripped and stripped != s:
+        return stripped.strip()
+    stripped = _SPOT_SUFFIX_NOSEP.sub('', s)
+    if stripped and stripped != s:
+        return stripped.strip()
+    return s
 
 
 def default_visible_channels(channels: Iterable[str], primary_channel: str) -> list[str]:
@@ -49,12 +145,44 @@ def default_visible_channels(channels: Iterable[str], primary_channel: str) -> l
     return ordered[: min(4, len(ordered))]
 
 
-def build_channel_colors(channels: Iterable[str]) -> dict[str, str]:
-    channel_list = [str(channel) for channel in channels]
-    return {
-        channel: CHANNEL_PALETTE[index % len(CHANNEL_PALETTE)]
-        for index, channel in enumerate(channel_list)
-    }
+def build_channel_colors(
+    channels: Iterable[str],
+    theme_name: str = "dark",
+) -> dict[str, str]:
+    """Assign discrete palette colours to channels.
+
+    All isotopes of the same element receive the same base colour.  Visual
+    distinction between isotopes is provided by the chip border-style in the
+    IsotopeGridWidget.
+    """
+    palette = _PALETTE_DARK if (theme_name == "dark") else _PALETTE_LIGHT
+    channel_list = [str(ch) for ch in channels]
+
+    # Dynamic assignment for elements not in the fixed map.
+    _dyn_color: dict[str, str] = {}
+    _dyn_idx: list[int] = [0]
+
+    def _elem_color(elem: str) -> str:
+        if elem in _ELEM_PALETTE_IDX:
+            return palette[_ELEM_PALETTE_IDX[elem] % len(palette)]
+        if elem not in _dyn_color:
+            _dyn_color[elem] = palette[_dyn_idx[0] % len(palette)]
+            _dyn_idx[0] += 1
+        return _dyn_color[elem]
+
+    colors: dict[str, str] = {}
+    unparsed_idx = 0
+    for ch in channel_list:
+        parsed = _parse_channel_name(ch)
+        if parsed:
+            elem, _ = parsed
+            colors[ch] = _elem_color(elem)
+        else:
+            # Unnamed channels: assign from the end of the palette backwards.
+            colors[ch] = palette[(len(palette) - 1 - unparsed_idx) % len(palette)]
+            unparsed_idx += 1
+
+    return colors
 
 
 def default_reference_material_library_path() -> str:

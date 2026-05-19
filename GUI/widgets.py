@@ -1,12 +1,312 @@
 from __future__ import annotations
 
+import re
 
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
 from GUI.theme import ThemeSpec
+
+
+_MASS_RE = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
+
+
+def _parse_channel(name: str) -> tuple[str, str] | None:
+    """Return (Element_Capitalized, mass_str) for '238U' / 'U238', else None."""
+    return _parse_channel_name(name)
+
+
+# -- SpotTree --------------------------------------------------------------
+
+class SpotTree(QtWidgets.QTreeWidget):
+    """QTreeWidget with F2-rename and Delete-key support for spot management."""
+
+    deleteRequested = QtCore.Signal()
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # type: ignore[override]
+        key = event.key()
+        if key == QtCore.Qt.Key.Key_F2:
+            item = self.currentItem()
+            if item and (item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable):
+                self.editItem(item, 0)
+                return
+        elif key in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):
+            self.deleteRequested.emit()
+            return
+        super().keyPressEvent(event)
+
+class ChipButton(QtWidgets.QPushButton):
+    """QPushButton that also emits doubleClicked via mouseDoubleClickEvent."""
+
+    doubleClicked = QtCore.Signal()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        self.doubleClicked.emit()
+        event.accept()
+
+
+class IsotopeGridWidget(QtWidgets.QWidget):
+    """Compact element-grouped channel toggle grid.
+
+    Channels are displayed in geochemical sections (Geochronology, Internal
+    Standards, REE+Y, HFSE, ...).  Each element occupies one row with
+    mass-number chips.
+
+    Interaction
+    -----------
+    * Single click  → selects the chip as the active stats channel
+                      (emits ``channelSelected``).
+    * Double click  → toggles the channel on/off in the trace plot
+                      (emits ``channelToggled``).
+    * Right click   → opens a colour picker
+                      (emits ``colorChangeRequested``).
+    """
+
+    channelToggled = QtCore.Signal(str, bool)   # (channel_name, active)
+    channelSelected = QtCore.Signal(str)         # channel_name (stats channel)
+    colorChangeRequested = QtCore.Signal(str)    # channel_name
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._channels: list[str] = []
+        self._checked: dict[str, bool] = {}
+        self._colors: dict[str, str] = {}
+        self._buttons: dict[str, ChipButton] = {}
+        self._selected_channel: str | None = None
+        self._theme_name: str = "dark"
+        self._layout = QtWidgets.QVBoxLayout(self)
+        self._layout.setContentsMargins(4, 4, 4, 4)
+        self._layout.setSpacing(2)
+
+    # -- Public API --------------------------------------------------------
+
+    def set_channels(
+        self,
+        channels: list[str],
+        checked: set[str],
+        colors: dict[str, str],
+        theme_name: str = "dark",
+    ) -> None:
+        self._channels = list(channels)
+        self._checked = {ch: ch in checked for ch in channels}
+        self._colors = dict(colors)
+        self._theme_name = theme_name
+        # Preserve selected channel if it is still present
+        if self._selected_channel not in channels:
+            self._selected_channel = None
+        self._rebuild()
+
+    def set_selected_channel(self, channel: str | None) -> None:
+        """Highlight *channel* as the active stats channel."""
+        old = self._selected_channel
+        self._selected_channel = channel
+        for ch in {old, channel}:
+            if ch and ch in self._buttons:
+                idx = self._buttons[ch].property("isotope_index") or 0
+                self._apply_chip_style(self._buttons[ch], ch, isotope_index=idx)
+
+    def set_color(self, channel: str, color: str) -> None:
+        self._colors[channel] = color
+        if channel in self._buttons:
+            idx = self._buttons[channel].property("isotope_index") or 0
+            self._apply_chip_style(self._buttons[channel], channel, isotope_index=idx)
+
+    def set_theme(self, theme_name: str) -> None:
+        """Re-apply chip styles after a theme switch."""
+        self._theme_name = theme_name
+        for ch, btn in self._buttons.items():
+            idx = btn.property("isotope_index") or 0
+            self._apply_chip_style(btn, ch, isotope_index=idx)
+
+    def checked_channels(self) -> list[str]:
+        return [ch for ch, state in self._checked.items() if state]
+
+    # -- Internal ----------------------------------------------------------
+
+    def _rebuild(self) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._buttons.clear()
+
+        element_groups: dict[str, list[str]] = {}
+        other: list[str] = []
+        for ch in self._channels:
+            parsed = _parse_channel(ch)
+            if parsed:
+                elem, _ = parsed
+                element_groups.setdefault(elem, []).append(ch)
+            else:
+                other.append(ch)
+
+        placed: set[str] = set()
+
+        for section_label, section_elems in CHANNEL_SECTIONS:
+            if section_elems is None:
+                present = [e for e in sorted(element_groups) if e not in placed]
+            else:
+                present = [e for e in section_elems if e in element_groups and e not in placed]
+
+            has_other = section_elems is None and bool(other)
+            if not present and not has_other:
+                continue
+
+            self._layout.addWidget(self._make_section_header(section_label))
+
+            for elem in present:
+                self._layout.addWidget(self._make_element_row(elem, element_groups[elem]))
+                placed.add(elem)
+
+            if has_other:
+                self._layout.addWidget(self._make_other_row(other))
+
+        self._layout.addStretch(1)
+
+    def _make_section_header(self, title: str) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(w)
+        layout.setContentsMargins(0, 6, 0, 1)
+        layout.setSpacing(6)
+        lbl = QtWidgets.QLabel(title)
+        lbl.setObjectName("IsotopeSectionLabel")
+        line = QtWidgets.QWidget()
+        line.setFixedHeight(1)
+        line.setObjectName("IsotopeSectionLine")
+        line.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout.addWidget(lbl)
+        layout.addWidget(line, 1)
+        return w
+
+    def _make_element_row(self, elem: str, channels: list[str]) -> QtWidgets.QWidget:
+        row = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        elem_lbl = QtWidgets.QLabel(elem)
+        elem_lbl.setObjectName("IsotopeElemLabel")
+        elem_lbl.setFixedWidth(26)
+        row_layout.addWidget(elem_lbl)
+        sorted_channels = sorted(channels, key=lambda c: int(_parse_channel(c)[1]) if _parse_channel(c) else 0)
+        for idx, ch in enumerate(sorted_channels):
+            row_layout.addWidget(self._make_chip(ch, isotope_index=idx))
+        row_layout.addStretch(1)
+        return row
+
+    def _make_other_row(self, channels: list[str]) -> QtWidgets.QWidget:
+        row = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        lbl = QtWidgets.QLabel("...")
+        lbl.setObjectName("IsotopeElemLabel")
+        lbl.setFixedWidth(26)
+        row_layout.addWidget(lbl)
+        for ch in channels:
+            row_layout.addWidget(self._make_chip(ch))
+        row_layout.addStretch(1)
+        return row
+
+    def _make_chip(self, channel: str, isotope_index: int = 0) -> ChipButton:
+        parsed = _parse_channel(channel)
+        label = f"{parsed[1]}\n{parsed[0]}" if parsed else channel
+        btn = ChipButton(label)
+        btn.setObjectName("IsotopeChip")
+        btn.setFixedSize(44, 40)
+        btn.setToolTip(channel)
+        btn.setProperty("isotope_index", isotope_index)
+        self._apply_chip_style(btn, channel, isotope_index=isotope_index)
+        btn.clicked.connect(lambda _checked=False, ch=channel: self._on_chip_clicked(ch))
+        btn.doubleClicked.connect(lambda ch=channel: self._on_chip_double_clicked(ch))
+        btn.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        btn.customContextMenuRequested.connect(
+            lambda _pos, ch=channel: self.colorChangeRequested.emit(ch)
+        )
+        self._buttons[channel] = btn
+        return btn
+
+    # -- Chip styling ------------------------------------------------------
+    # Border styles cycle per isotope index so isotopes of the same element
+    # are visually distinguishable even though they share the same hue.
+    _BORDER_STYLES = ["solid", "dashed", "dotted", "double"]
+
+    def _apply_chip_style(
+        self,
+        btn: ChipButton,
+        channel: str,
+        *,
+        isotope_index: int = 0,
+    ) -> None:
+        color = self._colors.get(channel, "#6c7a8a")
+        border_style = self._BORDER_STYLES[isotope_index % len(self._BORDER_STYLES)]
+        is_active = self._checked.get(channel, True)
+        is_selected = (channel == self._selected_channel)
+        is_dark = (self._theme_name == "dark")
+
+        if is_active:
+            if is_selected:
+                bg       = f"{color}55"
+                border_w = "2.5px"
+                border_c = color
+                text_c   = "#ffffff" if is_dark else "#111111"
+                fw       = "800"
+            else:
+                bg       = f"{color}28"
+                border_w = "1.5px"
+                border_c = f"{color}99"
+                text_c   = "#dddddd" if is_dark else "#111111"
+                fw       = "700"
+        else:
+            # Inactive (hidden from trace)
+            bg       = "transparent"
+            border_w = "1px"
+            border_c = f"{color}44"
+            text_c   = "#666666" if is_dark else "#aaaaaa"
+            fw       = "600"
+
+        btn.setStyleSheet(f"""
+            QPushButton#IsotopeChip {{
+                background: {bg};
+                border: {border_w} {border_style} {border_c};
+                border-radius: 8px;
+                color: {text_c};
+                font-size: 9px;
+                font-weight: {fw};
+                padding: 0px;
+            }}
+            QPushButton#IsotopeChip:hover {{
+                background: {color}44;
+                border: 2px {border_style} {color};
+            }}
+        """)
+
+    # -- Interaction handlers ----------------------------------------------
+
+    def _on_chip_clicked(self, channel: str) -> None:
+        """Single click: select chip as the active stats channel."""
+        old = self._selected_channel
+        self._selected_channel = channel
+        # Refresh styles for old and new selection
+        for ch in {old, channel}:
+            if ch and ch in self._buttons:
+                idx = self._buttons[ch].property("isotope_index") or 0
+                self._apply_chip_style(self._buttons[ch], ch, isotope_index=idx)
+        self.channelSelected.emit(channel)
+
+    def _on_chip_double_clicked(self, channel: str) -> None:
+        """Double click: toggle channel on/off in the trace plot."""
+        new_state = not self._checked.get(channel, True)
+        self._checked[channel] = new_state
+        if channel in self._buttons:
+            idx = self._buttons[channel].property("isotope_index") or 0
+            self._apply_chip_style(self._buttons[channel], channel, isotope_index=idx)
+        self.channelToggled.emit(channel, new_state)
 
 
 class MetricCard(QtWidgets.QFrame):

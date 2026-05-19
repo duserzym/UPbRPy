@@ -183,9 +183,35 @@ def _stylesheet(theme: ThemeSpec) -> str:
         border: 1px solid {theme.input_border};
         border-radius: 20px;
     }}
+    #WorkflowCard {{
+        background: {theme.surface};
+        border: 2px solid {theme.accent};
+        border-radius: 20px;
+    }}
     #WorkflowHintCard, #WorkflowActionsCard {{
         background: {theme.surface_soft};
         border-radius: 16px;
+    }}
+    #IsotopeElemLabel {{
+        color: {theme.muted};
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }}
+    #IsotopeSectionLabel {{
+        color: {theme.muted};
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }}
+    #IsotopeSectionLine {{
+        background: {theme.input_border};
+    }}
+    #ChannelsCard {{
+        background: {theme.input_bg};
+        border: 1px solid {theme.input_border};
+        border-radius: 14px;
     }}
     #PlotControlBar {{
         background: {theme.surface_soft};
@@ -273,6 +299,20 @@ def _stylesheet(theme: ThemeSpec) -> str:
         border: 1px solid {theme.input_border};
         border-radius: 14px;
         padding: 8px;
+    }}
+    QTreeWidget {{
+        background: {theme.input_bg};
+        border: 1px solid {theme.input_border};
+        border-radius: 14px;
+        padding: 4px;
+    }}
+    QTreeWidget::item {{
+        padding: 5px 4px;
+        border-radius: 6px;
+    }}
+    QTreeWidget::item:selected {{
+        background: {theme.accent_soft};
+        color: {theme.text};
     }}
     QTextEdit, QTextBrowser {{
         selection-background-color: {theme.accent_soft};
