@@ -77,14 +77,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="The zircon notebook uses 29Si as the internal analyte and normalizes sweep-wise, not spot-wise. This keeps depth-profile variance information while reducing common drift and tilt.",
             ),
             WorkflowStep(
-                title="Calibrate concentrations",
-                summary="Use NIST glass standards for origin-anchored cps-to-ppm calibration.",
-                hint="The notebook separates glass, standard, and unknown traces before fitting concentration factors. This is still concentration-only; do not reuse the normalized data for isotope ratios.",
-            ),
-            WorkflowStep(
-                title="Calculate concentrations and uncertainty",
-                summary="Convert plateau cps to concentrations and keep the Student-t based uncertainty estimate used in the notebooks.",
-                hint="The notebook deliberately propagates per-spot uncertainty in the concentration step rather than only exporting mean values. Keep that behavior visible in the GUI summary.",
+                title="Calibrate and calculate concentrations",
+                summary="Use NIST glass standards for origin-anchored cps-to-ppm calibration, then convert plateau cps to concentrations with the notebook-style uncertainty estimate.",
+                hint="The notebook separates glass, standard, and unknown traces before fitting concentration factors, then carries the Student-t based per-spot uncertainty into the concentration outputs. The GUI currently runs that as one concentration stage.",
             ),
             COMMON_RATIO_STEP,
             WorkflowStep(
@@ -148,14 +143,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="The notebook explicitly uses sweep-wise normalization so depth-profile behavior remains visible. Keep that explanation visible because users often expect a single spot mean normalization.",
             ),
             WorkflowStep(
-                title="Calibrate concentrations",
-                summary="Fit concentration calibration factors from NIST glasses after baseline subtraction and internal normalization.",
-                hint="As in the notebook, concentration calibration stays separate from isotopic ratio work. This is a good place to remind users not to reuse normalized data for isotope ratios.",
-            ),
-            WorkflowStep(
-                title="Calculate concentrations and uncertainty",
-                summary="Compute spot concentrations for standards and unknowns using the same Student-t style uncertainty estimate used in the notebooks.",
-                hint="The GUI should label these as notebook-style uncertainties so users understand that the concentration uncertainty is not yet a full calibration-model uncertainty propagation.",
+                title="Calibrate and calculate concentrations",
+                summary="Fit concentration calibration factors from NIST glasses, then compute spot concentrations with the notebook-style uncertainty estimate.",
+                hint="As in the notebook, concentration calibration stays separate from isotopic ratio work. The GUI currently runs calibration and concentration output together so users can inspect the fit and final ppm products in one step.",
             ),
             COMMON_RATIO_STEP,
             WorkflowStep(
@@ -219,14 +209,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="This is a notebook-specific difference for rutile. The GUI should make this a visible stage so users know the calibration fit was cleaned before use.",
             ),
             WorkflowStep(
-                title="Calibrate concentrations",
-                summary="Fit the origin-anchored glass calibration and convert spot means to concentrations.",
-                hint="The notebook plots a representative analyte and then fits concentration factors. Keeping the calibration plot near this step will make the workflow harder to misuse.",
-            ),
-            WorkflowStep(
-                title="Calculate concentrations and thermometry",
-                summary="Compute final concentrations and optionally derive Zr-in-rutile temperatures.",
-                hint="Rutile adds a real downstream product after concentration calibration. The GUI should expose Zr-in-rutile thermometry as an optional follow-on, not bury it in a notebook-only step.",
+                title="Calibrate concentrations and thermometry",
+                summary="Fit the origin-anchored glass calibration, convert spot means to concentrations, and keep the rutile thermometry outputs tied to the same concentration stage.",
+                hint="The notebook plots a representative analyte and then fits concentration factors before exporting concentrations and optional Zr-in-rutile temperatures. The GUI currently exposes that as one concentration-focused action.",
             ),
             COMMON_RATIO_STEP,
             WorkflowStep(
@@ -285,14 +270,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="This is a backend caveat, not a silent assumption. Until a dedicated titanite normalization branch exists in UPbRPy, the GUI should tell users exactly what is happening.",
             ),
             WorkflowStep(
-                title="Filter glass outliers and calibrate",
-                summary="Use the same notebook sequence of NIST inspection, optional outlier filtering, and concentration calibration.",
-                hint="The titanite notebook mirrors the rutile concentration path closely here, so the GUI can reuse that sequence while preserving the titanite labeling.",
-            ),
-            WorkflowStep(
-                title="Calculate concentrations and titanite thermometry",
-                summary="Produce concentration outputs and keep room for Zr-in-titanite thermometry products.",
-                hint="The core library already contains titanite thermometry functions, even though the normalization branch still needs cleanup. That distinction should be clear in the interface.",
+                title="Calibrate concentrations and titanite thermometry",
+                summary="Use the notebook sequence of NIST inspection, optional outlier filtering, concentration calibration, and titanite thermometry-ready outputs.",
+                hint="The titanite notebook mirrors the rutile concentration path closely here. The core library already contains titanite thermometry functions, even though the normalization branch still needs cleanup, so the GUI presents that concentration stage as one combined action.",
             ),
             COMMON_RATIO_STEP,
             WorkflowStep(

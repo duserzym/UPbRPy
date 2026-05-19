@@ -8,6 +8,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from GUI.icon import build_app_icon, build_brand_pixmap
 from GUI.services import (
+    DOWNHOLE_FIT_METHODS,
+    SESSION_FIT_METHODS,
     autopick_selection_regions,
     build_channel_colors,
     build_notes,
@@ -26,6 +28,7 @@ from GUI.services import (
     get_selection_regions,
     get_session_plot_data,
     get_spot_data,
+    fit_method_label,
     load_standard_archive_from_path,
     load_session,
     project_summary,
@@ -56,8 +59,8 @@ PLOT_MODE_LABELS = {
     "normalized_plateau": "Normalized",
     "calibration_slopes": "Cal. slopes",
     "raw_ratios": "Raw ratios",
-    "downhole_ratios": "Downhole",
-    "session_ratios": "Session",
+    "downhole_ratios": "Downhole\nfractionation",
+    "session_ratios": "Session\nfractionation",
 }
 
 _STAGE_CACHE_KEYS: dict[str, str | None] = {
@@ -133,6 +136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.default_reference_library_path = default_reference_material_library_path()
         self._reference_library_notice: str | None = None
         self.selection_colors = self._resolve_selection_colors()
+        self.session.session_fit_options["polynomial_degree"] = self.workflow_preset.session_polynomial_degree
 
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
@@ -187,13 +191,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
+        self._sync_fit_controls()
 
     def _build_sidebar(self) -> QtWidgets.QFrame:
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFixedWidth(356)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setFixedWidth(420)
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("SidebarPanel")
@@ -280,9 +286,15 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_label = QtWidgets.QLabel("Processing sequence")
         workflow_label.setObjectName("SectionTitle")
         self.workflow_step_list = QtWidgets.QListWidget()
+        self.workflow_step_list.setObjectName("WorkflowStepList")
+        self.workflow_step_list.setWordWrap(True)
+        self.workflow_step_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        self.workflow_step_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.workflow_step_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.workflow_step_list.setSpacing(4)
         self.workflow_step_list.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.workflow_step_list.currentRowChanged.connect(self.on_workflow_step_changed)
         hint_card = QtWidgets.QFrame()
@@ -403,7 +415,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtWidgets.QSizePolicy.Policy.Fixed,
                 )
             )
-            button.setMinimumWidth(self.fontMetrics().horizontalAdvance(label) + 32)
+            label_lines = label.split("\n")
+            button.setMinimumWidth(max(self.fontMetrics().horizontalAdvance(line) for line in label_lines) + 34)
+            button.setMinimumHeight(58 if len(label_lines) > 1 else 42)
             button.clicked.connect(lambda _checked=False, plot_mode=key: self.set_plot_mode(plot_mode, refresh=True))
             self.plot_mode_group.addButton(button)
             self.plot_mode_buttons[key] = button
@@ -684,7 +698,305 @@ class MainWindow(QtWidgets.QMainWindow):
         selection_colors_row.addWidget(self.plateau_color_button)
         selector_layout.addLayout(selection_colors_row)
         layout.addWidget(selector_card, 1)
+
+        fit_card = QtWidgets.QFrame()
+        fit_card.setObjectName("SessionCard")
+        fit_layout = QtWidgets.QVBoxLayout(fit_card)
+        fit_layout.setContentsMargins(16, 16, 16, 16)
+        fit_layout.setSpacing(10)
+
+        fit_label = QtWidgets.QLabel("Fractionation fit settings")
+        fit_label.setObjectName("SectionTitle")
+        fit_layout.addWidget(fit_label)
+
+        downhole_label = QtWidgets.QLabel("Downhole fit")
+        downhole_label.setObjectName("WorkflowLabel")
+        self.downhole_fit_combo = StyledComboBox()
+        self._populate_fit_method_combo(self.downhole_fit_combo, DOWNHOLE_FIT_METHODS)
+        self.downhole_fit_combo.currentIndexChanged.connect(self.on_downhole_fit_method_changed)
+        fit_layout.addWidget(downhole_label)
+        fit_layout.addWidget(self.downhole_fit_combo)
+
+        self.downhole_fit_stack = QtWidgets.QStackedWidget()
+        self._downhole_fit_pages = self._build_fit_parameter_pages(
+            self.downhole_fit_stack,
+            prefix="downhole",
+            degree_default=int(self.session.downhole_fit_options.get("polynomial_degree", 2)),
+            window_default=int(self.session.downhole_fit_options.get("running_mean_window", 5)),
+            decay_default=float(self.session.downhole_fit_options.get("exponential_initial_decay", 0.1)),
+        )
+        fit_layout.addWidget(self.downhole_fit_stack)
+
+        session_label = QtWidgets.QLabel("Session fit")
+        session_label.setObjectName("WorkflowLabel")
+        self.session_fit_combo = StyledComboBox()
+        self._populate_fit_method_combo(self.session_fit_combo, SESSION_FIT_METHODS)
+        self.session_fit_combo.currentIndexChanged.connect(self.on_session_fit_method_changed)
+        fit_layout.addWidget(session_label)
+        fit_layout.addWidget(self.session_fit_combo)
+
+        self.session_fit_stack = QtWidgets.QStackedWidget()
+        self._session_fit_pages = self._build_fit_parameter_pages(
+            self.session_fit_stack,
+            prefix="session",
+            degree_default=int(self.session.session_fit_options.get("polynomial_degree", 2)),
+            window_default=int(self.session.session_fit_options.get("running_mean_window", 5)),
+            decay_default=float(self.session.session_fit_options.get("exponential_initial_decay", 0.001)),
+        )
+        fit_layout.addWidget(self.session_fit_stack)
+
+        self.fit_settings_note_label = QtWidgets.QLabel()
+        self.fit_settings_note_label.setObjectName("PanelBody")
+        self.fit_settings_note_label.setWordWrap(True)
+        fit_layout.addWidget(self.fit_settings_note_label)
+        layout.addWidget(fit_card, 0)
         return frame
+
+    def _populate_fit_method_combo(self, combo: StyledComboBox, methods: tuple[str, ...]) -> None:
+        for method in methods:
+            label = fit_method_label(method)
+            if method == "lowess":
+                label += " (planned)"
+            combo.addItem(label, method)
+            if method == "lowess":
+                model = combo.model()
+                item = model.item(combo.count() - 1) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+
+    def _build_fit_parameter_pages(
+        self,
+        stack: QtWidgets.QStackedWidget,
+        *,
+        prefix: str,
+        degree_default: int,
+        window_default: int,
+        decay_default: float,
+    ) -> dict[str, int]:
+        pages: dict[str, int] = {}
+
+        summary_page = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QVBoxLayout(summary_page)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(4)
+        summary_label = QtWidgets.QLabel("No extra arguments for this fit method.")
+        summary_label.setObjectName("PanelBody")
+        summary_label.setWordWrap(True)
+        summary_layout.addWidget(summary_label)
+        pages["none"] = stack.addWidget(summary_page)
+
+        poly_page = QtWidgets.QWidget()
+        poly_layout = QtWidgets.QHBoxLayout(poly_page)
+        poly_layout.setContentsMargins(0, 0, 0, 0)
+        poly_layout.setSpacing(8)
+        poly_label = QtWidgets.QLabel("Polynomial degree")
+        poly_label.setObjectName("SecondaryText")
+        poly_spin = QtWidgets.QSpinBox()
+        poly_spin.setRange(1, 6)
+        poly_spin.setValue(degree_default)
+        poly_spin.valueChanged.connect(
+            self.on_downhole_polynomial_degree_changed if prefix == "downhole" else self.on_session_polynomial_degree_changed
+        )
+        setattr(self, f"{prefix}_polynomial_degree_spin", poly_spin)
+        poly_layout.addWidget(poly_label)
+        poly_layout.addStretch(1)
+        poly_layout.addWidget(poly_spin)
+        pages["polynomial"] = stack.addWidget(poly_page)
+
+        running_page = QtWidgets.QWidget()
+        running_layout = QtWidgets.QHBoxLayout(running_page)
+        running_layout.setContentsMargins(0, 0, 0, 0)
+        running_layout.setSpacing(8)
+        running_label = QtWidgets.QLabel("Running-mean window")
+        running_label.setObjectName("SecondaryText")
+        running_spin = QtWidgets.QSpinBox()
+        running_spin.setRange(3, 99)
+        running_spin.setSingleStep(2)
+        running_spin.setValue(window_default)
+        running_spin.valueChanged.connect(
+            self.on_downhole_running_mean_window_changed if prefix == "downhole" else self.on_session_running_mean_window_changed
+        )
+        setattr(self, f"{prefix}_running_mean_window_spin", running_spin)
+        running_layout.addWidget(running_label)
+        running_layout.addStretch(1)
+        running_layout.addWidget(running_spin)
+        pages["running_mean"] = stack.addWidget(running_page)
+
+        exp_page = QtWidgets.QWidget()
+        exp_layout = QtWidgets.QVBoxLayout(exp_page)
+        exp_layout.setContentsMargins(0, 0, 0, 0)
+        exp_layout.setSpacing(6)
+        exp_formula = QtWidgets.QLabel("Exponential form: y = a + b.exp(-c x)")
+        exp_formula.setObjectName("PanelBody")
+        exp_formula.setWordWrap(True)
+        exp_row = QtWidgets.QHBoxLayout()
+        exp_row.setContentsMargins(0, 0, 0, 0)
+        exp_row.setSpacing(8)
+        exp_label = QtWidgets.QLabel("Initial c guess")
+        exp_label.setObjectName("SecondaryText")
+        exp_spin = QtWidgets.QDoubleSpinBox()
+        exp_spin.setDecimals(4)
+        exp_spin.setRange(0.0001, 10.0)
+        exp_spin.setSingleStep(0.01)
+        exp_spin.setValue(decay_default)
+        exp_spin.valueChanged.connect(
+            self.on_downhole_exponential_decay_changed if prefix == "downhole" else self.on_session_exponential_decay_changed
+        )
+        setattr(self, f"{prefix}_exponential_decay_spin", exp_spin)
+        exp_row.addWidget(exp_label)
+        exp_row.addStretch(1)
+        exp_row.addWidget(exp_spin)
+        exp_layout.addWidget(exp_formula)
+        exp_layout.addLayout(exp_row)
+        pages["exponential"] = stack.addWidget(exp_page)
+
+        lowess_page = QtWidgets.QWidget()
+        lowess_layout = QtWidgets.QVBoxLayout(lowess_page)
+        lowess_layout.setContentsMargins(0, 0, 0, 0)
+        lowess_layout.setSpacing(4)
+        lowess_label = QtWidgets.QLabel("LOWESS will need either a local implementation or a statsmodels dependency before it can be enabled.")
+        lowess_label.setObjectName("PanelBody")
+        lowess_label.setWordWrap(True)
+        lowess_layout.addWidget(lowess_label)
+        pages["lowess"] = stack.addWidget(lowess_page)
+
+        for method in ("interpolated", "linear", "cubic_spline"):
+            pages[method] = pages["none"]
+
+        return pages
+
+    def _set_fit_stack_page(self, stack: QtWidgets.QStackedWidget, pages: dict[str, int], method: str) -> None:
+        stack.setCurrentIndex(pages.get(method, pages["none"]))
+
+    def _invalidate_downhole_fit_cache(self) -> None:
+        self.session.reduction_cache.pop("downhole_results", None)
+        self.session.reduction_cache.pop("session_correction_results", None)
+
+    def _invalidate_session_fit_cache(self) -> None:
+        self.session.reduction_cache.pop("session_correction_results", None)
+
+    def _sync_fit_controls(self) -> None:
+        self._is_populating = True
+        try:
+            for combo, method, methods in [
+                (self.downhole_fit_combo, self.session.downhole_fit_method, DOWNHOLE_FIT_METHODS),
+                (self.session_fit_combo, self.session.session_fit_method, SESSION_FIT_METHODS),
+            ]:
+                for index in range(combo.count()):
+                    if combo.itemData(index) == method:
+                        combo.setCurrentIndex(index)
+                        break
+
+            self.downhole_polynomial_degree_spin.setValue(int(self.session.downhole_fit_options.get("polynomial_degree", 2)))
+            self.downhole_running_mean_window_spin.setValue(int(self.session.downhole_fit_options.get("running_mean_window", 5)))
+            self.downhole_exponential_decay_spin.setValue(float(self.session.downhole_fit_options.get("exponential_initial_decay", 0.1)))
+
+            self.session_polynomial_degree_spin.setValue(int(self.session.session_fit_options.get("polynomial_degree", self.workflow_preset.session_polynomial_degree)))
+            self.session_running_mean_window_spin.setValue(int(self.session.session_fit_options.get("running_mean_window", 5)))
+            self.session_exponential_decay_spin.setValue(float(self.session.session_fit_options.get("exponential_initial_decay", 0.001)))
+        finally:
+            self._is_populating = False
+
+        self._set_fit_stack_page(self.downhole_fit_stack, self._downhole_fit_pages, self.session.downhole_fit_method)
+        self._set_fit_stack_page(self.session_fit_stack, self._session_fit_pages, self.session.session_fit_method)
+        self._update_fit_settings_note()
+
+    def _update_fit_settings_note(self) -> None:
+        downhole_label = fit_method_label(self.session.downhole_fit_method)
+        session_label = fit_method_label(self.session.session_fit_method)
+        parts = [
+            f"Downhole: {downhole_label}",
+            f"Session: {session_label}",
+        ]
+        if self.session.downhole_fit_method == "polynomial":
+            parts.append(f"downhole degree {int(self.session.downhole_fit_options.get('polynomial_degree', 2))}")
+        if self.session.session_fit_method == "polynomial":
+            parts.append(f"session degree {int(self.session.session_fit_options.get('polynomial_degree', self.workflow_preset.session_polynomial_degree))}")
+        if self.session.downhole_fit_method == "running_mean":
+            parts.append(f"downhole window {int(self.session.downhole_fit_options.get('running_mean_window', 5))}")
+        if self.session.session_fit_method == "running_mean":
+            parts.append(f"session window {int(self.session.session_fit_options.get('running_mean_window', 5))}")
+        if "lowess" in {self.session.downhole_fit_method, self.session.session_fit_method}:
+            parts.append("LOWESS is displayed as a planned method; it is not active in this build.")
+        self.fit_settings_note_label.setText(" | ".join(parts))
+
+    def on_downhole_fit_method_changed(self, index: int) -> None:
+        if self._is_populating or index < 0:
+            return
+        method = str(self.downhole_fit_combo.itemData(index) or "interpolated")
+        self.session.downhole_fit_method = method
+        self._set_fit_stack_page(self.downhole_fit_stack, self._downhole_fit_pages, method)
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+        self.statusBar().showMessage(f"Downhole fit method set to {fit_method_label(method)}.")
+        if self.session.loaded:
+            self.refresh_view()
+
+    def on_session_fit_method_changed(self, index: int) -> None:
+        if self._is_populating or index < 0:
+            return
+        method = str(self.session_fit_combo.itemData(index) or "polynomial")
+        self.session.session_fit_method = method
+        self._set_fit_stack_page(self.session_fit_stack, self._session_fit_pages, method)
+        self._invalidate_session_fit_cache()
+        self._update_fit_settings_note()
+        self.statusBar().showMessage(f"Session fit method set to {fit_method_label(method)}.")
+        if self.session.loaded:
+            self.refresh_view()
+
+    def on_downhole_polynomial_degree_changed(self, value: int) -> None:
+        if self._is_populating:
+            return
+        self.session.downhole_fit_options["polynomial_degree"] = int(value)
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.downhole_fit_method == "polynomial":
+            self.refresh_view()
+
+    def on_session_polynomial_degree_changed(self, value: int) -> None:
+        if self._is_populating:
+            return
+        self.session.session_fit_options["polynomial_degree"] = int(value)
+        self._invalidate_session_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.session_fit_method == "polynomial":
+            self.refresh_view()
+
+    def on_downhole_running_mean_window_changed(self, value: int) -> None:
+        if self._is_populating:
+            return
+        self.session.downhole_fit_options["running_mean_window"] = int(value)
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.downhole_fit_method == "running_mean":
+            self.refresh_view()
+
+    def on_session_running_mean_window_changed(self, value: int) -> None:
+        if self._is_populating:
+            return
+        self.session.session_fit_options["running_mean_window"] = int(value)
+        self._invalidate_session_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.session_fit_method == "running_mean":
+            self.refresh_view()
+
+    def on_downhole_exponential_decay_changed(self, value: float) -> None:
+        if self._is_populating:
+            return
+        self.session.downhole_fit_options["exponential_initial_decay"] = float(value)
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.downhole_fit_method == "exponential":
+            self.refresh_view()
+
+    def on_session_exponential_decay_changed(self, value: float) -> None:
+        if self._is_populating:
+            return
+        self.session.session_fit_options["exponential_initial_decay"] = float(value)
+        self._invalidate_session_fit_cache()
+        self._update_fit_settings_note()
+        if self.session.loaded and self.session.session_fit_method == "exponential":
+            self.refresh_view()
 
     def _connect_system_theme_updates(self) -> None:
         app = QtWidgets.QApplication.instance()
@@ -867,14 +1179,29 @@ class MainWindow(QtWidgets.QMainWindow):
             for index, step in enumerate(self.workflow_preset.steps, start=1):
                 item = QtWidgets.QListWidgetItem(f"  {index}.  {step.title}")
                 item.setToolTip(step.summary)
+                item_height = 72 if len(step.title) > 38 else 56
+                item.setSizeHint(QtCore.QSize(0, item_height))
                 self.workflow_step_list.addItem(item)
             if self.workflow_step_list.count() > 0:
                 self.workflow_step_list.setCurrentRow(0)
         finally:
             self._is_populating = False
+        self._resize_workflow_step_list_to_contents()
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._rebuild_workflow_actions()
         self._refresh_workflow_status()
+
+    def _resize_workflow_step_list_to_contents(self) -> None:
+        count = self.workflow_step_list.count()
+        total_height = self.workflow_step_list.frameWidth() * 2 + 8
+        for index in range(count):
+            item = self.workflow_step_list.item(index)
+            if item is not None:
+                total_height += item.sizeHint().height()
+        if count > 1:
+            total_height += (count - 1) * self.workflow_step_list.spacing()
+        self.workflow_step_list.setMinimumHeight(total_height)
+        self.workflow_step_list.setMaximumHeight(total_height)
 
     def current_workflow_step_title(self) -> str | None:
         row = self.workflow_step_list.currentRow()
@@ -896,7 +1223,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         workflow_key = str(self.workflow_combo.itemData(index))
         self.workflow_preset = get_workflow_preset(workflow_key)
+        self.session.session_fit_options["polynomial_degree"] = self.workflow_preset.session_polynomial_degree
         self._populate_workflow_ui()
+        self._sync_fit_controls()
         self.notes_body.setText(self._compose_notes(self.session.selected_spot))
         self.statusBar().showMessage(f"Selected {self.workflow_preset.title.lower()} workflow preset.")
         if self.session.loaded and self.session.directory:
@@ -1739,6 +2068,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for index, (label, handler, accent) in enumerate(self._workflow_action_specs()):
             button = QtWidgets.QPushButton(label)
+            button.setMinimumHeight(42)
             if accent:
                 button.setProperty("accent", True)
             button.clicked.connect(handler)
@@ -1758,43 +2088,43 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
         if "review baseline" in title:
             return [
-                ("Apply edited windows", self.apply_current_windows, True),
+                ("Apply baseline and plateau edits", self.apply_current_windows, True),
                 ("Reset current spot", self.run_autopick_current_spot, False),
-                ("Return to raw traces", self.show_raw_traces, False),
+                ("Show raw traces", self.show_raw_traces, False),
             ]
         if "subtract baseline" in title:
             return [
-                ("Preview baseline-subtracted traces", self.run_baseline_preview, True),
-                ("Return to raw traces", self.show_raw_traces, False),
+                ("Subtract baseline", self.run_baseline_preview, True),
+                ("Show raw traces", self.show_raw_traces, False),
             ]
         if "internal normalization" in title:
             return [
-                ("Run internal normalization preview", self.run_internal_normalization_preview, True),
-                ("Return to raw traces", self.show_raw_traces, False),
+                ("Apply internal normalization", self.run_internal_normalization_preview, True),
+                ("Show raw traces", self.show_raw_traces, False),
             ]
         if "calibrate" in title or "concentration" in title or "thermometry" in title:
             return [
-                ("Run concentration stage", self.run_concentration_stage, True),
+                ("Calibrate and calculate concentrations", self.run_concentration_stage, True),
                 ("Show normalized plateau", self.run_internal_normalization_preview, False),
             ]
         if "raw isotope" in title or "raw ratio" in title:
             return [
-                ("Run raw ratio preview", self.run_raw_ratio_preview, True),
-                ("Return to raw traces", self.show_raw_traces, False),
+                ("Build raw isotope ratios", self.run_raw_ratio_preview, True),
+                ("Show raw traces", self.show_raw_traces, False),
             ]
         if "downhole" in title:
             return [
-                ("Run downhole correction preview", self.run_downhole_preview, True),
-                ("Show raw ratios", self.run_raw_ratio_preview, False),
+                ("Apply downhole fractionation", self.run_downhole_preview, True),
+                ("Show raw isotope ratios", self.run_raw_ratio_preview, False),
             ]
         if "session fractionation" in title or "session-wide" in title:
             return [
-                ("Run session correction preview", self.run_session_correction_preview, True),
-                ("Show downhole ratios", self.run_downhole_preview, False),
+                ("Apply session fractionation", self.run_session_correction_preview, True),
+                ("Show downhole fractionation", self.run_downhole_preview, False),
             ]
         return [
             ("Show final corrected ratios", self.run_final_review, True),
-            ("Return to raw traces", self.show_raw_traces, False),
+            ("Show raw traces", self.show_raw_traces, False),
         ]
 
     def _workflow_step_allows_region_edits(self) -> bool:
@@ -1833,6 +2163,30 @@ class MainWindow(QtWidgets.QMainWindow):
         # Unknown step keyword: unlock only if session is loaded
         return True
 
+    def _step_completion_cache_key(self, step_title: str) -> str | None:
+        title_lower = step_title.lower()
+        if "import" in title_lower:
+            return "__loaded__"
+        if "review baseline" in title_lower:
+            return "baseline_subtracted_total_data"
+        if "subtract baseline" in title_lower:
+            return "baseline_subtracted_total_data"
+        if "internal normalization" in title_lower:
+            return "normalized_plateau_data"
+        if "filter glass outliers" in title_lower:
+            return "concentration_results"
+        if "calibrate" in title_lower or "concentration" in title_lower or "thermometry" in title_lower:
+            return "concentration_results"
+        if "raw isotope" in title_lower or "raw ratio" in title_lower:
+            return "plateau_data_with_raw_ratios"
+        if "downhole" in title_lower:
+            return "downhole_results"
+        if "session fractionation" in title_lower or "session-wide" in title_lower:
+            return "session_correction_results"
+        if "dates" in title_lower or "final" in title_lower or "review" in title_lower or "depth-profile" in title_lower:
+            return "session_correction_results"
+        return None
+
     def _sync_workflow_step_locks(self) -> None:
         """Grey out workflow steps whose prerequisites are not yet met, and show status symbols."""
         cache = self.session.reduction_cache if self.session.loaded else {}
@@ -1853,23 +2207,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if index == 0:
                 unlocked = True
 
-            # Determine completion: check if the result cache key for this step is present
-            step_cache_key = None
-            for cache_key_name, cache_key in [
-                ("baseline_subtracted_total_data", "Baseline subtraction"),
-                ("normalized_plateau_data", "Internal normalization"),
-                ("concentration_results", "Calibrate concentrations"),
-                ("plateau_data_with_raw_ratios", "Compute raw ratios"),
-                ("downhole_results", "Downhole fractionation correction"),
-                ("session_correction_results", "Session fractionation correction"),
-            ]:
-                if step.title.lower() in cache_key.lower() or cache_key.lower() in step.title.lower():
-                    step_cache_key = cache_key_name
-                    break
-            is_done = step_cache_key is not None and step_cache_key in cache
-            # Import step is "done" if session is loaded
-            if index == 0 and self.session.loaded:
-                is_done = True
+            step_cache_key = self._step_completion_cache_key(step.title)
+            is_done = False
+            if step_cache_key == "__loaded__":
+                is_done = self.session.loaded
+            elif step_cache_key is not None:
+                is_done = step_cache_key in cache
 
             # Choose prefix symbol
             if not unlocked:
@@ -2042,7 +2385,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.set_plot_mode("downhole_ratios", refresh=False)
         self.append_log(
-            f"Downhole correction ready using {self.workflow_preset.primary_standard} and {len(results['corrected_ratios'])} plateau rows."
+            f"Downhole correction ready using {results.get('fit_label', 'Interpolated')} smoothing with {self.workflow_preset.primary_standard} and {len(results['corrected_ratios'])} plateau rows."
         )
         self.refresh_view()
 
@@ -2055,7 +2398,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_action_error("Session correction failed", exc)
             return
         self.set_plot_mode("session_ratios", refresh=False)
-        self.append_log(f"Session correction ready for {len(results['corrected_ratios'])} corrected plateau rows.")
+        self.append_log(
+            f"Session correction ready using {results.get('fit_label', 'Polynomial')} smoothing for {len(results['corrected_ratios'])} corrected plateau rows."
+        )
         self.refresh_view()
 
     def run_final_review(self) -> None:

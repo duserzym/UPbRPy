@@ -488,6 +488,7 @@ class DownholeFractionationWidget(pg.GraphicsLayoutWidget):
         mean_frac = data["mean_frac"]
         std_frac = float(data["std_frac"])
         primary_standard = data["primary_standard"]
+        fit_label = str(data.get("fit_label", "Interpolated"))
 
         p = self.addPlot(row=0, col=0)
         self._plot_item = p
@@ -495,7 +496,7 @@ class DownholeFractionationWidget(pg.GraphicsLayoutWidget):
         p.setLabel("bottom", "Relative time (s)", color=theme.axis_text, size="9px")
         p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
         p.setTitle(
-            f"{ratio_name}  downhole fractionation — {primary_standard}",
+            f"{ratio_name}  downhole fractionation — {primary_standard} ({fit_label})",
             color=theme.axis_text, size="10pt",
         )
 
@@ -620,6 +621,8 @@ class SessionFractionationWidget(pg.GraphicsLayoutWidget):
         fit_times = data["fit_times"]
         fit_vals = data["fit_vals"]
         fit_std = float(data["fit_std"])
+        show_uncertainty = bool(data.get("show_uncertainty", False))
+        fit_label = str(data.get("fit_label", "Polynomial"))
 
         p = self.addPlot(row=0, col=0)
         self._plot_item = p
@@ -627,32 +630,47 @@ class SessionFractionationWidget(pg.GraphicsLayoutWidget):
         p.setLabel("bottom", "Session time (s)", color=theme.axis_text, size="9px")
         p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
         p.setTitle(
-            f"{ratio_name}  session fractionation — {primary_standard}",
+            f"{ratio_name}  session fractionation — {primary_standard} ({fit_label})",
             color=theme.axis_text, size="10pt",
         )
 
-        # ±1σ polynomial fit envelope
-        fill_brush = pg.mkColor("#888888")
-        fill_brush.setAlpha(30)
-        upper_curve = p.plot(fit_times, fit_vals + fit_std,
-                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
-        lower_curve = p.plot(fit_times, fit_vals - fit_std,
-                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
-        fill = pg.FillBetweenItem(upper_curve, lower_curve, brush=fill_brush)
-        p.addItem(fill)
+        if show_uncertainty:
+            fill_brush = pg.mkColor("#888888")
+            fill_brush.setAlpha(30)
+            upper_curve = p.plot(
+                fit_times,
+                fit_vals + fit_std,
+                pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine),
+            )
+            lower_curve = p.plot(
+                fit_times,
+                fit_vals - fit_std,
+                pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine),
+            )
+            fill = pg.FillBetweenItem(upper_curve, lower_curve, brush=fill_brush)
+            p.addItem(fill)
 
-        # Polynomial fit (red)
+        # Polynomial fit follows the same weighted notebook fit stored by the core.
         p.plot(fit_times, fit_vals, pen=pg.mkPen("#e05050", width=2))
 
-        # Spot-mean scatter + error bars
-        accent = theme.accent
-        err = pg.ErrorBarItem(x=t_arr, y=f_arr, height=2 * e_arr,
-                              beam=0, pen=pg.mkPen(accent, width=1.5))
-        p.addItem(err)
-        scatter = pg.ScatterPlotItem(x=t_arr, y=f_arr,
-                                     symbol="o", size=8,
-                                     pen=pg.mkPen(accent, width=1.5),
-                                     brush=pg.mkBrush(accent))
+        point_color = theme.text
+        if show_uncertainty:
+            err = pg.ErrorBarItem(
+                x=t_arr,
+                y=f_arr,
+                height=2 * e_arr,
+                beam=0,
+                pen=pg.mkPen(point_color, width=1.2),
+            )
+            p.addItem(err)
+        scatter = pg.ScatterPlotItem(
+            x=t_arr,
+            y=f_arr,
+            symbol="o",
+            size=8,
+            pen=pg.mkPen(point_color, width=1.2),
+            brush=pg.mkBrush(point_color),
+        )
         p.addItem(scatter)
 
         # Reference line at 1.0

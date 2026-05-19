@@ -7,17 +7,16 @@ from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import CubicSpline, interp1d
+from scipy.optimize import curve_fit
 
 from GUI.state import ReductionSession
 from GUI.workflows import WorkflowPreset, format_import_defaults, infer_workflow_preset
 from UPbRPy import (
     apply_DH_correction,
-    apply_session_correction,
-    calc_DH_fractionations_rad,
     calc_concentration,
     calc_concentration_calibration_factor,
     calc_raw_ratios,
-    calc_session_fractionation_rad,
     internal_normalization,
     read_experiment_data,
     select_baseline_peak,
@@ -29,6 +28,311 @@ from UPbRPy import (
 DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "standards.csv")
 _active_standard_archive = standard_archive.copy()
 _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
+
+
+FIT_METHOD_LABELS: dict[str, str] = {
+    "interpolated": "Interpolated",
+    "linear": "Linear",
+    "exponential": "Exponential",
+    "cubic_spline": "Cubic spline",
+    "running_mean": "Running mean",
+    "lowess": "LOWESS",
+    "polynomial": "Polynomial",
+}
+
+DOWNHOLE_FIT_METHODS: tuple[str, ...] = (
+    "interpolated",
+    "linear",
+    "exponential",
+    "cubic_spline",
+    "running_mean",
+    "lowess",
+    "polynomial",
+)
+
+SESSION_FIT_METHODS: tuple[str, ...] = (
+    "interpolated",
+    "linear",
+    "exponential",
+    "cubic_spline",
+    "running_mean",
+    "lowess",
+    "polynomial",
+)
+
+
+def fit_method_label(method: str) -> str:
+    return FIT_METHOD_LABELS.get(method, method.replace("_", " ").title())
+
+
+def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    return a + b * np.exp(-c * x)
+
+
+def _coerce_running_mean_window(value: object, size: int) -> int:
+    window = int(value) if value is not None else 5
+    window = max(3, window)
+    if window % 2 == 0:
+        window += 1
+    if size <= 2:
+        return size
+    return min(window, size if size % 2 == 1 else size - 1)
+
+
+def _running_mean(values: np.ndarray, window: int) -> np.ndarray:
+    if values.size == 0 or window <= 1:
+        return values
+    pad = window // 2
+    padded = np.pad(values, (pad, pad), mode="edge")
+    kernel = np.ones(window, dtype=float) / window
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _session_fit_weights(fractions: np.ndarray, stds: np.ndarray) -> np.ndarray:
+    safe_stds = np.where(np.isfinite(stds) & (stds > 0), stds, np.nanmedian(stds[np.isfinite(stds) & (stds > 0)]) if np.any(np.isfinite(stds) & (stds > 0)) else 1.0)
+    relative = np.where(safe_stds > 0, fractions / safe_stds, 1.0)
+    weights = np.where(np.isfinite(relative) & (relative != 0), 1 / relative**2, 1.0)
+    return weights.astype(float)
+
+
+def _evaluate_fit_model(model: dict[str, Any], x_values: np.ndarray | pd.Series | list[float]) -> np.ndarray:
+    evaluator = model.get("evaluator")
+    x_arr = np.asarray(x_values, dtype=float)
+    if callable(evaluator):
+        return np.asarray(evaluator(x_arr), dtype=float)
+    raise ValueError("Invalid fit model: missing evaluator.")
+
+
+def _fit_fractionation_model(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    method: str,
+    options: dict[str, float | int | str],
+    *,
+    weights: np.ndarray | None = None,
+) -> tuple[dict[str, Any], np.ndarray]:
+    x_arr = np.asarray(x_values, dtype=float)
+    y_arr = np.asarray(y_values, dtype=float)
+    weights_arr = None if weights is None else np.asarray(weights, dtype=float)
+
+    if method == "lowess":
+        raise NotImplementedError("LOWESS is planned but not yet implemented in this GUI build.")
+
+    if method == "interpolated":
+        interpolator = interp1d(x_arr, y_arr, kind="linear", fill_value="extrapolate")
+        model = {"kind": method, "evaluator": interpolator, "parameter_count": 0}
+    elif method == "linear":
+        coeffs = np.polyfit(x_arr, y_arr, 1, w=weights_arr)
+        model = {
+            "kind": method,
+            "coeffs": coeffs,
+            "evaluator": lambda x, c=coeffs: np.polyval(c, x),
+            "parameter_count": 2,
+        }
+    elif method == "polynomial":
+        degree = max(1, int(options.get("polynomial_degree", 2)))
+        coeffs = np.polyfit(x_arr, y_arr, degree, w=weights_arr)
+        model = {
+            "kind": method,
+            "coeffs": coeffs,
+            "degree": degree,
+            "evaluator": lambda x, c=coeffs: np.polyval(c, x),
+            "parameter_count": degree + 1,
+        }
+    elif method == "exponential":
+        initial_decay = max(float(options.get("exponential_initial_decay", 0.1)), 1e-6)
+        p0 = (float(y_arr[-1]), float(y_arr[0] - y_arr[-1]), initial_decay)
+        params, _cov = curve_fit(
+            _exp_decay,
+            x_arr,
+            y_arr,
+            p0=p0,
+            bounds=([-np.inf, -np.inf, 0.0], [np.inf, np.inf, np.inf]),
+            maxfev=20000,
+        )
+        model = {
+            "kind": method,
+            "params": params,
+            "evaluator": lambda x, p=params: _exp_decay(np.asarray(x, dtype=float), *p),
+            "parameter_count": 3,
+        }
+    elif method == "cubic_spline":
+        spline = CubicSpline(x_arr, y_arr, bc_type="natural", extrapolate=True)
+        model = {"kind": method, "spline": spline, "evaluator": spline, "parameter_count": 4}
+    elif method == "running_mean":
+        window = _coerce_running_mean_window(options.get("running_mean_window", 5), len(y_arr))
+        smoothed = _running_mean(y_arr, window)
+        interpolator = interp1d(x_arr, smoothed, kind="linear", fill_value="extrapolate")
+        model = {
+            "kind": method,
+            "window": window,
+            "smoothed": smoothed,
+            "evaluator": interpolator,
+            "parameter_count": 1,
+        }
+    else:
+        raise ValueError(f"Unsupported fit method: {method}")
+
+    return model, _evaluate_fit_model(model, x_arr)
+
+
+def _build_session_primary_standard_summary(
+    dh_corrected: pd.DataFrame,
+    primary_standard: str,
+    ratio_name: str,
+    known_ratio: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    corrected_col = f"{ratio_name}_DH_corrected"
+    ps_rows = dh_corrected[dh_corrected["sample"] == primary_standard]
+    if ps_rows.empty or corrected_col not in ps_rows.columns:
+        return np.array([]), np.array([]), np.array([]), []
+
+    spot_mean_times: list[float] = []
+    spot_mean_fracs: list[float] = []
+    spot_frac_errs: list[float] = []
+    spot_names_out: list[str] = []
+    for spot_name in ps_rows["spot_name"].unique():
+        this_spot = ps_rows[ps_rows["spot_name"] == spot_name]
+        r_vals = this_spot[corrected_col].to_numpy(dtype=float)
+        valid = np.isfinite(r_vals) & (r_vals > 0)
+        if valid.sum() < 2:
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            spot_fractionations = np.where(r_vals[valid] > 0, known_ratio / r_vals[valid], np.nan)
+        spot_fractionations = spot_fractionations[np.isfinite(spot_fractionations)]
+        if spot_fractionations.size < 2:
+            continue
+        spot_mean_times.append(float(this_spot["Time"].mean()))
+        spot_mean_fracs.append(float(np.mean(spot_fractionations)))
+        spot_frac_errs.append(float(np.std(spot_fractionations)))
+        spot_names_out.append(str(spot_name))
+
+    if len(spot_mean_times) < 2:
+        return np.array([]), np.array([]), np.array([]), []
+
+    times = np.array(spot_mean_times, dtype=float)
+    fracs = np.array(spot_mean_fracs, dtype=float)
+    errs = np.array(spot_frac_errs, dtype=float)
+    order = np.argsort(times)
+    return times[order], fracs[order], errs[order], [spot_names_out[i] for i in order]
+
+
+def _build_downhole_correction_results(
+    primary_standard_ratios: pd.DataFrame,
+    standard_archive_frame: pd.DataFrame,
+    *,
+    method: str,
+    options: dict[str, float | int | str],
+    ratio_names: tuple[str, ...] = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"),
+) -> dict[str, Any]:
+    primary_standard = str(primary_standard_ratios["sample"].iloc[0])
+    results: dict[str, Any] = {}
+
+    for ratio_name in ratio_names:
+        known_ratio = float(standard_archive_frame.loc[primary_standard, ratio_name + "*"])
+        spot_times: list[np.ndarray] = []
+        spot_ratios: list[np.ndarray] = []
+        for spot_name in primary_standard_ratios["spot_name"].unique():
+            this_spot = primary_standard_ratios[primary_standard_ratios["spot_name"] == spot_name].copy()
+            rel_t = (this_spot["Time"] - this_spot["Time"].iloc[0]).to_numpy(dtype=float)
+            ratios = this_spot[ratio_name].to_numpy(dtype=float)
+            valid = np.isfinite(ratios) & (ratios > 0)
+            if valid.sum() < 2:
+                continue
+            spot_times.append(rel_t[valid])
+            spot_ratios.append(ratios[valid])
+
+        if not spot_times:
+            continue
+
+        max_time = float(max(times[-1] for times in spot_times))
+        point_count = max(len(times) for times in spot_times)
+        unified_time = np.linspace(0.0, max_time, point_count)
+        stacked = np.array([np.interp(unified_time, times, ratios) for times, ratios in zip(spot_times, spot_ratios)])
+        mean_ratio = np.nanmean(stacked, axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_fractionation = np.where(mean_ratio > 0, known_ratio / mean_ratio, np.nan)
+
+        fit_model, fit_values = _fit_fractionation_model(unified_time, mean_fractionation, method, options)
+        all_times = np.concatenate(spot_times)
+        all_fractionations = np.concatenate([np.where(ratios > 0, known_ratio / ratios, np.nan) for ratios in spot_ratios])
+        valid = np.isfinite(all_times) & np.isfinite(all_fractionations)
+        residuals = all_fractionations[valid] - _evaluate_fit_model(fit_model, all_times[valid])
+        std_value = float(np.std(residuals)) if residuals.size else 0.0
+
+        results[ratio_name] = {
+            "plot": None,
+            "method": method,
+            "fit_label": fit_method_label(method),
+            "model": fit_model,
+            "interpolation": lambda x, model=fit_model: _evaluate_fit_model(model, x),
+            "fit_time": unified_time,
+            "fit_values": fit_values,
+            "mean_fractionation": mean_fractionation,
+            "std": std_value,
+        }
+
+    return results
+
+
+def _build_session_correction_results(
+    primary_standard_dh_corrected: pd.DataFrame,
+    standard_archive_frame: pd.DataFrame,
+    *,
+    primary_standard: str,
+    method: str,
+    options: dict[str, float | int | str],
+    ratio_names: tuple[str, ...] = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"),
+) -> dict[str, Any]:
+    results: dict[str, Any] = {}
+
+    for ratio_name in ratio_names:
+        known_ratio = float(standard_archive_frame.loc[primary_standard, ratio_name + "*"])
+        times, fracs, errs, spot_names = _build_session_primary_standard_summary(
+            primary_standard_dh_corrected,
+            primary_standard,
+            ratio_name,
+            known_ratio,
+        )
+        if times.size < 2:
+            continue
+        weights = _session_fit_weights(fracs, errs)
+        fit_model, fit_at_points = _fit_fractionation_model(times, fracs, method, options, weights=weights)
+        residuals = fracs - fit_at_points
+        parameter_count = max(int(fit_model.get("parameter_count", 1)), 1)
+        dof = max(len(residuals) - parameter_count, 1)
+        fit_std = float(np.sqrt(np.sum(weights * residuals**2) / dof)) if residuals.size else 0.0
+        fit_times = np.linspace(float(times[0]), float(times[-1]), 200)
+        fit_values = _evaluate_fit_model(fit_model, fit_times)
+        results[ratio_name] = {
+            "plot": None,
+            "method": method,
+            "fit_label": fit_method_label(method),
+            "fit_model": fit_model,
+            "fit": fit_model,
+            "std": fit_std,
+            "fit_times": fit_times,
+            "fit_values": fit_values,
+            "spot_mean_times": times,
+            "spot_mean_fracs": fracs,
+            "spot_frac_errs": errs,
+            "spot_names": spot_names,
+        }
+
+    return results
+
+
+def _apply_session_correction_models(
+    dh_corrected_ratios: pd.DataFrame,
+    session_correction_results: dict[str, Any],
+) -> pd.DataFrame:
+    corrected = dh_corrected_ratios.copy()
+    for ratio_name, result in session_correction_results.items():
+        model = result.get("fit_model") or result.get("fit")
+        corrected[f"{ratio_name}_fractionation_corrected"] = (
+            corrected[f"{ratio_name}_DH_corrected"] * _evaluate_fit_model(model, corrected["Time"].to_numpy(dtype=float))
+        )
+    return corrected
 
 
 # ── Isotope channel parsing ────────────────────────────────────────────────
@@ -454,9 +758,20 @@ def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -
 
     _require_samples(session, (preset.primary_standard,), "primary standard")
     primary_standard_ratios = raw_ratios[raw_ratios["sample"] == preset.primary_standard].reset_index(drop=True)
-    correction_results = calc_DH_fractionations_rad(primary_standard_ratios.copy(), current_standard_archive())
+    correction_results = _build_downhole_correction_results(
+        primary_standard_ratios.copy(),
+        current_standard_archive(),
+        method=session.downhole_fit_method,
+        options=session.downhole_fit_options,
+    )
     corrected = apply_DH_correction(raw_ratios.copy(), correction_results)
-    results = {"correction_results": correction_results, "corrected_ratios": corrected}
+    results = {
+        "correction_results": correction_results,
+        "corrected_ratios": corrected,
+        "fit_method": session.downhole_fit_method,
+        "fit_label": fit_method_label(session.downhole_fit_method),
+        "fit_options": dict(session.downhole_fit_options),
+    }
     session.reduction_cache[cache_key] = results
     return results
 
@@ -470,13 +785,21 @@ def ensure_session_corrected(session: ReductionSession, preset: WorkflowPreset) 
     downhole_results = ensure_downhole_results(session, preset)
     corrected = downhole_results["corrected_ratios"]
     primary_standard = corrected[corrected["sample"] == preset.primary_standard].reset_index(drop=True)
-    session_results = calc_session_fractionation_rad(
+    session_results = _build_session_correction_results(
         primary_standard.copy(),
         current_standard_archive(),
-        degree=preset.session_polynomial_degree,
+        primary_standard=preset.primary_standard,
+        method=session.session_fit_method,
+        options=session.session_fit_options,
     )
-    session_corrected = apply_session_correction(corrected.copy(), session_results)
-    results = {"correction_results": session_results, "corrected_ratios": session_corrected}
+    session_corrected = _apply_session_correction_models(corrected.copy(), session_results)
+    results = {
+        "correction_results": session_results,
+        "corrected_ratios": session_corrected,
+        "fit_method": session.session_fit_method,
+        "fit_label": fit_method_label(session.session_fit_method),
+        "fit_options": dict(session.session_fit_options),
+    }
     session.reduction_cache[cache_key] = results
     return results
 
@@ -578,6 +901,7 @@ def get_downhole_plot_data(
     Returns None if the prerequisite cache entries are absent.
     """
     raw_ratios = session.reduction_cache.get("plateau_data_with_raw_ratios")
+    downhole_results = session.reduction_cache.get("downhole_results")
     if not isinstance(raw_ratios, pd.DataFrame) or raw_ratios.empty:
         return None
     primary_standard = preset.primary_standard
@@ -630,6 +954,15 @@ def get_downhole_plot_data(
     mean_frac_repeated = np.tile(mean_frac, len(spot_times))[valid_mask]
     std_frac = float(np.std(all_frac_flat[valid_mask] - mean_frac_repeated))
 
+    fit_curve = mean_frac
+    fit_label = fit_method_label(session.downhole_fit_method)
+    if isinstance(downhole_results, dict):
+        correction_results = downhole_results.get("correction_results")
+        if isinstance(correction_results, dict) and ratio_name in correction_results:
+            ratio_result = correction_results[ratio_name]
+            fit_curve = np.asarray(ratio_result.get("fit_values", mean_frac), dtype=float)
+            fit_label = str(ratio_result.get("fit_label", fit_label))
+
     return {
         "ratio_name": ratio_name,
         "known_ratio": known_ratio,
@@ -638,7 +971,8 @@ def get_downhole_plot_data(
         "spot_times": spot_times,
         "spot_ratios": spot_ratios,
         "unified_time": unified_time,
-        "mean_frac": mean_frac,
+        "mean_frac": fit_curve,
+        "fit_label": fit_label,
         "std_frac": std_frac,
     }
 
@@ -654,11 +988,8 @@ def get_session_plot_data(
     if not isinstance(session_results, dict) or not isinstance(downhole_results, dict):
         return None
 
-    corrected_col = f"{ratio_name}_DH_corrected"
     dh_corrected = downhole_results.get("corrected_ratios")
     if not isinstance(dh_corrected, pd.DataFrame) or dh_corrected.empty:
-        return None
-    if corrected_col not in dh_corrected.columns:
         return None
 
     primary_standard = preset.primary_standard
@@ -670,46 +1001,24 @@ def get_session_plot_data(
     except Exception:
         return None
 
-    ps_rows = dh_corrected[dh_corrected["sample"] == primary_standard]
-    if ps_rows.empty:
+    t_arr, f_arr, e_arr, spot_names_out = _build_session_primary_standard_summary(
+        dh_corrected,
+        primary_standard,
+        ratio_name,
+        known_ratio,
+    )
+    if t_arr.size < 2:
         return None
-
-    spot_mean_times: list[float] = []
-    spot_mean_fracs: list[float] = []
-    spot_frac_errs: list[float] = []
-    spot_names_out: list[str] = []
-    for sn in ps_rows["spot_name"].unique():
-        this_spot = ps_rows[ps_rows["spot_name"] == sn]
-        r_vals = this_spot[corrected_col].values.astype(float)
-        valid = np.isfinite(r_vals) & (r_vals > 0)
-        if valid.sum() < 2:
-            continue
-        r_valid = r_vals[valid]
-        mean_t = float(this_spot["Time"].mean())
-        mean_r = float(np.mean(r_valid))
-        std_r = float(np.std(r_valid))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            frac = known_ratio / mean_r if mean_r > 0 else np.nan
-            frac_err = (known_ratio / mean_r**2) * std_r if mean_r > 0 else np.nan
-        spot_mean_times.append(mean_t)
-        spot_mean_fracs.append(frac)
-        spot_frac_errs.append(frac_err)
-        spot_names_out.append(str(sn))
-
-    if len(spot_mean_times) < 2:
-        return None
-
-    t_arr = np.array(spot_mean_times)
-    f_arr = np.array(spot_mean_fracs)
-    e_arr = np.array(spot_frac_errs)
 
     ratio_results = session_results.get("correction_results", {}).get(ratio_name)
     if not ratio_results:
         return None
-    p = ratio_results["fit"]
     p_std = float(ratio_results.get("std", 0.0))
-    fit_times = np.linspace(float(t_arr[0]), float(t_arr[-1]), 200)
-    fit_vals = np.polyval(p, fit_times)
+    fit_times = np.asarray(ratio_results.get("fit_times", np.linspace(float(t_arr[0]), float(t_arr[-1]), 200)), dtype=float)
+    fit_vals = np.asarray(ratio_results.get("fit_values", []), dtype=float)
+    if fit_vals.size == 0:
+        fit_model = ratio_results.get("fit_model") or ratio_results.get("fit")
+        fit_vals = _evaluate_fit_model(fit_model, fit_times)
 
     return {
         "ratio_name": ratio_name,
@@ -722,6 +1031,8 @@ def get_session_plot_data(
         "fit_times": fit_times,
         "fit_vals": fit_vals,
         "fit_std": p_std,
+        "fit_label": str(ratio_results.get("fit_label", fit_method_label(session.session_fit_method))),
+        "show_uncertainty": False,
     }
 
 

@@ -399,6 +399,17 @@ def _stylesheet(theme: ThemeSpec) -> str:
         padding: 6px 4px;
         border-radius: 8px;
     }}
+    #WorkflowStepList {{
+        border-radius: 16px;
+        padding: 10px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    #WorkflowStepList::item {{
+        padding: 10px 10px;
+        margin: 2px 0px;
+        border-radius: 12px;
+    }}
     QListWidget::item:selected {{
         background: {theme.accent_soft};
         color: {theme.text};
