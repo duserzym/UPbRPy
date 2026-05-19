@@ -333,6 +333,457 @@ class MetricCard(QtWidgets.QFrame):
         self.value_widget.setText(value)
 
 
+# ── Diagnostic plot palette ────────────────────────────────────────────────
+
+_DIAG_SPOT_COLORS = [
+    "#5590f5", "#f5c040", "#f07840", "#b864f0", "#40c870",
+    "#d04848", "#40c8d8", "#f060a8", "#b8d840", "#f0a040",
+    "#7090d8", "#d090f0",
+]
+
+
+def _make_diag_axis(plot_item: pg.PlotItem, theme: ThemeSpec) -> None:
+    """Apply consistent axis styling to a diagnostic sub-plot."""
+    tick_font = QtGui.QFont()
+    tick_font.setPointSizeF(9.0)
+    for axis_name in ("left", "bottom"):
+        ax = plot_item.getAxis(axis_name)
+        ax.setTextPen(theme.axis_text)
+        ax.setPen(theme.axis_line)
+        ax.setStyle(tickFont=tick_font, tickTextOffset=4)
+    plot_item.showGrid(x=True, y=True, alpha=theme.grid_alpha)
+    plot_item.setContentsMargins(4, 4, 4, 4)
+
+
+class DownholeFractionationWidget(pg.GraphicsLayoutWidget):
+    """Stacked primary-RM downhole fractionation plot with mean + ±1σ envelope.
+
+    Data is supplied via :meth:`show_data`.  Accepts the dict returned by
+    ``services.get_downhole_plot_data``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._theme: ThemeSpec | None = None
+        self._data: dict | None = None
+        self._plot_item: pg.PlotItem | None = None
+        self._zoom_mode = "xy"
+        self._interaction_mode = "zoom"
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                  QtWidgets.QSizePolicy.Policy.Expanding)
+        )
+
+    def apply_theme(self, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self.setBackground(theme.plot_background)
+        if self._data is not None:
+            self._draw()
+
+    def show_data(self, data: dict | None, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self._data = data
+        self.setBackground(theme.plot_background)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.clear()
+        self._plot_item = None
+        theme = self._theme
+        data = self._data
+        if theme is None:
+            return
+        if data is None:
+            p = self.addPlot(0, 0)
+            self._plot_item = p
+            lbl = pg.TextItem("No downhole correction data available.\nRun the downhole correction step first.",
+                              color=theme.muted, anchor=(0.5, 0.5))
+            lbl.setFont(QtGui.QFont("", 11))
+            p.addItem(lbl)
+            lbl.setPos(0.5, 0.5)
+            return
+
+        ratio_name = data["ratio_name"]
+        unified_time = data["unified_time"]
+        mean_frac = data["mean_frac"]
+        std_frac = float(data["std_frac"])
+        primary_standard = data["primary_standard"]
+
+        p = self.addPlot(row=0, col=0)
+        self._plot_item = p
+        _make_diag_axis(p, theme)
+        p.setLabel("bottom", "Relative time (s)", color=theme.axis_text, size="9px")
+        p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
+        p.setTitle(
+            f"{ratio_name}  downhole fractionation — {primary_standard}",
+            color=theme.axis_text, size="10pt",
+        )
+
+        # Individual spot traces (thin, semi-transparent)
+        for i, (rel_t, r) in enumerate(zip(data["spot_times"], data["spot_ratios"])):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                frac = np.where(r > 0, data["known_ratio"] / r, np.nan)
+            color = _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]
+            c = pg.mkColor(color)
+            c.setAlpha(120)
+            p.plot(rel_t, frac, pen=pg.mkPen(c, width=1.2))
+
+        # ±1σ envelope (fill between dashed boundary curves)
+        upper = mean_frac + std_frac
+        lower = mean_frac - std_frac
+        fill_brush = pg.mkColor("#888888")
+        fill_brush.setAlpha(30)
+        upper_curve = p.plot(unified_time, upper,
+                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        lower_curve = p.plot(unified_time, lower,
+                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        fill = pg.FillBetweenItem(upper_curve, lower_curve, brush=fill_brush)
+        p.addItem(fill)
+
+        # Mean fractionation (bold dashed white/dark)
+        mean_color = theme.text
+        p.plot(unified_time, mean_frac,
+               pen=pg.mkPen(mean_color, width=2, style=QtCore.Qt.PenStyle.DashLine))
+
+        # Reference line at 1.0
+        p.addLine(y=1.0, pen=pg.mkPen(theme.muted, width=1,
+                                       style=QtCore.Qt.PenStyle.DotLine))
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
+
+    def set_zoom_mode(self, mode: str) -> None:
+        self._zoom_mode = mode if mode in {"xy", "x", "y"} else "xy"
+        self._apply_zoom_mode()
+
+    def zoom_mode(self) -> str:
+        return self._zoom_mode
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        self._apply_interaction_mode()
+
+    def interaction_mode(self) -> str:
+        return self._interaction_mode
+
+    def _apply_zoom_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._zoom_mode == "x":
+            self._plot_item.vb.setMouseEnabled(x=True, y=False)
+        elif self._zoom_mode == "y":
+            self._plot_item.vb.setMouseEnabled(x=False, y=True)
+        else:
+            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+
+    def _apply_interaction_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._interaction_mode == "pan":
+            self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
+        else:
+            self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+
+
+class SessionFractionationWidget(pg.GraphicsLayoutWidget):
+    """Session-wide fractionation: spot-mean factors, polynomial fit + ±1σ envelope.
+
+    Data is supplied via :meth:`show_data`.  Accepts the dict returned by
+    ``services.get_session_plot_data``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._theme: ThemeSpec | None = None
+        self._data: dict | None = None
+        self._plot_item: pg.PlotItem | None = None
+        self._zoom_mode = "xy"
+        self._interaction_mode = "zoom"
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                  QtWidgets.QSizePolicy.Policy.Expanding)
+        )
+
+    def apply_theme(self, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self.setBackground(theme.plot_background)
+        if self._data is not None:
+            self._draw()
+
+    def show_data(self, data: dict | None, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self._data = data
+        self.setBackground(theme.plot_background)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.clear()
+        self._plot_item = None
+        theme = self._theme
+        data = self._data
+        if theme is None:
+            return
+        if data is None:
+            p = self.addPlot(0, 0)
+            self._plot_item = p
+            lbl = pg.TextItem("No session fractionation data available.\nRun the session correction step first.",
+                              color=theme.muted, anchor=(0.5, 0.5))
+            lbl.setFont(QtGui.QFont("", 11))
+            p.addItem(lbl)
+            lbl.setPos(0.5, 0.5)
+            return
+
+        ratio_name = data["ratio_name"]
+        primary_standard = data["primary_standard"]
+        t_arr = data["spot_mean_times"]
+        f_arr = data["spot_mean_fracs"]
+        e_arr = data["spot_frac_errs"]
+        fit_times = data["fit_times"]
+        fit_vals = data["fit_vals"]
+        fit_std = float(data["fit_std"])
+
+        p = self.addPlot(row=0, col=0)
+        self._plot_item = p
+        _make_diag_axis(p, theme)
+        p.setLabel("bottom", "Session time (s)", color=theme.axis_text, size="9px")
+        p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
+        p.setTitle(
+            f"{ratio_name}  session fractionation — {primary_standard}",
+            color=theme.axis_text, size="10pt",
+        )
+
+        # ±1σ polynomial fit envelope
+        fill_brush = pg.mkColor("#888888")
+        fill_brush.setAlpha(30)
+        upper_curve = p.plot(fit_times, fit_vals + fit_std,
+                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        lower_curve = p.plot(fit_times, fit_vals - fit_std,
+                             pen=pg.mkPen("#888888", width=1, style=QtCore.Qt.PenStyle.DashLine))
+        fill = pg.FillBetweenItem(upper_curve, lower_curve, brush=fill_brush)
+        p.addItem(fill)
+
+        # Polynomial fit (red)
+        p.plot(fit_times, fit_vals, pen=pg.mkPen("#e05050", width=2))
+
+        # Spot-mean scatter + error bars
+        accent = theme.accent
+        err = pg.ErrorBarItem(x=t_arr, y=f_arr, height=2 * e_arr,
+                              beam=0, pen=pg.mkPen(accent, width=1.5))
+        p.addItem(err)
+        scatter = pg.ScatterPlotItem(x=t_arr, y=f_arr,
+                                     symbol="o", size=8,
+                                     pen=pg.mkPen(accent, width=1.5),
+                                     brush=pg.mkBrush(accent))
+        p.addItem(scatter)
+
+        # Reference line at 1.0
+        p.addLine(y=1.0, pen=pg.mkPen(theme.muted, width=1,
+                                       style=QtCore.Qt.PenStyle.DotLine))
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
+
+    def set_zoom_mode(self, mode: str) -> None:
+        self._zoom_mode = mode if mode in {"xy", "x", "y"} else "xy"
+        self._apply_zoom_mode()
+
+    def zoom_mode(self) -> str:
+        return self._zoom_mode
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        self._apply_interaction_mode()
+
+    def interaction_mode(self) -> str:
+        return self._interaction_mode
+
+    def _apply_zoom_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._zoom_mode == "x":
+            self._plot_item.vb.setMouseEnabled(x=True, y=False)
+        elif self._zoom_mode == "y":
+            self._plot_item.vb.setMouseEnabled(x=False, y=True)
+        else:
+            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+
+    def _apply_interaction_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._interaction_mode == "pan":
+            self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
+        else:
+            self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+
+
+class CalibrationSlopesWidget(pg.GraphicsLayoutWidget):
+    """Grid of origin-anchored calibration slope plots (cps vs. known ppm).
+
+    Data is supplied via :meth:`show_data`.  Accepts the dict returned by
+    ``services.get_calibration_slope_data``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._theme: ThemeSpec | None = None
+        self._data: dict | None = None
+        self._scatter_for_line: dict[pg.PlotDataItem, pg.ScatterPlotItem] = {}
+        self._plot_item: pg.PlotItem | None = None
+        self._zoom_mode = "xy"
+        self._interaction_mode = "zoom"
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                  QtWidgets.QSizePolicy.Policy.Expanding)
+        )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        # Rebuild legend column layout when width changes.
+        if hasattr(self, "_theme") and hasattr(self, "_data") and self._theme is not None and self._data is not None:
+            self._draw()
+
+    def apply_theme(self, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self.setBackground(theme.plot_background)
+        if self._data is not None:
+            self._draw()
+
+    def show_data(self, data: dict | None, theme: ThemeSpec) -> None:
+        self._theme = theme
+        self._data = data
+        self.setBackground(theme.plot_background)
+        self._draw()
+
+    def _draw(self) -> None:
+        self.clear()
+        self._scatter_for_line = {}
+        self._plot_item = None
+        theme = self._theme
+        data = self._data
+        if theme is None:
+            return
+        if data is None or not data.get("channels"):
+            p = self.addPlot(0, 0)
+            self._plot_item = p
+            lbl = pg.TextItem("No calibration data available.\nRun the concentration calibration step first.",
+                              color=theme.muted, anchor=(0.5, 0.5))
+            lbl.setFont(QtGui.QFont("", 11))
+            p.addItem(lbl)
+            lbl.setPos(0.5, 0.5)
+            return
+
+        channels = data["channels"]
+        p = self.addPlot(row=0, col=0)
+        self._plot_item = p
+        _make_diag_axis(p, theme)
+        p.setTitle("Calibration slopes by element", color=theme.axis_text, size="10pt")
+        p.setLabel("left", "cps", color=theme.axis_text, size="9px")
+        p.setLabel("bottom", "ppm", color=theme.axis_text, size="9px")
+        legend = p.addLegend(offset=(12, 12), labelTextColor=theme.axis_text, labelTextSize="9pt")
+        if legend is not None:
+            legend.setColumnCount(self._legend_column_count(len(channels)))
+
+        global_xmax = 0.0
+        for channel in channels:
+            ch_data = data["channel_data"][channel]
+            ppm = np.asarray(ch_data["ppm"], dtype=float)
+            if ppm.size:
+                global_xmax = max(global_xmax, float(np.nanmax(ppm)))
+        if global_xmax <= 0:
+            global_xmax = 1.0
+        line_xmax = global_xmax * 1.05
+
+        for idx, channel in enumerate(channels):
+            ch_data = data["channel_data"][channel]
+            ppm = np.asarray(ch_data["ppm"], dtype=float)
+            cps = np.asarray(ch_data["cps"], dtype=float)
+            slope = float(ch_data["slope"])
+            color = _DIAG_SPOT_COLORS[idx % len(_DIAG_SPOT_COLORS)]
+
+            # Scatter points for calibration standards
+            scatter = pg.ScatterPlotItem(
+                x=ppm,
+                y=cps,
+                symbol="o",
+                size=7,
+                pen=pg.mkPen(color, width=1.2),
+                brush=pg.mkBrush(color),
+            )
+            p.addItem(scatter)
+
+            # Dashed origin-anchored slope line. Keep this as the legend item;
+            # clicking the legend sample will toggle both this line and its scatter.
+            # Notebook calibration slope is ppm/cps. In this plot x=ppm, y=cps,
+            # so the physically consistent origin-anchored line is y = x / slope.
+            if np.isfinite(slope) and slope > 0:
+                line_item = p.plot(
+                    [0.0, line_xmax],
+                    [0.0, line_xmax / slope],
+                    pen=pg.mkPen(color, width=2.0, style=QtCore.Qt.PenStyle.DashLine),
+                    name=channel,
+                )
+            else:
+                line_item = p.plot(
+                    [0.0],
+                    [0.0],
+                    pen=pg.mkPen(color, width=2.0, style=QtCore.Qt.PenStyle.DashLine),
+                    name=channel,
+                )
+            self._scatter_for_line[line_item] = scatter
+
+        if legend is not None:
+            legend.sigSampleClicked.connect(self._on_legend_sample_clicked)
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
+
+    def _on_legend_sample_clicked(self, line_item: object) -> None:
+        if not isinstance(line_item, pg.PlotDataItem):
+            return
+        scatter = self._scatter_for_line.get(line_item)
+        if scatter is not None:
+            scatter.setVisible(line_item.isVisible())
+
+    def _legend_column_count(self, n_channels: int) -> int:
+        if n_channels <= 0:
+            return 1
+        # Width-based estimate (roughly one legend column per ~220 px).
+        width_cap = max(1, int(self.width() / 220))
+        # Row-based estimate to avoid very tall legends with many channels.
+        # Keep around <=12 rows when possible.
+        row_based = max(1, (n_channels + 11) // 12)
+        return min(n_channels, max(width_cap, row_based))
+
+    def set_zoom_mode(self, mode: str) -> None:
+        self._zoom_mode = mode if mode in {"xy", "x", "y"} else "xy"
+        self._apply_zoom_mode()
+
+    def zoom_mode(self) -> str:
+        return self._zoom_mode
+
+    def set_interaction_mode(self, mode: str) -> None:
+        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        self._apply_interaction_mode()
+
+    def interaction_mode(self) -> str:
+        return self._interaction_mode
+
+    def _apply_zoom_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._zoom_mode == "x":
+            self._plot_item.vb.setMouseEnabled(x=True, y=False)
+        elif self._zoom_mode == "y":
+            self._plot_item.vb.setMouseEnabled(x=False, y=True)
+        else:
+            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+
+    def _apply_interaction_mode(self) -> None:
+        if self._plot_item is None:
+            return
+        if self._interaction_mode == "pan":
+            self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
+        else:
+            self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+
+
 class TracePlotWidget(pg.PlotWidget):
     regionChanged = QtCore.Signal(str, tuple)
     xWindowChanged = QtCore.Signal(tuple)
@@ -378,6 +829,17 @@ class TracePlotWidget(pg.PlotWidget):
         self._hover_proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self._on_scene_mouse_moved)
         self.plot_item.vb.sigXRangeChanged.connect(self._on_x_range_changed)
         self._configure_plot()
+
+        # Floating spot-name label in the top-right corner
+        self._spot_name_label = QtWidgets.QLabel("", self)
+        self._spot_name_label.setObjectName("SpotOverlayLabel")
+        self._spot_name_label.setStyleSheet(
+            "color: rgba(180,200,220,0.55); font-size: 13px; font-weight: 600;"
+            " background: transparent; padding: 2px 6px;"
+        )
+        self._spot_name_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._spot_name_label.hide()
+
         self.show_preview()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
@@ -387,6 +849,28 @@ class TracePlotWidget(pg.PlotWidget):
         self.plot_item.layout.setRowFixedHeight(3, 62)
         self.plot_item.getAxis("bottom").setHeight(54)
         self.plot_item.showAxis("bottom")
+        self._reposition_spot_label()
+
+    def _update_spot_label(self, spot_name: str | None) -> None:
+        if not hasattr(self, "_spot_name_label"):
+            return
+        if spot_name:
+            self._spot_name_label.setText(spot_name)
+            self._spot_name_label.adjustSize()
+            self._reposition_spot_label()
+            self._spot_name_label.show()
+        else:
+            self._spot_name_label.hide()
+
+    def _reposition_spot_label(self) -> None:
+        if not hasattr(self, "_spot_name_label"):
+            return
+        lbl = self._spot_name_label
+        lbl.adjustSize()
+        margin = 14
+        x = self.width() - lbl.width() - margin
+        y = margin
+        lbl.move(max(0, x), max(0, y))
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -489,15 +973,19 @@ class TracePlotWidget(pg.PlotWidget):
         y_label: str = "Counts / cps",
         stats_channel: str | None = None,
         region_colors: dict[str, str] | None = None,
+        spot_name: str | None = None,
     ) -> None:
         if spot_data.empty:
             self.show_preview()
+            self._update_spot_label(None)
             return
         if not channels:
             self.show_empty("Check one or more channels to display traces.", y_label=y_label)
+            self._update_spot_label(None)
             return
 
         self._reset_items()
+        self._update_spot_label(spot_name)
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("left", y_label, **label_style)
         x_values = spot_data["Time"].to_numpy(dtype=float)

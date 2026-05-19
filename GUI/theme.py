@@ -294,11 +294,28 @@ def _stylesheet(theme: ThemeSpec) -> str:
         color: {theme.muted};
         border-color: {theme.input_border};
     }}
-    QListWidget, QComboBox, QTextEdit, QTextBrowser {{
+    QListWidget, QTextEdit, QTextBrowser {{
         background: {theme.input_bg};
         border: 1px solid {theme.input_border};
         border-radius: 14px;
         padding: 8px;
+    }}
+    QComboBox {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                    stop:0 {theme.surface}, stop:1 {theme.input_bg});
+        border: 1px solid {theme.input_border};
+        border-radius: 10px;
+        padding: 6px 30px 6px 10px;
+        min-height: 24px;
+        font-weight: 500;
+    }}
+    QComboBox:hover {{
+        border-color: {theme.accent};
+        background: {theme.surface};
+    }}
+    QComboBox:focus {{
+        border-color: {theme.accent_strong};
+        background: {theme.surface};
     }}
     QTreeWidget {{
         background: {theme.input_bg};
@@ -318,14 +335,40 @@ def _stylesheet(theme: ThemeSpec) -> str:
         selection-background-color: {theme.accent_soft};
     }}
     QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
         border: none;
-        width: 26px;
+        border-left: 1px solid {theme.input_border};
+        width: 24px;
+        margin: 2px 3px 2px 0;
+        border-top-right-radius: 8px;
+        border-bottom-right-radius: 8px;
+        background: {theme.surface_soft};
+    }}
+    QComboBox::down-arrow {{
+        image: none;
+        width: 0;
+        height: 0;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+        border-top: 6px solid {theme.muted};
     }}
     QComboBox QAbstractItemView {{
         background: {theme.surface};
         border: 1px solid {theme.input_border};
+        border-radius: 12px;
+        padding: 6px;
         selection-background-color: {theme.accent_soft};
         selection-color: {theme.text};
+        outline: 0;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: 8px 10px;
+        border-radius: 8px;
+        min-height: 20px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {theme.accent_soft};
     }}
     QListWidget::item {{
         padding: 6px 4px;

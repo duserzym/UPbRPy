@@ -21,7 +21,10 @@ from GUI.services import (
     ensure_normalized_plateau,
     ensure_raw_ratios,
     ensure_session_corrected,
+    get_calibration_slope_data,
+    get_downhole_plot_data,
     get_selection_regions,
+    get_session_plot_data,
     get_spot_data,
     load_standard_archive_from_path,
     load_session,
@@ -29,12 +32,20 @@ from GUI.services import (
     reference_material_summary,
     selection_quality,
     spot_base_name,
-    spot_metrics,
     update_selection_region,
 )
 from GUI.state import ReductionSession
 from GUI.theme import active_theme, apply_theme
-from GUI.widgets import IsotopeGridWidget, MetricCard, SessionOverviewWidget, SpotTree, TracePlotWidget, make_list_item
+from GUI.widgets import (
+    CalibrationSlopesWidget,
+    DownholeFractionationWidget,
+    IsotopeGridWidget,
+    SessionFractionationWidget,
+    SessionOverviewWidget,
+    SpotTree,
+    TracePlotWidget,
+    make_list_item,
+)
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 
 
@@ -42,6 +53,7 @@ PLOT_MODE_LABELS = {
     "raw": "Raw traces",
     "baseline_subtracted": "Baseline",
     "normalized_plateau": "Normalized",
+    "calibration_slopes": "Cal. slopes",
     "raw_ratios": "Raw ratios",
     "downhole_ratios": "Downhole",
     "session_ratios": "Session",
@@ -51,9 +63,21 @@ _STAGE_CACHE_KEYS: dict[str, str | None] = {
     "raw": None,
     "baseline_subtracted": "baseline_subtracted_total_data",
     "normalized_plateau": "normalized_plateau_data",
+    "calibration_slopes": "concentration_results",
     "raw_ratios": "plateau_data_with_raw_ratios",
     "downhole_ratios": "downhole_results",
     "session_ratios": "session_correction_results",
+}
+
+# Stack index for the plot QStackedWidget
+_PLOT_STACK_IDX: dict[str, int] = {
+    "raw": 0,
+    "baseline_subtracted": 0,
+    "normalized_plateau": 0,
+    "calibration_slopes": 1,
+    "raw_ratios": 0,
+    "downhole_ratios": 2,
+    "session_ratios": 3,
 }
 
 # Maps a lowercase keyword from a workflow step title to the cache key that
@@ -219,40 +243,46 @@ class MainWindow(QtWidgets.QMainWindow):
         library_layout.addWidget(self.reference_library_button)
         layout.addWidget(library_card)
 
-        preset_card = QtWidgets.QFrame()
-        preset_card.setObjectName("SessionCard")
-        preset_layout = QtWidgets.QVBoxLayout(preset_card)
-        preset_layout.setContentsMargins(16, 16, 16, 16)
-        preset_layout.setSpacing(8)
-        preset_label = QtWidgets.QLabel("Mineral workflow")
-        preset_label.setObjectName("SectionTitle")
+        # Mineral workflow combo — now part of workflow_card; description/defaults become tooltip
         self.workflow_combo = QtWidgets.QComboBox()
         for key, preset in WORKFLOW_PRESETS.items():
             self.workflow_combo.addItem(preset.title, key)
         self.workflow_combo.currentIndexChanged.connect(self.on_workflow_preset_changed)
+        # description / defaults labels kept for back-compat but hidden (tooltip carries the text)
         self.workflow_description_label = QtWidgets.QLabel()
-        self.workflow_description_label.setWordWrap(True)
-        self.workflow_description_label.setObjectName("SecondaryText")
+        self.workflow_description_label.setVisible(False)
         self.workflow_defaults_label = QtWidgets.QLabel()
-        self.workflow_defaults_label.setWordWrap(True)
-        self.workflow_defaults_label.setObjectName("SecondaryText")
-
-        preset_layout.addWidget(preset_label)
-        preset_layout.addWidget(self.workflow_combo)
-        preset_layout.addWidget(self.workflow_description_label)
-        preset_layout.addWidget(self.workflow_defaults_label)
-        layout.addWidget(preset_card)
+        self.workflow_defaults_label.setVisible(False)
 
         workflow_card = QtWidgets.QFrame()
         workflow_card.setObjectName("WorkflowCard")
         workflow_layout = QtWidgets.QVBoxLayout(workflow_card)
         workflow_layout.setContentsMargins(16, 16, 16, 16)
         workflow_layout.setSpacing(10)
+
+        # "Mineral workflow" row with tooltip carrying description + defaults
+        workflow_preset_row = QtWidgets.QHBoxLayout()
+        workflow_preset_row.setSpacing(6)
+        preset_label = QtWidgets.QLabel("Mineral workflow")
+        preset_label.setObjectName("SectionTitle")
+        self._workflow_info_btn = QtWidgets.QToolButton()
+        self._workflow_info_btn.setText("?")
+        self._workflow_info_btn.setObjectName("InfoToolButton")
+        self._workflow_info_btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._workflow_info_btn.setFixedSize(18, 18)
+        workflow_preset_row.addWidget(preset_label)
+        workflow_preset_row.addWidget(self._workflow_info_btn)
+        workflow_preset_row.addStretch(1)
+        workflow_layout.addLayout(workflow_preset_row)
+        workflow_layout.addWidget(self.workflow_combo)
+
         workflow_label = QtWidgets.QLabel("Processing sequence")
         workflow_label.setObjectName("SectionTitle")
         self.workflow_step_list = QtWidgets.QListWidget()
-        self.workflow_step_list.setMinimumHeight(180)
-        self.workflow_step_list.setMaximumHeight(220)
+        self.workflow_step_list.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.workflow_step_list.currentRowChanged.connect(self.on_workflow_step_changed)
         hint_card = QtWidgets.QFrame()
         hint_card.setObjectName("WorkflowHintCard")
@@ -321,18 +351,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
         self.project_spots_label.setObjectName("SecondaryText")
         self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_mode_label = QtWidgets.QLabel("Choose a notebook-derived mineral workflow")
-        self.project_mode_label.setObjectName("SecondaryText")
-        self.project_mode_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
         self.project_engine_label.setObjectName("SecondaryText")
         self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         summary_box.addWidget(workspace_label, 0, QtCore.Qt.AlignmentFlag.AlignRight)
         summary_box.addWidget(self.project_name_label)
         summary_box.addWidget(self.project_spots_label)
-        summary_box.addWidget(self.project_mode_label)
         summary_box.addWidget(self.project_engine_label)
-
         header_right = QtWidgets.QVBoxLayout()
         header_right.setSpacing(10)
         header_right.addLayout(summary_box)
@@ -354,18 +379,6 @@ class MainWindow(QtWidgets.QMainWindow):
         header_right.addLayout(theme_row)
         header_layout.addLayout(header_right)
         layout.addWidget(header)
-
-        metrics = QtWidgets.QHBoxLayout()
-        metrics.setSpacing(14)
-        self.metric_cards = {
-            "Active spot": MetricCard("Active spot", "Preview", "#69e2ff"),
-            "Selection span": MetricCard("Selection span", "34.8 s", "#ffba6b"),
-            "206Pb/238U": MetricCard("206Pb/238U", "0.09142 ± preview", "#19a188"),
-            "Primary signal": MetricCard("Primary signal", "1.95 kcps", "#8ea7ff"),
-        }
-        for card in self.metric_cards.values():
-            metrics.addWidget(card)
-        layout.addLayout(metrics)
 
         plot_card = QtWidgets.QFrame()
         plot_card.setObjectName("PlotCard")
@@ -406,9 +419,10 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.addLayout(mode_row)
 
         # ── Plot canvas ────────────────────────────────────────────────────
-        plots_container = QtWidgets.QWidget()
-        plots_container.setContentsMargins(0, 0, 0, 0)
-        plots_vbox = QtWidgets.QVBoxLayout(plots_container)
+        # Page 0: trace + session overview
+        plots_page0 = QtWidgets.QWidget()
+        plots_page0.setContentsMargins(0, 0, 0, 0)
+        plots_vbox = QtWidgets.QVBoxLayout(plots_page0)
         plots_vbox.setContentsMargins(0, 0, 0, 0)
         plots_vbox.setSpacing(0)
         self.trace_plot = TracePlotWidget()
@@ -419,7 +433,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_overview_plot = SessionOverviewWidget()
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
         plots_vbox.addWidget(self.session_overview_plot)
-        plot_layout.addWidget(plots_container)
+
+        # Page 1: calibration slopes, Page 2: downhole fractionation, Page 3: session fractionation
+        self.calibration_slopes_plot = CalibrationSlopesWidget()
+        self.downhole_frac_plot = DownholeFractionationWidget()
+        self.session_frac_plot = SessionFractionationWidget()
+
+        self.plots_stack = QtWidgets.QStackedWidget()
+        self.plots_stack.addWidget(plots_page0)               # index 0
+        self.plots_stack.addWidget(self.calibration_slopes_plot)  # index 1
+        self.plots_stack.addWidget(self.downhole_frac_plot)   # index 2
+        self.plots_stack.addWidget(self.session_frac_plot)    # index 3
+        plot_layout.addWidget(self.plots_stack)
 
         # ── Control bar below both plots ───────────────────────────────────
         control_bar = QtWidgets.QFrame()
@@ -783,6 +808,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.set_zoom_mode(self.trace_plot.zoom_mode())
         self.session_overview_plot.apply_theme(active_theme(app))
+        self.calibration_slopes_plot.apply_theme(active_theme(app))
+        self.downhole_frac_plot.apply_theme(active_theme(app))
+        self.session_frac_plot.apply_theme(active_theme(app))
         # Rebuild channel colours for new background when a session is loaded
         if self.session.loaded:
             self.channel_colors = self._resolve_channel_colors(self.session.channels)
@@ -822,8 +850,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_populating = False
 
     def _populate_workflow_ui(self) -> None:
-        self.workflow_description_label.setText(self.workflow_preset.description)
-        self.workflow_defaults_label.setText(format_import_defaults(self.workflow_preset))
+        desc = self.workflow_preset.description
+        defaults_text = format_import_defaults(self.workflow_preset)
+        self.workflow_description_label.setText(desc)
+        self.workflow_defaults_label.setText(defaults_text)
+        # Update tooltip on the info button next to "Mineral workflow"
+        tooltip_html = f"<b>{self.workflow_preset.title}</b><br>{desc}<br><br><i>Defaults:</i> {defaults_text}"
+        if hasattr(self, "_workflow_info_btn"):
+            self._workflow_info_btn.setToolTip(tooltip_html)
         self._sync_workflow_combo()
         self._set_default_ratio_for_preset()
         self._is_populating = True
@@ -1420,18 +1454,53 @@ class MainWindow(QtWidgets.QMainWindow):
         if refresh:
             self.refresh_view()
 
+    def _current_plot_interaction_target(self) -> object:
+        mode = self.session.plot_mode
+        if mode == "calibration_slopes":
+            return self.calibration_slopes_plot
+        if mode == "downhole_ratios":
+            return self.downhole_frac_plot
+        if mode == "session_ratios":
+            return self.session_frac_plot
+        return self.trace_plot
+
+    def _selected_interaction_mode(self) -> str:
+        for key, button in self.interact_mode_buttons.items():
+            if button.isChecked():
+                return key
+        return "zoom"
+
+    def _selected_zoom_mode(self) -> str:
+        for key, button in self.zoom_mode_buttons.items():
+            if button.isChecked():
+                return key
+        return "xy"
+
+    def _apply_interaction_controls_to_current_plot(self) -> None:
+        target = self._current_plot_interaction_target()
+        if hasattr(target, "set_interaction_mode"):
+            target.set_interaction_mode(self._selected_interaction_mode())
+        if hasattr(target, "set_zoom_mode"):
+            target.set_zoom_mode(self._selected_zoom_mode())
+
     def set_interaction_mode(self, mode: str) -> None:
-        self.trace_plot.set_interaction_mode(mode)
+        target = self._current_plot_interaction_target()
+        if hasattr(target, "set_interaction_mode"):
+            target.set_interaction_mode(mode)
+        current_mode = target.interaction_mode() if hasattr(target, "interaction_mode") else mode
         for key, button in self.interact_mode_buttons.items():
             button.blockSignals(True)
-            button.setChecked(key == self.trace_plot.interaction_mode())
+            button.setChecked(key == current_mode)
             button.blockSignals(False)
 
     def set_zoom_mode(self, mode: str) -> None:
-        self.trace_plot.set_zoom_mode(mode)
+        target = self._current_plot_interaction_target()
+        if hasattr(target, "set_zoom_mode"):
+            target.set_zoom_mode(mode)
+        current_mode = target.zoom_mode() if hasattr(target, "zoom_mode") else mode
         for key, button in self.zoom_mode_buttons.items():
             button.blockSignals(True)
-            button.setChecked(key == self.trace_plot.zoom_mode())
+            button.setChecked(key == current_mode)
             button.blockSignals(False)
 
     def restore_default_main_view(self) -> None:
@@ -1464,7 +1533,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.loaded:
             self.trace_plot.show_preview(self.selection_colors)
             self.session_overview_plot.show_preview()
-            self._apply_metrics(spot_metrics(self.session, None))
             self.notes_body.setText(self._compose_notes(None))
             self._refresh_workflow_status()
             return
@@ -1521,7 +1589,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_plot_mode = self.session.plot_mode
 
         self._apply_project_summary(project_summary(self.session))
-        self._apply_metrics(spot_metrics(self.session, selected_spot))
         self.notes_body.setText(self._compose_notes(selected_spot))
         self._refresh_workflow_status()
 
@@ -1565,6 +1632,33 @@ class MainWindow(QtWidgets.QMainWindow):
         editable_regions: bool,
     ) -> None:
         spot_data = raw_spot_data if isinstance(raw_spot_data, QtCore.QObject) is False else raw_spot_data
+        # Switch the plot stack page
+        stack_idx = _PLOT_STACK_IDX.get(self.session.plot_mode, 0)
+        self.plots_stack.setCurrentIndex(stack_idx)
+        self._apply_interaction_controls_to_current_plot()
+
+        app = QtWidgets.QApplication.instance()
+        theme = active_theme(app) if app else None
+        ratio_name = self.current_ratio_name()
+
+        if self.session.plot_mode == "calibration_slopes":
+            data = get_calibration_slope_data(self.session, self.workflow_preset)
+            if theme:
+                self.calibration_slopes_plot.show_data(data, theme)
+            return
+
+        if self.session.plot_mode == "downhole_ratios":
+            data = get_downhole_plot_data(self.session, self.workflow_preset, ratio_name)
+            if theme:
+                self.downhole_frac_plot.show_data(data, theme)
+            return
+
+        if self.session.plot_mode == "session_ratios":
+            data = get_session_plot_data(self.session, self.workflow_preset, ratio_name)
+            if theme:
+                self.session_frac_plot.show_data(data, theme)
+            return
+
         if self.session.plot_mode == "raw":
             self.trace_plot.show_spot(
                 self.session.total_data,
@@ -1574,6 +1668,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 editable_regions=editable_regions,
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
+                spot_name=selected_spot,
             )
             return
 
@@ -1589,6 +1684,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 y_label="Baseline-subtracted cps",
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
+                spot_name=selected_spot,
             )
             return
 
@@ -1598,31 +1694,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trace_plot.show_series(normalized, channels, self.channel_colors, y_label="Normalized plateau cps", line_style="scatter")
             return
 
-        ratio_name = self.current_ratio_name()
         if self.session.plot_mode == "raw_ratios":
             ratios = ensure_raw_ratios(self.session)
             self.trace_plot.show_series(ratios, [ratio_name], {ratio_name: RATIO_COLORS.get(ratio_name, "#1f63cf")}, y_label=ratio_name, line_style="scatter")
-            return
-
-        if self.session.plot_mode == "downhole_ratios":
-            downhole = ensure_downhole_results(self.session, self.workflow_preset)["corrected_ratios"]
-            corrected_name = f"{ratio_name}_DH_corrected"
-            colors = {
-                ratio_name: "#8a97a8",
-                corrected_name: RATIO_COLORS.get(ratio_name, "#1f63cf"),
-            }
-            self.trace_plot.show_series(downhole, [ratio_name, corrected_name], colors, y_label=ratio_name, line_style="scatter")
-            return
-
-        if self.session.plot_mode == "session_ratios":
-            session_corrected = ensure_session_corrected(self.session, self.workflow_preset)["corrected_ratios"]
-            downhole_name = f"{ratio_name}_DH_corrected"
-            session_name = f"{ratio_name}_fractionation_corrected"
-            colors = {
-                downhole_name: "#8a97a8",
-                session_name: RATIO_COLORS.get(ratio_name, "#1f63cf"),
-            }
-            self.trace_plot.show_series(session_corrected, [downhole_name, session_name], colors, y_label=ratio_name, line_style="scatter")
             return
 
         self.trace_plot.show_spot(
@@ -1633,6 +1707,7 @@ class MainWindow(QtWidgets.QMainWindow):
             editable_regions=editable_regions,
             stats_channel=self.current_stats_channel(),
             region_colors=self.selection_colors,
+            spot_name=selected_spot,
         )
 
     def _apply_channel_checks(self, channels: list[str]) -> None:
@@ -1649,13 +1724,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_project_summary(self, summary: dict[str, str]) -> None:
         self.project_name_label.setText(summary["name"])
         self.project_spots_label.setText(summary["spots"])
-        self.project_mode_label.setText(summary["mode"])
         self.project_engine_label.setText(summary["engine"])
 
     def _apply_metrics(self, metrics: dict[str, str]) -> None:
-        for label, value in metrics.items():
-            if label in self.metric_cards:
-                self.metric_cards[label].set_value(value)
+        pass  # metric cards removed
 
     def _rebuild_workflow_actions(self) -> None:
         while self.workflow_actions_layout.count():
@@ -1761,12 +1833,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _sync_workflow_step_locks(self) -> None:
-        """Grey out workflow steps whose prerequisites are not yet met."""
+        """Grey out workflow steps whose prerequisites are not yet met, and show status symbols."""
         cache = self.session.reduction_cache if self.session.loaded else {}
         app = QtWidgets.QApplication.instance()
         theme = active_theme(app) if app else None
         muted_color = QtGui.QColor(theme.muted) if theme else QtGui.QColor("#888888")
         normal_color = QtGui.QColor(theme.text) if theme else QtGui.QColor("#000000")
+        done_color = QtGui.QColor(theme.success) if (theme and hasattr(theme, "success")) else QtGui.QColor("#19a188")
+        accent_color = QtGui.QColor(theme.accent) if (theme and hasattr(theme, "accent")) else QtGui.QColor("#69e2ff")
 
         for index in range(self.workflow_step_list.count()):
             item = self.workflow_step_list.item(index)
@@ -1778,12 +1852,47 @@ class MainWindow(QtWidgets.QMainWindow):
             if index == 0:
                 unlocked = True
 
+            # Determine completion: check if the result cache key for this step is present
+            step_cache_key = None
+            for cache_key_name, cache_key in [
+                ("baseline_subtracted_total_data", "Baseline subtraction"),
+                ("normalized_plateau_data", "Internal normalization"),
+                ("concentration_results", "Calibrate concentrations"),
+                ("plateau_data_with_raw_ratios", "Compute raw ratios"),
+                ("downhole_results", "Downhole fractionation correction"),
+                ("session_correction_results", "Session fractionation correction"),
+            ]:
+                if step.title.lower() in cache_key.lower() or cache_key.lower() in step.title.lower():
+                    step_cache_key = cache_key_name
+                    break
+            is_done = step_cache_key is not None and step_cache_key in cache
+            # Import step is "done" if session is loaded
+            if index == 0 and self.session.loaded:
+                is_done = True
+
+            # Choose prefix symbol
+            if not unlocked:
+                prefix = "⊘ "
+                color = muted_color
+            elif is_done:
+                prefix = "✓ "
+                color = done_color
+            elif unlocked and not is_done:
+                is_current = self.workflow_step_list.currentRow() == index
+                prefix = "• " if is_current else "○ "
+                color = accent_color if is_current else normal_color
+            else:
+                prefix = "  "
+                color = normal_color
+
+            title_text = f"  {index + 1}.  {step.title}"
+            item.setText(f"{prefix}{index + 1}.  {step.title}")
+
             if unlocked:
                 item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
-                item.setForeground(normal_color)
             else:
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
-                item.setForeground(muted_color)
+            item.setForeground(color)
 
 
 
@@ -1904,7 +2013,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._handle_action_error("Concentration stage failed", exc)
             return
-        self.set_plot_mode("normalized_plateau", refresh=False)
+        self.set_plot_mode("calibration_slopes", refresh=False)
         self.append_log(
             f"Concentration calibration ready with {results['calibrant_count']} calibrant rows and {results['result_count']} output rows."
         )

@@ -566,6 +566,230 @@ def slice_region(frame: pd.DataFrame, region: tuple[float, float] | None) -> pd.
     return frame[(frame["Time"] >= start_time) & (frame["Time"] <= end_time)].reset_index(drop=True)
 
 
+# ── Diagnostic plot data helpers ──────────────────────────────────────────
+
+def get_downhole_plot_data(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+    ratio_name: str = "206Pb/238U",
+) -> dict | None:
+    """Return a dict of arrays needed to draw the downhole fractionation diagnostic.
+
+    Returns None if the prerequisite cache entries are absent.
+    """
+    raw_ratios = session.reduction_cache.get("plateau_data_with_raw_ratios")
+    if not isinstance(raw_ratios, pd.DataFrame) or raw_ratios.empty:
+        return None
+    primary_standard = preset.primary_standard
+    if not primary_standard:
+        return None
+    if ratio_name not in raw_ratios.columns:
+        return None
+    try:
+        archive = current_standard_archive()
+        known_ratio = float(archive.loc[primary_standard, ratio_name + "*"])
+    except Exception:
+        return None
+
+    ps_rows = raw_ratios[raw_ratios["sample"] == primary_standard]
+    if ps_rows.empty:
+        return None
+
+    spot_times: list[np.ndarray] = []
+    spot_ratios: list[np.ndarray] = []
+    spot_names: list[str] = []
+    for spot_name in ps_rows["spot_name"].unique():
+        this_spot = ps_rows[ps_rows["spot_name"] == spot_name]
+        t = this_spot["Time"].values.astype(float)
+        r = this_spot[ratio_name].values.astype(float)
+        valid = np.isfinite(r) & (r > 0)
+        if valid.sum() < 2:
+            continue
+        rel_t = t - t[0]
+        spot_times.append(rel_t[valid])
+        spot_ratios.append(r[valid])
+        spot_names.append(str(spot_name))
+
+    if not spot_times:
+        return None
+
+    max_t = float(max(t[-1] for t in spot_times))
+    n_pts = max(len(t) for t in spot_times)
+    unified_time = np.linspace(0.0, max_t, n_pts)
+
+    stacked = np.array([np.interp(unified_time, t, r) for t, r in zip(spot_times, spot_ratios)])
+    mean_ratio = np.nanmean(stacked, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean_frac = np.where(mean_ratio > 0, known_ratio / mean_ratio, np.nan)
+
+    # Std of individual fractionation residuals vs the mean curve (scalar, like notebook)
+    all_frac_flat = np.concatenate([
+        np.where(r > 0, known_ratio / r, np.nan) for r in stacked
+    ])
+    valid_mask = np.isfinite(all_frac_flat)
+    mean_frac_repeated = np.tile(mean_frac, len(spot_times))[valid_mask]
+    std_frac = float(np.std(all_frac_flat[valid_mask] - mean_frac_repeated))
+
+    return {
+        "ratio_name": ratio_name,
+        "known_ratio": known_ratio,
+        "primary_standard": primary_standard,
+        "spot_names": spot_names,
+        "spot_times": spot_times,
+        "spot_ratios": spot_ratios,
+        "unified_time": unified_time,
+        "mean_frac": mean_frac,
+        "std_frac": std_frac,
+    }
+
+
+def get_session_plot_data(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+    ratio_name: str = "206Pb/238U",
+) -> dict | None:
+    """Return a dict of arrays for drawing the session fractionation diagnostic."""
+    session_results = session.reduction_cache.get("session_correction_results")
+    downhole_results = session.reduction_cache.get("downhole_results")
+    if not isinstance(session_results, dict) or not isinstance(downhole_results, dict):
+        return None
+
+    corrected_col = f"{ratio_name}_DH_corrected"
+    dh_corrected = downhole_results.get("corrected_ratios")
+    if not isinstance(dh_corrected, pd.DataFrame) or dh_corrected.empty:
+        return None
+    if corrected_col not in dh_corrected.columns:
+        return None
+
+    primary_standard = preset.primary_standard
+    if not primary_standard:
+        return None
+    try:
+        archive = current_standard_archive()
+        known_ratio = float(archive.loc[primary_standard, ratio_name + "*"])
+    except Exception:
+        return None
+
+    ps_rows = dh_corrected[dh_corrected["sample"] == primary_standard]
+    if ps_rows.empty:
+        return None
+
+    spot_mean_times: list[float] = []
+    spot_mean_fracs: list[float] = []
+    spot_frac_errs: list[float] = []
+    spot_names_out: list[str] = []
+    for sn in ps_rows["spot_name"].unique():
+        this_spot = ps_rows[ps_rows["spot_name"] == sn]
+        r_vals = this_spot[corrected_col].values.astype(float)
+        valid = np.isfinite(r_vals) & (r_vals > 0)
+        if valid.sum() < 2:
+            continue
+        r_valid = r_vals[valid]
+        mean_t = float(this_spot["Time"].mean())
+        mean_r = float(np.mean(r_valid))
+        std_r = float(np.std(r_valid))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = known_ratio / mean_r if mean_r > 0 else np.nan
+            frac_err = (known_ratio / mean_r**2) * std_r if mean_r > 0 else np.nan
+        spot_mean_times.append(mean_t)
+        spot_mean_fracs.append(frac)
+        spot_frac_errs.append(frac_err)
+        spot_names_out.append(str(sn))
+
+    if len(spot_mean_times) < 2:
+        return None
+
+    t_arr = np.array(spot_mean_times)
+    f_arr = np.array(spot_mean_fracs)
+    e_arr = np.array(spot_frac_errs)
+
+    ratio_results = session_results.get("correction_results", {}).get(ratio_name)
+    if not ratio_results:
+        return None
+    p = ratio_results["fit"]
+    p_std = float(ratio_results.get("std", 0.0))
+    fit_times = np.linspace(float(t_arr[0]), float(t_arr[-1]), 200)
+    fit_vals = np.polyval(p, fit_times)
+
+    return {
+        "ratio_name": ratio_name,
+        "known_ratio": known_ratio,
+        "primary_standard": primary_standard,
+        "spot_names": spot_names_out,
+        "spot_mean_times": t_arr,
+        "spot_mean_fracs": f_arr,
+        "spot_frac_errs": e_arr,
+        "fit_times": fit_times,
+        "fit_vals": fit_vals,
+        "fit_std": p_std,
+    }
+
+
+def get_calibration_slope_data(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+) -> dict | None:
+    """Return a dict of arrays for drawing the concentration calibration slopes."""
+    conc_results = session.reduction_cache.get("concentration_results")
+    if not isinstance(conc_results, dict):
+        return None
+    calibration = conc_results.get("calibration")
+    if not isinstance(calibration, pd.Series) or calibration.empty:
+        return None
+
+    normalized = session.reduction_cache.get("normalized_plateau_data")
+    if not isinstance(normalized, pd.DataFrame) or normalized.empty:
+        return None
+    if not preset.concentration_standards:
+        return None
+
+    nist_data = normalized[normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
+    if nist_data.empty:
+        return None
+
+    try:
+        archive = current_standard_archive()
+    except Exception:
+        return None
+
+    channels = list(calibration.index)
+    channel_data: dict[str, dict] = {}
+    for channel in channels:
+        if channel not in nist_data.columns:
+            continue
+        cps_vals: list[float] = []
+        ppm_vals: list[float] = []
+        sample_labels: list[str] = []
+        for sn in nist_data["spot_name"].unique():
+            this_spot = nist_data[nist_data["spot_name"] == sn]
+            sample = str(this_spot["sample"].values[0])
+            if sample not in archive.index or channel not in archive.columns:
+                continue
+            known_ppm = float(archive.loc[sample, channel])
+            if not np.isfinite(known_ppm) or known_ppm <= 0:
+                continue
+            mean_cps = float(this_spot[channel].mean())
+            if not np.isfinite(mean_cps):
+                continue
+            cps_vals.append(mean_cps)
+            ppm_vals.append(known_ppm)
+            sample_labels.append(sample)
+        if len(cps_vals) >= 2:
+            channel_data[channel] = {
+                "cps": np.array(cps_vals),
+                "ppm": np.array(ppm_vals),
+                "slope": float(calibration[channel]),
+                "labels": sample_labels,
+            }
+
+    if not channel_data:
+        return None
+    return {
+        "channels": [c for c in channels if c in channel_data],
+        "channel_data": channel_data,
+    }
+
+
 def build_notes(session: ReductionSession, spot_name: str | None, preset: WorkflowPreset, current_step: str | None = None) -> str:
     if not session.loaded:
         return (
