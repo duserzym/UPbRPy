@@ -1576,6 +1576,155 @@ def get_tera_wasserburg_point(age):
     return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
 
 
+def _finite_array(values, positive=False):
+    arr = np.asarray(values, dtype=float)
+    mask = np.isfinite(arr)
+    if positive:
+        mask &= arr > 0
+    return arr[mask]
+
+
+def _nice_step(value):
+    if not np.isfinite(value) or value <= 0:
+        return 1.0
+    exponent = np.floor(np.log10(value))
+    fraction = value / 10**exponent
+    if fraction <= 1:
+        nice_fraction = 1
+    elif fraction <= 2:
+        nice_fraction = 2
+    elif fraction <= 5:
+        nice_fraction = 5
+    else:
+        nice_fraction = 10
+    return nice_fraction * 10**exponent
+
+
+def _format_age_label(age, step):
+    if step >= 1:
+        return str(int(round(age)))
+    decimals = int(np.ceil(-np.log10(step)))
+    return f"{age:.{decimals}f}".rstrip("0").rstrip(".")
+
+
+def _ratio_bounds(values, one_sigma_errors, extra_values=None, sigma=2):
+    values = np.asarray(values, dtype=float)
+    one_sigma_errors = np.asarray(one_sigma_errors, dtype=float)
+    finite = np.isfinite(values)
+    lower_values = values[finite] - sigma * np.nan_to_num(one_sigma_errors[finite], nan=0)
+    upper_values = values[finite] + sigma * np.nan_to_num(one_sigma_errors[finite], nan=0)
+    all_values = np.concatenate([lower_values, upper_values])
+    if extra_values is not None:
+        all_values = np.concatenate([all_values, _finite_array(extra_values)])
+    all_values = all_values[np.isfinite(all_values)]
+    if len(all_values) == 0:
+        return 0, 1
+
+    lower = np.min(all_values)
+    upper = np.max(all_values)
+    center = np.nanmean(all_values)
+    span = upper - lower
+    error_scale = np.nanmedian(np.abs(one_sigma_errors[np.isfinite(one_sigma_errors)])) if np.any(np.isfinite(one_sigma_errors)) else 0
+    pad = max(0.08 * span, 4 * error_scale, 0.01 * abs(center), 1e-12)
+    if span == 0:
+        lower -= pad
+        upper += pad
+    else:
+        lower -= pad
+        upper += pad
+    return min(lower, upper), max(lower, upper)
+
+
+def _concordia_data_ages(plot_type, x, y):
+    if plot_type == "Wetherill":
+        ages = np.concatenate([
+            calc_75_date(_finite_array(x, positive=True)),
+            calc_68_date(_finite_array(y, positive=True)),
+        ])
+    else:
+        x_positive = _finite_array(x, positive=True)
+        ages = calc_68_date(1 / x_positive) if len(x_positive) else np.array([])
+    ages = ages[np.isfinite(ages)]
+    if len(ages) == 0:
+        return np.array([1000.0])
+    return ages
+
+
+def _concordia_age_uncertainties(plot_type, x, y, sx, sy):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    sx = np.asarray(sx, dtype=float)
+    sy = np.asarray(sy, dtype=float)
+    if plot_type == "Wetherill":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            age_sigma_75 = sx / (lambda_235 * (1 + x)) / 1e6
+            age_sigma_68 = sy / (lambda_238 * (1 + y)) / 1e6
+        age_sigmas = np.concatenate([age_sigma_75, age_sigma_68])
+    else:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            age_sigmas = sx / (lambda_238 * x * (x + 1)) / 1e6
+    age_2sigmas = 2 * _finite_array(age_sigmas)
+    return age_2sigmas[age_2sigmas > 0]
+
+
+def _concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim):
+    manual_age_min = age_min is not None
+    manual_age_max = age_max is not None
+    data_ages = _concordia_data_ages(plot_type, x, y)
+    age_uncertainties = _concordia_age_uncertainties(plot_type, x, y, sx, sy)
+    age_uncertainty = np.nanmedian(age_uncertainties) if len(age_uncertainties) else 0
+
+    data_age_min = float(np.nanmin(data_ages))
+    data_age_max = float(np.nanmax(data_ages))
+    data_age_span = data_age_max - data_age_min
+    if data_age_span > 0 or age_uncertainty > 0:
+        preliminary_span = max(data_age_span, 4 * age_uncertainty)
+    else:
+        preliminary_span = max(1.0, abs(np.nanmean(data_ages)) * 0.005)
+    age_step = _nice_step(max(preliminary_span / 8, age_uncertainty))
+    age_pad = max(2 * age_step, 2 * age_uncertainty, 0.05 * data_age_span)
+
+    curve_min_age = data_age_min - age_pad if age_min is None else float(age_min)
+    curve_max_age = data_age_max + age_pad if age_max is None else float(age_max)
+    curve_min_age = max(0.01, curve_min_age)
+    curve_max_age = min(4500.0, curve_max_age)
+    if curve_min_age >= curve_max_age:
+        curve_min_age = max(0.01, data_age_min - age_pad)
+        curve_max_age = min(4500.0, data_age_max + age_pad)
+
+    visible_age_span = max(curve_max_age - curve_min_age, age_step)
+    age_step = _nice_step(max(visible_age_span / 8, age_uncertainty))
+    tick_start = np.floor(curve_min_age / age_step) * age_step
+    tick_end = np.ceil(curve_max_age / age_step) * age_step
+    tick_ages = np.arange(tick_start, tick_end + 0.5 * age_step, age_step)
+    tick_ages = tick_ages[(tick_ages >= 0) & (tick_ages <= 4500)]
+    if len(tick_ages) > 14:
+        age_step = _nice_step(age_step * len(tick_ages) / 10)
+        tick_start = np.floor(curve_min_age / age_step) * age_step
+        tick_end = np.ceil(curve_max_age / age_step) * age_step
+        tick_ages = np.arange(tick_start, tick_end + 0.5 * age_step, age_step)
+        tick_ages = tick_ages[(tick_ages >= 0) & (tick_ages <= 4500)]
+
+    extra_x = None
+    extra_y = None
+    if manual_age_min or manual_age_max:
+        edge_ages = np.array([curve_min_age, curve_max_age])
+        if plot_type == "Wetherill":
+            extra_x, extra_y = get_wetherill_point(edge_ages)
+        else:
+            extra_x, extra_y = get_tera_wasserburg_point(edge_ages)
+
+    if xlim is None:
+        xlim = _ratio_bounds(x, sx, extra_x)
+    else:
+        xlim = tuple(sorted(xlim))
+    if ylim is None:
+        ylim = _ratio_bounds(y, sy, extra_y)
+    else:
+        ylim = tuple(sorted(ylim))
+
+    return xlim, ylim, curve_min_age, curve_max_age, tick_ages, age_step
+
 
 def concordia(data, type='Wetherill', 
               r75='207Pb/235U', r68='206Pb/238U', 
@@ -1656,59 +1805,31 @@ def concordia(data, type='Wetherill',
         a holoviews overlay object containing the concordia diagram
     '''
     if type == 'Wetherill':
-        x, y, sx, sy, err_corr = data[r75], data[r68], data[s75]/2, data[s68]/2, data[rho]
+        x = pd.to_numeric(data[r75], errors='coerce').to_numpy(dtype=float)
+        y = pd.to_numeric(data[r68], errors='coerce').to_numpy(dtype=float)
+        sx = pd.to_numeric(data[s75], errors='coerce').to_numpy(dtype=float) / 2
+        sy = pd.to_numeric(data[s68], errors='coerce').to_numpy(dtype=float) / 2
+        err_corr = pd.to_numeric(data[rho], errors='coerce').fillna(0).to_numpy(dtype=float)
     elif type == 'TW':
-        x, y, sx, sy = data[r86], data[r76], data[s86]/2, data[s76]/2
+        x = pd.to_numeric(data[r86], errors='coerce').to_numpy(dtype=float)
+        y = pd.to_numeric(data[r76], errors='coerce').to_numpy(dtype=float)
+        sx = pd.to_numeric(data[s86], errors='coerce').to_numpy(dtype=float) / 2
+        sy = pd.to_numeric(data[s76], errors='coerce').to_numpy(dtype=float) / 2
         err_corr = np.zeros(x.shape[0])
     else:
         raise ValueError('type must be either Wetherill or TW')
-    
-    ages_68 = calc_68_date(y)
-    ages_75 = calc_75_date(x)
 
-    # first estimate the x and y axis limits based on the given data
-    if age_min is None:
-        # age_min be the min of either the 68 or 75 date
-        age_min = min(np.min(ages_68), np.min(ages_75))
-    if age_max is None:
-        # age_max be the max of either the 68 or 75 date
-        age_max = max(np.max(ages_68), np.max(ages_75))
-    # now based on the differences between the min and max ages decide the age interval to label
-    age_difference = max(np.mean(sy) * 4, np.mean(sx) * 4, age_max - age_min)
-    if age_difference < 1: # within 1 Myr
-        age_interval = 10
-    if age_difference < 10: # within 10 Myr
-        age_interval = 20
-    elif age_difference < 20: # within 20 Myr
-        age_interval = 30
-    elif age_difference < 50: # within 50 Myr
-        age_interval = 50
-    elif age_difference < 100: # within 100 Myr
-        age_interval = 100
-    elif age_difference < 500: # within 500 Myr
-        age_interval = 200
-    else:
-        age_interval = 500
-
-    # now set the x and y axis limits
-    if type == 'Wetherill':
-        xmin, ymin = get_wetherill_point(max(0, age_min-2*age_interval))
-        xmax, ymax = get_wetherill_point(min(age_max+2*age_interval, 4500))
-    elif type == 'TW':
-        xmin, ymin = get_tera_wasserburg_point(max(0, age_min-2*age_interval))
-        xmax, ymax = get_tera_wasserburg_point(min(age_max+2*age_interval, 4500))
-    if xlim is None:
-        xlim = (xmin, xmax)
-    if ylim is None:
-        ylim = (ymin, ymax)
+    xlim, ylim, curve_min_age, curve_max_age, tick_ages, age_step = _concordia_plot_ranges(
+        type, x, y, sx, sy, age_min, age_max, xlim, ylim
+    )
 
     # initiate the plot
     plot = hv.Overlay()
-    curve_min_age = max(0.01, age_min-2*age_interval)
-    curve_max_age = min(age_max+2*age_interval, 4500)
+    curve_resolution = int(np.clip((curve_max_age - curve_min_age) * 4, 300, 2000))
+    curve_ages = np.linspace(curve_min_age, curve_max_age, curve_resolution)
     # put the concordia curve on the plot
     if type == 'Wetherill':
-        plot *= hv.Curve(get_wetherill_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
+        plot *= hv.Curve(get_wetherill_point(curve_ages), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
         if concordia_uncertainty:
             Pb207_U235s, lower_68, upper_68 = get_Wetherill_concordia_uncertainty()
             plot *= hv.Area((Pb207_U235s, lower_68, upper_68), vdims=['y', 'y2']).opts(color='grey',
@@ -1716,42 +1837,36 @@ def concordia(data, type='Wetherill',
                                                                                                 line_alpha=0  # Optional: hide edge line
                                                                                             )
     elif type == 'TW':
-        plot *= hv.Curve(get_tera_wasserburg_point(np.linspace(curve_min_age, curve_max_age, 100)), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
+        plot *= hv.Curve(get_tera_wasserburg_point(curve_ages), label='Concordia').opts(color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha)
         if concordia_uncertainty:
             U238_Pb206s, lower_76, upper_76 = get_TW_concordia_uncertainty()
             plot *= hv.Area((U238_Pb206s, lower_76, upper_76), vdims=['y', 'y2']).opts(color='grey',
                                                                                         alpha=0.25,
                                                                                         line_alpha=1  # Optional: hide edge line
                                                                                     )
-    # add labels through the age intervals between the min and max x limits
-    # convert the x limits to ages
-    x_min_age = calc_75_date(xlim[0]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
-    x_max_age = calc_75_date(xlim[1]) if type == 'Wetherill' else calc_68_date(1/xlim[0])
-    # convert to the nearest multiples of the age interval
-    x_min_age = (int(x_min_age / age_interval)) * age_interval
-    x_max_age = (int(x_max_age / age_interval)+1) * age_interval
-    # given the age_interval, calculate the number of labels to add
-    num_labels = int((x_max_age - x_min_age) / age_interval)
-    # add the labels
-    for i in range(num_labels+1):
-        age = x_min_age + i * age_interval
+
+    x_label_offset = 0.018 * (xlim[1] - xlim[0])
+    y_label_offset = 0.012 * (ylim[1] - ylim[0])
+    for age in tick_ages:
         if type == 'Wetherill':
             x_label, y_label = get_wetherill_point(age)
-            # place the label with offset based on age_interval
-            xlabel_offset = 0.15 * get_wetherill_point(age_interval)[0]
-            ylabel_offset = 0.075 * get_wetherill_point(age_interval)[1]
         elif type == 'TW':
             x_label, y_label = get_tera_wasserburg_point(age)
-            # place the label with offset based on age_interval
-            xlabel_offset = 0.15 * get_tera_wasserburg_point(age_interval)[0]
-            ylabel_offset = 0.075 * get_tera_wasserburg_point(age_interval)[1]
 
+        if not (xlim[0] <= x_label <= xlim[1] and ylim[0] <= y_label <= ylim[1]):
+            continue
         plot *= hv.Scatter((x_label, y_label)).opts(color='black', size=5, alpha=0.5)
-        plot *= hv.Text(x_label-xlabel_offset, y_label+ylabel_offset, str(int(age))).opts(text_color='black', text_font_size='10pt', text_align='center', text_baseline='middle')
+        plot *= hv.Text(
+            x_label + x_label_offset,
+            y_label + y_label_offset,
+            _format_age_label(age, age_step),
+        ).opts(text_color='black', text_font_size='10pt', text_align='left', text_baseline='middle')
 
     if color_by is None:
         # plot data ellipses
         for i in range(len(x)):
+            if not np.all(np.isfinite([x[i], y[i], sx[i], sy[i], err_corr[i]])):
+                continue
             # calculate the ellipse points
             ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
             # plot filled ellipses
@@ -1761,6 +1876,8 @@ def concordia(data, type='Wetherill',
         polys = []
         color_values = []
         for i in range(len(x)):
+            if not np.all(np.isfinite([x[i], y[i], sx[i], sy[i], err_corr[i]])):
+                continue
             ell_x, ell_y = calc_concordia_ellipse(x[i], y[i], sx[i], sy[i], err_corr[i])
             color_value = data[color_by].iloc[i]
 
