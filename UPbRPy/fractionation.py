@@ -6,21 +6,13 @@ from bokeh.plotting import figure
 import numpy as np
 import pandas as pd
 from bokeh.palettes import Category20
-from scipy.interpolate import interp1d
 
+from .calibration import evaluate_correction_result, fit_calibration_model
 from .ratios import project_tw_206pb_238u
 from .uncertainty import (
-    CovarianceStore,
     inverse_standard_deviation_weights,
     relative_time_by_spot,
-    build_downhole_fractionation_metadata,
-    evaluate_downhole_fractionation,
-    evaluate_session_fractionation_fit,
-    fit_weighted_polynomial_with_covariance,
-    polynomial_prediction_covariance,
-    propagate_downhole_corrected_ratio_covariance,
 )
-_DENSE_COVARIANCE_MAX_ROWS = 512
 
 
 def align_downhole_traces(spot_times, spot_values):
@@ -63,7 +55,14 @@ def align_downhole_traces(spot_times, spot_values):
     stacked_values = np.asarray(interpolated, dtype=float)
     return unified_time, stacked_values, cleaned_times, cleaned_values
 
-def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_name, return_metadata=False):
+def calc_DH_nominal_fractionation(
+    known_ratio,
+    primary_standard_ratios,
+    ratio_name,
+    return_metadata=False,
+    correction_model='mean',
+    model_kwargs=None,
+):
     '''
     function for calculating nominal fractionation factor by comparing a given known ratio with the measured ratio
         use this function when the dealing with a single known ratio value
@@ -114,28 +113,51 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     # calculate the fractionation factor as known ratio / mean_ratio
     mean_fractionation_factor = known_ratio / mean_ratio
     interpolated_fractionations = known_ratio / np.asarray(interpolated_ratios, dtype=float)
-    downhole_metadata = build_downhole_fractionation_metadata(
-        unified_time,
-        interpolated_fractionations,
-        mean_fractionation=mean_fractionation_factor,
+    model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+    model_method = (
+        'interpolate'
+        if isinstance(correction_model, str)
+        and correction_model.strip().lower().replace('-', '_').replace(' ', '_')
+        in {'mean', 'pointwise_mean'}
+        else correction_model
     )
-    # construct the downhole fractionation function
-    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
+    fitted_model = fit_calibration_model(
+        unified_time,
+        mean_fractionation_factor,
+        method=model_method,
+        **model_kwargs,
+    )
+    downhole_fractionation = fitted_model
+    fitted_fractionation_factor = downhole_fractionation(unified_time)
 
     # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
     all_times_array = np.concatenate(all_times)
     all_fractionations_array = known_ratio / np.concatenate(all_ratios)
     # calculate the standard deviation of the mean_fractionation_factor
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
+    residuals = interpolated_fractionations - fitted_fractionation_factor
+    downhole_metadata = {
+        'time': unified_time,
+        'mean_fractionation': mean_fractionation_factor,
+        'fitted_fractionation': fitted_fractionation_factor,
+        'model': 'mean' if model_method == 'interpolate' else fitted_model.method,
+        'model_parameters': fitted_model.parameters,
+        'model_settings': fitted_model.settings,
+        'residuals': residuals,
+        'residual_standard_deviation': std_fractionation_factor,
+        'contributor_count': np.count_nonzero(
+            np.isfinite(interpolated_fractionations), axis=0
+        ),
+    }
 
     plot.varea(
-        unified_time, mean_fractionation_factor - std_fractionation_factor,
-        mean_fractionation_factor + std_fractionation_factor,
+        unified_time, fitted_fractionation_factor - std_fractionation_factor,
+        fitted_fractionation_factor + std_fractionation_factor,
         fill_color='grey', fill_alpha=0.12,
     )
-    plot.line(unified_time, mean_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label='mean fractionation factor')
-    plot.line(unified_time, mean_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='1 sigma')
-    plot.line(unified_time, mean_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
+    plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
+    plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
+    plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
     plot.legend.location = 'top_right'
 
     if return_metadata:
@@ -145,7 +167,10 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
 def calc_DH_fractionations_rad(primary_standard_ratios, 
                                 standard_archive, 
                                 ratio_names = ['206Pb/238U', '207Pb/206Pb', '208Pb/232Th'], 
-                                fit='linear'):
+                                fit=None,
+                                *,
+                                model='mean',
+                                model_kwargs=None):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
         interpolating the ratio as a function of relative time within each spot analysis
@@ -165,12 +190,20 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
         the name of the ratio to be plotted
     standard_archive : pd.DataFrame
         a pandas dataframe containing the standard archive
-    fit : str
-        the type of fit to be used for the interpolation
-        here for now we use a linear inerpolation
-        in the future we can implement polynomial or spline or exponential fits
+    model : str or callable, optional
+        Downhole calibration model. ``'mean'`` (default) interpolates the
+        pointwise mean of aligned reference-material traces. Other built-ins
+        are ``'interpolate'``, ``'linear'``, ``'polynomial'``,
+        ``'orthogonal_polynomial'``, ``'exponential'``, and ``'spline'``.
+        A callable may be parametric or an already calibrated predictor.
+        ``fit`` is retained as a backward-compatible alias for ``model``.
+    model_kwargs : dict, optional
+        Options passed to :func:`fit_calibration_model`, such as polynomial
+        degree, spline smoothing, or custom-function initial values.
     '''
 
+    if fit is not None:
+        model = fit
     # first get the known standard ratios from the standard archive
     primary_standard = primary_standard_ratios['sample'].unique()[0]
     # store the plots and interpolations in a dictionary
@@ -183,24 +216,26 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
             primary_standard_ratios,
             ratio_name,
             return_metadata=True,
+            correction_model=model,
+            model_kwargs=model_kwargs,
         )
         # append the results to the dictionary
         DH_correction_results.update({ratio_name: {
             'plot': plot,
             'interpolation': downhole_fractionation,
             'metadata': downhole_metadata,
-            'fit_covariance': downhole_metadata['covariance'],
+            'model': downhole_metadata['model'],
+            'model_parameters': downhole_metadata['model_parameters'],
             'fit_prediction_x': downhole_metadata['time'],
-            'fit_prediction_1sigma': np.sqrt(np.clip(np.diag(downhole_metadata['covariance']), 0, None)),
+            'fit_residual_standard_deviation': downhole_metadata['residual_standard_deviation'],
             'fit_residuals': downhole_metadata['residuals'],
-            'fit_degrees_of_freedom': downhole_metadata['degrees_of_freedom'],
         }})
     return DH_correction_results
 
 def calc_DH_fractionations_TW(primary_68_standard_ratios, 
                                 primary_76_standard_ratios, 
                                 primary_82_standard_ratios, 
-                                standard_archive, fit='linear'):
+                                standard_archive, fit=None, *, model='mean', model_kwargs=None):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
         interpolating the ratio as a function of relative time within each spot analysis
@@ -221,12 +256,12 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         the name of the ratio to be plotted
     standard_archive : pd.DataFrame
         a pandas dataframe containing the standard archive
-    fit : str
-        the type of fit to be used for the interpolation
-        here for now we use a linear inerpolation
-        in the future we can implement polynomial or spline or exponential fits
+    model : str or callable, optional
+        Downhole calibration model; see :func:`calc_DH_fractionations_rad`.
     '''
 
+    if fit is not None:
+        model = fit
     # first get the known standard ratios from the standard archive
     primary_68_standard = primary_68_standard_ratios['sample'].unique()[0]
     primary_76_standard = primary_76_standard_ratios['sample'].unique()[0]
@@ -242,16 +277,18 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         primary_76_standard_ratios,
         '207Pb/206Pb',
         return_metadata=True,
+        correction_model=model,
+        model_kwargs=model_kwargs,
     )
     DH_correction_results.update({'207Pb/206Pb': {
         'plot': plot_76,
         'interpolation': downhole_fractionation_76,
         'metadata': downhole_metadata_76,
-        'fit_covariance': downhole_metadata_76['covariance'],
+        'model': downhole_metadata_76['model'],
+        'model_parameters': downhole_metadata_76['model_parameters'],
         'fit_prediction_x': downhole_metadata_76['time'],
-        'fit_prediction_1sigma': np.sqrt(np.clip(np.diag(downhole_metadata_76['covariance']), 0, None)),
+        'fit_residual_standard_deviation': downhole_metadata_76['residual_standard_deviation'],
         'fit_residuals': downhole_metadata_76['residuals'],
-        'fit_degrees_of_freedom': downhole_metadata_76['degrees_of_freedom'],
     }})
 
     # then use this fractionation factor to correct the 7/6 ratio of the primary 68 standard
@@ -275,16 +312,18 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         '206Pb/238U',
         '206Pb/238U_TW_projected',
         return_metadata=True,
+        correction_model=model,
+        model_kwargs=model_kwargs,
     )
     DH_correction_results.update({'206Pb/238U': {
         'plot': plot_68,
         'interpolation': downhole_fractionation_68,
         'metadata': downhole_metadata_68,
-        'fit_covariance': downhole_metadata_68['covariance'],
+        'model': downhole_metadata_68['model'],
+        'model_parameters': downhole_metadata_68['model_parameters'],
         'fit_prediction_x': downhole_metadata_68['time'],
-        'fit_prediction_1sigma': np.sqrt(np.clip(np.diag(downhole_metadata_68['covariance']), 0, None)),
+        'fit_residual_standard_deviation': downhole_metadata_68['residual_standard_deviation'],
         'fit_residuals': downhole_metadata_68['residuals'],
-        'fit_degrees_of_freedom': downhole_metadata_68['degrees_of_freedom'],
     }})
 
     # add the 8/2 ratio correction
@@ -294,20 +333,29 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         primary_82_standard_ratios,
         '208Pb/232Th',
         return_metadata=True,
+        correction_model=model,
+        model_kwargs=model_kwargs,
     )
     DH_correction_results.update({'208Pb/232Th': {
         'plot': plot_82,
         'interpolation': downhole_fractionation_82,
         'metadata': downhole_metadata_82,
-        'fit_covariance': downhole_metadata_82['covariance'],
+        'model': downhole_metadata_82['model'],
+        'model_parameters': downhole_metadata_82['model_parameters'],
         'fit_prediction_x': downhole_metadata_82['time'],
-        'fit_prediction_1sigma': np.sqrt(np.clip(np.diag(downhole_metadata_82['covariance']), 0, None)),
+        'fit_residual_standard_deviation': downhole_metadata_82['residual_standard_deviation'],
         'fit_residuals': downhole_metadata_82['residuals'],
-        'fit_degrees_of_freedom': downhole_metadata_82['degrees_of_freedom'],
     }})
     return DH_correction_results
 
-def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, projected_ratio_name, return_metadata=False):
+def calc_DH_dynamic_fractionation(
+    primary_standard_ratios,
+    measured_ratio_name,
+    projected_ratio_name,
+    return_metadata=False,
+    correction_model='mean',
+    model_kwargs=None,
+):
     '''
     function for calculating dynamic fractionation, this is used for cases where we need to do TW projection to get
         the TW 86 ratios for each sweep and then calculate the projected ratios against the measured ratios
@@ -355,25 +403,50 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
     
     # calculate the stacked mean sweep-wise fractionation vs. relative time
     mean_fractionation_factor = np.nanmean(interpolated_fractionations, axis=0)
-    downhole_metadata = build_downhole_fractionation_metadata(
+    model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+    model_method = (
+        'interpolate'
+        if isinstance(correction_model, str)
+        and correction_model.strip().lower().replace('-', '_').replace(' ', '_')
+        in {'mean', 'pointwise_mean'}
+        else correction_model
+    )
+    fitted_model = fit_calibration_model(
         unified_time,
-        interpolated_fractionations,
+        mean_fractionation_factor,
+        method=model_method,
+        **model_kwargs,
     )
     # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
     all_times_array = np.concatenate(all_times)
     all_fractionations_array = np.concatenate(all_fractionations)
-    downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
+    downhole_fractionation = fitted_model
+    fitted_fractionation_factor = downhole_fractionation(unified_time)
     # calculate the standard deviation of the mean_fractionation_factor
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
+    residuals = interpolated_fractionations - fitted_fractionation_factor
+    downhole_metadata = {
+        'time': unified_time,
+        'mean_fractionation': mean_fractionation_factor,
+        'fitted_fractionation': fitted_fractionation_factor,
+        'model': 'mean' if model_method == 'interpolate' else fitted_model.method,
+        'model_parameters': fitted_model.parameters,
+        'model_settings': fitted_model.settings,
+        'residuals': residuals,
+        'residual_standard_deviation': std_fractionation_factor,
+        'contributor_count': np.count_nonzero(
+            np.isfinite(interpolated_fractionations), axis=0
+        ),
+    }
 
     plot.varea(
-        unified_time, mean_fractionation_factor - std_fractionation_factor,
-        mean_fractionation_factor + std_fractionation_factor,
+        unified_time, fitted_fractionation_factor - std_fractionation_factor,
+        fitted_fractionation_factor + std_fractionation_factor,
         fill_color='grey', fill_alpha=0.12,
     )
-    plot.line(unified_time, mean_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label='mean fractionation factor')
-    plot.line(unified_time, mean_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='1 sigma')
-    plot.line(unified_time, mean_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
+    plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
+    plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
+    plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
     plot.legend.location = 'top_right'
 
     if return_metadata:
@@ -383,8 +456,6 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
 def apply_DH_correction(
     plateau_data_with_raw_ratios,
     DH_correction_results,
-    *,
-    covariance_mode='auto',
 ):
     '''
     function for applying a DH correction scheme derived from the primary standard to the entire raw ratios plateau data
@@ -398,13 +469,6 @@ def apply_DH_correction(
         a pandas dataframe containing the raw ratios for the plateau data
     DH_correction_results : dict
         a dictionary containing the DH correction plots and interpolations for each isotope ratio
-    covariance_mode : {'auto', 'full', 'deferred'}, optional
-        ``'auto'`` retains dense covariance only for tables up to 512 rows.
-        ``'full'`` retains the full sweep-by-sweep covariance matrix, which is
-        useful for small targeted analyses but scales quadratically in memory.
-        ``'deferred'`` retains lightweight provenance and per-row uncertainty
-        columns without materializing those dense matrices.
-    
     Returns
     -------
     corrected_plateau_data : pandas.DataFrame
@@ -416,16 +480,14 @@ def apply_DH_correction(
         for isotope_ratio in DH_correction_results.keys():
             this_spot_DH_correction = DH_correction_results[isotope_ratio]['interpolation']
             relative_time = relative_time_by_spot(this_spot_data)
-            if 'metadata' in DH_correction_results[isotope_ratio]:
-                fit_evaluation = evaluate_downhole_fractionation(
-                    DH_correction_results[isotope_ratio]['metadata'],
-                    relative_time,
+            correction_factor = this_spot_DH_correction(relative_time)
+            model_time = DH_correction_results[isotope_ratio].get('fit_prediction_x')
+            if model_time is not None:
+                model_time = np.asarray(model_time, dtype=float)
+                this_spot_data[isotope_ratio + '_DH_correction_extrapolated'] = (
+                    (relative_time < np.nanmin(model_time))
+                    | (relative_time > np.nanmax(model_time))
                 )
-                correction_factor = fit_evaluation['prediction']
-                this_spot_data[isotope_ratio + '_DH_correction_1s'] = fit_evaluation['prediction_1sigma']
-                this_spot_data[isotope_ratio + '_DH_correction_extrapolated'] = fit_evaluation['is_extrapolated']
-            else:
-                correction_factor = this_spot_DH_correction(relative_time)
             # All UPbRPy fractionation factors use the convention
             # C = R_target / R_measured, so R_corrected = C * R_measured.
             this_spot_data[isotope_ratio + '_DH_correction_factor'] = correction_factor
@@ -435,48 +497,17 @@ def apply_DH_correction(
 
         corrected_plateau_data = pd.concat([corrected_plateau_data, this_spot_data])
 
-    if covariance_mode not in {'auto', 'full', 'deferred'}:
-        raise ValueError("covariance_mode must be 'auto', 'full', or 'deferred'.")
-
-    retain_dense_covariance = (
-        covariance_mode == 'full'
-        or (
-            covariance_mode == 'auto'
-            and len(corrected_plateau_data) <= _DENSE_COVARIANCE_MAX_ROWS
-        )
-    )
-    corrected_plateau_data.attrs["downhole_corrected_covariance"] = CovarianceStore()
-    relative_time = relative_time_by_spot(corrected_plateau_data)
-    for isotope_ratio, downhole_result in DH_correction_results.items():
-        if isotope_ratio not in corrected_plateau_data.columns:
-            continue
-        metadata = {
-            "row_index": corrected_plateau_data.index.to_numpy(),
-            "spot_name": corrected_plateau_data['spot_name'].to_numpy(),
-            "time": corrected_plateau_data['Time'].to_numpy(dtype=float),
-            "relative_time": relative_time,
-            "covariance_mode": 'full' if retain_dense_covariance else 'deferred',
-        }
-        if not retain_dense_covariance:
-            corrected_plateau_data.attrs["downhole_corrected_covariance"][isotope_ratio] = metadata
-            continue
-        raw_ratio_1sigma = None
-        if isotope_ratio + '_2e' in corrected_plateau_data.columns:
-            raw_ratio_1sigma = corrected_plateau_data[isotope_ratio + '_2e'].to_numpy(dtype=float) / 2
-        covariance_result = propagate_downhole_corrected_ratio_covariance(
-            corrected_plateau_data[isotope_ratio].to_numpy(dtype=float),
-            relative_time,
-            downhole_result,
-            raw_ratio_1sigma=raw_ratio_1sigma,
-        )
-        corrected_plateau_data.attrs["downhole_corrected_covariance"][isotope_ratio] = {
-            **metadata,
-            **covariance_result,
-        }
-
+    corrected_plateau_data.attrs = {}
     return corrected_plateau_data
 
-def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_name, degree=2):
+def calc_session_nominal_fractionation(
+    known_ratio,
+    primary_standard_ratios,
+    ratio_name,
+    degree=2,
+    model='polynomial',
+    model_kwargs=None,
+):
     '''
     function for calculating nominal fractionation factor through a given session by comparing a given known ratio with the measured ratio
         use this function when the dealing with a single known ratio value
@@ -504,31 +535,28 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
         spot_mean_fractionation.append(this_spot_mean_fractionation)
         spot_mean_fractionation_std.append(this_spot_mean_fractionation_std)
 
-    # calculate a polynomial fit for the mean DH corrected ratios against time
+    # Fit the configured model to the mean DH-corrected ratios against time.
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_fractionation = np.array(spot_mean_fractionation)
     spot_mean_fractionation_std = np.array(spot_mean_fractionation_std)
     spot_mean_fractionation_weights = inverse_standard_deviation_weights(
         spot_mean_fractionation_std
     )
-    fit_result = fit_weighted_polynomial_with_covariance(
+    model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+    model_kwargs.setdefault('degree', degree)
+    fitted_model = fit_calibration_model(
         spot_mean_times,
         spot_mean_fractionation,
-        spot_mean_fractionation_std,
-        degree,
+        method=model,
+        weights=spot_mean_fractionation_weights,
+        **model_kwargs,
     )
-    # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2, default is weighted by the standard deviation of each spot fractionation
-    p = fit_result["coefficients"]
-    p_std = fit_result["residual_standard_deviation"]
+    p = fitted_model.parameters
+    p_std = fitted_model.residual_standard_deviation
     
-    # calculate a fitted polynomial curve
-    fit_x = np.linspace(spot_mean_times[0], spot_mean_times[-1], 100)
-    polynomial_values = np.polyval(p, fit_x)
-    prediction_covariance = polynomial_prediction_covariance(
-        fit_result["covariance"],
-        fit_x,
-    )
-    prediction_1sigma = np.sqrt(np.clip(np.diag(prediction_covariance), 0, None))
+    # Calculate a fitted curve across the observed session interval.
+    fit_x = np.linspace(np.nanmin(spot_mean_times), np.nanmax(spot_mean_times), 100)
+    fitted_values = fitted_model(fit_x)
 
     plot = figure(
         width=800, height=400,
@@ -537,20 +565,19 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
     plot.scatter(spot_mean_times, spot_mean_fractionation, color='black', size=6, legend_label='mean fractionation factor')
-    plot.line(fit_x, polynomial_values, color='red', line_width=2, legend_label='polynomial fit of degree {}'.format(degree))
-    plot.varea(fit_x, polynomial_values - p_std, polynomial_values + p_std, fill_color='grey', fill_alpha=0.12)
+    plot.line(fit_x, fitted_values, color='red', line_width=2, legend_label=f'{fitted_model.method} session model')
+    plot.varea(fit_x, fitted_values - p_std, fitted_values + p_std, fill_color='grey', fill_alpha=0.12)
     plot.legend.location = 'top_right'
     
     fit_metadata = {
-        "covariance": fit_result["covariance"],
-        "covariance_unscaled": fit_result["covariance_unscaled"],
-        "covariance_overdispersion_scaled": fit_result["covariance_overdispersion_scaled"],
+        "model": fitted_model.method,
+        "predictor": fitted_model,
+        "parameters": fitted_model.parameters,
+        "model_settings": fitted_model.settings,
         "prediction_x": fit_x,
-        "prediction_covariance": prediction_covariance,
-        "prediction_1sigma": prediction_1sigma,
-        "residuals": fit_result["residuals"],
-        "reduced_chi_square": fit_result["reduced_chi_square"],
-        "degrees_of_freedom": fit_result["degrees_of_freedom"],
+        "residual_standard_deviation": p_std,
+        "residuals": fitted_model.residuals,
+        "degrees_of_freedom": fitted_model.degrees_of_freedom,
         "spot_mean_times": spot_mean_times,
         "spot_mean_fractionation": spot_mean_fractionation,
         "spot_mean_fractionation_std": spot_mean_fractionation_std,
@@ -562,7 +589,9 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
 def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios, 
                                     standard_archive, 
                                     ratio_names=['206Pb/238U', '207Pb/206Pb', '208Pb/232Th'], 
-                                    degree=2):
+                                    degree=2,
+                                    model='polynomial',
+                                    model_kwargs=None):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
         after applying a given downhole correction based on the primary standards
@@ -579,7 +608,12 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
     ratio_name : str
         the name of the ratio to be corrected
     degree : int
-        the degree of the polynomial fit to be used for the session-wide fractionation correction
+        Degree used by polynomial and orthogonal-polynomial models.
+    model : str or callable, optional
+        Session calibration model. Built-ins are ``'mean'``, ``'interpolate'``,
+        ``'linear'``, ``'polynomial'``, ``'orthogonal_polynomial'``,
+        ``'exponential'``, and ``'spline'``. Custom callables follow
+        :func:`fit_calibration_model`.
 
     Returns
     -------
@@ -593,20 +627,25 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
 
     for ratio_name in ratio_names:
         known_PR_ratio = standard_archive.loc[primary_standard, ratio_name+'*'] # at this stage we only compare radiogenic vs. radiogenic
-        plot, p, p_std, fit_metadata = calc_session_nominal_fractionation(known_PR_ratio, primary_standard_DH_corrected_ratios, ratio_name, degree)
+        plot, p, p_std, fit_metadata = calc_session_nominal_fractionation(
+            known_PR_ratio,
+            primary_standard_DH_corrected_ratios,
+            ratio_name,
+            degree,
+            model=model,
+            model_kwargs=model_kwargs,
+        )
         # append the results to the dictionary
         session_correction_results.update({ratio_name: {
             'plot': plot,
             'fit': p,
+            'predictor': fit_metadata['predictor'],
+            'model': fit_metadata['model'],
+            'model_parameters': fit_metadata['parameters'],
             'std': p_std,
-            'fit_covariance': fit_metadata['covariance'],
-            'fit_covariance_unscaled': fit_metadata['covariance_unscaled'],
-            'fit_covariance_overdispersion_scaled': fit_metadata['covariance_overdispersion_scaled'],
             'fit_prediction_x': fit_metadata['prediction_x'],
-            'fit_prediction_covariance': fit_metadata['prediction_covariance'],
-            'fit_prediction_1sigma': fit_metadata['prediction_1sigma'],
+            'fit_residual_standard_deviation': fit_metadata['residual_standard_deviation'],
             'fit_residuals': fit_metadata['residuals'],
-            'fit_reduced_chi_square': fit_metadata['reduced_chi_square'],
             'fit_degrees_of_freedom': fit_metadata['degrees_of_freedom'],
             'fit_observations': {
                 'time': fit_metadata['spot_mean_times'],
@@ -618,7 +657,15 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
 
     return session_correction_results
 
-def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, primary_82_DH_ratios, standard_archive, degree=2):
+def calc_session_fractionation_TW(
+    primary_68_DH_ratios,
+    primary_76_DH_ratios,
+    primary_82_DH_ratios,
+    standard_archive,
+    degree=2,
+    model='polynomial',
+    model_kwargs=None,
+):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
         after applying a given downhole correction scheme to the primary standard ratios
@@ -655,20 +702,25 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, pr
 
     # let's first get the fractionation factor for the 7/6 ratio
     known_PR_76_ratio = standard_archive.loc[primary_76_standard, '207Pb/206Pb*'] # for the radiogenic 76 ratio (usually use NIST glass standard)
-    plot_76, p_76, p_std_76, fit_metadata_76 = calc_session_nominal_fractionation(known_PR_76_ratio, primary_76_DH_ratios, '207Pb/206Pb', degree)
+    plot_76, p_76, p_std_76, fit_metadata_76 = calc_session_nominal_fractionation(
+        known_PR_76_ratio,
+        primary_76_DH_ratios,
+        '207Pb/206Pb',
+        degree,
+        model=model,
+        model_kwargs=model_kwargs,
+    )
 
     session_correction_results.update({'207Pb/206Pb': {
         'plot': plot_76,
         'fit': p_76,
+        'predictor': fit_metadata_76['predictor'],
+        'model': fit_metadata_76['model'],
+        'model_parameters': fit_metadata_76['parameters'],
         'std': p_std_76,
-        'fit_covariance': fit_metadata_76['covariance'],
-        'fit_covariance_unscaled': fit_metadata_76['covariance_unscaled'],
-        'fit_covariance_overdispersion_scaled': fit_metadata_76['covariance_overdispersion_scaled'],
         'fit_prediction_x': fit_metadata_76['prediction_x'],
-        'fit_prediction_covariance': fit_metadata_76['prediction_covariance'],
-        'fit_prediction_1sigma': fit_metadata_76['prediction_1sigma'],
+        'fit_residual_standard_deviation': fit_metadata_76['residual_standard_deviation'],
         'fit_residuals': fit_metadata_76['residuals'],
-        'fit_reduced_chi_square': fit_metadata_76['reduced_chi_square'],
         'fit_degrees_of_freedom': fit_metadata_76['degrees_of_freedom'],
         'fit_observations': {
             'time': fit_metadata_76['spot_mean_times'],
@@ -679,7 +731,10 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, pr
     }})
 
     # then use this fractionation factor to correct the 7/6 ratio of the primary 68 standard through the session
-    primary_68_DH_ratios['207Pb/206Pb_session_corrected'] = primary_68_DH_ratios['207Pb/206Pb_DH_corrected'] * np.polyval(p_76, primary_68_DH_ratios['Time'])
+    primary_68_DH_ratios['207Pb/206Pb_session_corrected'] = (
+        primary_68_DH_ratios['207Pb/206Pb_DH_corrected']
+        * fit_metadata_76['predictor'](primary_68_DH_ratios['Time'])
+    )
     
     # horizontally project the corrected 7/6 ratio to get the TW intercept point
     PR_68_rad = standard_archive.loc[primary_68_standard, '206Pb/238U*'] # for the radiogenic 68 ratio
@@ -713,31 +768,27 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, pr
         spot_mean_times.append(this_spot_mean_time)
         spot_mean_68_fractionation.append(this_spot_mean_68_fractionation)
         spot_mean_68_fractionation_std.append(this_spot_68_fractionation_std)
-    # calculate a polynomial fit for the mean DH corrected ratios against time
+    # Fit the configured model to mean DH-corrected ratios against time.
     spot_mean_times = np.array(spot_mean_times)
     spot_mean_68_fractionation = np.array(spot_mean_68_fractionation)
     spot_mean_68_fractionation_std = np.array(spot_mean_68_fractionation_std)
     spot_mean_68_fractionation_weights = inverse_standard_deviation_weights(
         spot_mean_68_fractionation_std
     )
-    fit_result_68 = fit_weighted_polynomial_with_covariance(
+    model_kwargs_68 = {} if model_kwargs is None else dict(model_kwargs)
+    model_kwargs_68.setdefault('degree', degree)
+    fitted_model_68 = fit_calibration_model(
         spot_mean_times,
         spot_mean_68_fractionation,
-        spot_mean_68_fractionation_std,
-        degree,
+        method=model,
+        weights=spot_mean_68_fractionation_weights,
+        **model_kwargs_68,
     )
-    # fit a polynomial of user-specified to the mean DH corrected ratios, default is 2
-    p_68 = fit_result_68["coefficients"]
-    # calculate the std of the residuals
-    p_std_68 = fit_result_68["residual_standard_deviation"]
-    # calculate a fitted polynomial curve
-    fit_x_68 = np.linspace(spot_mean_times[0], spot_mean_times[-1], 100)
-    polynomial_values_68 = np.polyval(p_68, fit_x_68)
-    prediction_covariance_68 = polynomial_prediction_covariance(
-        fit_result_68["covariance"],
-        fit_x_68,
-    )
-    prediction_1sigma_68 = np.sqrt(np.clip(np.diag(prediction_covariance_68), 0, None))
+    p_68 = fitted_model_68.parameters
+    p_std_68 = fitted_model_68.residual_standard_deviation
+    # Calculate a fitted curve across the observed session interval.
+    fit_x_68 = np.linspace(np.nanmin(spot_mean_times), np.nanmax(spot_mean_times), 100)
+    fitted_values_68 = fitted_model_68(fit_x_68)
     plot_68 = figure(
         width=800, height=400,
         title='206Pb/238U fractionation correction factor for primary standard ' + primary_68_standard,
@@ -745,23 +796,21 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, pr
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
     plot_68.scatter(spot_mean_times, spot_mean_68_fractionation, color='black', size=6, legend_label='mean fractionation factor')
-    plot_68.line(fit_x_68, polynomial_values_68, color='red', line_width=2, legend_label='polynomial fit of degree {}'.format(degree))
-    plot_68.varea(fit_x_68, polynomial_values_68 - p_std_68, polynomial_values_68 + p_std_68, fill_color='grey', fill_alpha=0.12)
+    plot_68.line(fit_x_68, fitted_values_68, color='red', line_width=2, legend_label=f'{fitted_model_68.method} session model')
+    plot_68.varea(fit_x_68, fitted_values_68 - p_std_68, fitted_values_68 + p_std_68, fill_color='grey', fill_alpha=0.12)
     plot_68.legend.location = 'top_right'
     
     session_correction_results.update({'206Pb/238U': {
         'plot': plot_68,
         'fit': p_68,
+        'predictor': fitted_model_68,
+        'model': fitted_model_68.method,
+        'model_parameters': fitted_model_68.parameters,
         'std': p_std_68,
-        'fit_covariance': fit_result_68['covariance'],
-        'fit_covariance_unscaled': fit_result_68['covariance_unscaled'],
-        'fit_covariance_overdispersion_scaled': fit_result_68['covariance_overdispersion_scaled'],
         'fit_prediction_x': fit_x_68,
-        'fit_prediction_covariance': prediction_covariance_68,
-        'fit_prediction_1sigma': prediction_1sigma_68,
-        'fit_residuals': fit_result_68['residuals'],
-        'fit_reduced_chi_square': fit_result_68['reduced_chi_square'],
-        'fit_degrees_of_freedom': fit_result_68['degrees_of_freedom'],
+        'fit_residual_standard_deviation': p_std_68,
+        'fit_residuals': fitted_model_68.residuals,
+        'fit_degrees_of_freedom': fitted_model_68.degrees_of_freedom,
         'fit_observations': {
             'time': spot_mean_times,
             'fractionation': spot_mean_68_fractionation,
@@ -772,19 +821,24 @@ def calc_session_fractionation_TW(primary_68_DH_ratios, primary_76_DH_ratios, pr
 
     # add the 8/2 ratio correction
     known_PR_82_ratio = standard_archive.loc[primary_82_standard, '208Pb/232Th*'] # for the radiogenic 82 ratio
-    plot_82, p_82, p_std_82, fit_metadata_82 = calc_session_nominal_fractionation(known_PR_82_ratio, primary_82_DH_ratios, '208Pb/232Th', degree)
+    plot_82, p_82, p_std_82, fit_metadata_82 = calc_session_nominal_fractionation(
+        known_PR_82_ratio,
+        primary_82_DH_ratios,
+        '208Pb/232Th',
+        degree,
+        model=model,
+        model_kwargs=model_kwargs,
+    )
     session_correction_results.update({'208Pb/232Th': {
         'plot': plot_82,
         'fit': p_82,
+        'predictor': fit_metadata_82['predictor'],
+        'model': fit_metadata_82['model'],
+        'model_parameters': fit_metadata_82['parameters'],
         'std': p_std_82,
-        'fit_covariance': fit_metadata_82['covariance'],
-        'fit_covariance_unscaled': fit_metadata_82['covariance_unscaled'],
-        'fit_covariance_overdispersion_scaled': fit_metadata_82['covariance_overdispersion_scaled'],
         'fit_prediction_x': fit_metadata_82['prediction_x'],
-        'fit_prediction_covariance': fit_metadata_82['prediction_covariance'],
-        'fit_prediction_1sigma': fit_metadata_82['prediction_1sigma'],
+        'fit_residual_standard_deviation': fit_metadata_82['residual_standard_deviation'],
         'fit_residuals': fit_metadata_82['residuals'],
-        'fit_reduced_chi_square': fit_metadata_82['reduced_chi_square'],
         'fit_degrees_of_freedom': fit_metadata_82['degrees_of_freedom'],
         'fit_observations': {
             'time': fit_metadata_82['spot_mean_times'],
@@ -815,24 +869,29 @@ def apply_session_correction(DH_corrected_ratios, session_correction_results):
         this_spot_data = DH_corrected_ratios[DH_corrected_ratios['spot_name'] == spot_name].copy()
         for isotope_ratio in session_correction_results.keys():
             session_fit = session_correction_results[isotope_ratio]
-            fit_evaluation = evaluate_session_fractionation_fit(
-                session_fit,
-                this_spot_data['Time'],
+            correction_factor = evaluate_correction_result(
+                session_fit, this_spot_data['Time']
             )
-            this_spot_data[isotope_ratio + '_session_correction_factor'] = fit_evaluation['prediction']
-            this_spot_data[isotope_ratio + '_session_correction_1s'] = fit_evaluation['prediction_1sigma']
-            this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = fit_evaluation['is_extrapolated']
+            this_spot_data[isotope_ratio + '_session_correction_factor'] = correction_factor
+            this_spot_data[isotope_ratio + '_session_correction_1s'] = session_fit['std']
+            fit_times = np.asarray(
+                session_fit.get('fit_observations', {}).get('time', []),
+                dtype=float,
+            )
+            if fit_times.size:
+                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = (
+                    (this_spot_data['Time'] < np.nanmin(fit_times))
+                    | (this_spot_data['Time'] > np.nanmax(fit_times))
+                )
+            else:
+                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = False
             this_spot_data[isotope_ratio + '_fractionation_corrected'] = (
                 this_spot_data[isotope_ratio + '_DH_corrected']
-                * fit_evaluation['prediction']
+                * correction_factor
             )
         fractionation_corrected_ratios = pd.concat([fractionation_corrected_ratios, this_spot_data])
 
-    if "downhole_corrected_covariance" in DH_corrected_ratios.attrs:
-        fractionation_corrected_ratios.attrs["downhole_corrected_covariance"] = (
-            DH_corrected_ratios.attrs["downhole_corrected_covariance"]
-        )
-
+    fractionation_corrected_ratios.attrs = {}
     return fractionation_corrected_ratios
 
 __all__ = [

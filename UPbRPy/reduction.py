@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .calibration import evaluate_correction_result
 from .constants import common_U238_U235
 from .isoplot import (
     calc_68_date,
@@ -15,16 +16,6 @@ from .isoplot import (
     calc_76_date_uncertainty,
     propagate_reciprocal_uncertainty,
 )
-from .uncertainty import (
-    CovarianceStore,
-    evaluate_session_fractionation_fit,
-    propagate_date_covariance,
-    propagate_discordance_covariance,
-    propagate_product_covariance,
-    propagate_reciprocal_covariance,
-    propagate_session_corrected_ratio_covariance,
-)
-
 def calc_intercept_std(time, ratio):
     '''
     function for calculating the standard deviation of the measured isotope ratio
@@ -96,8 +87,10 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     function for calculating the depth profile of the ratios 
         for each sweep, the 68 and 76 ratios are the downhole and session fractionation corrected ratios
         the associated uncertainties of the ratios are calculated based on propagating raw ratio uncertainties 
-        assuming Poisson error of the counting statistics of each analyte, downhole correction covariance,
-        and session fractionation correction covariance where these covariance terms are available
+        assuming Poisson error of the counting statistics of each analyte and
+        the scalar residual scatter of the session correction. The downhole
+        correction is treated as systematic and correction correlations are
+        not propagated between sweeps.
 
     Parameters
     ----------
@@ -121,12 +114,11 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             this_spot_measured_ratio_se = this_spot_data[isotope_ratio+'_2e']/2 # sweep-wise Poisson error
 
             # get the session-wide fractionation correction and se at each sweep time
-            fit_evaluation = evaluate_session_fractionation_fit(
-                session_correction_results[isotope_ratio],
-                this_spot_data['Time'],
+            session_result = session_correction_results[isotope_ratio]
+            this_spot_this_ratio_fractionation_mean = evaluate_correction_result(
+                session_result, this_spot_data['Time']
             )
-            this_spot_this_ratio_fractionation_mean = fit_evaluation['prediction']
-            this_ratio_fractionation_se = fit_evaluation['prediction_1sigma']
+            this_ratio_fractionation_se = session_result['std']
 
             # get the fractionation corrected mean
             this_spot_fractionation_corrected = this_spot_data[isotope_ratio + '_fractionation_corrected']
@@ -136,61 +128,21 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
             # save results
             this_spot_data[isotope_ratio + '_session_correction_1s'] = this_ratio_fractionation_se
-            this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = fit_evaluation['is_extrapolated']
+            fit_times = np.asarray(
+                session_result.get('fit_observations', {}).get('time', []),
+                dtype=float,
+            )
+            if fit_times.size:
+                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = (
+                    (this_spot_data['Time'] < np.nanmin(fit_times))
+                    | (this_spot_data['Time'] > np.nanmax(fit_times))
+                )
+            else:
+                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = False
             this_spot_data[isotope_ratio + '_fractionation_corrected_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_corrected * 100
             this_spot_data[isotope_ratio + '_fractionation_corrected_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
         depthpro_ratios = pd.concat([depthpro_ratios, this_spot_data])
     # depthpro_ratios = depthpro_ratios.sort_values(by='Time').reset_index(drop=True)
-
-    depthpro_ratios.attrs["session_corrected_covariance"] = CovarianceStore()
-    downhole_covariance = fractionation_corrected_ratios.attrs.get("downhole_corrected_covariance", {})
-    for isotope_ratio in session_correction_results.keys():
-        if isotope_ratio + '_fractionation_corrected' not in depthpro_ratios.columns:
-            continue
-        downhole_ratio_column = isotope_ratio + '_DH_corrected'
-        downhole_result = downhole_covariance.get(isotope_ratio)
-        downhole_matrix = (
-            downhole_result.get("covariance")
-            if isinstance(downhole_result, dict)
-            else None
-        )
-        if (
-            downhole_matrix is not None
-            and downhole_ratio_column in depthpro_ratios.columns
-            and np.asarray(downhole_matrix).shape
-            == (len(depthpro_ratios), len(depthpro_ratios))
-        ):
-            covariance_result = propagate_session_corrected_ratio_covariance(
-                depthpro_ratios[downhole_ratio_column].to_numpy(dtype=float),
-                depthpro_ratios['Time'].to_numpy(dtype=float),
-                session_correction_results[isotope_ratio],
-                measured_ratio_covariance=downhole_matrix,
-            )
-            measured_covariance_source = "downhole_corrected_covariance"
-        else:
-            required_columns = {isotope_ratio, isotope_ratio + '_2e', 'Time'}
-            if not required_columns.issubset(depthpro_ratios.columns):
-                continue
-            covariance_result = propagate_session_corrected_ratio_covariance(
-                depthpro_ratios[isotope_ratio].to_numpy(dtype=float),
-                depthpro_ratios['Time'].to_numpy(dtype=float),
-                session_correction_results[isotope_ratio],
-                measured_ratio_1sigma=depthpro_ratios[isotope_ratio + '_2e'].to_numpy(dtype=float) / 2,
-            )
-            measured_covariance_source = "raw_ratio_1sigma"
-
-        depthpro_ratios.attrs["session_corrected_covariance"][isotope_ratio] = {
-            "row_index": depthpro_ratios.index.to_numpy(),
-            "time": depthpro_ratios['Time'].to_numpy(dtype=float),
-            "measured_covariance_source": measured_covariance_source,
-            **covariance_result,
-        }
-        ratio_1sigma = np.sqrt(np.clip(np.diag(covariance_result["covariance"]), 0, None))
-        corrected_values = depthpro_ratios[isotope_ratio + '_fractionation_corrected'].to_numpy(dtype=float)
-        depthpro_ratios[isotope_ratio + '_fractionation_corrected_2e'] = ratio_1sigma * 2
-        depthpro_ratios[isotope_ratio + '_fractionation_corrected_2e%'] = (
-            ratio_1sigma * 2 / corrected_values * 100
-        )
 
     # calculate the 207Pb/235U ratio and error based on the 206Pb/238U and 207Pb/206Pb raw ratio calculations
     depthpro_ratios['207Pb/235U_fractionation_corrected'] = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] * depthpro_ratios['206Pb/238U_fractionation_corrected'] * common_U238_U235
@@ -238,34 +190,7 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
         depthpro_ratios['206Pb/238U_age_2e'] / depthpro_ratios['206Pb/238U_age'] * 100
     )
 
-    depthpro_ratios.attrs["derived_covariance"] = {}
-    primary_covariance = depthpro_ratios.attrs["session_corrected_covariance"]
-    if {"207Pb/206Pb", "206Pb/238U"}.issubset(primary_covariance):
-        covariance_75 = propagate_product_covariance(
-            depthpro_ratios['207Pb/206Pb_fractionation_corrected'].to_numpy(),
-            depthpro_ratios['206Pb/238U_fractionation_corrected'].to_numpy(),
-            primary_covariance["207Pb/206Pb"]["covariance"],
-            primary_covariance["206Pb/238U"]["covariance"],
-            scale=common_U238_U235,
-        )
-        depthpro_ratios.attrs["derived_covariance"]["207Pb/235U_fractionation_corrected"] = covariance_75
-        depthpro_ratios.attrs["derived_covariance"]["207Pb/235U_age"] = propagate_date_covariance(
-            depthpro_ratios['207Pb/235U_fractionation_corrected'].to_numpy(),
-            covariance_75["covariance"],
-            "207Pb/235U",
-        )
-    if "206Pb/238U" in primary_covariance:
-        covariance_86 = propagate_reciprocal_covariance(
-            depthpro_ratios['206Pb/238U_fractionation_corrected'].to_numpy(),
-            primary_covariance["206Pb/238U"]["covariance"],
-        )
-        depthpro_ratios.attrs["derived_covariance"]["238U/206Pb_fractionation_corrected"] = covariance_86
-        depthpro_ratios.attrs["derived_covariance"]["206Pb/238U_age"] = propagate_date_covariance(
-            depthpro_ratios['206Pb/238U_fractionation_corrected'].to_numpy(),
-            primary_covariance["206Pb/238U"]["covariance"],
-            "206Pb/238U",
-        )
-
+    depthpro_ratios.attrs = {}
     return depthpro_ratios
 
 def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
@@ -282,15 +207,6 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
         a dictionary containing the session-wide fractionation correction plots and fits, and std of the fractionation correction factor for each isotope ratio
     '''
     final_ratios = pd.DataFrame()
-    spot_covariance_inputs = {
-        isotope_ratio: {
-            "spot_name": [],
-            "time": [],
-            "measured_ratio": [],
-            "measured_ratio_1sigma": [],
-        }
-        for isotope_ratio in session_correction_results.keys()
-    }
     for spot_name in fractionation_corrected_ratios['spot_name'].unique():
         this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name]
         for isotope_ratio in session_correction_results.keys():
@@ -305,12 +221,12 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
                     this_spot_measured_ratio_se = 0.0
 
             # get the session-wide fractionation correction mean and se at the mean spot time
-            fit_evaluation = evaluate_session_fractionation_fit(
-                session_correction_results[isotope_ratio],
-                this_spot_data['Time'].mean(),
-            )
-            this_spot_this_ratio_fractionation_mean = fit_evaluation['prediction']
-            this_ratio_fractionation_se = fit_evaluation['prediction_1sigma']
+            session_result = session_correction_results[isotope_ratio]
+            this_spot_mean_time = this_spot_data['Time'].mean()
+            this_spot_this_ratio_fractionation_mean = float(evaluate_correction_result(
+                session_result, this_spot_mean_time
+            ))
+            this_ratio_fractionation_se = session_result['std']
             # later will add mean and std of the blank correction
 
             # get the fractionation corrected mean
@@ -321,13 +237,19 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
             # save results
             final_ratios.loc[spot_name, isotope_ratio] = this_spot_fractionation_correction_mean
             final_ratios.loc[spot_name, isotope_ratio + '_session_correction_1s'] = this_ratio_fractionation_se
-            final_ratios.loc[spot_name, isotope_ratio + '_session_correction_extrapolated'] = fit_evaluation['is_extrapolated']
+            fit_times = np.asarray(
+                session_result.get('fit_observations', {}).get('time', []),
+                dtype=float,
+            )
+            final_ratios.loc[spot_name, isotope_ratio + '_session_correction_extrapolated'] = bool(
+                fit_times.size
+                and (
+                    this_spot_mean_time < np.nanmin(fit_times)
+                    or this_spot_mean_time > np.nanmax(fit_times)
+                )
+            )
             final_ratios.loc[spot_name, isotope_ratio + '_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_correction_mean * 100
             final_ratios.loc[spot_name, isotope_ratio + '_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
-            spot_covariance_inputs[isotope_ratio]["spot_name"].append(spot_name)
-            spot_covariance_inputs[isotope_ratio]["time"].append(this_spot_data['Time'].mean())
-            spot_covariance_inputs[isotope_ratio]["measured_ratio"].append(this_spot_measured_ratio_mean)
-            spot_covariance_inputs[isotope_ratio]["measured_ratio_1sigma"].append(this_spot_measured_ratio_se)
         # calculate the 207Pb/235U ratio and error
         final_ratios.loc[spot_name, '207Pb/235U'] = final_ratios.loc[spot_name,'207Pb/206Pb'] * final_ratios.loc[spot_name,'206Pb/238U'] * common_U238_U235
         final_ratios.loc[spot_name, '207Pb/235U_2e%'] = np.sqrt((final_ratios.loc[spot_name,'207Pb/206Pb_2e%']**2 + final_ratios.loc[spot_name,'206Pb/238U_2e%']**2))
@@ -436,128 +358,7 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
     other_columns = [i for i in final_ratios_columns if i not in first_columns]
     final_ratios = final_ratios[first_columns + other_columns]
     final_ratios = final_ratios.sort_values(by='spot_name').reset_index(drop=True)
-    final_ratios.attrs["session_corrected_covariance"] = CovarianceStore()
-    spot_order = final_ratios['spot_name'].to_numpy()
-    downhole_covariance = fractionation_corrected_ratios.attrs.get("downhole_corrected_covariance", {})
-    source_spot_names = fractionation_corrected_ratios['spot_name'].to_numpy()
-    for isotope_ratio, covariance_inputs in spot_covariance_inputs.items():
-        downhole_ratio_column = isotope_ratio + '_DH_corrected'
-        downhole_result = downhole_covariance.get(isotope_ratio)
-        downhole_matrix = (
-            downhole_result.get("covariance")
-            if isinstance(downhole_result, dict)
-            else None
-        )
-        if (
-            downhole_matrix is not None
-            and downhole_ratio_column in fractionation_corrected_ratios.columns
-            and np.asarray(downhole_matrix).shape
-            == (len(fractionation_corrected_ratios), len(fractionation_corrected_ratios))
-        ):
-            aggregation = np.zeros((len(spot_order), len(fractionation_corrected_ratios)), dtype=float)
-            for row, spot_name in enumerate(spot_order):
-                positions = np.where(source_spot_names == spot_name)[0]
-                if positions.size == 0:
-                    break
-                aggregation[row, positions] = 1 / positions.size
-            else:
-                measured_ratios = (
-                    aggregation
-                    @ fractionation_corrected_ratios[downhole_ratio_column].to_numpy(dtype=float)
-                )
-                time_values = (
-                    aggregation
-                    @ fractionation_corrected_ratios['Time'].to_numpy(dtype=float)
-                )
-                measured_covariance = (
-                    aggregation
-                    @ np.asarray(downhole_matrix, dtype=float)
-                    @ aggregation.T
-                )
-                covariance_result = propagate_session_corrected_ratio_covariance(
-                    measured_ratios,
-                    time_values,
-                    session_correction_results[isotope_ratio],
-                    measured_ratio_covariance=measured_covariance,
-                )
-                final_ratios.attrs["session_corrected_covariance"][isotope_ratio] = {
-                    "spot_name": spot_order,
-                    "time": time_values,
-                    "measured_covariance_source": "downhole_corrected_covariance",
-                    **covariance_result,
-                }
-                continue
-
-        input_by_spot = {
-            spot_name: {
-                "time": time,
-                "measured_ratio": measured_ratio,
-                "measured_ratio_1sigma": measured_ratio_1sigma,
-            }
-            for spot_name, time, measured_ratio, measured_ratio_1sigma in zip(
-                covariance_inputs["spot_name"],
-                covariance_inputs["time"],
-                covariance_inputs["measured_ratio"],
-                covariance_inputs["measured_ratio_1sigma"],
-            )
-        }
-        if not all(spot_name in input_by_spot for spot_name in spot_order):
-            continue
-        time_values = np.array([input_by_spot[spot_name]["time"] for spot_name in spot_order], dtype=float)
-        measured_ratios = np.array([input_by_spot[spot_name]["measured_ratio"] for spot_name in spot_order], dtype=float)
-        measured_ratio_1sigma = np.array([input_by_spot[spot_name]["measured_ratio_1sigma"] for spot_name in spot_order], dtype=float)
-        covariance_result = propagate_session_corrected_ratio_covariance(
-            measured_ratios,
-            time_values,
-            session_correction_results[isotope_ratio],
-            measured_ratio_1sigma=measured_ratio_1sigma,
-        )
-        final_ratios.attrs["session_corrected_covariance"][isotope_ratio] = {
-            "spot_name": spot_order,
-            "time": time_values,
-            "measured_covariance_source": "spot_mean_1sigma",
-            **covariance_result,
-        }
-    final_ratios.attrs["derived_covariance"] = CovarianceStore()
-    primary_covariance = final_ratios.attrs["session_corrected_covariance"]
-    if {"207Pb/206Pb", "206Pb/238U"}.issubset(primary_covariance):
-        covariance_75 = propagate_product_covariance(
-            final_ratios['207Pb/206Pb'].to_numpy(),
-            final_ratios['206Pb/238U'].to_numpy(),
-            primary_covariance["207Pb/206Pb"]["covariance"],
-            primary_covariance["206Pb/238U"]["covariance"],
-            scale=common_U238_U235,
-        )
-        final_ratios.attrs["derived_covariance"]["207Pb/235U"] = covariance_75
-        final_ratios.attrs["derived_covariance"]["207Pb/235U_age"] = propagate_date_covariance(
-            final_ratios['207Pb/235U'].to_numpy(),
-            covariance_75["covariance"],
-            "207Pb/235U",
-        )
-    if "206Pb/238U" in primary_covariance:
-        covariance_86 = propagate_reciprocal_covariance(
-            final_ratios['206Pb/238U'].to_numpy(),
-            primary_covariance["206Pb/238U"]["covariance"],
-        )
-        final_ratios.attrs["derived_covariance"]["238U/206Pb"] = covariance_86
-        final_ratios.attrs["derived_covariance"]["206Pb/238U_age"] = propagate_date_covariance(
-            final_ratios['206Pb/238U'].to_numpy(),
-            primary_covariance["206Pb/238U"]["covariance"],
-            "206Pb/238U",
-        )
-    if "207Pb/206Pb" in primary_covariance:
-        final_ratios.attrs["derived_covariance"]["207Pb/206Pb_age"] = propagate_date_covariance(
-            final_ratios['207Pb/206Pb'].to_numpy(),
-            primary_covariance["207Pb/206Pb"]["covariance"],
-            "207Pb/206Pb",
-        )
-    if {"206Pb/238U_age", "207Pb/206Pb_age"}.issubset(final_ratios.attrs["derived_covariance"]):
-        final_ratios.attrs["derived_covariance"]["disc%"] = propagate_discordance_covariance(
-            final_ratios['206Pb/238U_age'].to_numpy(),
-            final_ratios['207Pb/206Pb_age'].to_numpy(),
-            final_ratios.attrs["derived_covariance"]["206Pb/238U_age"]["covariance"],
-            final_ratios.attrs["derived_covariance"]["207Pb/206Pb_age"]["covariance"],
-        )
+    final_ratios.attrs = {}
     return final_ratios
 
 __all__ = [

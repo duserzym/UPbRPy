@@ -55,7 +55,7 @@ def test_covariance_store_survives_pandas_concat_without_array_comparison():
     assert combined.attrs["downhole_corrected_covariance"] is store
 
 
-def test_large_downhole_covariance_defaults_to_deferred_storage():
+def test_large_downhole_correction_does_not_create_covariance_metadata():
     row_count = 513
     data = pd.DataFrame({
         "spot_name": ["unknown"] * row_count,
@@ -69,10 +69,8 @@ def test_large_downhole_covariance_defaults_to_deferred_storage():
     }
 
     corrected = apply_DH_correction(data, downhole_results)
-    metadata = corrected.attrs["downhole_corrected_covariance"]["206Pb/238U"]
 
-    assert metadata["covariance_mode"] == "deferred"
-    assert "covariance" not in metadata
+    assert corrected.attrs == {}
 
 
 def test_core_session_weights_favor_more_precise_observations():
@@ -193,7 +191,7 @@ def test_apply_session_correction_records_prediction_uncertainty_columns():
     assert corrected["206Pb/238U_session_correction_extrapolated"].tolist() == [False, True]
 
 
-def test_apply_session_correction_preserves_downhole_covariance_metadata():
+def test_apply_session_correction_does_not_preserve_covariance_metadata():
     data = pd.DataFrame({
         "spot_name": ["unknown-1", "unknown-1"],
         "Time": [1.5, 4.0],
@@ -219,10 +217,10 @@ def test_apply_session_correction_preserves_downhole_covariance_metadata():
 
     corrected = apply_session_correction(data, session_results)
 
-    assert corrected.attrs["downhole_corrected_covariance"] is data.attrs["downhole_corrected_covariance"]
+    assert corrected.attrs == {}
 
 
-def test_depth_profile_uses_downhole_covariance_as_session_measurement_input():
+def test_depth_profile_uses_poisson_and_scalar_session_scatter_only():
     time_grid = np.array([0.0, 1.0])
     stacked_fractionations = np.array([
         [1.00, 1.10],
@@ -251,17 +249,10 @@ def test_depth_profile_uses_downhole_covariance_as_session_measurement_input():
         for ratio in ["206Pb/238U", "207Pb/206Pb"]
     }
     downhole_corrected = apply_DH_correction(raw, downhole_results)
-    fit = fit_weighted_polynomial_with_covariance(
-        np.array([9.0, 10.0, 11.0, 12.0]),
-        np.ones(4),
-        np.full(4, 0.01),
-        degree=0,
-    )
     session_results = {
         ratio: {
-            "fit": fit["coefficients"],
-            "std": fit["residual_standard_deviation"],
-            "fit_covariance": fit["covariance"],
+            "fit": np.array([1.0]),
+            "std": 0.02,
             "fit_observations": {"time": np.array([9.0, 10.0, 11.0, 12.0])},
         }
         for ratio in ["206Pb/238U", "207Pb/206Pb"]
@@ -269,14 +260,15 @@ def test_depth_profile_uses_downhole_covariance_as_session_measurement_input():
     session_corrected = apply_session_correction(downhole_corrected, session_results)
 
     depth_profile = calc_depth_profile(session_corrected, session_results)
-    covariance_metadata = depth_profile.attrs["session_corrected_covariance"]["206Pb/238U"]
-
-    assert covariance_metadata["measured_covariance_source"] == "downhole_corrected_covariance"
-    assert covariance_metadata["covariance_measurement"][0, 1] != 0
+    expected_1sigma = depth_profile["206Pb/238U_fractionation_corrected"] * np.sqrt(
+        (raw["206Pb/238U_2e"].to_numpy() / 2 / raw["206Pb/238U"].to_numpy()) ** 2
+        + 0.02**2
+    )
     np.testing.assert_allclose(
         depth_profile["206Pb/238U_fractionation_corrected_2e"].to_numpy() / 2,
-        np.sqrt(np.diag(covariance_metadata["covariance"])),
+        expected_1sigma,
     )
+    assert depth_profile.attrs == {}
 
 
 def test_session_corrected_covariance_includes_shared_fit_terms():
@@ -314,15 +306,14 @@ def test_session_corrected_covariance_includes_shared_fit_terms():
     assert propagated["covariance"][0, 1] != 0
 
 
-def test_spot_summary_carries_session_corrected_covariance_metadata():
+def test_spot_summary_uses_scalar_session_scatter_without_covariance_metadata():
     x = np.array([0.0, 1.0, 2.0, 3.0])
     y = 1.0 + 0.02 * x
     sigma = np.full_like(x, 0.01)
     fit = fit_weighted_polynomial_with_covariance(x, y, sigma, degree=1)
     session_result = {
         "fit": fit["coefficients"],
-        "std": fit["residual_standard_deviation"],
-        "fit_covariance": fit["covariance"],
+        "std": 0.01,
         "fit_observations": {"time": x},
     }
     session_results = {
@@ -343,14 +334,5 @@ def test_spot_summary_carries_session_corrected_covariance_metadata():
 
     summary = calc_ratio_mean_and_uncertainty(data, session_results)
 
-    covariance_metadata = summary.attrs["session_corrected_covariance"]["206Pb/238U"]
-    assert covariance_metadata["covariance"].shape == (2, 2)
-    assert covariance_metadata["spot_name"].tolist() == summary["spot_name"].tolist()
-    assert covariance_metadata["covariance_session"][0, 1] != 0
-
-    derived_covariance = summary.attrs["derived_covariance"]
-    assert derived_covariance["207Pb/235U"]["covariance"].shape == (2, 2)
-    assert derived_covariance["238U/206Pb"]["covariance"].shape == (2, 2)
-    assert derived_covariance["206Pb/238U_age"]["covariance"].shape == (2, 2)
-    assert derived_covariance["207Pb/206Pb_age"]["covariance"].shape == (2, 2)
-    assert derived_covariance["disc%"]["covariance"].shape == (2, 2)
+    assert summary.attrs == {}
+    np.testing.assert_allclose(summary["206Pb/238U_session_correction_1s"], 0.01)

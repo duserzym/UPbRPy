@@ -142,7 +142,7 @@ def test_downhole_metadata_evaluates_interpolated_covariance():
     np.testing.assert_equal(evaluated["is_extrapolated"], [False, True])
 
 
-def test_apply_downhole_correction_records_prediction_uncertainty_columns():
+def test_apply_downhole_correction_does_not_propagate_model_uncertainty():
     time_grid = np.array([0.0, 1.0, 2.0])
     stacked_fractionations = np.array([
         [1.00, 1.10, 1.20],
@@ -166,8 +166,8 @@ def test_apply_downhole_correction_records_prediction_uncertainty_columns():
     corrected = apply_DH_correction(raw, correction_results)
 
     np.testing.assert_allclose(corrected["206Pb/238U_DH_correction_factor"], [1.0, 1.1])
-    assert np.all(corrected["206Pb/238U_DH_correction_1s"] > 0)
-    assert corrected["206Pb/238U_DH_correction_extrapolated"].tolist() == [False, False]
+    assert "206Pb/238U_DH_correction_1s" not in corrected
+    assert "downhole_corrected_covariance" not in corrected.attrs
 
 
 def test_multiplicative_correction_covariance_matches_jacobian_terms():
@@ -223,7 +223,7 @@ def test_downhole_corrected_covariance_includes_shared_curve_terms():
     assert propagated["covariance"][0, 1] != 0
 
 
-def test_apply_downhole_correction_attaches_full_covariance_metadata():
+def test_apply_downhole_correction_does_not_attach_covariance_metadata():
     time_grid = np.array([0.0, 1.0, 2.0])
     stacked_fractionations = np.array([
         [1.00, 1.10, 1.20],
@@ -246,14 +246,9 @@ def test_apply_downhole_correction_attaches_full_covariance_metadata():
     }
 
     corrected = apply_DH_correction(raw, correction_results)
-    covariance_metadata = corrected.attrs["downhole_corrected_covariance"]["206Pb/238U"]
 
-    assert covariance_metadata["covariance"].shape == (4, 4)
-    assert covariance_metadata["covariance_downhole"][0, 2] != 0
-    np.testing.assert_allclose(
-        covariance_metadata["corrected_ratios"],
-        corrected["206Pb/238U_DH_corrected"],
-    )
+    assert corrected.attrs == {}
+    np.testing.assert_allclose(corrected["206Pb/238U_DH_corrected"], [0.10, 0.11, 0.12, 0.132])
 
 
 def test_reciprocal_preserves_relative_uncertainty_to_first_order():
