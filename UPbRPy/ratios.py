@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import warnings
 
 def project_tw_238u_206pb(
     corrected_207pb_206pb,
@@ -84,95 +85,166 @@ def propagate_raw_ratio_uncertaintiess(nom, denom):
 
     return 2 * eR # return 2 standard relative errors of the ratio, not in percentage format but in fraction format
 
-def calc_raw_ratios(experiment, total_data, baseline_subtracted_total_data):
-    '''
-    function for calculating raw isotope ratios (before downhole variability and fractionation correction) 
-        based on the initial unprocessed total data and the background-subtracted data
-        the reason we need the initial total data is specifically and only because 
-        we need the raw 204Pb and 202Hg cps from the baseline to help correct 
-        for Hg isobaric inference for 206Pb/204Pb ratio calculations 
-        note that we do not use the internally normalized data for this calculation,
-        as the normalization is for total elemental concentration analysis
+def calc_raw_ratios(
+    experiment,
+    total_data,
+    baseline_subtracted_total_data,
+    *,
+    region="plateau",
+):
+    """Calculate sweep-wise raw isotope ratios in a selected spot region.
 
-    by default we calculate the following ratios:
-    206Pb/204Pb
-    208Pb/232Th
-    206Pb/238U
-    207Pb/206Pb
+    ``region='signal'`` returns the inclusive signal-start through signal-end
+    interval used to construct a full downhole correction. ``region='plateau'``
+    retains the historical half-open plateau interval used for spot means.
+    Both outputs carry ``signal_relative_time``, whose zero is the saved signal
+    start rather than the first row of the selected region.
+    """
+    region = str(region).strip().lower()
+    if region not in {"plateau", "signal"}:
+        raise ValueError("region must be 'plateau' or 'signal'.")
+    required_selection_columns = {
+        "spot_names",
+        "baseline_start_times",
+        "baseline_end_times",
+        "signal_start_times",
+        "signal_end_times",
+    }
+    if region == "plateau":
+        required_selection_columns.update(
+            {"plateau_start_times", "plateau_end_times"}
+        )
+    missing = required_selection_columns - set(experiment)
+    if missing:
+        raise KeyError(
+            "experiment is missing ratio-selection columns: "
+            + ", ".join(sorted(missing))
+        )
 
-    The 238U/206Pb ratio and the 207Pb/235U ratios are always calculated
+    output_columns = [
+        "sample",
+        "spot_name",
+        "Time",
+        "signal_relative_time",
+        "206Pb/204Pb",
+        "206Pb/238U",
+        "207Pb/206Pb",
+        "208Pb/232Th",
+        "206Pb/238U_2e",
+        "207Pb/206Pb_2e",
+        "208Pb/232Th_2e",
+    ]
+    ratio_frames = []
+    skipped_spots = []
+    for spot_name in baseline_subtracted_total_data["spot_name"].unique():
+        rows = experiment.loc[experiment["spot_names"] == spot_name]
+        if rows.empty:
+            skipped_spots.append(str(spot_name))
+            continue
+        row = rows.iloc[0]
+        boundary_names = [
+            "baseline_start_times",
+            "baseline_end_times",
+            "signal_start_times",
+            "signal_end_times",
+        ]
+        if region == "plateau":
+            boundary_names.extend(["plateau_start_times", "plateau_end_times"])
+        boundaries = pd.to_numeric(row[boundary_names], errors="coerce")
+        if boundaries.isna().any():
+            skipped_spots.append(str(spot_name))
+            continue
 
-    Parameters
-    ----------
-    experiment : pandas.DataFrame
-        a pandas dataframe containing the experiment metadata
-    total_data : pandas.DataFrame
-        a pandas dataframe containing the total data
-    baseline_subtracted_plateau_data : pandas.DataFrame
-        a pandas dataframe containing the background-subtracted plateau data
-    
-    Returns
-    -------
-    raw_ratios : pandas.DataFrame
-        a pandas dataframe containing the raw isotope ratios
-    '''
-    plateau_data_with_raw_ratios = pd.DataFrame()
-    # raw_ratios = pd.DataFrame()
+        baseline_start = float(boundaries["baseline_start_times"])
+        baseline_end = float(boundaries["baseline_end_times"])
+        signal_start = float(boundaries["signal_start_times"])
+        signal_end = float(boundaries["signal_end_times"])
+        if region == "plateau":
+            region_start = float(boundaries["plateau_start_times"])
+            region_end = float(boundaries["plateau_end_times"])
+        else:
+            region_start = signal_start
+            region_end = signal_end
 
-    for spot_name in baseline_subtracted_total_data['spot_name'].unique():
-        # get the baseline indices for this spot
-        this_spot_baseline_start = experiment[experiment['spot_names'] == spot_name]['baseline_start_times'].values[0]
-        this_spot_baseline_end = experiment[experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
+        spot_corrected = baseline_subtracted_total_data.loc[
+            baseline_subtracted_total_data["spot_name"] == spot_name
+        ]
+        if region == "plateau":
+            selected = spot_corrected.loc[
+                (spot_corrected["Time"] >= region_start)
+                & (spot_corrected["Time"] < region_end)
+            ].copy()
+        else:
+            selected = spot_corrected.loc[
+                (spot_corrected["Time"] >= region_start)
+                & (spot_corrected["Time"] <= region_end)
+            ].copy()
+        if selected.empty:
+            skipped_spots.append(str(spot_name))
+            continue
+        selected["signal_relative_time"] = (
+            pd.to_numeric(selected["Time"], errors="coerce") - signal_start
+        )
 
-        # get the baseline subtracted plateau data for actual raw ratio calculations
-        this_spot_plateau_start_time = experiment[experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
-        this_spot_plateau_end_time = experiment[experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
-        this_spot_plateau_data = baseline_subtracted_total_data[(baseline_subtracted_total_data['Time'] >= this_spot_plateau_start_time) & (baseline_subtracted_total_data['Time'] < this_spot_plateau_end_time)]
+        spot_total = total_data.loc[total_data["spot_name"] == spot_name]
+        baseline_total = spot_total.loc[
+            (spot_total["Time"] >= baseline_start)
+            & (spot_total["Time"] < baseline_end)
+        ]
+        baseline_202hg = baseline_total["202Hg"].mean()
+        baseline_204 = baseline_total["204Hg"].mean()
 
-        # get the uncorrected total data for baseline use
-        this_spot_total_data = total_data[total_data['spot_name'] == spot_name]
-        this_spot_baseline_total_data = this_spot_total_data[(this_spot_total_data['Time'] >= this_spot_baseline_start) & (this_spot_total_data['Time'] < this_spot_baseline_end)]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio_64 = selected["206Pb"] / (
+                selected["204Hg"]
+                - selected["202Hg"] * (baseline_204 / baseline_202hg)
+            )
+            ratio_82 = selected["208Pb"] / selected["232Th"]
+            ratio_68 = selected["206Pb"] / selected["238U"]
+            ratio_76 = selected["207Pb"] / selected["206Pb"]
+            ratio_82_2e = (
+                propagate_raw_ratio_uncertaintiess(
+                    selected["208Pb"], selected["232Th"]
+                )
+                * ratio_82
+            )
+            ratio_68_2e = (
+                propagate_raw_ratio_uncertaintiess(
+                    selected["206Pb"], selected["238U"]
+                )
+                * ratio_68
+            )
+            ratio_76_2e = (
+                propagate_raw_ratio_uncertaintiess(
+                    selected["207Pb"], selected["206Pb"]
+                )
+                * ratio_76
+            )
+        selected["206Pb/204Pb"] = ratio_64.where(
+            np.isfinite(ratio_64) & (ratio_64 >= 0), 0
+        )
+        selected["206Pb/238U"] = ratio_68
+        selected["206Pb/238U_2e"] = ratio_68_2e
+        selected["207Pb/206Pb"] = ratio_76
+        selected["207Pb/206Pb_2e"] = ratio_76_2e
+        selected["208Pb/232Th"] = ratio_82
+        selected["208Pb/232Th_2e"] = ratio_82_2e
+        ratio_frames.append(selected.loc[:, output_columns])
 
-        # 206/204 ratio of means
-        this_spot_baseline_202Hg_mean = this_spot_baseline_total_data['202Hg'].mean() # baseline 202Hg mean
-        this_spot_baseline_204Pb_mean = this_spot_baseline_total_data['204Hg'].mean() # baseline 204Pb mean
-
-        # this_spot_plateau_206Pb_mean = this_spot_plateau_data['206Pb'].mean() # sample 206Pb mean
-        # this_spot_plateau_204Pb_mean = this_spot_plateau_data['204Hg'].mean() # sample 204Pb mean
-        # this_spot_plateau_202Hg_mean = this_spot_plateau_data['202Hg'].mean() # sample 202Hg mean
-
-        # 206/204 mean of ratios, replace all negative or inf values to be 0
-        this_spot_R64 = this_spot_plateau_data['206Pb']/(this_spot_plateau_data['204Hg'] - this_spot_plateau_data['202Hg'] * (this_spot_baseline_204Pb_mean/this_spot_baseline_202Hg_mean))
-        this_spot_R64[this_spot_R64 < 0] = 0
-        this_spot_R64[this_spot_R64 == np.inf] = 0
-        
-        # 208/232 mean of ratios
-        this_spot_R82 = this_spot_plateau_data['208Pb'] / this_spot_plateau_data['232Th']
-        this_spot_R82_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['208Pb'], this_spot_plateau_data['232Th']) * this_spot_R82
-
-        # 206/238 mean of ratios
-        this_spot_R68 = this_spot_plateau_data['206Pb'] / this_spot_plateau_data['238U']
-        this_spot_R68_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['206Pb'], this_spot_plateau_data['238U']) * this_spot_R68
-
-        # 207/206 mean of ratios
-        this_spot_R76 = this_spot_plateau_data['207Pb'] / this_spot_plateau_data['206Pb']
-        this_spot_R76_2e = propagate_raw_ratio_uncertaintiess(this_spot_plateau_data['207Pb'], this_spot_plateau_data['206Pb']) * this_spot_R76
-
-        this_spot_plateau_data['206Pb/204Pb'] = this_spot_R64
-        this_spot_plateau_data['206Pb/238U'] = this_spot_R68
-        this_spot_plateau_data['206Pb/238U_2e'] = this_spot_R68_2e
-        this_spot_plateau_data['207Pb/206Pb'] = this_spot_R76
-        this_spot_plateau_data['207Pb/206Pb_2e'] = this_spot_R76_2e
-        this_spot_plateau_data['208Pb/232Th'] = this_spot_R82
-        this_spot_plateau_data['208Pb/232Th_2e'] = this_spot_R82_2e
-
-        # update the plateau data with the raw ratios
-        plateau_data_with_raw_ratios = pd.concat([plateau_data_with_raw_ratios, this_spot_plateau_data])
-        
-        # now strip away the cps columns and only return the ratio columns
-        plateau_data_with_raw_ratios = plateau_data_with_raw_ratios[['sample', 'spot_name', 'Time', '206Pb/204Pb', '206Pb/238U', '207Pb/206Pb', '208Pb/232Th', '206Pb/238U_2e', '207Pb/206Pb_2e', '208Pb/232Th_2e']]
-        
-    return plateau_data_with_raw_ratios
+    if skipped_spots:
+        warnings.warn(
+            "Raw ratios skipped spots with incomplete or empty selections: "
+            + ", ".join(skipped_spots),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if not ratio_frames:
+        return pd.DataFrame(columns=output_columns)
+    result = pd.concat(ratio_frames, ignore_index=True)
+    result.attrs["selection_region"] = region
+    result.attrs["relative_time_origin"] = "signal_start_times"
+    result.attrs["skipped_spots"] = tuple(skipped_spots)
+    return result
 
 __all__ = [
     'project_tw_238u_206pb',

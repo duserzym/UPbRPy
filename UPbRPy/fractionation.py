@@ -22,6 +22,47 @@ from .uncertainty import (
 )
 _DENSE_COVARIANCE_MAX_ROWS = 512
 
+
+def align_downhole_traces(spot_times, spot_values):
+    """Interpolate spot traces across the full observed signal-relative interval.
+
+    Values outside an individual spot's measured interval remain NaN rather
+    than being endpoint-extrapolated. Consequently, late signal positions use
+    only standards that still contain measured signal sweeps.
+    """
+    if len(spot_times) != len(spot_values) or not spot_times:
+        raise ValueError("spot_times and spot_values must be nonempty lists of equal length.")
+    cleaned_times = []
+    cleaned_values = []
+    for times, values in zip(spot_times, spot_values):
+        times = np.asarray(times, dtype=float)
+        values = np.asarray(values, dtype=float)
+        valid = np.isfinite(times) & np.isfinite(values)
+        times = times[valid]
+        values = values[valid]
+        order = np.argsort(times)
+        times = times[order]
+        values = values[order]
+        if times.size < 2 or times[-1] <= times[0]:
+            continue
+        cleaned_times.append(times)
+        cleaned_values.append(values)
+    if not cleaned_times:
+        raise ValueError("No downhole trace contains two finite time-value pairs.")
+    common_start = min(times[0] for times in cleaned_times)
+    common_end = max(times[-1] for times in cleaned_times)
+    point_count = max(len(times) for times in cleaned_times)
+    if point_count < 2:
+        raise ValueError("Downhole traces share fewer than two signal sweeps.")
+    unified_time = np.linspace(common_start, common_end, point_count)
+    interpolated = []
+    for times, values in zip(cleaned_times, cleaned_values):
+        trace = np.interp(unified_time, times, values)
+        trace[(unified_time < times[0]) | (unified_time > times[-1])] = np.nan
+        interpolated.append(trace)
+    stacked_values = np.asarray(interpolated, dtype=float)
+    return unified_time, stacked_values, cleaned_times, cleaned_values
+
 def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_name, return_metadata=False):
     '''
     function for calculating nominal fractionation factor by comparing a given known ratio with the measured ratio
@@ -41,9 +82,18 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
     for i, spot_name in enumerate(primary_standard_ratios['spot_name'].unique()):
-        this_spot = primary_standard_ratios[primary_standard_ratios['spot_name'] == spot_name]
-        # these are already plateau data so we just need to adjust the time so that every spot starts at 0
-        this_spot['relative_time'] = this_spot['Time'] - this_spot['Time'].iloc[0]
+        this_spot = primary_standard_ratios[
+            primary_standard_ratios['spot_name'] == spot_name
+        ].copy()
+        this_spot['relative_time'] = relative_time_by_spot(this_spot)
+        valid = (
+            np.isfinite(this_spot['relative_time'])
+            & np.isfinite(this_spot[ratio_name])
+            & (this_spot[ratio_name] > 0)
+        )
+        this_spot = this_spot.loc[valid]
+        if len(this_spot) < 2:
+            continue
 
         # store the measured time and ratios for this spot
         all_times.append(this_spot['relative_time'].values)
@@ -55,17 +105,12 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
         )
 
     # now interpolate the time and fractionation for all spots, unify the time axis, and calculate the mean and std * student's t multiplier
-    min_time = 0
-    max_time = np.max(np.array(all_times))
-    unified_time = np.linspace(min_time, max_time, len(all_times[0])) # generate a unified time axis that has the same amount of points as the original time axis
-
-    interpolated_ratios = []
-    for time, ratio in zip(all_times, all_ratios):
-        interpolated_ratio = np.interp(unified_time, time, ratio)
-        interpolated_ratios.append(interpolated_ratio)
+    unified_time, interpolated_ratios, all_times, all_ratios = align_downhole_traces(
+        all_times, all_ratios
+    )
     
     # calculate the stacked mean sweep-wise ratio vs. relative time
-    mean_ratio = np.mean(interpolated_ratios, axis=0)
+    mean_ratio = np.nanmean(interpolated_ratios, axis=0)
     # calculate the fractionation factor as known ratio / mean_ratio
     mean_fractionation_factor = known_ratio / mean_ratio
     interpolated_fractionations = known_ratio / np.asarray(interpolated_ratios, dtype=float)
@@ -78,8 +123,8 @@ def calc_DH_nominal_fractionation(known_ratio, primary_standard_ratios, ratio_na
     downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
 
     # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
-    all_times_array = np.array(all_times).flatten()
-    all_fractionations_array = known_ratio/np.array(all_ratios).flatten()
+    all_times_array = np.concatenate(all_times)
+    all_fractionations_array = known_ratio / np.concatenate(all_ratios)
     # calculate the standard deviation of the mean_fractionation_factor
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
 
@@ -280,9 +325,19 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
     for i, spot_name in enumerate(primary_standard_ratios['spot_name'].unique()):
-        this_spot = primary_standard_ratios[primary_standard_ratios['spot_name'] == spot_name]
-        # these are already plateau data so we just need to adjust the time so that every spot starts at 0
-        this_spot['relative_time'] = this_spot['Time'] - this_spot['Time'].iloc[0]
+        this_spot = primary_standard_ratios[
+            primary_standard_ratios['spot_name'] == spot_name
+        ].copy()
+        this_spot['relative_time'] = relative_time_by_spot(this_spot)
+        valid = (
+            np.isfinite(this_spot['relative_time'])
+            & np.isfinite(this_spot[measured_ratio_name])
+            & np.isfinite(this_spot[projected_ratio_name])
+            & (this_spot[measured_ratio_name] > 0)
+        )
+        this_spot = this_spot.loc[valid]
+        if len(this_spot) < 2:
+            continue
         this_spot[measured_ratio_name +'_fractionation_factor'] = this_spot[projected_ratio_name] / this_spot[measured_ratio_name]
         # store the measured time and fractionation factors for this spot
         all_times.append(this_spot['relative_time'].values)
@@ -294,24 +349,19 @@ def calc_DH_dynamic_fractionation(primary_standard_ratios, measured_ratio_name, 
         )
 
     # now interpolate the time and fractionation for all spots, unify the time axis, and calculate the mean and std * student's t multiplier
-    min_time = 0
-    max_time = np.max(np.array(all_times))
-    unified_time = np.linspace(min_time, max_time, len(all_times[0])) # generate a unified time axis that has the same amount of points as the original time axis
-
-    interpolated_fractionations = []
-    for time, fractionation in zip(all_times, all_fractionations):
-        interpolated_fractionation = np.interp(unified_time, time, fractionation)
-        interpolated_fractionations.append(interpolated_fractionation)
+    unified_time, interpolated_fractionations, all_times, all_fractionations = (
+        align_downhole_traces(all_times, all_fractionations)
+    )
     
     # calculate the stacked mean sweep-wise fractionation vs. relative time
-    mean_fractionation_factor = np.mean(interpolated_fractionations, axis=0)
+    mean_fractionation_factor = np.nanmean(interpolated_fractionations, axis=0)
     downhole_metadata = build_downhole_fractionation_metadata(
         unified_time,
         interpolated_fractionations,
     )
     # calculate the std of the mean_fractionation_factor based on the difference between the mean and the individual ratios
-    all_times_array = np.array(all_times).flatten()
-    all_fractionations_array = np.array(all_fractionations).flatten()
+    all_times_array = np.concatenate(all_times)
+    all_fractionations_array = np.concatenate(all_fractionations)
     downhole_fractionation = interp1d(unified_time, mean_fractionation_factor, kind='linear', fill_value='extrapolate')
     # calculate the standard deviation of the mean_fractionation_factor
     std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
@@ -365,7 +415,7 @@ def apply_DH_correction(
         this_spot_data = plateau_data_with_raw_ratios[plateau_data_with_raw_ratios['spot_name'] == spot_name].copy()
         for isotope_ratio in DH_correction_results.keys():
             this_spot_DH_correction = DH_correction_results[isotope_ratio]['interpolation']
-            relative_time = this_spot_data['Time'] - this_spot_data['Time'].iloc[0]
+            relative_time = relative_time_by_spot(this_spot_data)
             if 'metadata' in DH_correction_results[isotope_ratio]:
                 fit_evaluation = evaluate_downhole_fractionation(
                     DH_correction_results[isotope_ratio]['metadata'],
@@ -444,7 +494,8 @@ def calc_session_nominal_fractionation(known_ratio, primary_standard_ratios, rat
         # this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
         # this_spot_mean_ratio_std = this_spot[ratio_name+'_DH_corrected'].std()
         this_spot_mean_fractionations = known_ratio / this_spot[ratio_name+'_DH_corrected']
-        this_spot_mean_fractionation = np.mean(this_spot_mean_fractionations)
+        this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
+        this_spot_mean_fractionation = known_ratio / this_spot_mean_ratio
         this_spot_mean_fractionation_std = np.std(this_spot_mean_fractionations)
         # this_spot_mean_fractionation_std = known_ratio / this_spot_mean_ratio_std
 
@@ -785,6 +836,7 @@ def apply_session_correction(DH_corrected_ratios, session_correction_results):
     return fractionation_corrected_ratios
 
 __all__ = [
+    'align_downhole_traces',
     'calc_DH_nominal_fractionation',
     'calc_DH_fractionations_rad',
     'calc_DH_fractionations_TW',

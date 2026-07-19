@@ -74,24 +74,72 @@ def build_downhole_fractionation_metadata(unified_time, interpolated_fractionati
         raise ValueError("interpolated_fractionations columns must match unified_time.")
 
     if mean_fractionation is None:
-        mean_fractionation = np.mean(interpolated_fractionations, axis=0)
+        mean_fractionation = np.nanmean(interpolated_fractionations, axis=0)
     else:
         mean_fractionation = np.asarray(mean_fractionation, dtype=float)
         if mean_fractionation.shape != unified_time.shape:
             raise ValueError("mean_fractionation must match unified_time.")
-    if interpolated_fractionations.shape[0] > 1:
-        covariance = np.cov(interpolated_fractionations, rowvar=False, ddof=1) / interpolated_fractionations.shape[0]
+    if interpolated_fractionations.shape[0] > 1 and np.all(
+        np.isfinite(interpolated_fractionations)
+    ):
+        covariance = np.cov(
+            interpolated_fractionations, rowvar=False, ddof=1
+        ) / interpolated_fractionations.shape[0]
+    elif interpolated_fractionations.shape[0] > 1:
+        covariance = np.zeros((unified_time.size, unified_time.size), dtype=float)
+        for left in range(unified_time.size):
+            for right in range(left, unified_time.size):
+                paired = (
+                    np.isfinite(interpolated_fractionations[:, left])
+                    & np.isfinite(interpolated_fractionations[:, right])
+                )
+                pair_count = int(np.count_nonzero(paired))
+                if pair_count > 1:
+                    pair_covariance = np.cov(
+                        interpolated_fractionations[paired, left],
+                        interpolated_fractionations[paired, right],
+                        ddof=1,
+                    )[0, 1] / pair_count
+                    covariance[left, right] = pair_covariance
+                    covariance[right, left] = pair_covariance
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        covariance = (
+            eigenvectors
+            @ np.diag(np.clip(eigenvalues, 0, None))
+            @ eigenvectors.T
+        )
     else:
         covariance = np.zeros((unified_time.size, unified_time.size), dtype=float)
     residuals = interpolated_fractionations - mean_fractionation
-    degrees_of_freedom = max(interpolated_fractionations.size - unified_time.size, 1)
-    residual_standard_deviation = np.sqrt(np.sum(residuals**2) / degrees_of_freedom)
+    finite_observations = int(np.count_nonzero(np.isfinite(residuals)))
+    finite_time_points = int(np.count_nonzero(np.isfinite(mean_fractionation)))
+    degrees_of_freedom = max(finite_observations - finite_time_points, 1)
+    residual_standard_deviation = np.sqrt(
+        np.nansum(residuals**2) / degrees_of_freedom
+    )
+    contributor_count = np.count_nonzero(
+        np.isfinite(interpolated_fractionations), axis=0
+    )
+    singleton = contributor_count <= 1
+    if np.any(singleton) and residual_standard_deviation > 0:
+        diagonal = np.diag(covariance).copy()
+        diagonal[singleton] = np.maximum(
+            diagonal[singleton], residual_standard_deviation**2
+        )
+        np.fill_diagonal(covariance, diagonal)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        covariance = (
+            eigenvectors
+            @ np.diag(np.clip(eigenvalues, 0, None))
+            @ eigenvectors.T
+        )
 
     return {
         "time": unified_time,
         "mean_fractionation": mean_fractionation,
         "covariance": covariance,
         "interpolated_fractionations": interpolated_fractionations,
+        "contributor_count": contributor_count,
         "residuals": residuals,
         "residual_standard_deviation": residual_standard_deviation,
         "degrees_of_freedom": degrees_of_freedom,
@@ -227,7 +275,16 @@ def propagate_downhole_corrected_ratio_covariance(
     }
 
 def relative_time_by_spot(data):
-    """Return within-spot relative times in the current row order."""
+    """Return signal-start-relative times in the current row order.
+
+    Ratio tables created by :func:`UPbRPy.ratios.calc_raw_ratios` carry an
+    explicit ``signal_relative_time`` column. Older tables fall back to the
+    first available row per spot for backward compatibility.
+    """
+    if "signal_relative_time" in data.columns:
+        relative_time = data["signal_relative_time"].to_numpy(dtype=float)
+        if np.all(np.isfinite(relative_time)):
+            return relative_time
     relative_time = np.zeros(len(data), dtype=float)
     time_values = data["Time"].to_numpy(dtype=float)
     for row_positions in data.groupby("spot_name", sort=False).indices.values():
