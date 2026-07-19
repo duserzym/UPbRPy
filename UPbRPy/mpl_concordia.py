@@ -1,9 +1,9 @@
 """Static Matplotlib plots for final U--Pb concordia figures.
 
 The main :mod:`UPbRPy.UPbRPy` module provides interactive HoloViews plots.
-This module reuses its decay constants, Wetherill coordinate calculation, and
-weighted-mean implementation while providing composable Matplotlib axes for
-multi-panel publication figures.
+This module reuses the package's decay constants, Wetherill coordinate
+calculation, and weighted-mean implementation while providing composable
+Matplotlib axes for multi-panel publication figures.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ from matplotlib.patches import Ellipse
 import numpy as np
 import pandas as pd
 
-from .UPbRPy import get_wetherill_point, weighted_mean
+from .isoplot import get_wetherill_point, weighted_mean
 
 
-def _ellipse_from_covariance(ax, x, y, sx_2sigma, sy_2sigma, rho,
+def ellipse_from_covariance(ax, x, y, sx_2sigma, sy_2sigma, rho,
                              facecolor, edgecolor=None, alpha=0.3,
                              linewidth=0.9, zorder=2):
     """Draw a two-sigma covariance ellipse on ``ax``."""
@@ -82,7 +82,7 @@ def plot_wetherill_concordia(
         sx = x * float(row["207Pb/235U_2sigma%"]) / 100
         sy = y * float(row["206Pb/238U_2sigma%"]) / 100
         color = accepted_color if accepted[idx] else rejected_color
-        _ellipse_from_covariance(
+        ellipse_from_covariance(
             ax, x, y, sx, sy, float(row["error_corr"]), color,
             alpha=ellipse_alpha if accepted[idx] else ellipse_alpha * 0.5,
         )
@@ -168,3 +168,10 @@ def plot_ranked_weighted_mean(
     ax.tick_params(labelsize=fontsize - 1)
     ax.grid(axis="y", color="0.9", linewidth=0.6)
     return mean, confidence
+
+
+__all__ = [
+    "ellipse_from_covariance",
+    "plot_wetherill_concordia",
+    "plot_ranked_weighted_mean",
+]
