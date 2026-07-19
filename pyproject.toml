@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel>=0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,28 +7,36 @@ name = "UPbRPy"
 version = "0.1.0"
 description = "Python LA-ICP-MS U-Pb and trace-element reduction toolkit with an optional PySide6 desktop GUI."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {file = "LICENSE"}
 authors = [
   {name = "UPbRPy contributors"}
 ]
 dependencies = [
-  "numpy>=2.0",
-  "pandas>=2.2",
-  "scipy>=1.14",
-  "matplotlib>=3.9",
-  "bokeh>=3.6",
-  "datashader>=0.17",
-  "holoviews>=1.20",
-  "hvplot>=0.11",
-  "panel>=1.6",
-  "plotly>=6.0"
+  "numpy>=2.5.1",
+  "pandas>=3.0.3",
+  "scipy>=1.18.0",
+  "matplotlib>=3.11.0",
+  "bokeh>=3.9.1"
 ]
 
 [project.optional-dependencies]
 gui = [
-  "PySide6>=6.7",
-  "pyqtgraph>=0.13.7"
+  "PySide6>=6.11.1",
+  "pyqtgraph>=0.14.0"
+]
+notebook = [
+  "ipykernel>=7.3.0",
+  "jupyter_bokeh>=4.1.0",
+  "panel>=1.8.10"
+]
+dev = [
+  "ipykernel>=7.3.0",
+  "jupyterlab>=4.6.1",
+  "jupyter_bokeh>=4.1.0",
+  "panel>=1.8.10",
+  "pytest>=9.1.1",
+  "ruff>=0.15.21"
 ]
 
 [project.scripts]
@@ -39,3 +47,6 @@ include = ["UPbRPy*", "GUI*"]
 
 [tool.setuptools.package-data]
 UPbRPy = ["standards.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
