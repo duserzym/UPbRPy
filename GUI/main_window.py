@@ -51,6 +51,7 @@ from GUI.widgets import (
     make_list_item,
 )
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
+from UPbRPy import SELECTION_METHODS, selection_method_label
 
 
 PLOT_MODE_LABELS = {
@@ -126,6 +127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
         self.pending_region_updates: dict[str, tuple[float, float]] = {}
         self.workflow_preset = get_workflow_preset("zircon")
+        self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
         self.theme_mode = theme_mode
         self.app_icon = app_icon or build_app_icon()
         self.sigma_level = 2
@@ -140,8 +142,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
-        self.resize(1800, 1150)
-        self.setMinimumSize(1400, 1000)
+        self.setMinimumSize(960, 680)
+        self._apply_initial_window_geometry()
 
         self._build_menu()
         self._build_ui()
@@ -184,22 +186,44 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setContentsMargins(18, 18, 18, 18)
         outer.setSpacing(18)
 
-        outer.addWidget(self._build_sidebar(), 0)
-        outer.addWidget(self._build_main_column(), 1)
-        outer.addWidget(self._build_inspector(), 0)
+        workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        workspace_splitter.setChildrenCollapsible(False)
+        workspace_splitter.addWidget(self._build_sidebar())
+        workspace_splitter.addWidget(self._build_main_column())
+        workspace_splitter.addWidget(self._build_inspector())
+        workspace_splitter.setStretchFactor(0, 0)
+        workspace_splitter.setStretchFactor(1, 1)
+        workspace_splitter.setStretchFactor(2, 0)
+        workspace_splitter.setSizes([380, 1000, 300])
+        outer.addWidget(workspace_splitter, 1)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
         self._sync_fit_controls()
 
-    def _build_sidebar(self) -> QtWidgets.QFrame:
+    def _apply_initial_window_geometry(self) -> None:
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1600, 1000)
+            return
+        available = screen.availableGeometry()
+        width = min(1800, max(960, int(available.width() * 0.92)))
+        height = min(1150, max(680, int(available.height() * 0.90)))
+        self.resize(width, height)
+
+    def _build_sidebar(self) -> QtWidgets.QWidget:
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        scroll.setFixedWidth(420)
+        scroll.setMinimumWidth(300)
+        scroll.setMaximumWidth(420)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("SidebarPanel")
@@ -255,6 +279,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for key, preset in WORKFLOW_PRESETS.items():
             self.workflow_combo.addItem(preset.title, key)
         self.workflow_combo.currentIndexChanged.connect(self.on_workflow_preset_changed)
+        self.selection_method_combo = StyledComboBox()
+        for method in SELECTION_METHODS:
+            self.selection_method_combo.addItem(selection_method_label(method), method)
+        self.selection_method_combo.currentIndexChanged.connect(self.on_selection_method_changed)
         # description / defaults labels kept for back-compat but hidden (tooltip carries the text)
         self.workflow_description_label = QtWidgets.QLabel()
         self.workflow_description_label.setVisible(False)
@@ -283,18 +311,23 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_layout.addLayout(workflow_preset_row)
         workflow_layout.addWidget(self.workflow_combo)
 
+        selection_method_title = QtWidgets.QLabel("Baseline / peak auto-pick")
+        selection_method_title.setObjectName("SectionTitle")
+        workflow_layout.addWidget(selection_method_title)
+        workflow_layout.addWidget(self.selection_method_combo)
+
         workflow_label = QtWidgets.QLabel("Processing sequence")
         workflow_label.setObjectName("SectionTitle")
         self.workflow_step_list = QtWidgets.QListWidget()
         self.workflow_step_list.setObjectName("WorkflowStepList")
         self.workflow_step_list.setWordWrap(True)
         self.workflow_step_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        self.workflow_step_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.workflow_step_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.workflow_step_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.workflow_step_list.setSpacing(4)
         self.workflow_step_list.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Maximum,
         )
         self.workflow_step_list.currentRowChanged.connect(self.on_workflow_step_changed)
         hint_card = QtWidgets.QFrame()
@@ -345,13 +378,21 @@ class MainWindow(QtWidgets.QMainWindow):
         title_box = QtWidgets.QVBoxLayout()
         title = QtWidgets.QLabel("U-Pb reduction workspace")
         title.setObjectName("HeroTitle")
+        title.setWordWrap(True)
+        title.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         subtitle = QtWidgets.QLabel("Notebook-derived zircon workflow, editable selections, and reduction-stage previews guided by iolite-style review steps.")
         subtitle.setObjectName("SecondaryText")
         subtitle.setWordWrap(True)
+        subtitle.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        header_layout.addLayout(title_box)
-        header_layout.addStretch(1)
+        header_layout.addLayout(title_box, 2)
 
         summary_box = QtWidgets.QVBoxLayout()
         summary_box.setSpacing(4)
@@ -363,9 +404,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_name_label.setStyleSheet("font-size: 18px; font-weight: 700;")
         self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
         self.project_spots_label.setObjectName("SecondaryText")
+        self.project_spots_label.setWordWrap(True)
         self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
         self.project_engine_label.setObjectName("SecondaryText")
+        self.project_engine_label.setWordWrap(True)
         self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         summary_box.addWidget(workspace_label, 0, QtCore.Qt.AlignmentFlag.AlignRight)
         summary_box.addWidget(self.project_name_label)
@@ -380,17 +423,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.theme_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.theme_mode_group = QtWidgets.QButtonGroup(self)
         self.theme_mode_group.setExclusive(True)
-        for tmode, tlabel in [("system", "Auto"), ("light", "Light"), ("dark", "Dark")]:
+        for tmode, tlabel, tooltip in [
+            ("system", "A", "Follow system theme"),
+            ("light", "L", "Light theme"),
+            ("dark", "D", "Dark theme"),
+        ]:
             tbtn = QtWidgets.QToolButton()
             tbtn.setText(tlabel)
+            tbtn.setToolTip(tooltip)
             tbtn.setCheckable(True)
             tbtn.setProperty("modeToggle", True)
+            tbtn.setMinimumWidth(42)
             tbtn.clicked.connect(lambda _checked=False, selected_tmode=tmode: self.apply_theme_mode(selected_tmode, persist=True))
             self.theme_mode_group.addButton(tbtn)
             self.theme_mode_buttons[tmode] = tbtn
             theme_row.addWidget(tbtn)
         header_right.addLayout(theme_row)
-        header_layout.addLayout(header_right)
+        header_layout.addLayout(header_right, 1)
         layout.addWidget(header)
 
         plot_card = QtWidgets.QFrame()
@@ -398,7 +447,9 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(12, 12, 12, 12)
         plot_layout.setSpacing(12)
-        mode_row = QtWidgets.QHBoxLayout()
+        mode_bar = QtWidgets.QWidget()
+        mode_row = QtWidgets.QHBoxLayout(mode_bar)
+        mode_row.setContentsMargins(0, 0, 0, 0)
         mode_row.setSpacing(8)
         self.plot_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.plot_mode_group = QtWidgets.QButtonGroup(self)
@@ -431,7 +482,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ratio_combo.addItem(ratio_name, ratio_name)
         self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
         mode_row.addWidget(self.ratio_combo)
-        plot_layout.addLayout(mode_row)
+        mode_bar.setMinimumWidth(mode_row.sizeHint().width())
+        mode_scroll = QtWidgets.QScrollArea()
+        mode_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        mode_scroll.setWidgetResizable(False)
+        mode_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        mode_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        mode_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        mode_scroll.setFixedHeight(mode_bar.sizeHint().height() + 18)
+        mode_scroll.setWidget(mode_bar)
+        plot_layout.addWidget(mode_scroll)
 
         # ── Plot canvas ────────────────────────────────────────────────────
         # Page 0: trace + session overview
@@ -543,12 +606,19 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout.addWidget(self.sigma_toggle_button)
 
         # Wrap control bar in a centering row so buttons stay centred under the plots
-        cb_outer = QtWidgets.QHBoxLayout()
-        cb_outer.setContentsMargins(0, 0, 0, 0)
-        cb_outer.addStretch(1)
-        cb_outer.addWidget(control_bar)
-        cb_outer.addStretch(1)
-        plot_layout.addLayout(cb_outer)
+        control_bar.setMinimumWidth(control_bar.sizeHint().width())
+        control_scroll = QtWidgets.QScrollArea()
+        control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        control_scroll.setWidgetResizable(False)
+        control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        control_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        control_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        control_scroll.setFixedHeight(control_bar.sizeHint().height() + 18)
+        control_scroll.setWidget(control_bar)
+        plot_layout.addWidget(control_scroll)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         content_splitter.setChildrenCollapsible(False)
@@ -607,10 +677,21 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(content_splitter, 1)
         return widget
 
-    def _build_inspector(self) -> QtWidgets.QFrame:
+    def _build_inspector(self) -> QtWidgets.QWidget:
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setMinimumWidth(260)
+        scroll.setMaximumWidth(340)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+
         frame = QtWidgets.QFrame()
         frame.setObjectName("InspectorPanel")
-        frame.setFixedWidth(320)
         layout = QtWidgets.QVBoxLayout(frame)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -688,7 +769,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_color_button = QtWidgets.QPushButton("Set selected channel color")
         self.channel_color_button.clicked.connect(self.choose_channel_color)
         selector_layout.addWidget(self.channel_color_button)
-        selection_colors_row = QtWidgets.QHBoxLayout()
+        selection_colors_row = QtWidgets.QVBoxLayout()
         selection_colors_row.setSpacing(8)
         self.baseline_color_button = QtWidgets.QPushButton("Baseline color")
         self.baseline_color_button.clicked.connect(lambda: self.choose_region_color("baseline"))
@@ -750,7 +831,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_settings_note_label.setWordWrap(True)
         fit_layout.addWidget(self.fit_settings_note_label)
         layout.addWidget(fit_card, 0)
-        return frame
+        scroll.setWidget(frame)
+        return scroll
 
     def _populate_fit_method_combo(self, combo: StyledComboBox, methods: tuple[str, ...]) -> None:
         for method in methods:
@@ -1087,7 +1169,12 @@ class MainWindow(QtWidgets.QMainWindow):
         chosen_primary = primary_channel or self.primary_channel_combo.currentText() or self.workflow_preset.primary_channel or self.session.primary_channel or "238U"
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         try:
-            self.session = load_session(directory, primary_channel=chosen_primary, preset=self.workflow_preset)
+            self.session = load_session(
+                directory,
+                primary_channel=chosen_primary,
+                preset=self.workflow_preset,
+                selection_method=self.selection_method,
+            )
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Failed to load experiment", str(exc))
             self.append_log(f"Load failed for {directory}: {exc}")
@@ -1162,6 +1249,16 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    def _sync_selection_method_combo(self) -> None:
+        self._is_populating = True
+        try:
+            for index in range(self.selection_method_combo.count()):
+                if self.selection_method_combo.itemData(index) == self.selection_method:
+                    self.selection_method_combo.setCurrentIndex(index)
+                    break
+        finally:
+            self._is_populating = False
+
     def _populate_workflow_ui(self) -> None:
         desc = self.workflow_preset.description
         defaults_text = format_import_defaults(self.workflow_preset)
@@ -1172,6 +1269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "_workflow_info_btn"):
             self._workflow_info_btn.setToolTip(tooltip_html)
         self._sync_workflow_combo()
+        self._sync_selection_method_combo()
         self._set_default_ratio_for_preset()
         self._is_populating = True
         try:
@@ -1200,8 +1298,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 total_height += item.sizeHint().height()
         if count > 1:
             total_height += (count - 1) * self.workflow_step_list.spacing()
-        self.workflow_step_list.setMinimumHeight(total_height)
-        self.workflow_step_list.setMaximumHeight(total_height)
+        visible_height = min(total_height, 360)
+        self.workflow_step_list.setMinimumHeight(min(visible_height, 180))
+        self.workflow_step_list.setMaximumHeight(visible_height)
 
     def current_workflow_step_title(self) -> str | None:
         row = self.workflow_step_list.currentRow()
@@ -1234,6 +1333,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.reduction_cache.clear()
             self.append_log(f"Workflow preset changed to {self.workflow_preset.title}; reload to apply notebook defaults.")
             self.refresh_view()
+
+    def on_selection_method_changed(self, index: int) -> None:
+        if self._is_populating or index < 0:
+            return
+        self.selection_method = str(self.selection_method_combo.itemData(index) or "threshold")
+        if self.session.loaded:
+            self.session.import_settings["selection_method"] = self.selection_method
+            clear_reduction_cache(self.session)
+        label = selection_method_label(self.selection_method)
+        self.statusBar().showMessage(f"Baseline / peak auto-pick set to {label}.")
+        self.append_log(f"Auto-pick method set to {label}; re-pick spots to apply it.")
 
     def on_workflow_step_changed(self, row: int) -> None:
         if self._is_populating:
@@ -2302,7 +2412,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.pending_region_updates.clear()
         self.set_plot_mode("raw", refresh=False)
-        self.append_log(f"Re-applied notebook auto-pick for {spot_name}.")
+        method = str(self.session.import_settings.get("selection_method", "threshold"))
+        self.append_log(f"Re-applied {selection_method_label(method)} auto-pick for {spot_name}.")
         self.refresh_view()
 
     def apply_current_windows(self) -> None:
