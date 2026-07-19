@@ -17,7 +17,7 @@ class ReductionSession:
     workflow_title: str = "Zircon"
     selected_spot: Optional[str] = None
     visible_channels: list[str] = field(default_factory=list)
-    import_settings: dict[str, float | int | str] = field(default_factory=dict)
+    import_settings: dict[str, object] = field(default_factory=dict)
     plot_mode: str = "raw"
     downhole_fit_method: str = "interpolated"
     downhole_fit_options: dict[str, float | int | str] = field(

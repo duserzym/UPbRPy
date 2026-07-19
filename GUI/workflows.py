@@ -17,7 +17,7 @@ class WorkflowPreset:
     title: str
     description: str
     primary_channel: str
-    read_kwargs: dict[str, float | int | str]
+    read_kwargs: dict[str, object]
     internal_material: str
     supports_depth_profiles: bool
     special_note: str
@@ -41,12 +41,14 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         key="zircon",
         title="Zircon",
         description="Radiogenic zircon workflow with Si-based internal normalization, NIST glass concentration calibration, and full downhole plus session fractionation correction.",
-        primary_channel="238U",
+        primary_channel="29Si",
         read_kwargs={
+            "selection_method": "threshold",
             "baseline_sweep_n": 10,
             "peak_sweep_n": 20,
             "threshold": 1,
             "filter_percentile": 0.3,
+            "signal_duration_limit_seconds": 9.0,
         },
         internal_material="zircon",
         supports_depth_profiles=True,
@@ -63,7 +65,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             ),
             WorkflowStep(
                 title="Review baseline and plateau picks",
-                summary="Inspect auto-picked baseline and plateau windows on Pb or U channels and correct any bad intervals.",
+                summary="Inspect Si-driven baseline, plateau, and signal-edge picks and correct any bad intervals.",
                 hint="The notebook plots selected data right after import. A bad selection here propagates into every later result, so this is the first manual QC gate.",
             ),
             WorkflowStep(
@@ -110,6 +112,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         description="Apatite workflow with Ca-based internal normalization, longer plateau picks, and explicit attention to common or initial Pb behavior.",
         primary_channel="44Ca",
         read_kwargs={
+            "selection_method": "threshold",
             "baseline_sweep_n": 15,
             "peak_sweep_n": 55,
             "threshold": 0.2,
@@ -171,6 +174,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         description="Rutile workflow with Ti-based internal normalization, glass outlier filtering before concentration calibration, and optional Zr-in-rutile thermometry plus depth-profile review.",
         primary_channel="49Ti",
         read_kwargs={
+            "selection_method": "threshold",
             "baseline_sweep_n": 10,
             "peak_sweep_n": 20,
             "threshold": 0.1,
@@ -237,6 +241,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         description="Titanite workflow following the current notebook defaults, with Si-based import settings and a backend note that the current notebooks still reuse the rutile-style internal normalization branch.",
         primary_channel="29Si",
         read_kwargs={
+            "selection_method": "threshold",
             "baseline_sweep_n": 10,
             "peak_sweep_n": 20,
             "threshold": 0.3,
@@ -312,6 +317,7 @@ def format_import_defaults(preset: WorkflowPreset) -> str:
         return f"Primary {preset.primary_channel}; default read_experiment_data settings."
     ordered_pairs = [f"primary {preset.primary_channel}"]
     label_map = {
+        "selection_method": "auto-pick",
         "baseline_sweep_n": "baseline sweeps",
         "peak_sweep_n": "peak sweeps",
         "threshold": "threshold",

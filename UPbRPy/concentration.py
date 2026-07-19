@@ -139,8 +139,18 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
             color=this_channel_color, line_width=2,
         )
     if plot.legend:
-        plot.legend.location = 'top_left'
-        plot.legend.click_policy = 'hide'
+        legend = plot.legend[0]
+        legend.location = 'top_left'
+        legend.orientation = 'horizontal'
+        legend.ncols = 2
+        legend.click_policy = 'hide'
+        legend.label_text_font_size = '8pt'
+        legend.spacing = 4
+        legend.padding = 8
+        # ``legend_label`` initially places the generated legend over the
+        # plotting canvas. Move that same model into a dedicated side panel.
+        plot.center.remove(legend)
+        plot.add_layout(legend, 'right')
     return calibration_factors, plot
 
 def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'):

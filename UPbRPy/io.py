@@ -38,16 +38,19 @@ class SelectionResult:
     method: str
     signal_end: int
     washout_start: int | None = None
+    signal_start_index: int | None = None
     diagnostics: Mapping[str, float | int | str] = field(default_factory=dict)
 
     @property
     def signal_start(self) -> int:
         """Return the inclusive first detected sample-signal index."""
-        return self.detection_index
+        if self.signal_start_index is None:
+            return self.detection_index
+        return self.signal_start_index
 
     @property
     def post_baseline_start(self) -> int | None:
-        """Compatibility alias for the first detected washout sweep."""
+        """Compatibility alias for the first non-retained washout sweep."""
         return self.washout_start
 
     def as_tuple(self) -> tuple[int, int, int, int]:
@@ -174,13 +177,83 @@ def selection_windows(
     plateau_start = min(max(baseline_end, plateau_start), last_boundary)
     plateau_stop_boundary = last_boundary
     if signal_end is not None:
-        plateau_stop_boundary = min(plateau_stop_boundary, int(signal_end) + 1)
+        # Plateau end is an exclusive time boundary, whereas signal end is an
+        # inclusive measured sweep. Keeping the plateau boundary at or before
+        # the signal-end sweep guarantees the visible plateau range is wholly
+        # contained by the signal range.
+        plateau_stop_boundary = min(plateau_stop_boundary, int(signal_end))
     plateau_end = min(plateau_start + peak_sweep_n, plateau_stop_boundary)
     if plateau_end <= plateau_start:
         raise SelectionError(
             "The detected signal returns to baseline before a usable plateau window begins."
         )
     return plateau_start, plateau_end, baseline_start, baseline_end
+
+
+def robust_center_scale(values: np.ndarray) -> tuple[float, float]:
+    """Return a median center and a nonzero robust spread estimate."""
+    center = float(np.median(values))
+    median_absolute_deviation = float(np.median(np.abs(values - center)))
+    scale = 1.4826 * median_absolute_deviation
+    if not np.isfinite(scale) or scale == 0:
+        scale = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+    if not np.isfinite(scale) or scale == 0:
+        scale = max(abs(center) * 0.01, float(np.finfo(float).eps))
+    return center, scale
+
+
+def find_signal_start(
+    values: np.ndarray,
+    *,
+    detected_onset: int,
+    baseline_start: int,
+    baseline_end: int,
+    sigma_threshold: float = 3.0,
+    relative_increase: float = 0.05,
+) -> tuple[int, Mapping[str, float | int | str]]:
+    """Backtrack a confirmed onset to the first contiguous elevated sweep.
+
+    The primary selector still anchors the baseline and plateau windows. This
+    refinement only expands the depth-profile signal boundary across a subtle
+    leading ramp that remains continuously above the robust baseline band.
+    """
+    sigma_threshold = float(sigma_threshold)
+    relative_increase = float(relative_increase)
+    if sigma_threshold <= 0:
+        raise ValueError("signal_start_sigma_threshold must be positive.")
+    if relative_increase < 0:
+        raise ValueError("signal_start_relative_increase cannot be negative.")
+
+    baseline = values[int(baseline_start) : int(baseline_end)]
+    if baseline.size < 2:
+        raise SelectionError("At least two baseline sweeps are needed to refine signal start.")
+    baseline_center, baseline_scale = robust_center_scale(baseline)
+    start_threshold = baseline_center + max(
+        sigma_threshold * baseline_scale,
+        abs(baseline_center) * relative_increase,
+    )
+
+    signal_start = int(detected_onset)
+    earliest_candidate = int(baseline_end)
+    while (
+        signal_start > earliest_candidate
+        and values[signal_start - 1] > start_threshold
+    ):
+        signal_start -= 1
+
+    return signal_start, {
+        "raw_detection_index": int(detected_onset),
+        "signal_start_state": (
+            "leading_ramp_recovered"
+            if signal_start < int(detected_onset)
+            else "detected_onset_retained"
+        ),
+        "signal_start_threshold": start_threshold,
+        "signal_start_baseline_center": baseline_center,
+        "signal_start_baseline_scale": baseline_scale,
+        "signal_start_sigma_threshold": sigma_threshold,
+        "signal_start_relative_increase": relative_increase,
+    }
 
 
 def find_signal_end(
@@ -194,37 +267,59 @@ def find_signal_end(
     sigma_threshold: float = 3.0,
     consecutive: int = 2,
     fraction_threshold: float = 0.8,
+    baseline_sigma_threshold: float = 3.0,
+    baseline_consecutive: int = 3,
+    minimum_signal_fraction: float = 0.05,
 ) -> tuple[int, int | None, Mapping[str, float | int | str]]:
-    """Find the final stable signal sweep before the falling washout edge.
+    """Find the final statistically elevated sweep before washout.
 
     The preceding plateau sweeps supply a rolling robust linear signal trend.
     The first sustained run below that trend by
-    ``sigma_threshold`` robust residual standard deviations starts washout;
-    the preceding sweep is the inclusive signal end. This deliberately marks
-    the falling edge rather than waiting for the washout tail to reach the
-    instrumental baseline.
+    ``sigma_threshold`` robust residual standard deviations identifies the
+    falling edge. The pre-ablation baseline supplies an upper washout threshold
+    based on both ``baseline_sigma_threshold`` and ``minimum_signal_fraction``
+    of the baseline-to-plateau elevation. Within the falling tail, the last
+    sweep above the larger threshold is the inclusive signal end. A later run
+    of ``baseline_consecutive`` sweeps inside the two-sided baseline band
+    confirms stable washout recovery, but noisy baseline-like sweeps before
+    that run are not retained as sample signal.
     """
     sigma_threshold = float(sigma_threshold)
     consecutive = int(consecutive)
     fraction_threshold = float(fraction_threshold)
+    baseline_sigma_threshold = float(baseline_sigma_threshold)
+    baseline_consecutive = int(baseline_consecutive)
+    minimum_signal_fraction = float(minimum_signal_fraction)
     if sigma_threshold <= 0:
         raise ValueError("signal_end_sigma_threshold must be positive.")
     if consecutive < 1:
         raise ValueError("signal_end_consecutive must be positive.")
     if not 0 < fraction_threshold < 1:
         raise ValueError("signal_end_fraction_threshold must be between 0 and 1.")
+    if baseline_sigma_threshold <= 0:
+        raise ValueError("signal_end_baseline_sigma_threshold must be positive.")
+    if baseline_consecutive < 1:
+        raise ValueError("signal_end_baseline_consecutive must be positive.")
+    if not 0 <= minimum_signal_fraction < 1:
+        raise ValueError(
+            "signal_end_minimum_signal_fraction must be between 0 and 1."
+        )
 
     baseline = values[int(baseline_start) : int(baseline_end)]
     if baseline.size < 2:
         raise SelectionError("At least two baseline sweeps are needed to detect signal end.")
-    baseline_center = float(np.median(baseline))
-    median_absolute_deviation = float(np.median(np.abs(baseline - baseline_center)))
-    baseline_std = 1.4826 * median_absolute_deviation
-    if baseline_std == 0:
-        q25, q75 = np.percentile(baseline, [25, 75])
-        baseline_std = float((q75 - q25) / 1.349)
+    baseline_center, baseline_std = robust_center_scale(baseline)
+    washout_half_width = baseline_sigma_threshold * baseline_std
+    washout_lower = baseline_center - washout_half_width
+    washout_upper = baseline_center + washout_half_width
     plateau_start = int(plateau_start)
     plateau_end = int(plateau_end)
+    plateau_center = float(np.median(values[plateau_start:plateau_end]))
+    signal_elevation = max(0.0, plateau_center - baseline_center)
+    retention_threshold = max(
+        washout_upper,
+        baseline_center + minimum_signal_fraction * signal_elevation,
+    )
     rolling_window = min(8, plateau_end - plateau_start)
     if rolling_window < 3:
         raise SelectionError("At least three plateau sweeps are needed to detect signal end.")
@@ -234,6 +329,8 @@ def find_signal_end(
     signal_intercept = float(np.median(values[plateau_start:plateau_end]))
     residual_std = 0.0
     detection_scale = max(baseline_std, abs(signal_intercept) * 0.01)
+    falling_edge_start: int | None = None
+    falling_edge_threshold = float("nan")
     for index in range(search_start, search_stop):
         reference_indices = np.arange(index - rolling_window, index, dtype=float)
         reference_values = values[index - rolling_window : index]
@@ -264,25 +361,68 @@ def find_signal_end(
         candidate_values = values[index : index + consecutive]
         material_drop = np.min(candidate_values) < np.median(reference_values) * fraction_threshold
         if np.all(candidate_values < lower_threshold) and material_drop:
-            return index - 1, index, {
-                "signal_end_state": "falling_edge_detected",
-                "signal_end_threshold": float(lower_threshold[0]),
-                "signal_end_baseline_center": baseline_center,
-                "signal_end_baseline_std": baseline_std,
-                "signal_end_signal_slope": signal_slope,
-                "signal_end_signal_intercept": signal_intercept,
-                "signal_end_residual_std": residual_std,
-                "signal_end_detection_scale": detection_scale,
-                "signal_end_rolling_window": rolling_window,
-                "signal_end_sigma_threshold": sigma_threshold,
-                "signal_end_consecutive": consecutive,
-                "signal_end_fraction_threshold": fraction_threshold,
-            }
-    return values.size - 1, None, {
-        "signal_end_state": "incomplete",
-        "signal_end_threshold": float("nan"),
+            falling_edge_start = index
+            falling_edge_threshold = float(lower_threshold[0])
+            break
+
+    baseline_search_start = (
+        falling_edge_start if falling_edge_start is not None else search_start
+    )
+    baseline_search_stop = values.size - baseline_consecutive + 1
+    stable_baseline_start: int | None = None
+    for index in range(baseline_search_start, baseline_search_stop):
+        candidate_values = values[index : index + baseline_consecutive]
+        if np.all(
+            (candidate_values >= washout_lower)
+            & (candidate_values <= washout_upper)
+        ):
+            stable_baseline_start = index
+            break
+
+    if falling_edge_start is not None:
+        tail_stop = (
+            stable_baseline_start
+            if stable_baseline_start is not None
+            else values.size
+        )
+        tail = values[falling_edge_start:tail_stop]
+        elevated_tail = np.flatnonzero(tail > retention_threshold)
+        if elevated_tail.size:
+            signal_end = falling_edge_start + int(elevated_tail[-1])
+        else:
+            signal_end = falling_edge_start - 1
+        # First sweep not retained as statistically elevated sample signal.
+        # Stable baseline recovery may occur a few noisy sweeps later.
+        washout_start = signal_end + 1
+    else:
+        washout_start = None
+
+    if stable_baseline_start is not None:
+        signal_end_state = "washout_baseline_detected"
+    elif falling_edge_start is not None:
+        signal_end_state = "falling_edge_detected_without_baseline_recovery"
+    else:
+        signal_end = values.size - 1
+        signal_end_state = "incomplete"
+
+    return signal_end, washout_start, {
+        "signal_end_state": signal_end_state,
+        "signal_end_threshold": falling_edge_threshold,
         "signal_end_baseline_center": baseline_center,
         "signal_end_baseline_std": baseline_std,
+        "signal_end_washout_baseline_lower": washout_lower,
+        "signal_end_washout_baseline_upper": washout_upper,
+        "signal_end_washout_baseline_sigma_threshold": baseline_sigma_threshold,
+        "signal_end_washout_baseline_consecutive": baseline_consecutive,
+        "signal_end_washout_retention_threshold": retention_threshold,
+        "signal_end_plateau_center": plateau_center,
+        "signal_end_minimum_signal_fraction": minimum_signal_fraction,
+        "signal_end_stable_baseline_start": (
+            -1 if stable_baseline_start is None else stable_baseline_start
+        ),
+        "signal_end_falling_edge_start": (
+            -1 if falling_edge_start is None else falling_edge_start
+        ),
         "signal_end_signal_slope": signal_slope,
         "signal_end_signal_intercept": signal_intercept,
         "signal_end_residual_std": residual_std,
@@ -430,6 +570,7 @@ SELECTION_METHODS = available_selection_methods()
 def select_signal_regions(
     data,
     *,
+    time=None,
     method: str = "threshold",
     baseline_sweep_n: int = 10,
     peak_sweep_n: int = 20,
@@ -440,6 +581,12 @@ def select_signal_regions(
     signal_end_sigma_threshold: float = 3.0,
     signal_end_consecutive: int = 2,
     signal_end_fraction_threshold: float = 0.8,
+    signal_end_baseline_sigma_threshold: float = 3.0,
+    signal_end_baseline_consecutive: int = 3,
+    signal_end_minimum_signal_fraction: float = 0.05,
+    signal_duration_limit_seconds: float | None = None,
+    signal_start_sigma_threshold: float = 3.0,
+    signal_start_relative_increase: float = 0.05,
     signal_minimum_relative_increase: float = 0.1,
     **method_options,
 ) -> SelectionResult:
@@ -449,7 +596,10 @@ def select_signal_regions(
     ``rolling_sigma`` compares each candidate onset against the mean and sample
     standard deviation of the preceding ``rolling_window`` sweeps.
     ``excel_expanding_sigma`` reproduces the reference workbook's expanding
-    mean plus eight-standard-deviation onset detector.
+    mean plus eight-standard-deviation onset detector. When
+    ``signal_duration_limit_seconds`` is supplied, the freely selected signal
+    end is capped at the measured sweep nearest that many seconds after the
+    detected signal start. The default ``None`` leaves the end unconstrained.
     """
     values = coerce_trace(data)
     common = validate_common_options(
@@ -495,9 +645,17 @@ def select_signal_regions(
         raise SelectionError(
             "The detected onset does not produce a plateau distinguishable from baseline."
         )
+    signal_start, start_diagnostics = find_signal_start(
+        values,
+        detected_onset=detection_index,
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+        sigma_threshold=signal_start_sigma_threshold,
+        relative_increase=signal_start_relative_increase,
+    )
     signal_end, washout_start, end_diagnostics = find_signal_end(
         values,
-        signal_start=detection_index,
+        signal_start=signal_start,
         baseline_start=baseline_start,
         baseline_end=baseline_end,
         plateau_start=plateau_start,
@@ -505,7 +663,52 @@ def select_signal_regions(
         sigma_threshold=signal_end_sigma_threshold,
         consecutive=signal_end_consecutive,
         fraction_threshold=signal_end_fraction_threshold,
+        baseline_sigma_threshold=signal_end_baseline_sigma_threshold,
+        baseline_consecutive=signal_end_baseline_consecutive,
+        minimum_signal_fraction=signal_end_minimum_signal_fraction,
     )
+    unrestricted_signal_end = int(signal_end)
+    duration_limit_applied = False
+    duration_limit_index = -1
+    if signal_duration_limit_seconds is not None:
+        duration_limit = float(signal_duration_limit_seconds)
+        if not np.isfinite(duration_limit) or duration_limit <= 0:
+            raise ValueError("signal_duration_limit_seconds must be positive or None.")
+        if time is None:
+            raise ValueError(
+                "time values are required when signal_duration_limit_seconds is set."
+            )
+        times = np.asarray(time, dtype=float)
+        if times.ndim != 1 or times.size != values.size:
+            raise ValueError("time must be one-dimensional and match the signal data.")
+        if not np.all(np.isfinite(times)):
+            raise ValueError("time must contain only finite values.")
+        if np.any(np.diff(times) <= 0):
+            raise ValueError("time must be strictly increasing within a spot.")
+        target_time = float(times[signal_start] + duration_limit)
+        duration_limit_index = int(np.argmin(np.abs(times - target_time)))
+        duration_limit_index = max(int(signal_start), duration_limit_index)
+        if signal_end > duration_limit_index:
+            signal_end = duration_limit_index
+            washout_start = min(signal_end + 1, values.size - 1)
+            duration_limit_applied = True
+        end_diagnostics = {
+            **end_diagnostics,
+            "signal_end_unrestricted_index": unrestricted_signal_end,
+            "signal_end_unrestricted_time": float(times[unrestricted_signal_end]),
+            "signal_duration_limit_seconds": duration_limit,
+            "signal_duration_limit_index": duration_limit_index,
+            "signal_duration_limit_time": float(times[duration_limit_index]),
+            "signal_duration_limit_applied": int(duration_limit_applied),
+        }
+    else:
+        end_diagnostics = {
+            **end_diagnostics,
+            "signal_end_unrestricted_index": unrestricted_signal_end,
+            "signal_duration_limit_seconds": "none",
+            "signal_duration_limit_index": -1,
+            "signal_duration_limit_applied": 0,
+        }
     windows = selection_windows(
         detection_index,
         size=values.size,
@@ -521,7 +724,8 @@ def select_signal_regions(
         method=canonical,
         signal_end=signal_end,
         washout_start=washout_start,
-        diagnostics={**diagnostics, **end_diagnostics},
+        signal_start_index=signal_start,
+        diagnostics={**diagnostics, **start_diagnostics, **end_diagnostics},
     )
 
 
@@ -551,7 +755,20 @@ def select_baseline_peak(
     ).as_tuple()
 
 
-def read_experiment_data(directory, primary_channel='29Si', baseline_sweep_n =10, peak_sweep_n = 20, threshold=0.1, filter_percentile=70, baseline_offset=2, plateau_offset=2, sep='_', selection_method='threshold', selection_options=None):
+def read_experiment_data(
+    directory,
+    primary_channel='29Si',
+    baseline_sweep_n=10,
+    peak_sweep_n=20,
+    threshold=0.1,
+    filter_percentile=70,
+    baseline_offset=2,
+    plateau_offset=2,
+    sep='_',
+    selection_method='threshold',
+    selection_options=None,
+    signal_duration_limit_seconds=None,
+):
     '''
     function for extracting spot names from files exported from Thermo iCap
 
@@ -563,6 +780,9 @@ def read_experiment_data(directory, primary_channel='29Si', baseline_sweep_n =10
     directory : str
         path to the folder containing the files
         we assume that the files in the folders are in .csv format
+    signal_duration_limit_seconds : float or None
+        Optional maximum elapsed time from detected signal start to inclusive
+        signal end. ``None`` preserves the unrestricted automatic endpoint.
 
     Returns
     -------
@@ -646,6 +866,7 @@ def read_experiment_data(directory, primary_channel='29Si', baseline_sweep_n =10
         plateau_offset,
         selection_method=selection_method,
         selection_options=selection_options,
+        signal_duration_limit_seconds=signal_duration_limit_seconds,
     )
 
     return experiment, element_channels, total_data
@@ -680,7 +901,8 @@ def auto_select_baseline_peak(experiment,
                               baseline_offset=2,
                               plateau_offset=2,
                               selection_method='threshold',
-                              selection_options: Mapping[str, object] | None = None):
+                              selection_options: Mapping[str, object] | None = None,
+                              signal_duration_limit_seconds: float | None = None):
     '''
     specific function for selecting the baseline and peak regions in the data given a parsed experiment dataframe
 
@@ -702,6 +924,11 @@ def auto_select_baseline_peak(experiment,
     '''
     spot_names = total_data['spot_name'].unique()
     method_options = dict(selection_options or {})
+    option_duration_limit = method_options.pop(
+        'signal_duration_limit_seconds', None
+    )
+    if signal_duration_limit_seconds is None:
+        signal_duration_limit_seconds = option_duration_limit
 
     for spot_name in spot_names:
         spot_data = total_data[total_data['spot_name'] == spot_name]
@@ -714,6 +941,7 @@ def auto_select_baseline_peak(experiment,
         try:
             selection = select_signal_regions(
                 values,
+                time=spot_data['Time'].to_numpy(dtype=float),
                 method=selection_method,
                 baseline_sweep_n=baseline_sweep_n,
                 peak_sweep_n=peak_sweep_n,
@@ -721,6 +949,7 @@ def auto_select_baseline_peak(experiment,
                 filter_percentile=filter_percentile,
                 baseline_offset=baseline_offset,
                 plateau_offset=plateau_offset,
+                signal_duration_limit_seconds=signal_duration_limit_seconds,
                 **method_options,
             )
         except SelectionError as error:
@@ -738,6 +967,15 @@ def auto_select_baseline_peak(experiment,
         experiment.loc[row_mask, 'selection_channel'] = '29Si' if 'NIST' in spot_name else primary_channel
         experiment.loc[row_mask, 'selection_detection_index'] = selection.detection_index
         experiment.loc[row_mask, 'selection_signal_end_index'] = selection.signal_end
+        experiment.loc[row_mask, 'selection_unrestricted_signal_end_index'] = (
+            selection.diagnostics['signal_end_unrestricted_index']
+        )
+        experiment.loc[row_mask, 'selection_signal_duration_limit_seconds'] = (
+            signal_duration_limit_seconds
+        )
+        experiment.loc[row_mask, 'selection_signal_duration_limit_applied'] = (
+            selection.diagnostics['signal_duration_limit_applied']
+        )
         experiment.loc[row_mask, 'selection_washout_start_index'] = selection.washout_start
         experiment.loc[row_mask, 'selection_post_baseline_start_index'] = selection.washout_start
         if 'sigma_threshold' in selection.diagnostics:
@@ -797,6 +1035,8 @@ __all__ = [
     'coerce_trace',
     'validate_common_options',
     'selection_windows',
+    'robust_center_scale',
+    'find_signal_start',
     'find_signal_end',
     'threshold_onset',
     'rolling_sigma_onset',

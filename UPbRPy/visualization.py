@@ -88,13 +88,67 @@ def initialize_bokeh():
         pass
 
 
+def inline_correction_plots(results: Mapping[str, Mapping[str, object]]):
+    """Return correction results whose Bokeh plots display inline via Panel.
+
+    The result and per-ratio dictionaries are shallow-copied; numerical fits,
+    interpolation callables, and metadata retain their original objects.
+    """
+    try:
+        import panel as pn
+
+        __import__("jupyter_bokeh.widgets")
+    except ImportError as error:
+        raise ImportError(
+            "Inline correction plots require Panel and jupyter_bokeh. "
+            "Install with `pip install 'UPbRPy[notebook]'`."
+        ) from error
+    if not isinstance(results, Mapping):
+        raise TypeError("correction results must be a mapping keyed by isotope ratio.")
+
+    inline_results = {}
+    for ratio_name, ratio_result in results.items():
+        if not isinstance(ratio_result, Mapping):
+            raise TypeError(f"Correction result {ratio_name!r} must be a mapping.")
+        inline_result = dict(ratio_result)
+        correction_plot = inline_result.get("plot")
+        if correction_plot is not None and not isinstance(
+            correction_plot, pn.viewable.Viewable
+        ):
+            inline_result["plot"] = pn.pane.Bokeh(
+                correction_plot,
+                sizing_mode="stretch_width",
+            )
+        inline_results[str(ratio_name)] = inline_result
+    return inline_results
+
+
+def inline_plot_pair(result):
+    """Wrap the plot in a ``(calculation, plot)`` result for inline display."""
+    try:
+        import panel as pn
+
+        __import__("jupyter_bokeh.widgets")
+    except ImportError as error:
+        raise ImportError(
+            "Inline plots require Panel and jupyter_bokeh. "
+            "Install with `pip install 'UPbRPy[notebook]'`."
+        ) from error
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise TypeError("inline plot results must be a two-item tuple.")
+    calculation, result_plot = result
+    if result_plot is not None and not isinstance(result_plot, pn.viewable.Viewable):
+        result_plot = pn.pane.Bokeh(result_plot, sizing_mode="stretch_width")
+    return calculation, result_plot
+
+
 def initialize_notebook(*, namespace=None, comms: str = "vscode"):
     """Enable inline UPbRPy plots in a VS Code notebook with one setup call.
 
     Call this after importing UPbRPy in a notebook. It replaces the notebook's
-    ``plot_selected_data``, ``plot_series``, ``plot_time_series``, and
-    ``concordia`` names with Panel-backed display wrappers while retaining the
-    same call signatures.
+    plotting helpers and fractionation-correction builders with Panel-backed
+    display wrappers while retaining their existing call signatures and
+    result-dictionary structure.
     """
     try:
         import panel as pn
@@ -111,6 +165,13 @@ def initialize_notebook(*, namespace=None, comms: str = "vscode"):
             raise RuntimeError("Pass the notebook namespace explicitly.")
         namespace = caller.f_globals
 
+    from .fractionation import (
+        calc_DH_fractionations_rad,
+        calc_DH_fractionations_TW,
+        calc_session_fractionation_rad,
+        calc_session_fractionation_TW,
+    )
+    from .concentration import calc_concentration_calibration_factor
     from .isoplot import concordia
 
     pn.extension(comms=comms)
@@ -125,12 +186,41 @@ def initialize_notebook(*, namespace=None, comms: str = "vscode"):
 
         return display_plot
 
+    def wrap_correction_results(function):
+        @wraps(function)
+        def display_results(*args, **kwargs):
+            return inline_correction_plots(function(*args, **kwargs))
+
+        return display_results
+
+    def wrap_plot_pair(function):
+        @wraps(function)
+        def display_result(*args, **kwargs):
+            return inline_plot_pair(function(*args, **kwargs))
+
+        return display_result
+
     namespace.update(
         {
             "plot_selected_data": wrap_plot(plot_selected_data),
             "plot_series": wrap_plot(plot_series),
             "plot_time_series": wrap_plot(plot_time_series),
             "concordia": wrap_plot(concordia),
+            "calc_concentration_calibration_factor": wrap_plot_pair(
+                calc_concentration_calibration_factor
+            ),
+            "calc_DH_fractionations_rad": wrap_correction_results(
+                calc_DH_fractionations_rad
+            ),
+            "calc_DH_fractionations_TW": wrap_correction_results(
+                calc_DH_fractionations_TW
+            ),
+            "calc_session_fractionation_rad": wrap_correction_results(
+                calc_session_fractionation_rad
+            ),
+            "calc_session_fractionation_TW": wrap_correction_results(
+                calc_session_fractionation_TW
+            ),
         }
     )
 
@@ -145,6 +235,7 @@ def selection_editor(
     width: int = 1080,
     height: int = 430,
     comms: str = "vscode",
+    signal_duration_limit_seconds: float | None = None,
     on_apply: Callable[
         [pd.DataFrame, str, Mapping[str, tuple[float, float]]], object
     ] | None = None,
@@ -212,6 +303,8 @@ def selection_editor(
     plateau_filter = IndexFilter(indices=[])
     plateau_inlier_filter = IndexFilter(indices=[])
     plateau_outlier_filter = IndexFilter(indices=[])
+    plateau_inlier_line_source = ColumnDataSource(data={"xs": [], "ys": []})
+    plateau_outlier_line_source = ColumnDataSource(data={"xs": [], "ys": []})
     signal_start_filter = IndexFilter(indices=[])
     signal_end_filter = IndexFilter(indices=[])
     plot = figure(
@@ -284,16 +377,24 @@ def selection_editor(
         line_alpha=0.95,
         legend_label="Baseline points",
     )
-    plot.line(
-        "Time",
-        "Signal",
-        source=source,
-        view=CDSView(filter=plateau_filter),
+    plot.multi_line(
+        "xs",
+        "ys",
+        source=plateau_inlier_line_source,
+        color="#2b74a8",
+        line_width=2,
+        line_alpha=0.9,
+        legend_label="Plateau included trace",
+    )
+    plot.multi_line(
+        "xs",
+        "ys",
+        source=plateau_outlier_line_source,
         color="#2b74a8",
         line_width=2,
         line_dash="dashed",
         line_alpha=0.9,
-        legend_label="Plateau trace",
+        legend_label="Plateau excluded connection",
     )
     plot.scatter(
         "Time",
@@ -462,6 +563,13 @@ selection_filter.change.emit();
         value=(0, 1),
         step=0.01,
     )
+    signal_slider = pn.widgets.RangeSlider(
+        name="Signal start/end (s)",
+        start=0,
+        end=1,
+        value=(0, 1),
+        step=0.01,
+    )
     selection_module_selector = pn.widgets.Select(
         name="Selection module",
         options=selection_module_options,
@@ -472,6 +580,13 @@ selection_filter.change.emit();
         value=8.0,
         start=0.1,
         step=0.5,
+    )
+    signal_duration_input = pn.widgets.FloatInput(
+        name="Max signal duration (s)",
+        value=signal_duration_limit_seconds,
+        start=0.1,
+        step=0.5,
+        placeholder="Automatic",
     )
     plateau_filter_selector = pn.widgets.Select(
         name="Plateau filter",
@@ -496,9 +611,14 @@ selection_filter.change.emit();
     instructions = pn.pane.Markdown(
         "#### Baseline and plateau windows\n"
         "Drag a colored band edge or set exact limits below. The green diamond and "
-        "orange square mark signal start and end. Filled plateau symbols are included; "
-        "hollow symbols are filtered out. The red and blue bars show means, and their "
-        "shaded rectangles show mean ± 2σ. Apply commits the selected spot.",
+        "orange square mark signal start and end; edit them with the signal range slider, "
+        "which snaps to measured sweeps and always contains the plateau. Filled plateau "
+        "symbols are included; hollow "
+        "symbols are filtered out, with dashed connections to adjacent points. The red "
+        "and blue bars show means, and their "
+        "shaded rectangles show mean ± 2σ. Max signal duration optionally caps the "
+        "auto-picked end relative to signal start; leave it blank for the unrestricted "
+        "algorithm. Apply commits the selected spot.",
         sizing_mode="stretch_width",
     )
 
@@ -599,11 +719,16 @@ selection_filter.change.emit();
                 "sigma_threshold": float(onset_sigma_input.value),
                 "consecutive": 2,
             }
+        if signal_duration_input.value is not None:
+            options["signal_duration_limit_seconds"] = float(
+                signal_duration_input.value
+            )
         return settings, options
 
-    def saved_signal_indices(spot_name: str, frame: pd.DataFrame) -> tuple[int | None, int | None]:
-        if spot_name in pending_signal_indices:
-            return pending_signal_indices[spot_name]
+    def persisted_signal_indices(
+        spot_name: str,
+        frame: pd.DataFrame,
+    ) -> tuple[int | None, int | None]:
         row = experiment.loc[experiment["spot_names"].astype(str) == spot_name].iloc[0]
         times = pd.to_numeric(frame["Time"], errors="coerce").to_numpy(dtype=float)
         if {"signal_start_times", "signal_end_times"}.issubset(experiment.columns):
@@ -617,6 +742,89 @@ selection_filter.change.emit();
                     int(np.nanargmin(np.abs(times - saved_times[1]))),
                 )
         return None, None
+
+    def saved_signal_indices(
+        spot_name: str,
+        frame: pd.DataFrame,
+    ) -> tuple[int | None, int | None]:
+        if spot_name in pending_signal_indices:
+            return pending_signal_indices[spot_name]
+        return persisted_signal_indices(spot_name, frame)
+
+    def nearest_signal_indices(
+        bounds: tuple[float, float],
+    ) -> tuple[int, int]:
+        times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
+        finite_indices = np.flatnonzero(np.isfinite(times))
+        if finite_indices.size == 0:
+            raise ValueError("The active spot has no finite measurement times.")
+        indices = [
+            int(finite_indices[np.argmin(np.abs(times[finite_indices] - float(bound)))])
+            for bound in bounds
+        ]
+        return min(indices), max(indices)
+
+    def included_window_indices(
+        bounds: tuple[float, float],
+    ) -> tuple[int, int]:
+        """Return first/last sweep in a half-open selection window."""
+        times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
+        included = np.flatnonzero(
+            np.isfinite(times) & (times >= bounds[0]) & (times < bounds[1])
+        )
+        if included.size:
+            return int(included[0]), int(included[-1])
+        return nearest_signal_indices(bounds)
+
+    def signal_times(
+        indices: tuple[int | None, int | None],
+    ) -> tuple[float, float] | None:
+        if any(index is None for index in indices):
+            return None
+        times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
+        start_index, end_index = (int(index) for index in indices)
+        if not (0 <= start_index <= end_index < len(times)):
+            return None
+        return float(times[start_index]), float(times[end_index])
+
+    def constrain_signal_to_plateau(
+        indices: tuple[int, int],
+    ) -> tuple[int, int]:
+        plateau_bounds = configured_window_values()["plateau"]
+        plateau_start_index, plateau_end_index = included_window_indices(
+            plateau_bounds
+        )
+        return (
+            min(indices[0], plateau_start_index),
+            max(indices[1], plateau_end_index),
+        )
+
+    def store_signal_indices(indices: tuple[int, int]) -> None:
+        nonlocal current_signal_indices
+        current_signal_indices = indices
+        persisted = persisted_signal_indices(current_spot, current_frame)
+        if indices == persisted:
+            pending_signal_indices.pop(current_spot, None)
+        else:
+            pending_signal_indices[current_spot] = indices
+
+    def expand_signal_to_plateau() -> None:
+        nonlocal syncing, selection_feedback
+        if any(index is None for index in current_signal_indices):
+            return
+        indices = tuple(int(index) for index in current_signal_indices)
+        constrained = constrain_signal_to_plateau(indices)
+        if constrained == indices:
+            return
+        store_signal_indices(constrained)
+        constrained_times = signal_times(constrained)
+        if constrained_times is not None:
+            syncing = True
+            try:
+                signal_slider.value = constrained_times
+            finally:
+                syncing = False
+        selection_feedback = "Signal range expanded to contain the plateau window"
 
     def update_statistics_source(
         stats_source: ColumnDataSource,
@@ -670,6 +878,25 @@ selection_filter.change.emit();
             local_mask = excel_plateau_inlier_mask(times[local], values[local])
             plateau_inliers = local[local_mask].tolist()
             plateau_outliers = local[~local_mask].tolist()
+
+        inlier_xs: list[list[float]] = []
+        inlier_ys: list[list[float]] = []
+        outlier_xs: list[list[float]] = []
+        outlier_ys: list[list[float]] = []
+        outlier_set = set(plateau_outliers)
+        for left, right in zip(plateau_indices, plateau_indices[1:]):
+            if right != left + 1:
+                continue
+            segment_x = [float(times[left]), float(times[right])]
+            segment_y = [float(values[left]), float(values[right])]
+            if left in outlier_set or right in outlier_set:
+                outlier_xs.append(segment_x)
+                outlier_ys.append(segment_y)
+            else:
+                inlier_xs.append(segment_x)
+                inlier_ys.append(segment_y)
+        plateau_inlier_line_source.data = {"xs": inlier_xs, "ys": inlier_ys}
+        plateau_outlier_line_source.data = {"xs": outlier_xs, "ys": outlier_ys}
 
         baseline_filter.indices = baseline_indices
         plateau_filter.indices = plateau_indices
@@ -736,9 +963,21 @@ selection_filter.change.emit();
         if all(index is not None for index in current_signal_indices):
             times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
             start_index, end_index = (int(index) for index in current_signal_indices)
+            plateau_start_index, plateau_end_index = included_window_indices(
+                windows["plateau"]
+            )
+            contains_plateau = (
+                start_index <= plateau_start_index and end_index >= plateau_end_index
+            )
+            valid &= contains_plateau
+            if not contains_plateau:
+                messages.append("signal range must contain plateau")
             messages.append(
                 f"signal: {times[start_index]:.3f}–{times[end_index]:.3f} s"
             )
+        else:
+            valid = False
+            messages.append("set signal start/end")
         status.object = (
             f"**{state}**: {current_spot} ({spot_position}/{len(spot_names)}) | "
             f"{channel} | " + " | ".join(messages)
@@ -779,7 +1018,30 @@ selection_filter.change.emit();
                 plateau_band.left, plateau_band.right = bounds
         finally:
             syncing = False
+        if region == "plateau":
+            expand_signal_to_plateau()
         record_pending_windows()
+
+    def update_signal_from_slider(values: tuple[float, float]) -> None:
+        nonlocal current_signal_indices, syncing, selection_feedback
+        if syncing or current_frame.empty:
+            return
+        selection_feedback = None
+        requested_indices = nearest_signal_indices(values)
+        indices = constrain_signal_to_plateau(requested_indices)
+        snapped_times = signal_times(indices)
+        if snapped_times is None:
+            return
+        store_signal_indices(indices)
+        if indices != requested_indices:
+            selection_feedback = "Signal range constrained to contain the plateau window"
+        syncing = True
+        try:
+            signal_slider.value = snapped_times
+        finally:
+            syncing = False
+        update_selected_points(configured_window_values())
+        update_status()
 
     def update_from_band(region: str) -> None:
         nonlocal syncing, selection_feedback
@@ -803,6 +1065,8 @@ selection_filter.change.emit();
                 plateau_slider.value = bounds
         finally:
             syncing = False
+        if region == "plateau":
+            expand_signal_to_plateau()
         record_pending_windows()
 
     def refresh_spot(*_events: object) -> None:
@@ -845,6 +1109,27 @@ selection_filter.change.emit();
                 slider.start = start_time
                 slider.end = end_time
                 slider.step = step
+            if all(index is not None for index in current_signal_indices):
+                requested_signal_indices = tuple(
+                    int(index) for index in current_signal_indices
+                )
+                constrained_signal_indices = constrain_signal_to_plateau(
+                    requested_signal_indices
+                )
+                if constrained_signal_indices != requested_signal_indices:
+                    store_signal_indices(constrained_signal_indices)
+                    selection_feedback = (
+                        "Signal range expanded to contain the plateau window"
+                    )
+            current_signal_times = signal_times(current_signal_indices)
+            if current_signal_times is None:
+                current_signal_times = (start_time, end_time)
+            signal_slider.start = min(float(signal_slider.start), start_time)
+            signal_slider.end = max(float(signal_slider.end), end_time)
+            signal_slider.value = current_signal_times
+            signal_slider.start = start_time
+            signal_slider.end = end_time
+            signal_slider.step = step
             set_band_bounds(windows)
             source.data = {"Time": times.tolist(), "Signal": values.tolist()}
             padding = max(step, (end_time - start_time) * 0.04)
@@ -884,6 +1169,7 @@ selection_filter.change.emit();
         try:
             selection = select_signal_regions(
                 values,
+                time=times,
                 method=str(settings["method"]),
                 **method_options,
             )
@@ -910,6 +1196,11 @@ selection_filter.change.emit();
             else:
                 plateau_slider.value = bounds
                 plateau_band.left, plateau_band.right = bounds
+            selected_signal_times = (
+                float(times[selection.signal_start]),
+                float(times[selection.signal_end]),
+            )
+            signal_slider.value = selected_signal_times
         finally:
             syncing = False
         current_signal_indices = (selection.signal_start, selection.signal_end)
@@ -938,6 +1229,9 @@ selection_filter.change.emit();
             experiment.loc[row_mask, "signal_end_times"] = times[int(end_index)]
             experiment.loc[row_mask, "selection_detection_index"] = int(start_index)
             experiment.loc[row_mask, "selection_signal_end_index"] = int(end_index)
+            experiment.loc[row_mask, "selection_signal_duration_limit_seconds"] = (
+                signal_duration_input.value
+            )
             experiment.loc[row_mask, "selection_method"] = str(
                 selection_module_settings[str(selection_module_selector.value)]["method"]
             )
@@ -981,12 +1275,16 @@ selection_filter.change.emit();
     channel_selector.param.watch(refresh_channel, "value")
     selection_module_selector.param.watch(update_selection_controls, "value")
     onset_sigma_input.param.watch(update_selection_controls, "value")
+    signal_duration_input.param.watch(update_selection_controls, "value")
     plateau_filter_selector.param.watch(refresh_plateau_filter, "value")
     baseline_slider.param.watch(
         lambda event: update_from_sliders("baseline", tuple(event.new)), "value"
     )
     plateau_slider.param.watch(
         lambda event: update_from_sliders("plateau", tuple(event.new)), "value"
+    )
+    signal_slider.param.watch(
+        lambda event: update_signal_from_slider(tuple(event.new)), "value"
     )
     for region, band in (("baseline", baseline_band), ("plateau", plateau_band)):
         band.on_change(
@@ -1010,8 +1308,10 @@ selection_filter.change.emit();
         channel_selector,
         baseline_slider,
         plateau_slider,
+        signal_slider,
         selection_module_selector,
         onset_sigma_input,
+        signal_duration_input,
         plateau_filter_selector,
         pn.Row(auto_baseline_button, auto_plateau_button),
         pn.Row(apply_button, reset_button),
@@ -1126,25 +1426,86 @@ def plot_series(
     return plot
 
 def plot_selected_data(experiment, total_data, channel, color='black', line_width=0.5, width=1200, height=400):
-    """Plot one raw channel with the selected baseline and plateau rows."""
+    """Plot one raw channel and highlight every complete saved selection.
+
+    Spots with missing or nonnumeric selection bounds remain visible in the
+    raw trace but are omitted from the baseline and plateau overlays. This
+    lets users inspect and repair failed auto-picks in mixed-quality sessions.
+    """
+    required_experiment_columns = {
+        "spot_names",
+        "baseline_start_times",
+        "baseline_end_times",
+        "plateau_start_times",
+        "plateau_end_times",
+    }
+    missing_experiment_columns = required_experiment_columns - set(experiment)
+    if missing_experiment_columns:
+        missing = ", ".join(sorted(missing_experiment_columns))
+        raise KeyError(f"experiment is missing selection columns: {missing}")
+    required_data_columns = {"spot_name", "Time", channel}
+    missing_data_columns = required_data_columns - set(total_data)
+    if missing_data_columns:
+        missing = ", ".join(sorted(missing_data_columns))
+        raise KeyError(f"total_data is missing plotting columns: {missing}")
+
     windows = experiment.set_index("spot_names")
     spot_windows = windows.reindex(total_data["spot_name"])
-    time = total_data["Time"].to_numpy()
+    time = pd.to_numeric(total_data["Time"], errors="coerce").to_numpy(dtype=float)
+
+    def finite_bounds(start_column: str, end_column: str):
+        start = pd.to_numeric(
+            spot_windows[start_column], errors="coerce"
+        ).to_numpy(dtype=float)
+        end = pd.to_numeric(
+            spot_windows[end_column], errors="coerce"
+        ).to_numpy(dtype=float)
+        return start, end
+
+    baseline_start, baseline_end = finite_bounds(
+        "baseline_start_times", "baseline_end_times"
+    )
+    plateau_start, plateau_end = finite_bounds(
+        "plateau_start_times", "plateau_end_times"
+    )
     baseline_mask = (
-        (time >= spot_windows["baseline_start_times"].to_numpy())
-        & (time < spot_windows["baseline_end_times"].to_numpy())
+        np.isfinite(time)
+        & np.isfinite(baseline_start)
+        & np.isfinite(baseline_end)
+        & (baseline_end > baseline_start)
+        & (time >= baseline_start)
+        & (time < baseline_end)
     )
     plateau_mask = (
-        (time >= spot_windows["plateau_start_times"].to_numpy())
-        & (time < spot_windows["plateau_end_times"].to_numpy())
+        np.isfinite(time)
+        & np.isfinite(plateau_start)
+        & np.isfinite(plateau_end)
+        & (plateau_end > plateau_start)
+        & (time >= plateau_start)
+        & (time < plateau_end)
     )
+    selection_columns = [
+        "baseline_start_times",
+        "baseline_end_times",
+        "plateau_start_times",
+        "plateau_end_times",
+    ]
+    numeric_windows = experiment[selection_columns].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    incomplete_spots = int(numeric_windows.isna().any(axis=1).sum())
+    title = "Original data with selected baseline and plateau"
+    if incomplete_spots:
+        noun = "spot" if incomplete_spots == 1 else "spots"
+        title += f" ({incomplete_spots} {noun} missing selections)"
+
     return plot_series(
         [
             {"data": total_data, "y": channel, "color": color, "line_width": line_width, "label": channel},
             {"data": total_data.loc[baseline_mask], "y": channel, "color": "#c43d3d", "kind": "scatter", "size": 4, "label": "baseline"},
             {"data": total_data.loc[plateau_mask], "y": channel, "color": "#2b74a8", "kind": "scatter", "size": 4, "label": "plateau"},
         ],
-        title="Original data with selected baseline and plateau",
+        title=title,
         xlabel="Time (s)",
         ylabel="cps",
         width=width,
@@ -1206,6 +1567,8 @@ def plot_time_series(dataframe, y=None, x='Time', color='black', kind='line', li
 __all__ = [
     'add_time_series',
     'excel_plateau_inlier_mask',
+    'inline_correction_plots',
+    'inline_plot_pair',
     'initialize_bokeh',
     'initialize_holoviews',
     'initialize_notebook',

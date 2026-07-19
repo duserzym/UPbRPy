@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,13 +14,15 @@ from scipy.optimize import curve_fit
 from GUI.state import ReductionSession
 from GUI.workflows import WorkflowPreset, format_import_defaults, infer_workflow_preset
 from UPbRPy import (
+    align_downhole_traces,
     apply_DH_correction,
     calc_concentration,
     calc_concentration_calibration_factor,
     calc_raw_ratios,
     internal_normalization,
     read_experiment_data,
-    select_baseline_peak,
+    relative_time_by_spot,
+    select_signal_regions,
     standard_archive,
     subtract_baseline,
 )
@@ -89,10 +92,12 @@ def _running_mean(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def _session_fit_weights(fractions: np.ndarray, stds: np.ndarray) -> np.ndarray:
-    safe_stds = np.where(np.isfinite(stds) & (stds > 0), stds, np.nanmedian(stds[np.isfinite(stds) & (stds > 0)]) if np.any(np.isfinite(stds) & (stds > 0)) else 1.0)
-    relative = np.where(safe_stds > 0, fractions / safe_stds, 1.0)
-    weights = np.where(np.isfinite(relative) & (relative != 0), 1 / relative**2, 1.0)
-    return weights.astype(float)
+    del fractions  # retained in the signature for compatibility with existing callers
+    valid = np.isfinite(stds) & (stds > 0)
+    fallback = np.nanmedian(stds[valid]) if np.any(valid) else 1.0
+    safe_stds = np.where(valid, stds, fallback)
+    # np.polyfit minimizes sum((w * residual)**2), so w = 1/sigma.
+    return (1 / safe_stds).astype(float)
 
 
 def _evaluate_fit_model(model: dict[str, Any], x_values: np.ndarray | pd.Series | list[float]) -> np.ndarray:
@@ -203,7 +208,7 @@ def _build_session_primary_standard_summary(
         if spot_fractionations.size < 2:
             continue
         spot_mean_times.append(float(this_spot["Time"].mean()))
-        spot_mean_fracs.append(float(np.mean(spot_fractionations)))
+        spot_mean_fracs.append(float(known_ratio / np.mean(r_vals[valid])))
         spot_frac_errs.append(float(np.std(spot_fractionations)))
         spot_names_out.append(str(spot_name))
 
@@ -234,7 +239,7 @@ def _build_downhole_correction_results(
         spot_ratios: list[np.ndarray] = []
         for spot_name in primary_standard_ratios["spot_name"].unique():
             this_spot = primary_standard_ratios[primary_standard_ratios["spot_name"] == spot_name].copy()
-            rel_t = (this_spot["Time"] - this_spot["Time"].iloc[0]).to_numpy(dtype=float)
+            rel_t = relative_time_by_spot(this_spot)
             ratios = this_spot[ratio_name].to_numpy(dtype=float)
             valid = np.isfinite(ratios) & (ratios > 0)
             if valid.sum() < 2:
@@ -245,10 +250,9 @@ def _build_downhole_correction_results(
         if not spot_times:
             continue
 
-        max_time = float(max(times[-1] for times in spot_times))
-        point_count = max(len(times) for times in spot_times)
-        unified_time = np.linspace(0.0, max_time, point_count)
-        stacked = np.array([np.interp(unified_time, times, ratios) for times, ratios in zip(spot_times, spot_ratios)])
+        unified_time, stacked, spot_times, spot_ratios = align_downhole_traces(
+            spot_times, spot_ratios
+        )
         mean_ratio = np.nanmean(stacked, axis=0)
         with np.errstate(divide="ignore", invalid="ignore"):
             mean_fractionation = np.where(mean_ratio > 0, known_ratio / mean_ratio, np.nan)
@@ -301,7 +305,7 @@ def _build_session_correction_results(
         residuals = fracs - fit_at_points
         parameter_count = max(int(fit_model.get("parameter_count", 1)), 1)
         dof = max(len(residuals) - parameter_count, 1)
-        fit_std = float(np.sqrt(np.sum(weights * residuals**2) / dof)) if residuals.size else 0.0
+        fit_std = float(np.sqrt(np.sum(residuals**2) / dof)) if residuals.size else 0.0
         fit_times = np.linspace(float(times[0]), float(times[-1]), 200)
         fit_values = _evaluate_fit_model(fit_model, fit_times)
         results[ratio_name] = {
@@ -521,13 +525,17 @@ def load_session(
     directory: str,
     primary_channel: str | None = None,
     preset: WorkflowPreset | None = None,
+    selection_method: str | None = None,
 ) -> ReductionSession:
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
+    read_kwargs = dict(workflow_preset.read_kwargs)
+    if selection_method is not None:
+        read_kwargs["selection_method"] = selection_method
     experiment, channels, total_data = read_experiment_data(
         directory,
         primary_channel=effective_primary,
-        **workflow_preset.read_kwargs,
+        **read_kwargs,
     )
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
@@ -542,7 +550,7 @@ def load_session(
         workflow_title=workflow_preset.title,
         selected_spot=selected_spot,
         visible_channels=default_visible_channels(clean_channels, resolved_primary),
-        import_settings={"primary_channel": resolved_primary, **workflow_preset.read_kwargs},
+        import_settings={"primary_channel": resolved_primary, **read_kwargs},
         plot_mode="raw",
         reduction_cache={},
     )
@@ -585,26 +593,71 @@ def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dic
     if selection_channel not in spot_data:
         selection_channel = session.primary_channel if session.primary_channel in spot_data else str(spot_data.columns[1])
 
-    plateau_start, plateau_end, baseline_start, baseline_end = select_baseline_peak(
+    selection_options = session.import_settings.get("selection_options", {})
+    if not isinstance(selection_options, Mapping):
+        selection_options = {}
+    selection_options = dict(selection_options)
+    option_duration_limit = selection_options.pop(
+        "signal_duration_limit_seconds", None
+    )
+    duration_limit = session.import_settings.get(
+        "signal_duration_limit_seconds", option_duration_limit
+    )
+    selection = select_signal_regions(
         spot_data[selection_channel].to_numpy(dtype=float),
+        time=spot_data["Time"].to_numpy(dtype=float),
+        method=str(session.import_settings.get("selection_method", "threshold")),
         baseline_sweep_n=int(session.import_settings.get("baseline_sweep_n", 10)),
         peak_sweep_n=int(session.import_settings.get("peak_sweep_n", 20)),
         threshold=float(session.import_settings.get("threshold", 0.1)),
         filter_percentile=float(session.import_settings.get("filter_percentile", 70)),
         baseline_offset=int(session.import_settings.get("baseline_offset", 2)),
         plateau_offset=int(session.import_settings.get("plateau_offset", 2)),
+        signal_duration_limit_seconds=duration_limit,
+        **selection_options,
     )
 
     max_index = max(0, len(spot_data) - 1)
     baseline = (
-        float(spot_data.iloc[min(baseline_start, max_index)]["Time"]),
-        float(spot_data.iloc[min(baseline_end, max_index)]["Time"]),
+        float(spot_data.iloc[min(selection.baseline_start, max_index)]["Time"]),
+        float(spot_data.iloc[min(selection.baseline_end, max_index)]["Time"]),
     )
     plateau = (
-        float(spot_data.iloc[min(plateau_start, max_index)]["Time"]),
-        float(spot_data.iloc[min(plateau_end, max_index)]["Time"]),
+        float(spot_data.iloc[min(selection.plateau_start, max_index)]["Time"]),
+        float(spot_data.iloc[min(selection.plateau_end, max_index)]["Time"]),
     )
     update_selection_region(session, spot_name, baseline=baseline, plateau=plateau)
+    row_mask = session.experiment["spot_names"] == spot_name
+    session.experiment.loc[row_mask, "selection_method"] = selection.method
+    session.experiment.loc[row_mask, "selection_channel"] = selection_channel
+    session.experiment.loc[row_mask, "selection_error"] = None
+    session.experiment.loc[row_mask, "selection_detection_index"] = selection.detection_index
+    if "sigma_threshold" in selection.diagnostics:
+        session.experiment.loc[row_mask, "selection_sigma_threshold"] = (
+            selection.diagnostics["sigma_threshold"]
+        )
+    session.experiment.loc[row_mask, "selection_signal_end_index"] = selection.signal_end
+    session.experiment.loc[row_mask, "selection_unrestricted_signal_end_index"] = (
+        selection.diagnostics["signal_end_unrestricted_index"]
+    )
+    session.experiment.loc[row_mask, "selection_signal_duration_limit_seconds"] = (
+        session.import_settings.get("signal_duration_limit_seconds")
+    )
+    session.experiment.loc[row_mask, "selection_signal_duration_limit_applied"] = (
+        selection.diagnostics["signal_duration_limit_applied"]
+    )
+    session.experiment.loc[row_mask, "selection_washout_start_index"] = (
+        selection.washout_start
+    )
+    session.experiment.loc[row_mask, "selection_post_baseline_start_index"] = (
+        selection.washout_start
+    )
+    session.experiment.loc[row_mask, "signal_start_times"] = float(
+        spot_data.iloc[min(selection.signal_start, max_index)]["Time"]
+    )
+    session.experiment.loc[row_mask, "signal_end_times"] = float(
+        spot_data.iloc[min(selection.signal_end, max_index)]["Time"]
+    )
     return {"baseline": baseline, "plateau": plateau}
 
 
@@ -739,7 +792,31 @@ def ensure_raw_ratios(session: ReductionSession) -> pd.DataFrame:
     baseline_subtracted = ensure_baseline_subtracted(session)
     if baseline_subtracted.empty:
         return pd.DataFrame()
-    ratios = calc_raw_ratios(session.experiment.copy(), session.total_data.copy(), baseline_subtracted.copy())
+    ratios = calc_raw_ratios(
+        session.experiment.copy(),
+        session.total_data.copy(),
+        baseline_subtracted.copy(),
+        region="plateau",
+    )
+    session.reduction_cache[cache_key] = ratios
+    return ratios
+
+
+def ensure_signal_raw_ratios(session: ReductionSession) -> pd.DataFrame:
+    """Return full-signal ratios aligned to each spot's saved signal start."""
+    cache_key = "signal_data_with_raw_ratios"
+    cached = session.reduction_cache.get(cache_key)
+    if isinstance(cached, pd.DataFrame) and not cached.empty:
+        return cached
+    baseline_subtracted = ensure_baseline_subtracted(session)
+    if baseline_subtracted.empty:
+        return pd.DataFrame()
+    ratios = calc_raw_ratios(
+        session.experiment.copy(),
+        session.total_data.copy(),
+        baseline_subtracted.copy(),
+        region="signal",
+    )
     session.reduction_cache[cache_key] = ratios
     return ratios
 
@@ -752,19 +829,22 @@ def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -
     if not preset.primary_standard:
         raise ValueError(f"{preset.title} does not yet define a primary standard for downhole correction.")
 
-    raw_ratios = ensure_raw_ratios(session)
-    if raw_ratios.empty:
+    plateau_ratios = ensure_raw_ratios(session)
+    signal_ratios = ensure_signal_raw_ratios(session)
+    if plateau_ratios.empty or signal_ratios.empty:
         raise ValueError("Raw isotope ratios are not available for downhole correction.")
 
     _require_samples(session, (preset.primary_standard,), "primary standard")
-    primary_standard_ratios = raw_ratios[raw_ratios["sample"] == preset.primary_standard].reset_index(drop=True)
+    primary_standard_ratios = signal_ratios[
+        signal_ratios["sample"] == preset.primary_standard
+    ].reset_index(drop=True)
     correction_results = _build_downhole_correction_results(
         primary_standard_ratios.copy(),
         current_standard_archive(),
         method=session.downhole_fit_method,
         options=session.downhole_fit_options,
     )
-    corrected = apply_DH_correction(raw_ratios.copy(), correction_results)
+    corrected = apply_DH_correction(plateau_ratios.copy(), correction_results)
     results = {
         "correction_results": correction_results,
         "corrected_ratios": corrected,
