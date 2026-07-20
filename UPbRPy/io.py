@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -794,31 +794,32 @@ def read_experiment_data(
     spot_names = []
     spot_paths = []
     spot_starting_times = []
-    # use the first .csv file to get the channel names
-    first_file = open(os.path.join(directory,[f if f.endswith('.csv') else None for f in os.listdir(directory)][0])).readlines()
+    csv_files = [name for name in os.listdir(directory) if name.endswith('.csv')]
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files were found in {directory!r}.")
+
+    # Use one instrument export to obtain the common channel names.
+    with open(os.path.join(directory, csv_files[0])) as file_handle:
+        first_file = file_handle.readlines()
 
     # now update the global variable channels
     element_channels = first_file[13].split(',')[1:-1]
 
     time_format = "%m/%d/%Y %I:%M:%S %p"
 
-    # make a pandas dataframe that stitches all data of all spots together
-    total_data = pd.DataFrame()
+    # Read only the short header during discovery; numerical tables are loaded
+    # once below after the experiment has been placed in chronological order.
+    for filename in csv_files:
+        this_path = os.path.join(directory, filename)
+        spot_paths.append(this_path)
+        with open(this_path) as file_handle:
+            first_line = file_handle.readline()
+        spot_names.append(first_line.split(':')[0])
+        spot_starting_times.append(
+            datetime.strptime(first_line[-24:-2], time_format)
+        )
 
-    # loop through all the .csv files in the directory using io and get their first lines
-    for file in os.listdir(directory):
-        if file.endswith('.csv'):
-            # use os tools to get the time of start, spot name and path of the file
-            this_path = os.path.join(directory, file)
-            spot_paths.append(this_path)
-            file = open(this_path)
-            lines = file.readlines()
-            this_spot_name = lines[0].split(':')[0]
-            spot_names.append(this_spot_name)
-            this_starting_time = datetime.strptime(lines[0][-24:-2], time_format)
-            spot_starting_times.append(this_starting_time)
-            file.close()
-        # create a pandas dataframe to store the experiment data
+    # Create a pandas dataframe to store the experiment data.
     experiment = pd.DataFrame()
     experiment['spot_names'] = spot_names
     experiment['sample'] = [spot_name.split(sep)[0] for spot_name in spot_names]
@@ -826,17 +827,25 @@ def read_experiment_data(
     experiment['spot_starting_times'] = spot_starting_times
 
     experiment = experiment.sort_values(by='spot_starting_times').reset_index(drop=True)
+    spot_frames = []
     for i in range(experiment.shape[0]):
-        # then use pandas to read csv files and append them to the total data
+        # Accumulate spot frames and concatenate once. Repeated concatenation
+        # would copy all previously imported rows for every additional spot.
         this_data = pd.read_csv(experiment['spot_paths'][i], skiprows=13)
         this_data = this_data.iloc[1:].reset_index(drop=True)
         this_data = this_data.dropna(axis=1, how='all')
         this_data = this_data.apply(pd.to_numeric, errors='coerce')
-        # make sure to change the time column to datetime and add start time to all the times
-        this_data['Time'] = [experiment['spot_starting_times'][i] + timedelta(seconds=this_data['Time'][j]) for j in range(this_data.shape[0])]
+        # Convert relative seconds to absolute timestamps without a Python row
+        # loop; pandas performs this operation as a vectorized timedelta add.
+        this_data['Time'] = (
+            experiment['spot_starting_times'][i]
+            + pd.to_timedelta(this_data['Time'], unit='s')
+        )
         this_data['spot_name'] = experiment['spot_names'][i]
         this_data['sample'] = experiment['sample'][i]
-        total_data = pd.concat([total_data, this_data], axis=0)
+        spot_frames.append(this_data)
+
+    total_data = pd.concat(spot_frames, ignore_index=True)
 
     experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
     #initialize the columns for the experiment dataframe with null values
@@ -922,7 +931,6 @@ def auto_select_baseline_peak(experiment,
     experiment : pandas.DataFrame
         a pandas dataframe containing the spot data with the baseline and peak regions selected
     '''
-    spot_names = total_data['spot_name'].unique()
     method_options = dict(selection_options or {})
     option_duration_limit = method_options.pop(
         'signal_duration_limit_seconds', None
@@ -930,8 +938,9 @@ def auto_select_baseline_peak(experiment,
     if signal_duration_limit_seconds is None:
         signal_duration_limit_seconds = option_duration_limit
 
-    for spot_name in spot_names:
-        spot_data = total_data[total_data['spot_name'] == spot_name]
+    # Group once so automatic selection does not rescan the complete session
+    # table for every analysis.
+    for spot_name, spot_data in total_data.groupby('spot_name', sort=False):
         # always use 29Si for glass
         if 'NIST' in spot_name:
             values = spot_data['29Si'].tolist()
@@ -985,8 +994,11 @@ def auto_select_baseline_peak(experiment,
     return experiment
 
 def subtract_baseline(experiment, channels, total_data):
-    '''
-    function for subtracting the baseline from the total data
+    """Subtract each spot's selected baseline from all requested channels.
+
+    Spots are grouped once and accumulated in a list before concatenation. This
+    keeps runtime and temporary memory approximately linear in the number of
+    rows instead of repeatedly scanning and copying the complete session table.
 
     Parameters
     ----------
@@ -1001,20 +1013,31 @@ def subtract_baseline(experiment, channels, total_data):
     -------
     baseline_corrected_total_data : pandas.DataFrame
         a pandas dataframe containing the baseline corrected data
-    '''
-    baseline_corrected_total_data = pd.DataFrame()
-    for spot_name in total_data['spot_name'].unique():
-        this_spot_data = total_data[total_data['spot_name'] == spot_name]
-        # get the baseline start and end times for this spot
-        baseline_start_time = experiment[experiment['spot_names'] == spot_name]['baseline_start_times'].values[0]
-        baseline_end_time = experiment[experiment['spot_names'] == spot_name]['baseline_end_times'].values[0]
-        this_spot_baseline = this_spot_data[(this_spot_data['Time'] >= baseline_start_time) & (this_spot_data['Time'] < baseline_end_time)]
-        for channel in channels:
-            this_spot_data.loc[:, channel] = this_spot_data[channel] - this_spot_baseline[channel].mean()
-        baseline_corrected_total_data = pd.concat([baseline_corrected_total_data, this_spot_data])
+    """
+    if total_data.empty:
+        return total_data.copy()
 
-    baseline_corrected_total_data.sort_values(by='Time', inplace=True, ignore_index=True)
-    return baseline_corrected_total_data
+    selection_by_spot = (
+        experiment.drop_duplicates('spot_names', keep='first')
+        .set_index('spot_names')[['baseline_start_times', 'baseline_end_times']]
+    )
+    corrected_frames = []
+    channel_names = list(channels)
+    for spot_name, spot_frame in total_data.groupby('spot_name', sort=False):
+        spot_frame = spot_frame.copy()
+        baseline_start, baseline_end = selection_by_spot.loc[spot_name]
+        baseline_mask = (
+            (spot_frame['Time'] >= baseline_start)
+            & (spot_frame['Time'] < baseline_end)
+        )
+        baseline_means = spot_frame.loc[baseline_mask, channel_names].mean()
+        spot_frame.loc[:, channel_names] = spot_frame[channel_names].subtract(
+            baseline_means, axis='columns'
+        )
+        corrected_frames.append(spot_frame)
+
+    result = pd.concat(corrected_frames, ignore_index=True)
+    return result.sort_values(by='Time', ignore_index=True)
 
 
 __all__ = [

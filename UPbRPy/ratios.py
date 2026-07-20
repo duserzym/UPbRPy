@@ -136,12 +136,23 @@ def calc_raw_ratios(
     ]
     ratio_frames = []
     skipped_spots = []
-    for spot_name in baseline_subtracted_total_data["spot_name"].unique():
-        rows = experiment.loc[experiment["spot_names"] == spot_name]
-        if rows.empty:
+    experiment_by_spot = (
+        experiment.drop_duplicates("spot_names", keep="first")
+        .set_index("spot_names")
+    )
+    total_by_spot = total_data.groupby("spot_name", sort=False)
+    corrected_by_spot = baseline_subtracted_total_data.groupby(
+        "spot_name", sort=False
+    )
+
+    # Group both source tables once. Calling a boolean full-table filter for
+    # every spot makes otherwise simple ratio construction scale quadratically
+    # with the number of analyses.
+    for spot_name, spot_corrected in corrected_by_spot:
+        if spot_name not in experiment_by_spot.index:
             skipped_spots.append(str(spot_name))
             continue
-        row = rows.iloc[0]
+        row = experiment_by_spot.loc[spot_name]
         boundary_names = [
             "baseline_start_times",
             "baseline_end_times",
@@ -166,9 +177,6 @@ def calc_raw_ratios(
             region_start = signal_start
             region_end = signal_end
 
-        spot_corrected = baseline_subtracted_total_data.loc[
-            baseline_subtracted_total_data["spot_name"] == spot_name
-        ]
         if region == "plateau":
             selected = spot_corrected.loc[
                 (spot_corrected["Time"] >= region_start)
@@ -186,7 +194,11 @@ def calc_raw_ratios(
             pd.to_numeric(selected["Time"], errors="coerce") - signal_start
         )
 
-        spot_total = total_data.loc[total_data["spot_name"] == spot_name]
+        try:
+            spot_total = total_by_spot.get_group(spot_name)
+        except KeyError:
+            skipped_spots.append(str(spot_name))
+            continue
         baseline_total = spot_total.loc[
             (spot_total["Time"] >= baseline_start)
             & (spot_total["Time"] < baseline_end)

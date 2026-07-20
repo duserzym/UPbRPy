@@ -16,6 +16,8 @@ from .isoplot import (
     calc_76_date_uncertainty,
     propagate_reciprocal_uncertainty,
 )
+
+
 def calc_intercept_std(time, ratio):
     '''
     function for calculating the standard deviation of the measured isotope ratio
@@ -83,14 +85,13 @@ def calc_68_76_discordance(t68, t76, s68, s76):
     return disc * 100, s * 2 / disc * 100
 
 def calc_depth_profile(fractionation_corrected_ratios, session_correction_results):
-    '''
-    function for calculating the depth profile of the ratios 
-        for each sweep, the 68 and 76 ratios are the downhole and session fractionation corrected ratios
-        the associated uncertainties of the ratios are calculated based on propagating raw ratio uncertainties 
-        assuming Poisson error of the counting statistics of each analyte and
-        the scalar residual scatter of the session correction. The downhole
-        correction is treated as systematic and correction correlations are
-        not propagated between sweeps.
+    """Calculate corrected sweep-wise ratios and their uncertainties.
+
+    The input already contains downhole- and session-corrected ratios. For each
+    sweep, this function propagates the raw counting-statistics uncertainty and
+    the scalar residual scatter of the session correction. The downhole model
+    is treated as systematic, and correlations introduced by either correction
+    are not propagated between sweeps.
 
     Parameters
     ----------
@@ -103,46 +104,47 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     -------
     depthpro_ratios : pandas.DataFrame
         a pandas dataframe containing the depth profile ratios and their associated uncertainties
-    '''
-    depthpro_ratios = pd.DataFrame()
-    for spot_name in fractionation_corrected_ratios['spot_name'].unique():
-        this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name].copy()
-        for isotope_ratio in session_correction_results.keys():
-            # get the measured mean and std
-            this_spot_measured_ratio = this_spot_data[isotope_ratio]
-            # use the original measured ratio std for the uncertainty propagation
-            this_spot_measured_ratio_se = this_spot_data[isotope_ratio+'_2e']/2 # sweep-wise Poisson error
+    """
+    # Every operation below is row-wise; no per-spot DataFrame split is needed.
+    # Evaluating whole columns avoids repeated copies and concatenations while
+    # preserving the input row order used by the depth-profile explorer.
+    depthpro_ratios = fractionation_corrected_ratios.copy()
+    session_time = depthpro_ratios['Time'].to_numpy(dtype=float)
+    for isotope_ratio, session_result in session_correction_results.items():
+        measured_ratio = depthpro_ratios[isotope_ratio]
+        measured_ratio_1sigma = depthpro_ratios[isotope_ratio + '_2e'] / 2
+        session_factor = evaluate_correction_result(session_result, session_time)
+        session_scatter = session_result['std']
+        corrected_ratio = depthpro_ratios[
+            isotope_ratio + '_fractionation_corrected'
+        ]
+        propagated_1sigma = corrected_ratio * np.sqrt(
+            (measured_ratio_1sigma / measured_ratio) ** 2
+            + (session_scatter / session_factor) ** 2
+        )
 
-            # get the session-wide fractionation correction and se at each sweep time
-            session_result = session_correction_results[isotope_ratio]
-            this_spot_this_ratio_fractionation_mean = evaluate_correction_result(
-                session_result, this_spot_data['Time']
+        depthpro_ratios[isotope_ratio + '_session_correction_1s'] = session_scatter
+        fit_times = np.asarray(
+            session_result.get('fit_observations', {}).get('time', []),
+            dtype=float,
+        )
+        if fit_times.size:
+            depthpro_ratios[
+                isotope_ratio + '_session_correction_extrapolated'
+            ] = (
+                (session_time < np.nanmin(fit_times))
+                | (session_time > np.nanmax(fit_times))
             )
-            this_ratio_fractionation_se = session_result['std']
-
-            # get the fractionation corrected mean
-            this_spot_fractionation_corrected = this_spot_data[isotope_ratio + '_fractionation_corrected']
-            # calculate the propagated uncertainty
-            this_spot_this_ratio_propagated_uncertainty = this_spot_fractionation_corrected * np.sqrt((this_spot_measured_ratio_se/this_spot_measured_ratio)**2 + (this_ratio_fractionation_se/this_spot_this_ratio_fractionation_mean)**2)
-
-            # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
-            # save results
-            this_spot_data[isotope_ratio + '_session_correction_1s'] = this_ratio_fractionation_se
-            fit_times = np.asarray(
-                session_result.get('fit_observations', {}).get('time', []),
-                dtype=float,
-            )
-            if fit_times.size:
-                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = (
-                    (this_spot_data['Time'] < np.nanmin(fit_times))
-                    | (this_spot_data['Time'] > np.nanmax(fit_times))
-                )
-            else:
-                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = False
-            this_spot_data[isotope_ratio + '_fractionation_corrected_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_corrected * 100
-            this_spot_data[isotope_ratio + '_fractionation_corrected_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
-        depthpro_ratios = pd.concat([depthpro_ratios, this_spot_data])
-    # depthpro_ratios = depthpro_ratios.sort_values(by='Time').reset_index(drop=True)
+        else:
+            depthpro_ratios[
+                isotope_ratio + '_session_correction_extrapolated'
+            ] = False
+        depthpro_ratios[
+            isotope_ratio + '_fractionation_corrected_2e%'
+        ] = propagated_1sigma * 2 / corrected_ratio * 100
+        depthpro_ratios[
+            isotope_ratio + '_fractionation_corrected_2e'
+        ] = propagated_1sigma * 2
 
     # calculate the 207Pb/235U ratio and error based on the 206Pb/238U and 207Pb/206Pb raw ratio calculations
     depthpro_ratios['207Pb/235U_fractionation_corrected'] = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] * depthpro_ratios['206Pb/238U_fractionation_corrected'] * common_U238_U235
@@ -193,11 +195,17 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     depthpro_ratios.attrs = {}
     return depthpro_ratios
 
-def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_correction_results, sep='_'):
-    '''
-    function for calculating the mean isotope ratios and associated propagated uncertainties
-        for highly radiogenic phases, we only consider the measurement ratio uncertainty (std) 
-        and the std of the session-wide fractionation correction factor for the uncertainty propagation
+def calc_ratio_mean_and_uncertainty(
+    fractionation_corrected_ratios,
+    session_correction_results,
+    sep='_',
+):
+    """Aggregate corrected sweeps into spot ratios, ages, and uncertainties.
+
+    For highly radiogenic phases, uncertainty combines the measurement standard
+    error within each spot with the residual scatter of the session correction.
+    Groups are traversed once and accumulated as records, avoiding incremental
+    DataFrame insertion and fragmentation.
 
     Parameters
     ----------
@@ -205,124 +213,123 @@ def calc_ratio_mean_and_uncertainty(fractionation_corrected_ratios, session_corr
         a pandas dataframe containing the fractionation corrected ratios
     session_correction_results : dict
         a dictionary containing the session-wide fractionation correction plots and fits, and std of the fractionation correction factor for each isotope ratio
-    '''
-    final_ratios = pd.DataFrame()
-    for spot_name in fractionation_corrected_ratios['spot_name'].unique():
-        this_spot_data = fractionation_corrected_ratios[fractionation_corrected_ratios['spot_name'] == spot_name]
-        for isotope_ratio in session_correction_results.keys():
-            # get the measured mean and std
-            this_spot_measured_ratio_mean = this_spot_data[isotope_ratio].mean()
-            # use the original measured ratio std for the uncertainty propagation
-            this_spot_measured_ratio_se = this_spot_data[isotope_ratio].std() / np.sqrt(this_spot_data.shape[0]) # standard error of the mean
-            if not np.isfinite(this_spot_measured_ratio_se):
-                if isotope_ratio + '_2e' in this_spot_data.columns:
-                    this_spot_measured_ratio_se = this_spot_data[isotope_ratio + '_2e'].mean() / 2
-                else:
-                    this_spot_measured_ratio_se = 0.0
+    """
+    records = []
+    for spot_name, spot_data in fractionation_corrected_ratios.groupby(
+        'spot_name', sort=False
+    ):
+        record = {
+            'spot_name': spot_name,
+            'sample': spot_data['sample'].iloc[0],
+        }
+        spot_mean_time = spot_data['Time'].mean()
+        spot_size = spot_data.shape[0]
 
-            # get the session-wide fractionation correction mean and se at the mean spot time
-            session_result = session_correction_results[isotope_ratio]
-            this_spot_mean_time = this_spot_data['Time'].mean()
-            this_spot_this_ratio_fractionation_mean = float(evaluate_correction_result(
-                session_result, this_spot_mean_time
-            ))
-            this_ratio_fractionation_se = session_result['std']
-            # later will add mean and std of the blank correction
+        for isotope_ratio, session_result in session_correction_results.items():
+            measured_mean = spot_data[isotope_ratio].mean()
+            measured_sem = spot_data[isotope_ratio].std() / np.sqrt(spot_size)
+            if not np.isfinite(measured_sem):
+                uncertainty_column = isotope_ratio + '_2e'
+                measured_sem = (
+                    spot_data[uncertainty_column].mean() / 2
+                    if uncertainty_column in spot_data.columns
+                    else 0.0
+                )
 
-            # get the fractionation corrected mean
-            this_spot_fractionation_correction_mean = this_spot_data[isotope_ratio + '_fractionation_corrected'].mean()
-            # calculate the propagated uncertainty
-            this_spot_this_ratio_propagated_uncertainty = this_spot_fractionation_correction_mean * np.sqrt((this_spot_measured_ratio_se/this_spot_measured_ratio_mean)**2 + (this_ratio_fractionation_se/this_spot_this_ratio_fractionation_mean)**2)
-            # print('contributions of error from fractionation correction:', this_ratio_fractionation_std/this_spot_this_ratio_fractionation_mean*100)
-            # save results
-            final_ratios.loc[spot_name, isotope_ratio] = this_spot_fractionation_correction_mean
-            final_ratios.loc[spot_name, isotope_ratio + '_session_correction_1s'] = this_ratio_fractionation_se
+            session_factor = float(
+                evaluate_correction_result(session_result, spot_mean_time)
+            )
+            session_scatter = session_result['std']
+            corrected_mean = spot_data[
+                isotope_ratio + '_fractionation_corrected'
+            ].mean()
+            propagated_1sigma = corrected_mean * np.sqrt(
+                (measured_sem / measured_mean) ** 2
+                + (session_scatter / session_factor) ** 2
+            )
             fit_times = np.asarray(
                 session_result.get('fit_observations', {}).get('time', []),
                 dtype=float,
             )
-            final_ratios.loc[spot_name, isotope_ratio + '_session_correction_extrapolated'] = bool(
+
+            record[isotope_ratio] = corrected_mean
+            record[isotope_ratio + '_session_correction_1s'] = session_scatter
+            record[isotope_ratio + '_session_correction_extrapolated'] = bool(
                 fit_times.size
                 and (
-                    this_spot_mean_time < np.nanmin(fit_times)
-                    or this_spot_mean_time > np.nanmax(fit_times)
+                    spot_mean_time < np.nanmin(fit_times)
+                    or spot_mean_time > np.nanmax(fit_times)
                 )
             )
-            final_ratios.loc[spot_name, isotope_ratio + '_2e%'] = this_spot_this_ratio_propagated_uncertainty * 2 / this_spot_fractionation_correction_mean * 100
-            final_ratios.loc[spot_name, isotope_ratio + '_2e'] = this_spot_this_ratio_propagated_uncertainty * 2 
-        # calculate the 207Pb/235U ratio and error
-        final_ratios.loc[spot_name, '207Pb/235U'] = final_ratios.loc[spot_name,'207Pb/206Pb'] * final_ratios.loc[spot_name,'206Pb/238U'] * common_U238_U235
-        final_ratios.loc[spot_name, '207Pb/235U_2e%'] = np.sqrt((final_ratios.loc[spot_name,'207Pb/206Pb_2e%']**2 + final_ratios.loc[spot_name,'206Pb/238U_2e%']**2))
-        final_ratios.loc[spot_name, '207Pb/235U_2e'] = final_ratios.loc[spot_name, '207Pb/235U'] * final_ratios.loc[spot_name, '207Pb/235U_2e%'] / 100
-        
-        # calculate the 238U/206Pb ratio and error where the 238U/206Pb ratio is the inverse of the 206Pb/238U ratio
-        final_ratios.loc[spot_name, '238U/206Pb'] = 1 / final_ratios.loc[spot_name, '206Pb/238U']
-        final_ratios.loc[spot_name, '238U/206Pb_2e'] = propagate_reciprocal_uncertainty(
-            final_ratios.loc[spot_name, '206Pb/238U'],
-            final_ratios.loc[spot_name, '206Pb/238U_2e'],
+            record[isotope_ratio + '_2e%'] = (
+                propagated_1sigma * 2 / corrected_mean * 100
+            )
+            record[isotope_ratio + '_2e'] = propagated_1sigma * 2
+
+        # Derived ratios and dates are calculated in a plain record before the
+        # final DataFrame is constructed, avoiding fragmented scalar inserts.
+        record['207Pb/235U'] = (
+            record['207Pb/206Pb']
+            * record['206Pb/238U']
+            * common_U238_U235
         )
-        final_ratios.loc[spot_name, '238U/206Pb_2e%'] = (
-            final_ratios.loc[spot_name, '238U/206Pb_2e']
-            / final_ratios.loc[spot_name, '238U/206Pb']
-            * 100
+        record['207Pb/235U_2e%'] = np.sqrt(
+            record['207Pb/206Pb_2e%'] ** 2
+            + record['206Pb/238U_2e%'] ** 2
         )
-        
-        # calculate the 207Pb/235U age
-        final_ratios.loc[spot_name, '207Pb/235U_age'] = calc_75_date(final_ratios.loc[spot_name, '207Pb/235U'])
-        final_ratios.loc[spot_name, '207Pb/235U_age_2e'] = calc_75_date_uncertainty(
-            final_ratios.loc[spot_name, '207Pb/235U'],
-            final_ratios.loc[spot_name, '207Pb/235U_2e'],
-        )
-        final_ratios.loc[spot_name, '207Pb/235U_age_2e%'] = (
-            final_ratios.loc[spot_name, '207Pb/235U_age_2e']
-            / final_ratios.loc[spot_name, '207Pb/235U_age']
-            * 100
+        record['207Pb/235U_2e'] = (
+            record['207Pb/235U'] * record['207Pb/235U_2e%'] / 100
         )
 
-        # calculate the 206Pb/238U age
-        final_ratios.loc[spot_name, '206Pb/238U_age'] = calc_68_date(final_ratios.loc[spot_name, '206Pb/238U'])
-        final_ratios.loc[spot_name, '206Pb/238U_age_2e'] = calc_68_date_uncertainty(
-            final_ratios.loc[spot_name, '206Pb/238U'],
-            final_ratios.loc[spot_name, '206Pb/238U_2e'],
+        record['238U/206Pb'] = 1 / record['206Pb/238U']
+        record['238U/206Pb_2e'] = propagate_reciprocal_uncertainty(
+            record['206Pb/238U'], record['206Pb/238U_2e']
         )
-        final_ratios.loc[spot_name, '206Pb/238U_age_2e%'] = (
-            final_ratios.loc[spot_name, '206Pb/238U_age_2e']
-            / final_ratios.loc[spot_name, '206Pb/238U_age']
-            * 100
+        record['238U/206Pb_2e%'] = (
+            record['238U/206Pb_2e'] / record['238U/206Pb'] * 100
         )
 
-        # calculate the 207Pb/206Pb age
-        final_ratios.loc[spot_name, '207Pb/206Pb_age'] = calc_76_date(final_ratios.loc[spot_name, '207Pb/206Pb'])
-        final_ratios.loc[spot_name, '207Pb/206Pb_age_2e'] = calc_76_date_uncertainty(
-            final_ratios.loc[spot_name, '207Pb/206Pb'],
-            final_ratios.loc[spot_name, '207Pb/206Pb_2e'],
+        record['207Pb/235U_age'] = calc_75_date(record['207Pb/235U'])
+        record['207Pb/235U_age_2e'] = calc_75_date_uncertainty(
+            record['207Pb/235U'], record['207Pb/235U_2e']
         )
-        final_ratios.loc[spot_name, '207Pb/206Pb_age_2e%'] = (
-            final_ratios.loc[spot_name, '207Pb/206Pb_age_2e']
-            / final_ratios.loc[spot_name, '207Pb/206Pb_age']
-            * 100
+        record['207Pb/235U_age_2e%'] = (
+            record['207Pb/235U_age_2e'] / record['207Pb/235U_age'] * 100
         )
 
-        # calculate discordance and uncertainty
-        final_ratios.loc[spot_name, 'disc%'], final_ratios.loc[spot_name, 'disc_2e%'] = calc_68_76_discordance(final_ratios.loc[spot_name, '206Pb/238U_age'], final_ratios.loc[spot_name, '207Pb/206Pb_age'], final_ratios.loc[spot_name, '206Pb/238U_age_2e']/2, final_ratios.loc[spot_name, '207Pb/206Pb_age_2e']/2)
+        record['206Pb/238U_age'] = calc_68_date(record['206Pb/238U'])
+        record['206Pb/238U_age_2e'] = calc_68_date_uncertainty(
+            record['206Pb/238U'], record['206Pb/238U_2e']
+        )
+        record['206Pb/238U_age_2e%'] = (
+            record['206Pb/238U_age_2e'] / record['206Pb/238U_age'] * 100
+        )
 
+        record['207Pb/206Pb_age'] = calc_76_date(record['207Pb/206Pb'])
+        record['207Pb/206Pb_age_2e'] = calc_76_date_uncertainty(
+            record['207Pb/206Pb'], record['207Pb/206Pb_2e']
+        )
+        record['207Pb/206Pb_age_2e%'] = (
+            record['207Pb/206Pb_age_2e'] / record['207Pb/206Pb_age'] * 100
+        )
 
-        # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
-        x = final_ratios.loc[spot_name,'207Pb/206Pb'] # 76 ratio
-        u = final_ratios.loc[spot_name,'207Pb/235U']  # 75 ratio
-        v = final_ratios.loc[spot_name,'206Pb/238U']  # 68 ratio
+        record['disc%'], record['disc_2e%'] = calc_68_76_discordance(
+            record['206Pb/238U_age'],
+            record['207Pb/206Pb_age'],
+            record['206Pb/238U_age_2e'] / 2,
+            record['207Pb/206Pb_age_2e'] / 2,
+        )
+        record['err_corr'] = calc_err_corr_quotient(
+            record['207Pb/206Pb'],
+            record['207Pb/206Pb_2e'] / 2,
+            record['207Pb/235U'],
+            record['207Pb/235U_2e'] / 2,
+            record['206Pb/238U'],
+            record['206Pb/238U_2e'] / 2,
+        )
+        records.append(record)
 
-        sx = final_ratios.loc[spot_name,'207Pb/206Pb_2e']/2 # 76 std
-        su = final_ratios.loc[spot_name,'207Pb/235U_2e']/2 # 75 std
-        sv = final_ratios.loc[spot_name,'206Pb/238U_2e']/2 # 68 std
-
-        this_75_68_err_corr = calc_err_corr_quotient(x, sx, u, su, v, sv)
-
-        final_ratios.loc[spot_name, 'err_corr'] = this_75_68_err_corr
-
-
-        final_ratios.loc[spot_name, 'sample'] = this_spot_data['sample'].unique()[0] # get the sample name from the first row of the spot data
-    final_ratios['spot_name'] = final_ratios.index
+    final_ratios = pd.DataFrame.from_records(records)
     # now let's reorganize the columns
     final_ratios_columns = final_ratios.columns.tolist()
 

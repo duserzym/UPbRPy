@@ -82,7 +82,11 @@ def test_initialize_notebook_wraps_public_plot_helpers():
 
     pane = namespace["plot_selected_data"](experiment, total_data, "29Si")
 
-    assert isinstance(pane, panel.pane.Bokeh)
+    assert isinstance(pane, visualization.StandaloneBokehPlot)
+    assert pane.object.title.text == "Original data with selected baseline and plateau"
+    html = pane._repr_html_()
+    assert "Bokeh.embed.embed_items" in html
+    assert "application/vnd.jupyter.widget-view+json" not in html
     assert {"concordia", "plot_series", "plot_time_series"} <= set(namespace)
     assert "calc_concentration_calibration_factor" in namespace
     assert {
@@ -106,7 +110,9 @@ def test_inline_correction_plots_wraps_figures_without_losing_fit_data():
 
     inline = visualization.inline_correction_plots(original)
 
-    assert isinstance(inline["206Pb/238U"]["plot"], panel.pane.Bokeh)
+    assert isinstance(
+        inline["206Pb/238U"]["plot"], visualization.StandaloneBokehPlot
+    )
     assert inline["206Pb/238U"]["plot"].object is correction_plot
     assert inline["206Pb/238U"]["fit"] is fit
     assert original["206Pb/238U"]["plot"] is correction_plot
@@ -122,7 +128,7 @@ def test_inline_plot_pair_wraps_concentration_plot_without_losing_result():
     )
 
     assert result is calibration
-    assert isinstance(pane, panel.pane.Bokeh)
+    assert isinstance(pane, visualization.StandaloneBokehPlot)
     assert pane.object is calibration_plot
 
 

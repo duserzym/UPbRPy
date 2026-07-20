@@ -80,10 +80,10 @@ def calc_DH_nominal_fractionation(
         y_axis_label=ratio_name + ' fractionation factor',
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
-    for i, spot_name in enumerate(primary_standard_ratios['spot_name'].unique()):
-        this_spot = primary_standard_ratios[
-            primary_standard_ratios['spot_name'] == spot_name
-        ].copy()
+    for i, (_, this_spot) in enumerate(
+        primary_standard_ratios.groupby('spot_name', sort=False)
+    ):
+        this_spot = this_spot.copy()
         this_spot['relative_time'] = relative_time_by_spot(this_spot)
         valid = (
             np.isfinite(this_spot['relative_time'])
@@ -134,7 +134,9 @@ def calc_DH_nominal_fractionation(
     all_times_array = np.concatenate(all_times)
     all_fractionations_array = known_ratio / np.concatenate(all_ratios)
     # calculate the standard deviation of the mean_fractionation_factor
-    std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
+    std_fractionation_factor = np.std(
+        all_fractionations_array - downhole_fractionation(all_times_array)
+    )
     residuals = interpolated_fractionations - fitted_fractionation_factor
     downhole_metadata = {
         'time': unified_time,
@@ -372,10 +374,10 @@ def calc_DH_dynamic_fractionation(
         y_axis_label=measured_ratio_name + ' fractionation factor',
         tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
     )
-    for i, spot_name in enumerate(primary_standard_ratios['spot_name'].unique()):
-        this_spot = primary_standard_ratios[
-            primary_standard_ratios['spot_name'] == spot_name
-        ].copy()
+    for i, (_, this_spot) in enumerate(
+        primary_standard_ratios.groupby('spot_name', sort=False)
+    ):
+        this_spot = this_spot.copy()
         this_spot['relative_time'] = relative_time_by_spot(this_spot)
         valid = (
             np.isfinite(this_spot['relative_time'])
@@ -423,7 +425,9 @@ def calc_DH_dynamic_fractionation(
     downhole_fractionation = fitted_model
     fitted_fractionation_factor = downhole_fractionation(unified_time)
     # calculate the standard deviation of the mean_fractionation_factor
-    std_fractionation_factor = np.std([all_fractionations_array[i] - downhole_fractionation(all_times_array[i]) for i in range(len(all_times_array))])
+    std_fractionation_factor = np.std(
+        all_fractionations_array - downhole_fractionation(all_times_array)
+    )
     residuals = interpolated_fractionations - fitted_fractionation_factor
     downhole_metadata = {
         'time': unified_time,
@@ -457,11 +461,13 @@ def apply_DH_correction(
     plateau_data_with_raw_ratios,
     DH_correction_results,
 ):
-    '''
-    function for applying a DH correction scheme derived from the primary standard to the entire raw ratios plateau data
-        note that this function only serves as a first step in the two-step fractionation correction
-        which effectively should just 'flatten' the ratios as a function of time
-        this is not the final step where we actually correct for fractionation 
+    """Apply downhole correction models to a sweep or plateau ratio table.
+
+    Correction factors are evaluated for all rows in one vectorized pass per
+    isotope ratio. Signal-relative time is calculated once, avoiding repeated
+    per-spot filtering and DataFrame concatenation. This function is the first
+    stage of the two-stage fractionation correction; session drift is applied
+    separately by :func:`apply_session_correction`.
         
     Parameters
     ----------
@@ -473,32 +479,28 @@ def apply_DH_correction(
     -------
     corrected_plateau_data : pandas.DataFrame
         a pandas dataframe containing the DH corrected raw ratios
-    '''
-    corrected_plateau_data = pd.DataFrame()
-    for spot_name in plateau_data_with_raw_ratios['spot_name'].unique():
-        this_spot_data = plateau_data_with_raw_ratios[plateau_data_with_raw_ratios['spot_name'] == spot_name].copy()
-        for isotope_ratio in DH_correction_results.keys():
-            this_spot_DH_correction = DH_correction_results[isotope_ratio]['interpolation']
-            relative_time = relative_time_by_spot(this_spot_data)
-            correction_factor = this_spot_DH_correction(relative_time)
-            model_time = DH_correction_results[isotope_ratio].get('fit_prediction_x')
-            if model_time is not None:
-                model_time = np.asarray(model_time, dtype=float)
-                this_spot_data[isotope_ratio + '_DH_correction_extrapolated'] = (
-                    (relative_time < np.nanmin(model_time))
-                    | (relative_time > np.nanmax(model_time))
-                )
-            # All UPbRPy fractionation factors use the convention
-            # C = R_target / R_measured, so R_corrected = C * R_measured.
-            this_spot_data[isotope_ratio + '_DH_correction_factor'] = correction_factor
-            this_spot_data[isotope_ratio + '_DH_corrected'] = (
-                this_spot_data[isotope_ratio] * correction_factor
+    """
+    corrected = plateau_data_with_raw_ratios.copy()
+    relative_time = relative_time_by_spot(corrected)
+    for isotope_ratio, correction_result in DH_correction_results.items():
+        correction_model = correction_result['interpolation']
+        correction_factor = correction_model(relative_time)
+        model_time = correction_result.get('fit_prediction_x')
+        if model_time is not None:
+            model_time = np.asarray(model_time, dtype=float)
+            corrected[isotope_ratio + '_DH_correction_extrapolated'] = (
+                (relative_time < np.nanmin(model_time))
+                | (relative_time > np.nanmax(model_time))
             )
+        # All UPbRPy fractionation factors use the convention
+        # C = R_target / R_measured, so R_corrected = C * R_measured.
+        corrected[isotope_ratio + '_DH_correction_factor'] = correction_factor
+        corrected[isotope_ratio + '_DH_corrected'] = (
+            corrected[isotope_ratio] * correction_factor
+        )
 
-        corrected_plateau_data = pd.concat([corrected_plateau_data, this_spot_data])
-
-    corrected_plateau_data.attrs = {}
-    return corrected_plateau_data
+    corrected.attrs = {}
+    return corrected
 
 def calc_session_nominal_fractionation(
     known_ratio,
@@ -518,8 +520,7 @@ def calc_session_nominal_fractionation(
     spot_mean_fractionation = [] # spot mean fractionation
     spot_mean_fractionation_std = [] # spot mean fractionation std
     # now let's plot the measured sweep-wise fractionation for the primary standard
-    for spot_name in primary_standard_ratios['spot_name'].unique():
-        this_spot = primary_standard_ratios[primary_standard_ratios['spot_name'] == spot_name]
+    for _, this_spot in primary_standard_ratios.groupby('spot_name', sort=False):
         # calculate mean time for the spot
         this_spot_mean_time = this_spot['Time'].mean()
         # this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
@@ -744,8 +745,7 @@ def calc_session_fractionation_TW(
     spot_mean_times = [] # spot mean time
     spot_mean_68_fractionation = [] # spot mean fractionation
     spot_mean_68_fractionation_std = [] # spot mean fractionation std
-    for spot_name in primary_68_DH_ratios['spot_name'].unique():
-        this_spot = primary_68_DH_ratios[primary_68_DH_ratios['spot_name'] == spot_name]
+    for _, this_spot in primary_68_DH_ratios.groupby('spot_name', sort=False):
         # calculate mean time for the spot
         this_spot_mean_time = this_spot['Time'].mean()
         this_spot_68_ratio = this_spot['206Pb/238U_DH_corrected']
@@ -851,11 +851,13 @@ def calc_session_fractionation_TW(
     return session_correction_results
 
 def apply_session_correction(DH_corrected_ratios, session_correction_results):
-    '''
-    function for applying a session-wide fractionation correction scheme derived from the primary standard 
-        to the entire downhole corrected ratios data
-        even if the session fractionation correction results are constructed based on TW-intercept ratios or total ratios
-        that they constrain isotope ratio fractionation means they can be applied any measured total ratios for unknowns
+    """Apply session correction models to all downhole-corrected rows.
+
+    Models are evaluated column-wise over the complete time array. This retains
+    the established numerical result while avoiding one DataFrame copy and
+    concatenation per spot. Correction models derived from radiogenic,
+    Tera--Wasserburg-projected, or total reference-material ratios all use the
+    same target-over-measured multiplicative convention.
 
     Parameters
     ----------
@@ -863,36 +865,30 @@ def apply_session_correction(DH_corrected_ratios, session_correction_results):
         a pandas dataframe containing the downhole corrected ratios
     session_correction_results : dict
         a dictionary containing the session-wide fractionation correction plots and fits for each isotope ratio
-    '''
-    fractionation_corrected_ratios = pd.DataFrame()
-    for spot_name in DH_corrected_ratios['spot_name'].unique():
-        this_spot_data = DH_corrected_ratios[DH_corrected_ratios['spot_name'] == spot_name].copy()
-        for isotope_ratio in session_correction_results.keys():
-            session_fit = session_correction_results[isotope_ratio]
-            correction_factor = evaluate_correction_result(
-                session_fit, this_spot_data['Time']
+    """
+    corrected = DH_corrected_ratios.copy()
+    session_time = corrected['Time'].to_numpy(dtype=float)
+    for isotope_ratio, session_fit in session_correction_results.items():
+        correction_factor = evaluate_correction_result(session_fit, session_time)
+        corrected[isotope_ratio + '_session_correction_factor'] = correction_factor
+        corrected[isotope_ratio + '_session_correction_1s'] = session_fit['std']
+        fit_times = np.asarray(
+            session_fit.get('fit_observations', {}).get('time', []),
+            dtype=float,
+        )
+        if fit_times.size:
+            corrected[isotope_ratio + '_session_correction_extrapolated'] = (
+                (session_time < np.nanmin(fit_times))
+                | (session_time > np.nanmax(fit_times))
             )
-            this_spot_data[isotope_ratio + '_session_correction_factor'] = correction_factor
-            this_spot_data[isotope_ratio + '_session_correction_1s'] = session_fit['std']
-            fit_times = np.asarray(
-                session_fit.get('fit_observations', {}).get('time', []),
-                dtype=float,
-            )
-            if fit_times.size:
-                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = (
-                    (this_spot_data['Time'] < np.nanmin(fit_times))
-                    | (this_spot_data['Time'] > np.nanmax(fit_times))
-                )
-            else:
-                this_spot_data[isotope_ratio + '_session_correction_extrapolated'] = False
-            this_spot_data[isotope_ratio + '_fractionation_corrected'] = (
-                this_spot_data[isotope_ratio + '_DH_corrected']
-                * correction_factor
-            )
-        fractionation_corrected_ratios = pd.concat([fractionation_corrected_ratios, this_spot_data])
+        else:
+            corrected[isotope_ratio + '_session_correction_extrapolated'] = False
+        corrected[isotope_ratio + '_fractionation_corrected'] = (
+            corrected[isotope_ratio + '_DH_corrected'] * correction_factor
+        )
 
-    fractionation_corrected_ratios.attrs = {}
-    return fractionation_corrected_ratios
+    corrected.attrs = {}
+    return corrected
 
 __all__ = [
     'align_downhole_traces',

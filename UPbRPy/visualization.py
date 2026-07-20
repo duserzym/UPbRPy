@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 import inspect
 from functools import wraps
 
+from bokeh.embed import components
 from bokeh.models import (
     BoxAnnotation,
     CDSView,
@@ -16,11 +17,36 @@ from bokeh.models import (
     Range1d,
 )
 from bokeh.plotting import figure
+from bokeh.resources import CDN
 import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
 from .io import SelectionError, select_signal_regions
+
+
+class StandaloneBokehPlot:
+    """Notebook-display wrapper for a Bokeh plot without a live Python comm.
+
+    The wrapper serializes the plot as standalone Bokeh HTML when a notebook
+    frontend requests its rich representation. Pan, zoom, hover, legend
+    toggles, and ``CustomJS`` callbacks continue to work in the browser, while
+    the kernel does not retain an ipywidget model or communication channel.
+
+    The original plot remains available through :attr:`object`, matching the
+    useful part of the ``Panel`` Bokeh-pane interface and allowing the existing
+    vector exporters to operate without special cases.
+    """
+
+    __slots__ = ("object",)
+
+    def __init__(self, plot):
+        self.object = plot
+
+    def _repr_html_(self):
+        """Return a self-contained notebook HTML fragment for this plot."""
+        script, div = components(self.object)
+        return f"{CDN.render()}\n{div}\n{script}"
 
 
 def excel_plateau_inlier_mask(
@@ -89,20 +115,13 @@ def initialize_bokeh():
 
 
 def inline_correction_plots(results: Mapping[str, Mapping[str, object]]):
-    """Return correction results whose Bokeh plots display inline via Panel.
+    """Return correction results with standalone inline Bokeh plots.
 
     The result and per-ratio dictionaries are shallow-copied; numerical fits,
-    interpolation callables, and metadata retain their original objects.
+    interpolation callables, and metadata retain their original objects. The
+    display wrapper uses browser-side JavaScript and does not allocate a live
+    notebook widget for each read-only correction plot.
     """
-    try:
-        import panel as pn
-
-        __import__("jupyter_bokeh.widgets")
-    except ImportError as error:
-        raise ImportError(
-            "Inline correction plots require Panel and jupyter_bokeh. "
-            "Install with `pip install 'UPbRPy[notebook]'`."
-        ) from error
     if not isinstance(results, Mapping):
         raise TypeError("correction results must be a mapping keyed by isotope ratio.")
 
@@ -113,41 +132,31 @@ def inline_correction_plots(results: Mapping[str, Mapping[str, object]]):
         inline_result = dict(ratio_result)
         correction_plot = inline_result.get("plot")
         if correction_plot is not None and not isinstance(
-            correction_plot, pn.viewable.Viewable
+            correction_plot, StandaloneBokehPlot
         ):
-            inline_result["plot"] = pn.pane.Bokeh(
-                correction_plot,
-                sizing_mode="stretch_width",
-            )
+            inline_result["plot"] = StandaloneBokehPlot(correction_plot)
         inline_results[str(ratio_name)] = inline_result
     return inline_results
 
 
 def inline_plot_pair(result):
-    """Wrap the plot in a ``(calculation, plot)`` result for inline display."""
-    try:
-        import panel as pn
-
-        __import__("jupyter_bokeh.widgets")
-    except ImportError as error:
-        raise ImportError(
-            "Inline plots require Panel and jupyter_bokeh. "
-            "Install with `pip install 'UPbRPy[notebook]'`."
-        ) from error
+    """Wrap a calculation's read-only plot for standalone inline display."""
     if not isinstance(result, tuple) or len(result) != 2:
         raise TypeError("inline plot results must be a two-item tuple.")
     calculation, result_plot = result
-    if result_plot is not None and not isinstance(result_plot, pn.viewable.Viewable):
-        result_plot = pn.pane.Bokeh(result_plot, sizing_mode="stretch_width")
+    if result_plot is not None and not isinstance(result_plot, StandaloneBokehPlot):
+        result_plot = StandaloneBokehPlot(result_plot)
     return calculation, result_plot
 
 
 def initialize_notebook(*, namespace=None, comms: str = "vscode"):
-    """Enable inline UPbRPy plots in a VS Code notebook with one setup call.
+    """Enable efficient inline UPbRPy plots and live editors in a notebook.
 
-    Call this after importing UPbRPy in a notebook. It replaces the notebook's
-    plotting helpers and fractionation-correction builders with Panel-backed
-    display wrappers while retaining their existing call signatures and
+    Read-only plots are serialized as standalone Bokeh HTML, so their browser
+    interactions do not require persistent kernel communication. Selection and
+    depth-profile editors remain Panel-backed because applying selections and
+    exporting a current view require Python callbacks. Call this function after
+    importing UPbRPy; wrapped functions retain their public call signatures and
     result-dictionary structure.
     """
     try:
@@ -179,10 +188,7 @@ def initialize_notebook(*, namespace=None, comms: str = "vscode"):
     def wrap_plot(function):
         @wraps(function)
         def display_plot(*args, **kwargs):
-            return pn.pane.Bokeh(
-                function(*args, **kwargs),
-                sizing_mode="stretch_width",
-            )
+            return StandaloneBokehPlot(function(*args, **kwargs))
 
         return display_plot
 
@@ -1565,6 +1571,7 @@ def plot_time_series(dataframe, y=None, x='Time', color='black', kind='line', li
     )
 
 __all__ = [
+    'StandaloneBokehPlot',
     'add_time_series',
     'excel_plateau_inlier_mask',
     'inline_correction_plots',

@@ -11,10 +11,19 @@ import pandas as pd
 from bokeh.palettes import Category20
 from scipy.stats import t
 
-def internal_normalization(experiment, channels, baseline_subtracted_total_data, standard_archive, material='zircon'):
-    '''
-    function for internal normalization of the data, sweep-wise correction
-    '''
+
+def internal_normalization(
+    experiment,
+    channels,
+    baseline_subtracted_total_data,
+    standard_archive,
+    material='zircon',
+):
+    """Select plateau rows and apply sweep-wise internal normalization.
+
+    Each spot is grouped once, normalized as a vector across all requested
+    channels, and appended to a list for a single final concatenation.
+    """
     if material == 'zircon':
         internal_analyte = '29Si'
         unknown_concentration = 151443
@@ -24,33 +33,55 @@ def internal_normalization(experiment, channels, baseline_subtracted_total_data,
     elif material == 'rutile':
         internal_analyte = '49Ti'
         unknown_concentration = 599499
+    else:
+        raise ValueError("material must be 'zircon', 'apatite', or 'rutile'")
 
-    this_standard_archive = standard_archive[standard_archive['material'].isin([material, 'glass'])]
-
-    normalized_plateau_data = pd.DataFrame()
-    for spot_name in baseline_subtracted_total_data['spot_name'].unique():
-        this_spot_data = baseline_subtracted_total_data[baseline_subtracted_total_data['spot_name'] == spot_name]
-        if this_spot_data['sample'].values[0] in this_standard_archive.index:
-            internal_analyte_concentration = this_standard_archive.loc[this_spot_data['sample'].values[0], internal_analyte]
+    this_standard_archive = standard_archive[
+        standard_archive['material'].isin([material, 'glass'])
+    ]
+    selection_by_spot = (
+        experiment.drop_duplicates('spot_names', keep='first')
+        .set_index('spot_names')[['plateau_start_times', 'plateau_end_times']]
+    )
+    normalized_frames = []
+    channel_names = list(channels)
+    for spot_name, spot_frame in baseline_subtracted_total_data.groupby(
+        'spot_name', sort=False
+    ):
+        sample_name = spot_frame['sample'].iloc[0]
+        if sample_name in this_standard_archive.index:
+            internal_analyte_concentration = this_standard_archive.loc[
+                sample_name, internal_analyte
+            ]
         else:
             internal_analyte_concentration = unknown_concentration
-            
-        # get the baseline start and end times for this spot
-        plateau_start_time = experiment[experiment['spot_names'] == spot_name]['plateau_start_times'].values[0]
-        plateau_end_time = experiment[experiment['spot_names'] == spot_name]['plateau_end_times'].values[0]
-        this_spot_plateau = this_spot_data[(this_spot_data['Time'] >= plateau_start_time) & (this_spot_data['Time'] < plateau_end_time)]
-        this_spot_plateau['internal_normalization_factor'] = internal_analyte_concentration / this_spot_plateau[internal_analyte]
-        for channel in channels:
-            this_spot_plateau.loc[:, channel] = this_spot_plateau[channel] * this_spot_plateau['internal_normalization_factor']
-        normalized_plateau_data = pd.concat([normalized_plateau_data, this_spot_plateau])
 
-    normalized_plateau_data.sort_values(by='Time', inplace=True, ignore_index=True)
-    return normalized_plateau_data
+        plateau_start, plateau_end = selection_by_spot.loc[spot_name]
+        plateau_mask = (
+            (spot_frame['Time'] >= plateau_start)
+            & (spot_frame['Time'] < plateau_end)
+        )
+        plateau = spot_frame.loc[plateau_mask].copy()
+        plateau['internal_normalization_factor'] = (
+            internal_analyte_concentration / plateau[internal_analyte]
+        )
+        plateau.loc[:, channel_names] = plateau[channel_names].mul(
+            plateau['internal_normalization_factor'], axis='index'
+        )
+        normalized_frames.append(plateau)
 
-def filter_concentration_outliers(NIST_data, primary_channel, n = 5):
-    '''
-    function for filtering out concentration outliers in the NIST glass standards before calibrating the unknowns
-        we filter out the points that lie beyond the 95CI which is calculated as std * student's t multiplier with n-1 degree of freedom
+    if not normalized_frames:
+        return baseline_subtracted_total_data.iloc[0:0].copy()
+    normalized = pd.concat(normalized_frames, ignore_index=True)
+    return normalized.sort_values(by='Time', ignore_index=True)
+
+
+def filter_concentration_outliers(NIST_data, primary_channel, n=5):
+    """Iteratively remove within-spot outliers from glass-standard data.
+
+    On each pass, rows outside the sample mean plus or minus the Student-t
+    multiplier times the sample standard deviation are removed. Spots are
+    grouped once and the retained frames are concatenated only once.
 
     Parameters
     ----------
@@ -65,17 +96,24 @@ def filter_concentration_outliers(NIST_data, primary_channel, n = 5):
     -------
     filtered_NIST_data : pd.DataFrame
         filtered NIST glass standards data
-    '''
-    filtered_NIST_data = pd.DataFrame()
-    for spot_name in NIST_data['spot_name'].unique():
-        this_spot_data = NIST_data[NIST_data['spot_name'] == spot_name]
-        for i in range(n):
+    """
+    filtered_frames = []
+    for _, this_spot_data in NIST_data.groupby('spot_name', sort=False):
+        for _ in range(n):
             this_spot_channel = this_spot_data[primary_channel]
-            this_post_channel_upper = this_spot_channel.mean() + this_spot_channel.std() * t.ppf(0.975, len(this_spot_channel)-1)
-            this_post_channel_lower = this_spot_channel.mean() - this_spot_channel.std() * t.ppf(0.975, len(this_spot_channel)-1)
-            this_spot_data = this_spot_data[(this_spot_data[primary_channel] < this_post_channel_upper) & (this_spot_data[primary_channel] > this_post_channel_lower)]
-        filtered_NIST_data = pd.concat([filtered_NIST_data, this_spot_data], ignore_index=True)
-    return filtered_NIST_data
+            t_multiplier = t.ppf(0.975, len(this_spot_channel) - 1)
+            interval = this_spot_channel.std() * t_multiplier
+            upper_bound = this_spot_channel.mean() + interval
+            lower_bound = this_spot_channel.mean() - interval
+            this_spot_data = this_spot_data[
+                (this_spot_data[primary_channel] < upper_bound)
+                & (this_spot_data[primary_channel] > lower_bound)
+            ]
+        filtered_frames.append(this_spot_data)
+    if not filtered_frames:
+        return NIST_data.iloc[0:0].copy()
+    return pd.concat(filtered_frames, ignore_index=True)
+
 
 def calc_concentration_calibration_factor(NIST_data, channels, standard_archive):
     '''
@@ -85,9 +123,22 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
     in the NIST_data dataframe we can extract the mean values for the cps for each NIST measurement and calculate a best-fit origin-anchored line
         whose slope is the calibration factor for cps-ppm conversion
     '''
-    calibration_factors = pd.Series()
-    effective_channels = [i for i in channels if (i in standard_archive.columns) and (i !='29Si')]
-    print('Analytes that can be calibrated for concentration measurements are: ', effective_channels)
+    calibration_factors = pd.Series(dtype=float)
+    effective_channels = [
+        channel
+        for channel in channels
+        if channel in standard_archive.columns and channel != '29Si'
+    ]
+    print(
+        'Analytes that can be calibrated for concentration measurements are: ',
+        effective_channels,
+    )
+
+    # Calculate every per-spot channel mean in one grouped operation instead of
+    # rescanning the full NIST table for each channel and spot combination.
+    grouped = NIST_data.groupby('spot_name', sort=False)
+    spot_means = grouped[effective_channels].mean()
+    spot_samples = grouped['sample'].first().reindex(spot_means.index)
 
     plot = figure(
         width=800,
@@ -99,24 +150,19 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         active_scroll='wheel_zoom',
     )
     for i, channel in enumerate(effective_channels):
-        this_channel_measured_cps = []
-        this_channel_known_ppm = []
-        sample_list = []
-        spot_list = []
+        this_channel_measured_cps = spot_means[channel].to_numpy(dtype=float)
+        sample_list = spot_samples.astype(str).tolist()
+        spot_list = spot_means.index.astype(str).tolist()
+        this_channel_known_ppm = np.asarray(
+            [standard_archive.loc[sample, channel] for sample in sample_list],
+            dtype=float,
+        )
         this_channel_color = Category20[20][i % 20]
-        for spot in NIST_data['spot_name'].unique():
-            this_spot_data = NIST_data[NIST_data['spot_name'] == spot]
-            this_spot_mean = this_spot_data[channel].mean()
-            this_channel_measured_cps.append(this_spot_mean)
-            this_spot_true_concentration = standard_archive.loc[this_spot_data['sample'].values[0], channel]
-            this_channel_known_ppm.append(this_spot_true_concentration)
-            sample_list.append(this_spot_data['sample'].values[0])
-            spot_list.append(spot)
 
         # now calculate the calibration factor using the best-fit line anchored at the origin
-        this_channel_measured_cps = np.array(this_channel_measured_cps)
-        this_channel_known_ppm = np.array(this_channel_known_ppm)
-        slope = np.dot(this_channel_measured_cps, this_channel_known_ppm) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
+        slope = np.dot(
+            this_channel_measured_cps, this_channel_known_ppm
+        ) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
         calibration_factors[channel] = slope
         # plot the data and the best-fit line
         source = ColumnDataSource({
@@ -131,7 +177,13 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         )
         plot.add_tools(HoverTool(
             renderers=[scatter],
-            tooltips=[('channel', channel), ('sample', '@sample'), ('spot', '@spot_name'), ('ppm', '@ppm'), ('cps', '@cps')],
+            tooltips=[
+                ('channel', channel),
+                ('sample', '@sample'),
+                ('spot', '@spot_name'),
+                ('ppm', '@ppm'),
+                ('cps', '@cps'),
+            ],
         ))
         max_ppm = float(np.nanmax(this_channel_known_ppm)) if this_channel_known_ppm.size else 0.0
         plot.line(
@@ -153,40 +205,62 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         plot.add_layout(legend, 'right')
     return calibration_factors, plot
 
-def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'):
-    '''
-    function for calculating the elemental concentrations in the unknown and standard samples
-        after the construction of the calibration factors stored in the concentration calibration pandas series
 
-    when calculating the unknonwns, after constructing the mean and standard deviation multiplied by a student's t multiplier with n-1 degrees of freedom
-        we exclude the data that fall outside of the 95% confidence interval
-    '''
+def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'):
+    """Calculate filtered spot-mean concentrations and uncertainty intervals.
+
+    The existing Student-t filtering calculation is preserved, but spot groups
+    and output records are constructed only once. This avoids thousands of
+    repeated full-table filters and scalar DataFrame insertions in sessions with
+    many analytes.
+    """
     element_channels = concentration_calibration.index
 
-    # strip the isotope mass number from the channel name as we already aligned the isotope signals to the total elemental concentration 
+    # Strip isotope mass numbers because each selected isotope signal has
+    # already been scaled to represent the total elemental concentration.
     elements = [re.sub(r'\d+', '', channel) for channel in element_channels]
-    unknown_standard_ppm_df = pd.DataFrame()
-
-    for spot_name in unknown_standard_data['spot_name'].unique():
-        this_spot_data = unknown_standard_data[unknown_standard_data['spot_name'] == spot_name]
+    records = []
+    for spot_name, this_spot_data in unknown_standard_data.groupby(
+        'spot_name', sort=False
+    ):
+        record = {
+            'spot_name': spot_name,
+            'sample': str(spot_name).split(sep)[0],
+        }
+        spot_t_multiplier = t.ppf(0.975, this_spot_data.shape[0] - 1)
         for channel, element in zip(element_channels, elements):
             unknown_standard_cps_mean = this_spot_data[channel].mean()
             unknown_standard_cps_std = this_spot_data[channel].std()
-            t_multiplier = t.ppf(0.975, this_spot_data.shape[0]-1)
-            lower_bound = unknown_standard_cps_mean - t_multiplier * unknown_standard_cps_std
-            upper_bound = unknown_standard_cps_mean + t_multiplier * unknown_standard_cps_std
+            lower_bound = (
+                unknown_standard_cps_mean
+                - spot_t_multiplier * unknown_standard_cps_std
+            )
+            upper_bound = (
+                unknown_standard_cps_mean
+                + spot_t_multiplier * unknown_standard_cps_std
+            )
 
-            # now filter for the data that falls within the 95% confidence interval
-            this_spot_data_filtered = this_spot_data[(this_spot_data[channel] >= lower_bound) & (this_spot_data[channel] <= upper_bound)]
+            # Retain values within the spot's 95% Student-t interval.
+            this_spot_data_filtered = this_spot_data[
+                (this_spot_data[channel] >= lower_bound)
+                & (this_spot_data[channel] <= upper_bound)
+            ]
             filtered_cps_mean = this_spot_data_filtered[channel].mean()
-            filtered_cps_95CI = this_spot_data_filtered[channel].std() * t.ppf(0.975, this_spot_data_filtered.shape[0]-1)
-            unknown_standard_ppm_df.loc[spot_name, element] = filtered_cps_mean * concentration_calibration[channel]
-            unknown_standard_ppm_df.loc[spot_name, element + '_95CI'] = filtered_cps_95CI * concentration_calibration[channel]
-    unknown_standard_ppm_df['spot_name'] = unknown_standard_ppm_df.index
-    unknown_standard_ppm_df['sample'] = unknown_standard_ppm_df['spot_name'].str.split(sep).str[0]
-    # now move the spot and sample columns up front
-    unknown_standard_ppm_df = unknown_standard_ppm_df[['spot_name', 'sample'] + [i for i in unknown_standard_ppm_df.columns if i not in ['spot_name', 'sample']]]
-    return unknown_standard_ppm_df
+            filtered_cps_95CI = this_spot_data_filtered[channel].std() * t.ppf(
+                0.975, this_spot_data_filtered.shape[0] - 1
+            )
+            calibration_factor = concentration_calibration[channel]
+            record[element] = filtered_cps_mean * calibration_factor
+            record[element + '_95CI'] = filtered_cps_95CI * calibration_factor
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame(columns=['spot_name', 'sample'])
+
+    result = pd.DataFrame.from_records(records)
+    result = result.set_index('spot_name', drop=False)
+    result.index.name = None
+    return result
 
 def calc_concentration_depth_profile(unknown_standard_data, concentration_calibration, sep='_'):
     '''
