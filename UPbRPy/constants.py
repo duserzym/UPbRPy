@@ -14,7 +14,14 @@ sigma_235 = lambda_235 * 0.14 / 100 / 2
 lambda_238 = 1.55125e-10
 sigma_238 = lambda_238 * 0.11 / 100 / 2
 
-standard_archive = pd.read_csv(files(__package__) / "standards.csv", index_col=0)
+# Retain the historical CSV archive as an explicit compatibility option. The
+# primary ``standard_archive`` is constructed from the TOML library in
+# :mod:`UPbRPy.standards`.
+standard_archive_legacy = pd.read_csv(
+    files(__package__) / "standards.csv",
+    index_col=0,
+)
+standard_archive_csv = standard_archive_legacy
 
 __all__ = [
     "common_U238_U235",
@@ -23,5 +30,6 @@ __all__ = [
     "sigma_235",
     "lambda_238",
     "sigma_238",
-    "standard_archive",
+    "standard_archive_csv",
+    "standard_archive_legacy",
 ]

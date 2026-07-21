@@ -5,6 +5,7 @@ New code may import from the focused modules directly. Existing imports from
 """
 
 from .constants import *  # noqa: F401,F403
+from .standards import *  # noqa: F401,F403
 from .io import *  # noqa: F401,F403
 from .visualization import *  # noqa: F401,F403
 from .mpl_concordia import *  # noqa: F401,F403
@@ -18,6 +19,7 @@ from .reduction import *  # noqa: F401,F403
 from .thermometry import *  # noqa: F401,F403
 
 from .constants import __all__ as _constants_all
+from .standards import __all__ as _standards_all
 from .io import __all__ as _io_all
 from .visualization import __all__ as _visualization_all
 from .mpl_concordia import __all__ as _mpl_concordia_all
@@ -32,6 +34,7 @@ from .thermometry import __all__ as _thermometry_all
 
 __all__ = [
     *_constants_all,
+    *_standards_all,
     *_io_all,
     *_visualization_all,
     *_mpl_concordia_all,

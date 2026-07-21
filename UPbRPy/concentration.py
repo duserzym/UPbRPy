@@ -12,12 +12,92 @@ from bokeh.palettes import Category20
 from scipy.stats import t
 
 
+_ISOTOPE_CHANNEL_PATTERN = re.compile(r"^(?:\d+)?([A-Z][a-z]?)$")
+
+
+def element_from_channel(channel):
+    """Return the element symbol represented by an isotope channel label.
+
+    Both ``29Si`` and ``Si`` resolve to ``Si``. Ratio names and other derived
+    quantities return ``None`` so they cannot accidentally enter elemental
+    concentration calibration.
+    """
+    match = _ISOTOPE_CHANNEL_PATTERN.fullmatch(str(channel).strip())
+    return match.group(1) if match else None
+
+
+def resolve_element_concentration(standard_archive, standard, channel):
+    """Resolve a total elemental concentration independently of isotope mass.
+
+    An exact channel is preferred. Otherwise, any finite archive column for
+    the same element may supply the value because reference concentrations are
+    total elemental mass fractions rather than isotope-specific abundances.
+    Multiple non-identical candidates are rejected as an ambiguous archive.
+
+    Returns
+    -------
+    value : float
+        Total elemental concentration in micrograms per gram.
+    archive_channel : str
+        Archive quantity from which the value was obtained.
+    """
+    if standard not in standard_archive.index:
+        raise KeyError(f"Unknown concentration standard {standard!r}.")
+    element = element_from_channel(channel)
+    if element is None:
+        raise KeyError(f"{channel!r} is not an elemental isotope channel.")
+
+    row = standard_archive.loc[standard]
+    exact = row.get(channel, np.nan)
+    if pd.notna(exact):
+        return float(exact), str(channel)
+
+    candidates = []
+    for quantity in standard_archive.columns:
+        if element_from_channel(quantity) != element:
+            continue
+        value = row.get(quantity, np.nan)
+        if pd.notna(value):
+            candidates.append((str(quantity), float(value)))
+    if not candidates:
+        raise KeyError(
+            f"Standard {standard!r} has no concentration for element {element}."
+        )
+
+    values = np.asarray([value for _, value in candidates], dtype=float)
+    if not np.allclose(values, values[0], rtol=1e-12, atol=0):
+        labels = ", ".join(f"{name}={value:g}" for name, value in candidates)
+        raise ValueError(
+            f"Standard {standard!r} has conflicting {element} concentrations: "
+            f"{labels}."
+        )
+    return float(values[0]), candidates[0][0]
+
+
+def channel_for_element(channels, preferred_channel):
+    """Choose the measured channel for an internal-normalization element."""
+    channels = list(channels)
+    if preferred_channel in channels:
+        return preferred_channel
+    element = element_from_channel(preferred_channel)
+    matches = [
+        channel for channel in channels if element_from_channel(channel) == element
+    ]
+    if not matches:
+        raise KeyError(
+            f"No measured {element} channel is available for internal normalization."
+        )
+    return matches[0]
+
+
 def internal_normalization(
     experiment,
     channels,
     baseline_subtracted_total_data,
     standard_archive,
     material='zircon',
+    *,
+    internal_channel=None,
 ):
     """Select plateau rows and apply sweep-wise internal normalization.
 
@@ -25,16 +105,27 @@ def internal_normalization(
     channels, and appended to a list for a single final concatenation.
     """
     if material == 'zircon':
-        internal_analyte = '29Si'
+        preferred_internal_channel = '29Si'
         unknown_concentration = 151443
     elif material == 'apatite':
-        internal_analyte = '44Ca'
+        preferred_internal_channel = '44Ca'
         unknown_concentration = 400443
     elif material == 'rutile':
-        internal_analyte = '49Ti'
+        preferred_internal_channel = '49Ti'
         unknown_concentration = 599499
+    elif material == 'titanite':
+        preferred_internal_channel = '29Si'
+        unknown_concentration = 151443
     else:
-        raise ValueError("material must be 'zircon', 'apatite', or 'rutile'")
+        raise ValueError(
+            "material must be 'zircon', 'apatite', 'rutile', or 'titanite'"
+        )
+    if internal_channel is not None:
+        preferred_internal_channel = internal_channel
+    internal_analyte = channel_for_element(
+        channels,
+        preferred_internal_channel,
+    )
 
     this_standard_archive = standard_archive[
         standard_archive['material'].isin([material, 'glass'])
@@ -50,9 +141,11 @@ def internal_normalization(
     ):
         sample_name = spot_frame['sample'].iloc[0]
         if sample_name in this_standard_archive.index:
-            internal_analyte_concentration = this_standard_archive.loc[
-                sample_name, internal_analyte
-            ]
+            internal_analyte_concentration, _ = resolve_element_concentration(
+                this_standard_archive,
+                sample_name,
+                internal_analyte,
+            )
         else:
             internal_analyte_concentration = unknown_concentration
 
@@ -115,20 +208,68 @@ def filter_concentration_outliers(NIST_data, primary_channel, n=5):
     return pd.concat(filtered_frames, ignore_index=True)
 
 
-def calc_concentration_calibration_factor(NIST_data, channels, standard_archive):
-    '''
-    function for calculating the calibration factors for the elemental concentrations
-        based on the NIST glass standards (610, 612)
-    the standard archive stores all the true ppm values independently measured for the glass and standards
-    in the NIST_data dataframe we can extract the mean values for the cps for each NIST measurement and calculate a best-fit origin-anchored line
-        whose slope is the calibration factor for cps-ppm conversion
-    '''
+def calc_concentration_calibration_factor(
+    NIST_data,
+    channels,
+    standard_archive,
+    *,
+    internal_channel='29Si',
+):
+    """Calculate total-element calibration factors from glass standards.
+
+    Measured isotope channels are matched to reference concentrations by
+    element symbol, so a ``151Eu`` sweep can use a concentration documented as
+    ``153Eu`` without duplicating the value in the reference library. If two
+    masses of the same element were acquired, a measured mass explicitly
+    documented by every calibration standard is preferred; otherwise the
+    first resolvable measured mass is used. The element is reported only once.
+
+    ``internal_channel`` identifies the element fixed by internal
+    normalization and excludes it from external concentration calibration.
+    """
     calibration_factors = pd.Series(dtype=float)
-    effective_channels = [
-        channel
-        for channel in channels
-        if channel in standard_archive.columns and channel != '29Si'
-    ]
+    sample_names = NIST_data['sample'].dropna().astype(str).unique().tolist()
+    internal_element = element_from_channel(internal_channel)
+    effective_channels = []
+    reference_channels = {}
+    channels_by_element = {}
+    for channel in channels:
+        element = element_from_channel(channel)
+        if element is None or element == internal_element:
+            continue
+        channels_by_element.setdefault(element, []).append(channel)
+
+    for element_channels in channels_by_element.values():
+        # Prefer a measured mass that is also explicitly documented for every
+        # calibration standard. This preserves established channels such as
+        # 208Pb when a method also acquires 206Pb and 207Pb. If no exact mass
+        # exists, fall back to the first measured mass that can be resolved by
+        # element (for example measured 151Eu using archived 153Eu).
+        exact_channels = [
+            channel
+            for channel in element_channels
+            if channel in standard_archive.columns
+            and all(
+                pd.notna(standard_archive.loc[sample, channel])
+                for sample in sample_names
+            )
+        ]
+        candidates = [*exact_channels, *element_channels]
+        for channel in dict.fromkeys(candidates):
+            resolved = {}
+            try:
+                for sample in sample_names:
+                    _, archive_channel = resolve_element_concentration(
+                        standard_archive,
+                        sample,
+                        channel,
+                    )
+                    resolved[sample] = archive_channel
+            except KeyError:
+                continue
+            effective_channels.append(channel)
+            reference_channels[channel] = resolved
+            break
     print(
         'Analytes that can be calibrated for concentration measurements are: ',
         effective_channels,
@@ -154,7 +295,14 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         sample_list = spot_samples.astype(str).tolist()
         spot_list = spot_means.index.astype(str).tolist()
         this_channel_known_ppm = np.asarray(
-            [standard_archive.loc[sample, channel] for sample in sample_list],
+            [
+                resolve_element_concentration(
+                    standard_archive,
+                    sample,
+                    channel,
+                )[0]
+                for sample in sample_list
+            ],
             dtype=float,
         )
         this_channel_color = Category20[20][i % 20]
@@ -203,6 +351,8 @@ def calc_concentration_calibration_factor(NIST_data, channels, standard_archive)
         # plotting canvas. Move that same model into a dedicated side panel.
         plot.center.remove(legend)
         plot.add_layout(legend, 'right')
+    calibration_factors.attrs['reference_channels'] = reference_channels
+    calibration_factors.attrs['internal_channel'] = internal_channel
     return calibration_factors, plot
 
 
@@ -290,6 +440,9 @@ def calc_concentration_depth_profile(unknown_standard_data, concentration_calibr
     return depthpro_concentration_df
 
 __all__ = [
+    'channel_for_element',
+    'element_from_channel',
+    'resolve_element_concentration',
     'internal_normalization',
     'filter_concentration_outliers',
     'calc_concentration_calibration_factor',

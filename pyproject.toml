@@ -46,7 +46,14 @@ upbrpy-gui = "GUI.main:main"
 include = ["UPbRPy*", "GUI*"]
 
 [tool.setuptools.package-data]
-UPbRPy = ["standards.csv"]
+UPbRPy = [
+  "standards.csv",
+  "reference_materials/*.toml",
+  "reference_materials/*/*.toml",
+]
+
+[tool.setuptools.exclude-package-data]
+UPbRPy = ["standards_v2.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
