@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from bokeh.models import ColorBar, ColumnDataSource, HoverTool, LinearColorMapper
+from bokeh.models import (
+    ColorBar,
+    ColumnDataSource,
+    CustomJS,
+    HoverTool,
+    LabelSet,
+    LinearColorMapper,
+)
 from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
 import matplotlib
@@ -19,6 +26,8 @@ from .constants import (
     sigma_235,
     sigma_238,
 )
+
+EARTH_AGE_MA = 4567.3
 
 def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     '''
@@ -203,6 +212,201 @@ def format_age_label(age, step):
     decimals = int(np.ceil(-np.log10(step)))
     return f"{age:.{decimals}f}".rstrip("0").rstrip(".")
 
+
+def full_concordia_curve(plot_type, maximum_age=EARTH_AGE_MA, resolution=2500):
+    """Return a full Earth-age concordia curve for interactive zooming."""
+    ages = np.linspace(0.01, float(maximum_age), int(resolution))
+    if plot_type == "Wetherill":
+        x, y = get_wetherill_point(ages)
+    elif plot_type == "TW":
+        x, y = get_tera_wasserburg_point(ages)
+    else:
+        raise ValueError("plot_type must be either Wetherill or TW")
+    return ages, np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+
+
+def visible_concordia_age_labels(plot_type, ages, x, y, xlim, ylim, maximum=12):
+    """Choose readable concordia age labels within the current ratio limits."""
+    if plot_type not in {"Wetherill", "TW"}:
+        raise ValueError("plot_type must be either Wetherill or TW")
+    ages = np.asarray(ages, dtype=float)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x_low, x_high = min(xlim), max(xlim)
+    y_low, y_high = min(ylim), max(ylim)
+    label_x_high = x_high - 0.04 * (x_high - x_low)
+    label_y_high = y_high - 0.04 * (y_high - y_low)
+    visible = (
+        np.isfinite(ages)
+        & np.isfinite(x)
+        & np.isfinite(y)
+        & (x >= x_low)
+        & (x <= label_x_high)
+        & (y >= y_low)
+        & (y <= label_y_high)
+    )
+    visible_ages = ages[visible]
+    if visible_ages.size == 0:
+        return np.array([], dtype=float)
+    age_min = float(np.min(visible_ages))
+    age_max = float(np.max(visible_ages))
+    span = max(age_max - age_min, 1.0)
+    step = nice_step(span / max(int(maximum) - 2, 1))
+    start = np.ceil(age_min / step) * step
+    labels = np.arange(start, age_max + 0.5 * step, step)
+    if labels.size > maximum:
+        step = nice_step(step * labels.size / maximum)
+        start = np.ceil(age_min / step) * step
+        labels = np.arange(start, age_max + 0.5 * step, step)
+    labels = labels[(labels >= 0) & (labels <= EARTH_AGE_MA)]
+    if plot_type == "Wetherill":
+        label_x, label_y = get_wetherill_point(labels)
+    else:
+        label_x, label_y = get_tera_wasserburg_point(labels)
+    fits = (
+        (label_x >= x_low)
+        & (label_x <= label_x_high)
+        & (label_y >= y_low)
+        & (label_y <= label_y_high)
+    )
+    return labels[fits]
+
+
+def add_dynamic_concordia_age_labels(
+    plot,
+    plot_type,
+    curve_ages,
+    curve_x,
+    curve_y,
+    initial_ages,
+    *,
+    color="black",
+    curve_source=None,
+):
+    """Attach client-side age labels that update as a Bokeh plot is zoomed."""
+    initial_ages = np.asarray(initial_ages, dtype=float)
+    if plot_type == "Wetherill":
+        initial_x, initial_y = get_wetherill_point(initial_ages)
+    else:
+        initial_x, initial_y = get_tera_wasserburg_point(initial_ages)
+    initial_step = (
+        nice_step(np.ptp(initial_ages) / max(len(initial_ages) - 1, 1))
+        if initial_ages.size
+        else 100.0
+    )
+    label_source = ColumnDataSource(
+        {
+            "x": np.asarray(initial_x, dtype=float),
+            "y": np.asarray(initial_y, dtype=float),
+            "label": [format_age_label(age, initial_step) for age in initial_ages],
+        },
+        name="concordia_age_labels",
+    )
+    plot.scatter(
+        "x",
+        "y",
+        source=label_source,
+        color=color,
+        size=5,
+        alpha=0.55,
+    )
+    plot.add_layout(
+        LabelSet(
+            x="x",
+            y="y",
+            text="label",
+            source=label_source,
+            x_offset=6,
+            y_offset=5,
+            text_color=color,
+            text_font_size="9pt",
+            text_baseline="middle",
+        )
+    )
+    if curve_source is None:
+        curve_source = ColumnDataSource(
+            {
+                "age": np.asarray(curve_ages, dtype=float),
+                "x": np.asarray(curve_x, dtype=float),
+                "y": np.asarray(curve_y, dtype=float),
+            }
+        )
+    callback = CustomJS(
+        args={
+            "labels": label_source,
+            "curve": curve_source,
+            "x_range": plot.x_range,
+            "y_range": plot.y_range,
+            "plot_type": plot_type,
+            "lambda235": lambda_235,
+            "lambda238": lambda_238,
+            "uranium_ratio": common_U238_U235,
+            "earth_age": EARTH_AGE_MA,
+        },
+        code="""
+const x0 = Math.min(x_range.start, x_range.end);
+const x1 = Math.max(x_range.start, x_range.end);
+const y0 = Math.min(y_range.start, y_range.end);
+const y1 = Math.max(y_range.start, y_range.end);
+const ages = curve.data.age;
+const xs = curve.data.x;
+const ys = curve.data.y;
+let amin = Infinity;
+let amax = -Infinity;
+for (let i = 0; i < ages.length; i += 1) {
+  if (xs[i] >= x0 && xs[i] <= x1 && ys[i] >= y0 && ys[i] <= y1) {
+    amin = Math.min(amin, ages[i]);
+    amax = Math.max(amax, ages[i]);
+  }
+}
+if (!Number.isFinite(amin) || !Number.isFinite(amax)) {
+  labels.data = {x: [], y: [], label: []};
+  return;
+}
+const span = Math.max(amax - amin, 0.1);
+const raw = span / 9;
+const exponent = Math.floor(Math.log10(raw));
+const magnitude = Math.pow(10, exponent);
+const fraction = raw / magnitude;
+let nice = 10;
+if (fraction <= 1) nice = 1;
+else if (fraction <= 2) nice = 2;
+else if (fraction <= 5) nice = 5;
+const step = nice * magnitude;
+const first = Math.max(0, Math.ceil(amin / step) * step);
+const outX = [];
+const outY = [];
+const outLabel = [];
+for (let age = first; age <= Math.min(amax + step * 0.25, earth_age); age += step) {
+  const years = age * 1e6;
+  const pb68 = Math.exp(lambda238 * years) - 1;
+  const pb75 = Math.exp(lambda235 * years) - 1;
+  let x;
+  let y;
+  if (plot_type === "Wetherill") {
+    x = pb75;
+    y = pb68;
+  } else {
+    if (pb68 <= 0) continue;
+    x = 1 / pb68;
+    y = pb75 / pb68 / uranium_ratio;
+  }
+  if (x >= x0 && x <= x1 - 0.04 * (x1 - x0) &&
+      y >= y0 && y <= y1 - 0.04 * (y1 - y0)) {
+    outX.push(x);
+    outY.push(y);
+    const decimals = step >= 1 ? 0 : Math.max(0, Math.ceil(-Math.log10(step)));
+    outLabel.push(age.toFixed(decimals));
+  }
+}
+labels.data = {x: outX, y: outY, label: outLabel};
+""",
+    )
+    for range_model in (plot.x_range, plot.y_range):
+        range_model.js_on_change("start", callback)
+        range_model.js_on_change("end", callback)
+    return label_source
+
 def ratio_bounds(values, one_sigma_errors, extra_values=None, sigma=2):
     values = np.asarray(values, dtype=float)
     one_sigma_errors = np.asarray(one_sigma_errors, dtype=float)
@@ -261,8 +465,6 @@ def concordia_age_uncertainties(plot_type, x, y, sx, sy):
     return age_2sigmas[age_2sigmas > 0]
 
 def concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim):
-    manual_age_min = age_min is not None
-    manual_age_max = age_max is not None
     data_ages = concordia_data_ages(plot_type, x, y)
     age_uncertainties = concordia_age_uncertainties(plot_type, x, y, sx, sy)
     age_uncertainty = np.nanmedian(age_uncertainties) if len(age_uncertainties) else 0
@@ -270,12 +472,23 @@ def concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim)
     data_age_min = float(np.nanmin(data_ages))
     data_age_max = float(np.nanmax(data_ages))
     data_age_span = data_age_max - data_age_min
-    if data_age_span > 0 or age_uncertainty > 0:
-        preliminary_span = max(data_age_span, 4 * age_uncertainty)
+    mean_data_age = float(np.nanmean(data_ages))
+    if data_age_span > 0:
+        preliminary_span = data_age_span
+        age_pad = max(
+            0.08 * data_age_span,
+            0.01 * abs(mean_data_age),
+            5.0,
+        )
     else:
-        preliminary_span = max(1.0, abs(np.nanmean(data_ages)) * 0.005)
-    age_step = nice_step(max(preliminary_span / 8, age_uncertainty))
-    age_pad = max(2 * age_step, 2 * age_uncertainty, 0.05 * data_age_span)
+        preliminary_span = max(1.0, abs(mean_data_age) * 0.02)
+        bounded_uncertainty = min(
+            2 * age_uncertainty,
+            0.25 * max(abs(mean_data_age), 1.0),
+        )
+        age_pad = max(bounded_uncertainty, preliminary_span, 5.0)
+    bounded_age_uncertainty = min(age_uncertainty, preliminary_span / 4)
+    age_step = nice_step(max(preliminary_span / 8, bounded_age_uncertainty))
 
     curve_min_age = data_age_min - age_pad if age_min is None else float(age_min)
     curve_max_age = data_age_max + age_pad if age_max is None else float(age_max)
@@ -286,7 +499,9 @@ def concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim)
         curve_max_age = min(4500.0, data_age_max + age_pad)
 
     visible_age_span = max(curve_max_age - curve_min_age, age_step)
-    age_step = nice_step(max(visible_age_span / 8, age_uncertainty))
+    age_step = nice_step(
+        max(visible_age_span / 8, min(age_uncertainty, visible_age_span / 4))
+    )
     tick_start = np.floor(curve_min_age / age_step) * age_step
     tick_end = np.ceil(curve_max_age / age_step) * age_step
     tick_ages = np.arange(tick_start, tick_end + 0.5 * age_step, age_step)
@@ -298,14 +513,14 @@ def concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim)
         tick_ages = np.arange(tick_start, tick_end + 0.5 * age_step, age_step)
         tick_ages = tick_ages[(tick_ages >= 0) & (tick_ages <= 4500)]
 
-    extra_x = None
-    extra_y = None
-    if manual_age_min or manual_age_max:
-        edge_ages = np.array([curve_min_age, curve_max_age])
-        if plot_type == "Wetherill":
-            extra_x, extra_y = get_wetherill_point(edge_ages)
-        else:
-            extra_x, extra_y = get_tera_wasserburg_point(edge_ages)
+    # Always include the relevant concordia segment in the initial viewport.
+    # This matters for discordant sweep data, whose x/y cloud may otherwise
+    # fall wholly to one side of the curve.
+    edge_ages = np.array([curve_min_age, curve_max_age])
+    if plot_type == "Wetherill":
+        extra_x, extra_y = get_wetherill_point(edge_ages)
+    else:
+        extra_x, extra_y = get_tera_wasserburg_point(edge_ages)
 
     if xlim is None:
         xlim = ratio_bounds(x, sx, extra_x)
@@ -324,7 +539,7 @@ def concordia(data, type='Wetherill',
               s75='207Pb/235U_2e', s68='206Pb/238U_2e', 
               s86='238U/206Pb_2e', s76='207Pb/206Pb_2e',
               rho='err_corr',
-              color_by=None, color_map='viridis_r', 
+              color_by=None, color_map='viridis_r', color_key='bar',
               discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
               age_min=None, age_max=None, xlim=None, ylim=None,
               concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
@@ -350,6 +565,9 @@ def concordia(data, type='Wetherill',
         the name of the column in the data to color the points by, by default None
     color_map : str, optional
         the name of the color map to use, by default 'viridis_r'
+    color_key : str, optional
+        show a continuous ``'bar'`` or a vector-friendly discrete ``'legend'``
+        when ``color_by`` is supplied, by default ``'bar'``
     discordia_fit : bool, optional
         whether to fit a discordia line to the data, by default False
     discordia_anchor : str, optional
@@ -396,6 +614,8 @@ def concordia(data, type='Wetherill',
     bokeh.plotting.figure
         A native Bokeh concordia diagram.
     '''
+    if color_key not in {'bar', 'legend'}:
+        raise ValueError("color_key must be either 'bar' or 'legend'")
     if type == 'Wetherill':
         x = pd.to_numeric(data[r75], errors='coerce').to_numpy(dtype=float)
         y = pd.to_numeric(data[r68], errors='coerce').to_numpy(dtype=float)
@@ -411,7 +631,7 @@ def concordia(data, type='Wetherill',
     else:
         raise ValueError('type must be either Wetherill or TW')
 
-    xlim, ylim, curve_min_age, curve_max_age, tick_ages, age_step = concordia_plot_ranges(
+    xlim, ylim, _curve_min_age, _curve_max_age, _tick_ages, _age_step = concordia_plot_ranges(
         type, x, y, sx, sy, age_min, age_max, xlim, ylim
     )
 
@@ -426,38 +646,57 @@ def concordia(data, type='Wetherill',
         tools='pan,wheel_zoom,box_zoom,reset,save',
         active_scroll='wheel_zoom',
     )
-    curve_resolution = int(np.clip((curve_max_age - curve_min_age) * 4, 300, 2000))
-    curve_ages = np.linspace(curve_min_age, curve_max_age, curve_resolution)
+    curve_ages, curve_x, curve_y = full_concordia_curve(type)
+    curve_source = ColumnDataSource(
+        {"age": curve_ages, "x": curve_x, "y": curve_y},
+        name="full_earth_concordia_source",
+    )
     if type == 'Wetherill':
-        curve_x, curve_y = get_wetherill_point(curve_ages)
-        plot.line(curve_x, curve_y, color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha, legend_label='Concordia')
+        plot.line(
+            'x',
+            'y',
+            source=curve_source,
+            color=concordia_color,
+            line_width=concordia_lw,
+            alpha=concordia_alpha,
+            legend_label='Concordia',
+            name='full_earth_concordia',
+        )
         if concordia_uncertainty:
             Pb207_U235s, lower_68, upper_68 = get_Wetherill_concordia_uncertainty()
             plot.varea(Pb207_U235s, lower_68, upper_68, fill_color='grey', fill_alpha=0.25)
     elif type == 'TW':
-        curve_x, curve_y = get_tera_wasserburg_point(curve_ages)
-        plot.line(curve_x, curve_y, color=concordia_color, line_width=concordia_lw, alpha=concordia_alpha, legend_label='Concordia')
+        plot.line(
+            'x',
+            'y',
+            source=curve_source,
+            color=concordia_color,
+            line_width=concordia_lw,
+            alpha=concordia_alpha,
+            legend_label='Concordia',
+            name='full_earth_concordia',
+        )
         if concordia_uncertainty:
             U238_Pb206s, lower_76, upper_76 = get_TW_concordia_uncertainty()
             plot.varea(U238_Pb206s, lower_76, upper_76, fill_color='grey', fill_alpha=0.25)
 
-    x_label_offset = 0.018 * (xlim[1] - xlim[0])
-    y_label_offset = 0.012 * (ylim[1] - ylim[0])
-    for age in tick_ages:
-        if type == 'Wetherill':
-            x_label, y_label = get_wetherill_point(age)
-        elif type == 'TW':
-            x_label, y_label = get_tera_wasserburg_point(age)
-
-        if not (xlim[0] <= x_label <= xlim[1] and ylim[0] <= y_label <= ylim[1]):
-            continue
-        plot.scatter([x_label], [y_label], color='black', size=5, alpha=0.5)
-        plot.text(
-            [x_label + x_label_offset],
-            [y_label + y_label_offset],
-            [format_age_label(age, age_step)],
-            text_color='black', text_font_size='10pt', text_align='left', text_baseline='middle',
-        )
+    initial_label_ages = visible_concordia_age_labels(
+        type,
+        curve_ages,
+        curve_x,
+        curve_y,
+        xlim,
+        ylim,
+    )
+    add_dynamic_concordia_age_labels(
+        plot,
+        type,
+        curve_ages,
+        curve_x,
+        curve_y,
+        initial_label_ages,
+        curve_source=curve_source,
+    )
 
     if color_by is None:
         # plot data ellipses
@@ -492,8 +731,17 @@ def concordia(data, type='Wetherill',
             low, high = min(color_values), max(color_values)
             if low == high:
                 high = low + 1
-            mapper = LinearColorMapper(palette=list(reversed(Viridis256)), low=low, high=high)
-            polygon_source = ColumnDataSource({'xs': polygon_xs, 'ys': polygon_ys, 'value': color_values})
+            palette = list(reversed(Viridis256))
+            mapper = LinearColorMapper(
+                palette=palette,
+                low=low,
+                high=high,
+                name='concordia_color_mapper',
+            )
+            polygon_source = ColumnDataSource(
+                {'xs': polygon_xs, 'ys': polygon_ys, 'value': color_values},
+                name='concordia_ellipse_source',
+            )
             plot.patches(
                 xs='xs', ys='ys', source=polygon_source,
                 fill_color={'field': 'value', 'transform': mapper},
@@ -502,7 +750,20 @@ def concordia(data, type='Wetherill',
                 line_width=ellipse_line_width,
                 line_alpha=ellipse_line_alpha,
             )
-            plot.add_layout(ColorBar(color_mapper=mapper, title=color_by), 'right')
+            if color_key == 'bar':
+                plot.add_layout(ColorBar(color_mapper=mapper, title=color_by), 'right')
+            else:
+                key_values = np.linspace(low, high, min(5, len(color_values)))
+                for key_value in key_values:
+                    fraction = (key_value - low) / (high - low)
+                    color_index = int(round(fraction * (len(palette) - 1)))
+                    plot.scatter(
+                        [np.nan],
+                        [np.nan],
+                        color=palette[color_index],
+                        size=8,
+                        legend_label=f'{key_value:g}',
+                    )
 
     center_data = pd.DataFrame({
         'x': x,
@@ -511,7 +772,7 @@ def concordia(data, type='Wetherill',
         'age_75': pd.to_numeric(data.get('207Pb/235U_age', np.nan), errors='coerce'),
         'age_68': pd.to_numeric(data.get('206Pb/238U_age', np.nan), errors='coerce'),
     })
-    center_source = ColumnDataSource(center_data)
+    center_source = ColumnDataSource(center_data, name='concordia_center_source')
     marker = {'o': 'circle', 's': 'square', '^': 'triangle', 'd': 'diamond'}.get(ellipse_center_marker, ellipse_center_marker)
     centers = plot.scatter(
         x='x', y='y', source=center_source,
@@ -528,6 +789,12 @@ def concordia(data, type='Wetherill',
     if plot.legend:
         plot.legend.location = 'top_right'
         plot.legend.click_policy = 'hide'
+        if color_by is not None and color_key == 'legend':
+            plot.legend.title = color_by
+            legend = plot.legend[0]
+            if legend in plot.center:
+                plot.center.remove(legend)
+            plot.add_layout(legend, 'right')
     return plot
 
 def get_Wetherill_concordia_uncertainty():
@@ -1033,6 +1300,9 @@ __all__ = [
     'finite_array',
     'nice_step',
     'format_age_label',
+    'full_concordia_curve',
+    'visible_concordia_age_labels',
+    'add_dynamic_concordia_age_labels',
     'ratio_bounds',
     'concordia_data_ages',
     'concordia_age_uncertainties',
