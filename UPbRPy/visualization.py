@@ -2487,6 +2487,78 @@ def plot_time_series(
     )
 
 
+def add_tw_concordia_context(plot, x_max, y_values):
+    """Add a full TW concordia while keeping the initial view data-focused."""
+    from .isoplot import (
+        add_dynamic_concordia_age_labels,
+        full_concordia_curve,
+        visible_concordia_age_labels,
+    )
+
+    x_max = float(x_max)
+    if not np.isfinite(x_max) or x_max <= 0:
+        raise ValueError("The Tera-Wasserburg x-axis maximum must be positive.")
+
+    curve_ages, curve_x, curve_y = full_concordia_curve("TW")
+    visible_curve = (
+        np.isfinite(curve_x)
+        & np.isfinite(curve_y)
+        & (curve_x >= 0)
+        & (curve_x <= x_max)
+    )
+    context_y = np.concatenate(
+        [
+            np.asarray(y_values, dtype=float).ravel(),
+            curve_y[visible_curve],
+        ]
+    )
+    context_y = context_y[np.isfinite(context_y)]
+    if context_y.size == 0:
+        raise ValueError("No finite Tera-Wasserburg y values are available.")
+
+    y_min = float(context_y.min())
+    y_max = float(context_y.max())
+    y_padding = max(0.05 * (y_max - y_min), 0.005)
+    initial_xlim = (0.0, x_max)
+    initial_ylim = (max(0.0, y_min - y_padding), y_max + y_padding)
+    plot.x_range = Range1d(*initial_xlim)
+    plot.y_range = Range1d(*initial_ylim)
+
+    curve_source = ColumnDataSource(
+        {"age": curve_ages, "x": curve_x, "y": curve_y},
+        name="full_earth_concordia_source",
+    )
+    plot.line(
+        "x",
+        "y",
+        source=curve_source,
+        color="#777777",
+        line_width=1.5,
+        alpha=0.75,
+        legend_label="Tera-Wasserburg concordia",
+        name="full_earth_concordia",
+    )
+    initial_label_ages = visible_concordia_age_labels(
+        "TW",
+        curve_ages,
+        curve_x,
+        curve_y,
+        initial_xlim,
+        initial_ylim,
+    )
+    add_dynamic_concordia_age_labels(
+        plot,
+        "TW",
+        curve_ages,
+        curve_x,
+        curve_y,
+        initial_label_ages,
+        color="#666666",
+        curve_source=curve_source,
+    )
+    return curve_source
+
+
 def plot_tw_spot_mean_session_projection(
     primary_standard_downhole_ratios,
     session_correction_results,
@@ -2504,8 +2576,10 @@ def plot_tw_spot_mean_session_projection(
     ``207Pb/206Pb`` session model is applied first. A short vertical dotted
     segment exposes that usually small Pb/Pb adjustment. The corrected
     ordinate is then held fixed while ``238U/206Pb`` is projected horizontally
-    onto the reference-material mixing line. No uncertainty symbols are drawn
-    so the geometry of the correction remains explicit.
+    onto the reference-material mixing line. The full Earth-age
+    Tera-Wasserburg concordia provides context for the isochron and updates its
+    visible age labels as the user zooms. No uncertainty symbols are drawn so
+    the geometry of the correction remains explicit.
 
     The named ``tw_session_spot_projection_source`` stores the plotted means,
     targets, and correction factors for auditing or tests.
@@ -2622,6 +2696,13 @@ def plot_tw_spot_mean_session_projection(
         projection,
         name="tw_session_spot_projection_source",
     )
+    x_max = max(
+        radiogenic_86,
+        float(projection["x_measured"].max()),
+        float(projection["x_target"].max()),
+    ) * 1.05
+    slope = (radiogenic_76 - initial_76) / radiogenic_86
+
     plot = figure(
         width=int(width),
         height=int(height),
@@ -2633,12 +2714,18 @@ def plot_tw_spot_mean_session_projection(
         tools="pan,wheel_zoom,box_zoom,reset,save",
         active_scroll="wheel_zoom",
     )
-    x_max = max(
-        radiogenic_86,
-        float(projection["x_measured"].max()),
-        float(projection["x_target"].max()),
-    ) * 1.05
-    slope = (radiogenic_76 - initial_76) / radiogenic_86
+    add_tw_concordia_context(
+        plot,
+        x_max,
+        np.concatenate(
+            [
+                [initial_76, radiogenic_76, initial_76 + slope * x_max],
+                projection[
+                    ["y_measured", "y_pbpb_corrected"]
+                ].to_numpy(dtype=float).ravel(),
+            ]
+        ),
+    )
     plot.line(
         [0.0, x_max],
         [initial_76, initial_76 + slope * x_max],
@@ -2738,10 +2825,12 @@ def plot_tw_spot_mean_session_projection(
     )
     if plot.legend:
         legend = plot.legend[0]
-        legend.location = "top_left"
+        legend.orientation = "horizontal"
+        legend.ncols = 2
+        legend.location = "center"
         legend.click_policy = "hide"
         legend.label_text_font_size = "8pt"
-        plot.add_layout(legend, "right")
+        plot.add_layout(legend, "below")
     return plot
 
 
@@ -2759,10 +2848,12 @@ def plot_tw_standard_calibration(
 
     The true mixing line joins the standard's radiogenic endpoint to its
     initial/common-Pb composition. Raw, downhole-corrected, and fully corrected
-    measurements are overlaid. Dashed horizontal segments show the
-    session-stage ``238U/206Pb`` projection at the fully Pb/Pb-corrected
-    ``207Pb/206Pb`` value; hollow points mark the corresponding targets on the
-    true line. Separate panels show every sweep and the arithmetic spot means.
+    measurements are overlaid in the context of the full Earth-age
+    Tera-Wasserburg concordia. Dashed horizontal segments show the session-stage
+    ``238U/206Pb`` projection at the fully Pb/Pb-corrected ``207Pb/206Pb``
+    value; hollow points mark the corresponding targets on the true line.
+    Separate panels show every sweep and the arithmetic spot means, with
+    concordia age labels that update as either panel is zoomed.
 
     Parameters
     ----------
@@ -2953,6 +3044,18 @@ def plot_tw_standard_calibration(
         finite_x.extend(projection.get("x_target", pd.Series(dtype=float)).tolist())
         x_max = max(finite_x) * 1.05
         slope = (radiogenic_76 - initial_76) / radiogenic_86
+        context_y = [initial_76, radiogenic_76, initial_76 + slope * x_max]
+        for frame in stage_frames.values():
+            context_y.extend(
+                pd.to_numeric(frame["y"], errors="coerce").tolist()
+            )
+        context_y.extend(
+            pd.to_numeric(
+                projection.get("y_corrected", pd.Series(dtype=float)),
+                errors="coerce",
+            ).tolist()
+        )
+        add_tw_concordia_context(plot, x_max, context_y)
         plot.line(
             [0.0, x_max],
             [initial_76, initial_76 + slope * x_max],
@@ -3036,9 +3139,13 @@ def plot_tw_standard_calibration(
                     ],
                 )
             )
-        plot.legend.location = "top_right"
-        plot.legend.click_policy = "hide"
-        plot.legend.label_text_font_size = "8pt"
+        legend = plot.legend[0]
+        legend.orientation = "horizontal"
+        legend.ncols = 2
+        legend.location = "center"
+        legend.click_policy = "hide"
+        legend.label_text_font_size = "8pt"
+        plot.add_layout(legend, "below")
         return plot
 
     sweep_plot = calibration_plot(
@@ -3063,6 +3170,7 @@ def plot_tw_standard_calibration(
 
 __all__ = [
     'StandaloneBokehPlot',
+    'add_tw_concordia_context',
     'add_time_series',
     'depth_profile_concordia_editor',
     'create_vector_export_webdriver',
