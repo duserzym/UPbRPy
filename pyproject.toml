@@ -30,11 +30,17 @@ notebook = [
   "jupyter_bokeh>=4.1.0",
   "panel>=1.8.10"
 ]
+export = [
+  "cairosvg>=2.8.2",
+  "selenium>=4.39.0"
+]
 dev = [
   "ipykernel>=7.3.0",
   "jupyterlab>=4.6.1",
   "jupyter_bokeh>=4.1.0",
   "panel>=1.8.10",
+  "cairosvg>=2.8.2",
+  "selenium>=4.39.0",
   "pytest>=9.1.1",
   "ruff>=0.15.21"
 ]

@@ -1,9 +1,12 @@
 """Compatibility checks for the focused package-module layout."""
 
 import inspect
+from pathlib import Path
 
-from bokeh.models import BoxAnnotation, MultiLine, Scatter
+import bokeh.io
+from bokeh.models import BoxAnnotation, MultiLine, Scatter, Segment
 from bokeh.plotting import figure
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -58,7 +61,7 @@ def test_package_star_exports_include_core_and_isochron_apis():
 
 
 def test_initialize_notebook_wraps_public_plot_helpers():
-    panel = pytest.importorskip("panel")
+    pytest.importorskip("panel")
     namespace = {}
 
     visualization.initialize_notebook(namespace=namespace)
@@ -87,6 +90,9 @@ def test_initialize_notebook_wraps_public_plot_helpers():
     html = pane._repr_html_()
     assert "Bokeh.embed.embed_items" in html
     assert "application/vnd.jupyter.widget-view+json" not in html
+    assert "static/extensions/" not in html
+    assert html.count("cdn.bokeh.org") == 1
+    assert "bokeh-widgets" not in html
     assert {"concordia", "plot_series", "plot_time_series"} <= set(namespace)
     assert "calc_concentration_calibration_factor" in namespace
     assert {
@@ -95,10 +101,100 @@ def test_initialize_notebook_wraps_public_plot_helpers():
         "calc_session_fractionation_rad",
         "calc_session_fractionation_TW",
     } <= set(namespace)
+    assert "plot_tw_spot_mean_session_projection" in namespace
+    assert "plot_tw_standard_calibration" in namespace
+
+
+def test_standalone_plot_resources_ignore_panel_extension_assets():
+    panel = pytest.importorskip("panel")
+    panel.extension()
+    standalone = visualization.StandaloneBokehPlot(figure(width=300, height=200))
+
+    html = standalone._repr_html_()
+
+    assert "static/extensions/panel" not in html
+    assert html.count("cdn.bokeh.org") == 1
+    assert "bokeh-gl" not in html
+    assert "bokeh-widgets" not in html
+    assert "bokeh-tables" not in html
+    assert "bokeh-mathjax" not in html
+
+
+def test_panel_extension_treats_legacy_vscode_comms_as_auto_detection():
+    calls = []
+
+    class ExtensionRecorder:
+        _loaded = False
+
+        def __call__(self, **kwargs):
+            calls.append(kwargs)
+
+    panel_module = type("PanelModule", (), {"extension": ExtensionRecorder()})()
+
+    visualization.initialize_panel_extension(panel_module, comms="vscode")
+
+    assert calls == [{}]
+
+
+def test_inline_plot_grid_combines_figures_into_one_document():
+    first = visualization.StandaloneBokehPlot(figure(width=300, height=200))
+    second = visualization.StandaloneBokehPlot(figure(width=300, height=200))
+
+    combined = visualization.inline_plot_grid([first, second], ncols=2)
+    html = combined._repr_html_()
+
+    assert isinstance(combined, visualization.StandaloneBokehPlot)
+    assert len(combined.object.children) == 2
+    assert "GridPlot" in html
+    assert html.count("Bokeh.embed.embed_items") == 1
+
+
+def test_notebook_display_sampling_retains_spot_endpoints_and_spike():
+    frame = pd.DataFrame(
+        {
+            "spot_name": ["a"] * 100 + ["b"] * 100,
+            "Time": np.arange(200, dtype=float),
+            "signal": np.r_[np.ones(49), 100.0, np.ones(50), np.ones(100)],
+        }
+    )
+    frame.attrs["nested_frame"] = pd.DataFrame({"value": [1, 2]})
+
+    rendered = visualization.plot_series(
+        [{"data": frame, "y": "signal"}],
+        max_display_points=24,
+    )
+    source = rendered.renderers[0].data_source.data
+
+    assert len(source["Time"]) <= 24
+    assert {0.0, 99.0, 100.0, 199.0} <= set(source["Time"])
+    assert 100.0 in source["signal"]
+
+
+def test_plot_display_limit_is_shared_across_series():
+    frame = pd.DataFrame(
+        {
+            "Time": np.arange(200, dtype=float),
+            "first": np.sin(np.arange(200, dtype=float)),
+            "second": np.cos(np.arange(200, dtype=float)),
+        }
+    )
+
+    rendered = visualization.plot_series(
+        [
+            {"data": frame, "y": "first"},
+            {"data": frame, "y": "second"},
+        ],
+        max_display_points=40,
+    )
+
+    assert sum(
+        len(renderer.data_source.data["Time"])
+        for renderer in rendered.renderers
+    ) <= 40
 
 
 def test_inline_correction_plots_wraps_figures_without_losing_fit_data():
-    panel = pytest.importorskip("panel")
+    pytest.importorskip("panel")
     correction_plot = figure(width=400, height=250)
     fit = object()
     original = {
@@ -119,7 +215,7 @@ def test_inline_correction_plots_wraps_figures_without_losing_fit_data():
 
 
 def test_inline_plot_pair_wraps_concentration_plot_without_losing_result():
-    panel = pytest.importorskip("panel")
+    pytest.importorskip("panel")
     calibration = pd.Series({"238U": 0.5})
     calibration_plot = figure(width=400, height=250)
 
@@ -161,6 +257,187 @@ def test_concentration_calibration_legend_is_outside_in_two_columns():
     assert legend not in calibration_plot.center
     assert legend.orientation == "horizontal"
     assert legend.ncols == 2
+
+
+def test_concentration_calibration_matches_elements_across_isotope_masses():
+    nist_data = pd.DataFrame(
+        {
+            "sample": ["NIST610", "NIST612"],
+            "spot_name": ["NIST610_1", "NIST612_1"],
+            "151Eu": [100.0, 10.0],
+            "153Eu": [101.0, 11.0],
+        }
+    )
+    archive = pd.DataFrame(
+        {"153Eu": [461.0, 35.0]},
+        index=["NIST610", "NIST612"],
+    )
+
+    calibration, _ = concentration.calc_concentration_calibration_factor(
+        nist_data,
+        ["151Eu", "153Eu"],
+        archive,
+    )
+
+    assert list(calibration.index) == ["153Eu"]
+    assert calibration.attrs["reference_channels"]["153Eu"] == {
+        "NIST610": "153Eu",
+        "NIST612": "153Eu",
+    }
+    expected = np.dot([101.0, 11.0], [461.0, 35.0]) / np.dot(
+        [101.0, 11.0],
+        [101.0, 11.0],
+    )
+    assert calibration["153Eu"] == expected
+
+    fallback, _ = concentration.calc_concentration_calibration_factor(
+        nist_data,
+        ["151Eu"],
+        archive,
+    )
+    assert list(fallback.index) == ["151Eu"]
+    assert fallback.attrs["reference_channels"]["151Eu"] == {
+        "NIST610": "153Eu",
+        "NIST612": "153Eu",
+    }
+
+
+def test_internal_channel_selection_is_isotope_mass_agnostic():
+    assert concentration.channel_for_element(["43Ca", "238U"], "44Ca") == "43Ca"
+    value, archive_channel = concentration.resolve_element_concentration(
+        pd.DataFrame({"44Ca": [400443.0]}, index=["apatite"]),
+        "apatite",
+        "43Ca",
+    )
+    assert value == 400443
+    assert archive_channel == "44Ca"
+
+
+def test_tw_standard_calibration_plot_projects_sweeps_and_spot_means():
+    raw = pd.DataFrame(
+        {
+            "sample": ["MAD"] * 4,
+            "spot_name": ["MAD 1", "MAD 1", "MAD 2", "MAD 2"],
+            "Time": [1.0, 2.0, 3.0, 4.0],
+            "206Pb/238U": [0.07, 0.071, 0.069, 0.0705],
+            "207Pb/206Pb": [0.62, 0.61, 0.64, 0.63],
+        }
+    )
+    downhole = raw[["sample", "spot_name", "Time"]].copy()
+    downhole["206Pb/238U_DH_corrected"] = [0.075, 0.076, 0.074, 0.0755]
+    downhole["207Pb/206Pb_DH_corrected"] = [0.60, 0.59, 0.62, 0.61]
+    corrected = raw[["sample", "spot_name", "Time"]].copy()
+    corrected["206Pb/238U_fractionation_corrected"] = [
+        0.078,
+        0.079,
+        0.077,
+        0.0785,
+    ]
+    corrected["207Pb/206Pb_fractionation_corrected"] = [
+        0.58,
+        0.57,
+        0.60,
+        0.59,
+    ]
+    archive = pd.DataFrame(
+        {
+            "206Pb/238U*": [0.08],
+            "207Pb/206Pb*": [0.055],
+            "207Pb/206Pb_i": [0.71],
+        },
+        index=["MAD"],
+    )
+
+    result = visualization.plot_tw_standard_calibration(
+        raw,
+        downhole,
+        corrected,
+        archive,
+        "MAD",
+    )
+
+    assert {"layout", "sweepwise", "spot_mean"}.issubset(result)
+    assert len(result["sweepwise_projection"]) == 4
+    assert len(result["spot_mean_projection"]) == 2
+    slope = (0.055 - 0.71) / (1 / 0.08)
+    projection = result["sweepwise_projection"]
+    expected_y = 0.71 + slope * projection["x_target"]
+    np.testing.assert_allclose(expected_y, projection["y_corrected"])
+
+    namespace = {}
+    visualization.initialize_notebook(namespace=namespace)
+    inline_result = namespace["plot_tw_standard_calibration"](
+        raw,
+        downhole,
+        corrected,
+        archive,
+        "MAD",
+    )
+
+    assert isinstance(inline_result["layout"], visualization.StandaloneBokehPlot)
+    assert inline_result["layout"].object is not None
+    assert not isinstance(
+        inline_result["sweepwise"], visualization.StandaloneBokehPlot
+    )
+    assert "Bokeh.embed.embed_items" in inline_result["layout"]._repr_html_()
+
+
+def test_tw_spot_mean_session_projection_matches_session_factor_geometry():
+    downhole = pd.DataFrame(
+        {
+            "sample": ["MAD"] * 4,
+            "spot_name": ["MAD 1", "MAD 1", "MAD 2", "MAD 2"],
+            "Time": [1.0, 2.0, 3.0, 4.0],
+            "206Pb/238U_DH_corrected": [0.075, 0.077, 0.073, 0.075],
+            "207Pb/206Pb_DH_corrected": [0.60, 0.58, 0.62, 0.60],
+        }
+    )
+    archive = pd.DataFrame(
+        {
+            "206Pb/238U*": [0.08],
+            "207Pb/206Pb*": [0.055],
+            "207Pb/206Pb_i": [0.71],
+        },
+        index=["MAD"],
+    )
+    session = {
+        "207Pb/206Pb": {
+            "predictor": lambda time: np.full(np.asarray(time).shape, 1.01),
+        }
+    }
+
+    plot = visualization.plot_tw_spot_mean_session_projection(
+        downhole,
+        session,
+        archive,
+        "MAD",
+    )
+    source = plot.select(name="tw_session_spot_projection_source")[0]
+    projection = pd.DataFrame(source.data)
+
+    assert len(projection) == 2
+    np.testing.assert_allclose(
+        projection["y_pbpb_corrected"],
+        projection["y_measured"] * 1.01,
+    )
+    slope = (0.055 - 0.71) / (1 / 0.08)
+    np.testing.assert_allclose(
+        0.71 + slope * projection["x_target"],
+        projection["y_pbpb_corrected"],
+    )
+    np.testing.assert_allclose(
+        projection["206Pb/238U_fractionation_factor"],
+        projection["x_measured"] / projection["x_target"],
+    )
+    segment_renderers = [
+        renderer
+        for renderer in plot.renderers
+        if isinstance(getattr(renderer, "glyph", None), Segment)
+    ]
+    assert {renderer.glyph.line_dash for renderer in segment_renderers} == {
+        "dashed",
+        "dotted",
+    }
 
 
 def test_plot_selected_data_skips_missing_selection_bounds():
@@ -338,6 +615,8 @@ def test_selection_editor_commits_only_active_spot_windows():
     assert tuple(widgets["Signal start/end (s)"].value) == (5.0, 28.0)
     widgets["Signal start/end (s)"].value = (6.2, 27.4)
     assert tuple(widgets["Signal start/end (s)"].value) == (5.0, 27.0)
+    widgets["Plateau filter"].value = "none"
+    assert selected_filters["#2b74a8"].indices == [5, 6, 7, 8]
     widgets["Apply"].clicks += 1
 
     first_spot = experiment.loc[experiment["spot_names"] == "spot-a"].iloc[0]
@@ -345,6 +624,9 @@ def test_selection_editor_commits_only_active_spot_windows():
     assert tuple(first_spot[["baseline_start_times", "baseline_end_times"]]) == (10.0, 12.0)
     assert tuple(first_spot[["plateau_start_times", "plateau_end_times"]]) == (5.0, 9.0)
     assert tuple(first_spot[["signal_start_times", "signal_end_times"]]) == (5.0, 27.0)
+    assert first_spot["plateau_filter_method"] == "none"
+    assert first_spot["plateau_filter_channel"] == "29Si"
+    assert second_spot["plateau_filter_method"] == "excel_2sigma"
     assert tuple(second_spot[["baseline_start_times", "baseline_end_times"]]) == (100.0, 102.0)
     assert refreshed_calculations[-1][0] == "spot-a"
     assert refreshed_calculations[-1][1] == {
@@ -353,6 +635,73 @@ def test_selection_editor_commits_only_active_spot_windows():
     }
     refreshed = refreshed_calculations[-1][2]
     assert refreshed.loc[refreshed["Time"] == 10.0, "29Si"].iloc[0] == 0.0
+
+
+def test_selection_editor_autopick_inherits_long_plateau_import_settings():
+    pytest.importorskip("panel")
+    pytest.importorskip("jupyter_bokeh.widgets")
+    signal = np.asarray([10.0] * 40 + [100.0] * 390 + [10.0] * 30)
+    times = np.arange(signal.size, dtype=float)
+    experiment = pd.DataFrame(
+        {
+            "spot_names": ["apatite 1"],
+            "baseline_start_times": [20.0],
+            "baseline_end_times": [35.0],
+            "plateau_start_times": [45.0],
+            "plateau_end_times": [410.0],
+        }
+    )
+    experiment.attrs["selection_parameters"] = {
+        "baseline_sweep_n": 15,
+        "peak_sweep_n": 365,
+        "threshold": 0.2,
+        "filter_percentile": 90,
+        "baseline_offset": 4,
+        "plateau_offset": 2,
+    }
+    total_data = pd.DataFrame(
+        {
+            "spot_name": "apatite 1",
+            "Time": times,
+            "44Ca": signal,
+        }
+    )
+    editor = visualization.selection_editor(
+        experiment,
+        total_data,
+        primary_channel="44Ca",
+    )
+
+    def descendants(component):
+        yield component
+        for child in getattr(component, "objects", []):
+            yield from descendants(child)
+
+    widgets = {
+        component.name: component
+        for component in descendants(editor)
+        if getattr(component, "name", None)
+    }
+    widgets["Selection module"].value = "threshold"
+    widgets["Auto-pick plateau"].clicks += 1
+
+    expected = io.select_signal_regions(
+        signal,
+        time=times,
+        method="threshold",
+        baseline_sweep_n=15,
+        peak_sweep_n=365,
+        threshold=0.2,
+        filter_percentile=90,
+        baseline_offset=4,
+        plateau_offset=2,
+    )
+    expected_bounds = (
+        times[expected.plateau_start],
+        times[expected.plateau_end],
+    )
+    assert tuple(widgets["Plateau window (s)"].value) == expected_bounds
+    assert expected.plateau_end - expected.plateau_start > 300
 
 
 def test_excel_plateau_filter_rejects_outlier_around_linear_trend():
@@ -402,3 +751,124 @@ def test_former_helpers_are_available_from_package_root():
     ):
         assert name in UPbRPy.__all__
         assert hasattr(UPbRPy, name)
+
+
+def test_concordia_keeps_full_earth_curve_but_data_focused_initial_range():
+    data = pd.DataFrame(
+        {
+            "207Pb/235U": [0.24],
+            "206Pb/238U": [0.038],
+            "207Pb/235U_2e": [0.012],
+            "206Pb/238U_2e": [0.0024],
+            "err_corr": [0.65],
+            "sample": ["synthetic"],
+        }
+    )
+
+    plot = isoplot.concordia(data)
+    ages, full_x, _full_y = isoplot.full_concordia_curve("Wetherill")
+
+    assert ages[-1] == pytest.approx(isoplot.EARTH_AGE_MA)
+    assert plot.x_range.end < full_x[-1]
+    assert len(plot.select(name="full_earth_concordia")) == 1
+    assert len(plot.select(name="concordia_age_labels")) == 1
+    assert plot.x_range.js_property_callbacks
+    assert plot.y_range.js_property_callbacks
+
+
+def test_vector_pdf_export_normalizes_bokeh_svg_colors(monkeypatch, tmp_path):
+    def fake_export_svg(_plot, *, filename, webdriver):
+        Path(filename).write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+            '<rect width="10" height="10" fill="rgb(0 128 0 / 0.2)"/>'
+            '</svg>',
+            encoding="utf-8",
+        )
+        return [str(filename)]
+
+    monkeypatch.setattr(bokeh.io, "export_svg", fake_export_svg)
+    output = tmp_path / "plot.pdf"
+
+    result = visualization.export_bokeh_vector(
+        figure(width=100, height=100),
+        output,
+        webdriver=object(),
+    )
+
+    assert result == output.resolve()
+    assert output.read_bytes().startswith(b"%PDF")
+
+
+def test_depth_profile_editor_buttons_refresh_spot_and_diagram():
+    rows = []
+    for spot_name, offset in (("spot-a", 0.0), ("spot-b", 0.02)):
+        for sweep in range(3):
+            ratio_68 = 0.038 + offset + sweep * 0.0005
+            rows.append(
+                {
+                    "spot_name": spot_name,
+                    "sample": "synthetic",
+                    "Time": float(sweep),
+                    "206Pb/238U_fractionation_corrected": ratio_68,
+                    "206Pb/238U_fractionation_corrected_2e": 0.001,
+                    "207Pb/206Pb_fractionation_corrected": 0.047,
+                    "207Pb/206Pb_fractionation_corrected_2e": 0.001,
+                    "207Pb/235U_fractionation_corrected": 0.24 + offset,
+                    "207Pb/235U_fractionation_corrected_2e": 0.008,
+                    "238U/206Pb_fractionation_corrected": 1 / ratio_68,
+                    "238U/206Pb_fractionation_corrected_2e": 0.7,
+                    "err_corr": 0.5,
+                }
+            )
+
+    editor = visualization.depth_profile_concordia_editor(pd.DataFrame(rows))
+    interactive_layout = editor.object
+    spot_controls = interactive_layout.children[0]
+    plot = interactive_layout.children[2]
+    previous_button, spot_selector, next_button, diagram_selector = (
+        spot_controls.children
+    )
+
+    assert plot.width == 1100
+    assert plot.height == 500
+    assert plot.title.text.startswith("spot-a | Wetherill")
+    assert isinstance(editor, visualization.StandaloneBokehPlot)
+    assert plot.output_backend == "svg"
+    save_tool = plot.select(type=visualization.SaveTool)[0]
+    assert save_tool.filename == "spot-a_Wetherill_depth_profile.svg"
+    assert spot_selector.js_property_callbacks
+    assert diagram_selector.js_property_callbacks
+    assert previous_button.js_event_callbacks
+    assert next_button.js_event_callbacks
+    assert len(
+        list(interactive_layout.select({"name": "depth_profile_switch_data"}))
+    ) == 1
+    assert "application/vnd.jupyter.widget-view+json" not in editor._repr_html_()
+    assert visualization.find_single_bokeh_plot(editor) is plot
+
+
+def test_concordia_initial_range_includes_discordant_data_and_curve():
+    data = pd.DataFrame(
+        {
+            "207Pb/235U": [0.2],
+            "206Pb/238U": [0.2],
+            "207Pb/235U_2e": [0.01],
+            "206Pb/238U_2e": [0.01],
+            "err_corr": [0.0],
+            "sample": ["discordant"],
+        }
+    )
+
+    plot = isoplot.concordia(data)
+    curve = plot.select(name="full_earth_concordia")[0].data_source.data
+    visible = (
+        (curve["x"] >= plot.x_range.start)
+        & (curve["x"] <= plot.x_range.end)
+        & (curve["y"] >= plot.y_range.start)
+        & (curve["y"] <= plot.y_range.end)
+    )
+
+    assert visible.any()
+    assert plot.x_range.start <= 0.2 <= plot.x_range.end
+    assert plot.y_range.start <= 0.2 <= plot.y_range.end
+    assert len(plot.select(name="full_earth_concordia_source")) == 1
