@@ -6,6 +6,7 @@ from UPbRPy import (
     apply_DH_correction,
     build_downhole_fractionation_metadata,
     calc_raw_ratios,
+    calc_ratio_mean_and_uncertainty,
     calc_68_date,
     calc_68_date_uncertainty,
     calc_75_date,
@@ -60,6 +61,75 @@ def test_raw_ratio_regions_share_signal_start_relative_time():
     assert signal["signal_relative_time"].tolist() == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
     assert plateau["Time"].tolist() == [5.0, 6.0]
     assert plateau["signal_relative_time"].tolist() == [2.0, 3.0]
+
+
+def test_saved_plateau_filter_excludes_spot_mean_sweep_but_not_signal_profile():
+    times = np.arange(25.0)
+    primary_signal = 100.0 - 2.0 * times + 0.1 * (times % 2)
+    primary_signal[10] += 30.0
+    pb206 = np.full(times.size, 100.0)
+    pb206[10] = 1000.0
+    experiment = pd.DataFrame(
+        {
+            "spot_names": ["RM_1"],
+            "baseline_start_times": [0.0],
+            "baseline_end_times": [2.0],
+            "signal_start_times": [2.0],
+            "signal_end_times": [22.0],
+            "plateau_start_times": [2.0],
+            "plateau_end_times": [22.0],
+            "plateau_filter_method": ["excel_2sigma"],
+            "plateau_filter_channel": ["29Si"],
+        }
+    )
+    total = pd.DataFrame(
+        {
+            "sample": ["RM"] * times.size,
+            "spot_name": ["RM_1"] * times.size,
+            "Time": times,
+            "29Si": primary_signal,
+            "202Hg": np.full(times.size, 10.0),
+            "204Hg": np.full(times.size, 20.0),
+            "206Pb": pb206,
+            "207Pb": np.full(times.size, 5.2),
+            "208Pb": np.full(times.size, 80.0),
+            "232Th": np.full(times.size, 40.0),
+            "238U": np.full(times.size, 200.0),
+        }
+    )
+
+    signal = calc_raw_ratios(experiment, total, total, region="signal")
+    plateau = calc_raw_ratios(experiment, total, total, region="plateau")
+    unfiltered_experiment = experiment.copy()
+    unfiltered_experiment["plateau_filter_method"] = "none"
+    unfiltered_plateau = calc_raw_ratios(
+        unfiltered_experiment,
+        total,
+        total,
+        region="plateau",
+    )
+
+    assert 10.0 in signal["Time"].tolist()
+    assert 10.0 not in plateau["Time"].tolist()
+    assert len(signal) == 21
+    assert len(plateau) == 19
+    assert len(unfiltered_plateau) == 20
+    assert 10.0 in unfiltered_plateau["Time"].tolist()
+    assert unfiltered_plateau.attrs["plateau_filter_excluded_count"] == 0
+    assert plateau.attrs["plateau_filter_excluded_count"] == 1
+    excluded = plateau.attrs["plateau_filter_excluded"].iloc[0]
+    assert excluded["spot_name"] == "RM_1"
+    assert excluded["Time"] == 10.0
+    assert signal.loc[signal["Time"] == 10.0, "206Pb/238U"].iloc[0] == 5.0
+
+    session_results = {}
+    for ratio in ("206Pb/238U", "207Pb/206Pb"):
+        plateau[ratio + "_fractionation_corrected"] = plateau[ratio]
+        session_results[ratio] = {"fit": np.array([1.0]), "std": 0.001}
+    spot_means = calc_ratio_mean_and_uncertainty(plateau, session_results)
+
+    assert np.isclose(spot_means.loc[0, "206Pb/238U"], 0.5)
+    assert np.isclose(spot_means.loc[0, "207Pb/206Pb"], 0.052)
 
 
 def test_downhole_alignment_covers_union_without_endpoint_extrapolation():

@@ -4,7 +4,108 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 import warnings
+
+
+def normalize_plateau_filter_method(method) -> str:
+    """Return a canonical saved plateau-filter method name."""
+    if method is None or (not isinstance(method, str) and pd.isna(method)):
+        return "none"
+    normalized = str(method).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": "none",
+        "none": "none",
+        "off": "none",
+        "no": "none",
+        "unfiltered": "none",
+        "2sigma": "excel_2sigma",
+        "2_sigma": "excel_2sigma",
+        "trend_2sigma": "excel_2sigma",
+        "excel_2sigma": "excel_2sigma",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as error:
+        raise ValueError(
+            "plateau filter method must be 'none' or 'excel_2sigma'."
+        ) from error
+
+
+def excel_plateau_inlier_mask(
+    time,
+    signal,
+    *,
+    confidence: float = 0.95,
+    iterations: int = 3,
+) -> np.ndarray:
+    """Return an iterative inlier mask around a linear plateau trend.
+
+    The reference VBA describes this as a 2-sigma filter. Its worksheet uses a
+    two-sided Student-t confidence multiplier times ``STEYX`` and repeats the
+    removal three times for count data. This implementation retains original
+    row positions and never treats non-finite measurements as inliers.
+    """
+    x = np.asarray(time, dtype=float)
+    y = np.asarray(signal, dtype=float)
+    if x.ndim != 1 or y.ndim != 1 or x.size != y.size:
+        raise ValueError(
+            "time and signal must be one-dimensional arrays of equal length."
+        )
+    confidence = float(confidence)
+    iterations = int(iterations)
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be between 0 and 1.")
+    if iterations < 1:
+        raise ValueError("iterations must be positive.")
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    inliers = finite.copy()
+    for _ in range(iterations):
+        selected = np.flatnonzero(inliers)
+        if selected.size < 3:
+            break
+        selected_x = x[selected]
+        selected_y = y[selected]
+        if np.ptp(selected_x) == 0:
+            predicted = np.full_like(selected_y, np.mean(selected_y))
+        else:
+            slope, intercept = np.polyfit(selected_x, selected_y, 1)
+            predicted = intercept + slope * selected_x
+        residuals = selected_y - predicted
+        residual_se = float(
+            np.sqrt(np.sum(residuals**2) / max(1, selected.size - 2))
+        )
+        if not np.isfinite(residual_se) or residual_se == 0:
+            break
+        # The workbook passes COUNT as TINV's degrees of freedom.
+        multiplier = float(student_t.ppf((1 + confidence) / 2, selected.size))
+        keep_selected = np.abs(residuals) <= multiplier * residual_se
+        updated = np.zeros_like(inliers)
+        updated[selected[keep_selected]] = True
+        if updated.sum() < 3 or np.array_equal(updated, inliers):
+            break
+        inliers = updated
+    return inliers
+
+
+def plateau_inlier_mask(time, signal, method="none") -> np.ndarray:
+    """Return plateau inliers for a canonical saved filter method."""
+    method = normalize_plateau_filter_method(method)
+    time_array = np.asarray(time, dtype=float)
+    signal_array = np.asarray(signal, dtype=float)
+    dimensions_match = (
+        time_array.ndim == 1
+        and signal_array.ndim == 1
+        and time_array.size == signal_array.size
+    )
+    if not dimensions_match:
+        raise ValueError(
+            "time and signal must be one-dimensional arrays of equal length."
+        )
+    if method == "none":
+        return np.ones(time_array.size, dtype=bool)
+    return excel_plateau_inlier_mask(time_array, signal_array)
 
 def project_tw_238u_206pb(
     corrected_207pb_206pb,
@@ -95,10 +196,14 @@ def calc_raw_ratios(
     """Calculate sweep-wise raw isotope ratios in a selected spot region.
 
     ``region='signal'`` returns the inclusive signal-start through signal-end
-    interval used to construct a full downhole correction. ``region='plateau'``
-    retains the historical half-open plateau interval used for spot means.
-    Both outputs carry ``signal_relative_time``, whose zero is the saved signal
-    start rather than the first row of the selected region.
+    interval used to construct a full downhole correction and never applies a
+    plateau filter. ``region='plateau'`` uses the historical half-open plateau
+    interval, then applies each spot's saved ``plateau_filter_method`` to the
+    saved filter channel. Consequently rejected plateau sweeps are omitted
+    from isotope-ratio session calibration and final spot means without
+    changing downhole or depth-profile data. Both outputs carry
+    ``signal_relative_time``, whose zero is the saved signal start rather than
+    the first row of the selected region.
     """
     region = str(region).strip().lower()
     if region not in {"plateau", "signal"}:
@@ -136,6 +241,8 @@ def calc_raw_ratios(
     ]
     ratio_frames = []
     skipped_spots = []
+    excluded_plateau_records = []
+    applied_plateau_filters = []
     experiment_by_spot = (
         experiment.drop_duplicates("spot_names", keep="first")
         .set_index("spot_names")
@@ -190,6 +297,53 @@ def calc_raw_ratios(
         if selected.empty:
             skipped_spots.append(str(spot_name))
             continue
+
+        if region == "plateau":
+            filter_method = normalize_plateau_filter_method(
+                row.get("plateau_filter_method", "none")
+            )
+            filter_channel = row.get(
+                "plateau_filter_channel",
+                row.get("selection_channel"),
+            )
+            if pd.isna(filter_channel) or not str(filter_channel).strip():
+                filter_channel = row.get("selection_channel")
+            filter_channel = (
+                None if pd.isna(filter_channel) else str(filter_channel)
+            )
+            if filter_method != "none":
+                if filter_channel is None or filter_channel not in selected.columns:
+                    raise KeyError(
+                        f"Saved plateau filter channel {filter_channel!r} is not "
+                        f"available for spot {spot_name!r}."
+                    )
+                inliers = plateau_inlier_mask(
+                    pd.to_numeric(selected["Time"], errors="coerce"),
+                    pd.to_numeric(selected[filter_channel], errors="coerce"),
+                    filter_method,
+                )
+                excluded = selected.loc[
+                    ~inliers,
+                    ["sample", "spot_name", "Time"],
+                ].copy()
+                if not excluded.empty:
+                    excluded["plateau_filter_method"] = filter_method
+                    excluded["plateau_filter_channel"] = filter_channel
+                    excluded["plateau_filter_signal"] = pd.to_numeric(
+                        selected.loc[~inliers, filter_channel], errors="coerce"
+                    ).to_numpy()
+                    excluded_plateau_records.extend(excluded.to_dict("records"))
+                selected = selected.loc[inliers].copy()
+            applied_plateau_filters.append(
+                {
+                    "spot_name": str(spot_name),
+                    "plateau_filter_method": filter_method,
+                    "plateau_filter_channel": filter_channel,
+                }
+            )
+            if selected.empty:
+                skipped_spots.append(str(spot_name))
+                continue
         selected["signal_relative_time"] = (
             pd.to_numeric(selected["Time"], errors="coerce") - signal_start
         )
@@ -256,9 +410,17 @@ def calc_raw_ratios(
     result.attrs["selection_region"] = region
     result.attrs["relative_time_origin"] = "signal_start_times"
     result.attrs["skipped_spots"] = tuple(skipped_spots)
+    result.attrs["plateau_filter_excluded"] = pd.DataFrame(
+        excluded_plateau_records
+    )
+    result.attrs["plateau_filter_excluded_count"] = len(excluded_plateau_records)
+    result.attrs["plateau_filters"] = pd.DataFrame(applied_plateau_filters)
     return result
 
 __all__ = [
+    'normalize_plateau_filter_method',
+    'excel_plateau_inlier_mask',
+    'plateau_inlier_mask',
     'project_tw_238u_206pb',
     'project_tw_206pb_238u',
     'propagate_raw_ratio_uncertaintiess',

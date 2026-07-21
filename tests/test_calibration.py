@@ -3,6 +3,7 @@ import pandas as pd
 
 from UPbRPy import (
     apply_session_correction,
+    calc_DH_dynamic_fractionation,
     calc_DH_nominal_fractionation,
     calc_session_nominal_fractionation,
     fit_calibration_model,
@@ -69,6 +70,68 @@ def test_downhole_default_is_pointwise_mean_and_model_is_replaceable():
     assert mean_metadata["model"] == "mean"
     assert linear_metadata["model"] == "linear"
     assert np.all(np.isfinite(linear_model(linear_metadata["time"])))
+
+
+def test_dynamic_downhole_filter_rejects_one_extreme_primary_sweep():
+    rows = []
+    for spot_index in range(6):
+        for relative_time in range(12):
+            factor = 1.0 + 0.01 * relative_time + 0.002 * spot_index
+            if spot_index == 2 and relative_time == 8:
+                factor = 80.0
+            rows.append(
+                {
+                    "sample": "Pb-rich RM",
+                    "spot_name": f"RM_{spot_index}",
+                    "Time": float(relative_time),
+                    "signal_relative_time": float(relative_time),
+                    "measured": 1.0,
+                    "projected": factor,
+                }
+            )
+    data = pd.DataFrame(rows)
+
+    filtered_plot, filtered_model, filtered = calc_DH_dynamic_fractionation(
+        data,
+        "measured",
+        "projected",
+        return_metadata=True,
+        outlier_sigma=5,
+    )
+    _, unfiltered_model, unfiltered = calc_DH_dynamic_fractionation(
+        data,
+        "measured",
+        "projected",
+        return_metadata=True,
+        outlier_sigma=None,
+    )
+
+    spike_time = filtered["time"][8]
+    assert filtered["excluded_count"] == 1
+    excluded = filtered["excluded_aligned_points"].iloc[0]
+    assert excluded["spot_name"] == "RM_2"
+    assert excluded["signal_relative_time"] == spike_time
+    assert np.isnan(filtered["residuals"][2, 8])
+    assert filtered_model(spike_time) < 1.2
+    assert unfiltered_model(spike_time) > 10
+    assert unfiltered["excluded_count"] == 0
+    assert filtered_plot.y_range.end < 2.0
+    outlier_sources = [
+        renderer.data_source.data
+        for renderer in filtered_plot.renderers
+        if hasattr(renderer, "data_source")
+        and "fractionation_factor" in renderer.data_source.data
+    ]
+    assert any(
+        80.0 in np.asarray(source["fractionation_factor"], dtype=float)
+        for source in outlier_sources
+    )
+    assert any(
+        "display_factor" in source
+        and np.max(np.asarray(source["display_factor"], dtype=float))
+        < filtered_plot.y_range.end
+        for source in outlier_sources
+    )
 
 
 def test_session_custom_model_is_used_when_applying_correction():

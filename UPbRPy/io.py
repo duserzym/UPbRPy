@@ -878,6 +878,23 @@ def read_experiment_data(
         signal_duration_limit_seconds=signal_duration_limit_seconds,
     )
 
+    # Keep the parameters that produced the initial selections with the
+    # experiment table. Interactive editors can then reproduce the same
+    # auto-pick instead of silently falling back to the selector defaults.
+    # These attrs contain only scalar values and a shallow options mapping, so
+    # they remain safe for ordinary pandas slicing and concatenation.
+    experiment.attrs['selection_parameters'] = {
+        'baseline_sweep_n': int(baseline_sweep_n),
+        'peak_sweep_n': int(peak_sweep_n),
+        'threshold': float(threshold),
+        'filter_percentile': float(filter_percentile),
+        'baseline_offset': int(baseline_offset),
+        'plateau_offset': int(plateau_offset),
+        'selection_method': str(selection_method),
+        'selection_options': dict(selection_options or {}),
+        'signal_duration_limit_seconds': signal_duration_limit_seconds,
+    }
+
     return experiment, element_channels, total_data
 
 def read_spot_data(spot_path):
