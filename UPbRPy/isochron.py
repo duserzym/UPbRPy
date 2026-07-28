@@ -54,6 +54,7 @@ class CommonPbAgeResult:
 
     @property
     def two_sigma_ma(self) -> float:
+        """Return the absolute two-sigma age uncertainty in Ma."""
         return 2.0 * self.sigma_ma
 
 
@@ -212,6 +213,7 @@ def age_207_corrected(
         return result if return_solver_info else result[0]
 
     def residual(age_ma):
+        """Return the 207-method equation misfit for a trial age."""
         radiogenic_68 = np.expm1(l238_ma * age_ma)
         radiogenic_75 = np.expm1(l235_ma * age_ma)
         return (
@@ -221,6 +223,7 @@ def age_207_corrected(
         )
 
     def derivative(age_ma):
+        """Return the age derivative of the 207-method residual."""
         return (
             l235_ma * np.exp(l235_ma * age_ma)
             - u238_u235
@@ -338,6 +341,7 @@ def age_208_corrected(
         return result if return_solver_info else result[0]
 
     def residual(age_ma):
+        """Return the 208-method equation misfit for a trial age."""
         radiogenic_68 = np.expm1(l238_ma * age_ma)
         radiogenic_82 = np.expm1(l232_ma * age_ma)
         return (
@@ -347,6 +351,7 @@ def age_208_corrected(
         )
 
     def derivative(age_ma):
+        """Return the age derivative of the 208-method residual."""
         return (
             th_u * common_68 * l232_ma * np.exp(l232_ma * age_ma)
             - l238_ma * np.exp(l238_ma * age_ma)
@@ -438,7 +443,38 @@ def calculate_common_pb_result(
     age_bounds_ma: tuple[float, float],
     max_208_th_u: float,
 ) -> CommonPbAgeResult:
-    """Evaluate one row for :func:`apply_common_pb_corrections`."""
+    """Calculate one conventional 207- or 208-corrected age result.
+
+    Parameters
+    ----------
+    method
+        ``"207"`` or ``"208"``.
+    ratio_68, ratio_68_1s
+        Total ``206Pb/238U`` and absolute one-sigma uncertainty.
+    ratio_other, ratio_other_1s
+        Total ``207Pb/206Pb`` for the 207 method or ``208Pb/232Th`` for the
+        208 method, with its one-sigma uncertainty.
+    common_ratio, common_ratio_1s
+        Fixed common ``207Pb/206Pb`` or ``206Pb/208Pb`` composition and its
+        one-sigma uncertainty. ``common_ratio`` is ignored when
+        ``use_stacey_kramers`` is true.
+    th_u, th_u_1s
+        Elemental Th/U and uncertainty used by the 208 method.
+    initial_age_ma, tolerance_ma, max_iterations, age_bounds_ma
+        Numerical solver controls.
+    use_stacey_kramers, stacey_kramers_u238_u235
+        Enable iterative model composition and select its U isotope ratio.
+    u238_u235
+        U isotope ratio used in modern age equations.
+    max_208_th_u
+        Th/U threshold above which the 208 result is retained but flagged.
+
+    Returns
+    -------
+    CommonPbAgeResult
+        Age, uncertainty, common fraction, convergence diagnostics, and
+        conservative validity state.
+    """
     age_guess = float(initial_age_ma)
     common = float(common_ratio) if common_ratio is not None else np.nan
     converged = False
@@ -555,6 +591,435 @@ def calculate_common_pb_result(
     )
 
 
+def apply_204pb_common_pb_correction(
+    data,
+    *,
+    common_pb_model: str | None = "stacey_kramers",
+    common_pb206_pb204: float | str | None = None,
+    common_pb207_pb204: float | str | None = None,
+    common_pb208_pb204: float | str | None = None,
+    common_pb206_pb204_1s: float = 0.0,
+    common_pb207_pb204_1s: float = 0.0,
+    common_pb208_pb204_1s: float = 0.0,
+    initial_age_ma: float = 1000.0,
+    max_iterations: int = 20,
+    tolerance_ma: float = 1e-5,
+    stacey_kramers_u238_u235: float = old_common_U238_U235,
+):
+    """Append conventional mass-204 common-Pb-corrected ratios and ages.
+
+    The measured mass-204 signal must already have its mercury contribution
+    removed. :func:`UPbRPy.ratios.calc_raw_ratios` performs that first step and
+    supplies ``206Pb/204Pb`` plus its counting-statistics uncertainty. This
+    function performs the distinct second step: it uses an initial common-Pb
+    composition to remove common 206Pb, 207Pb, and 208Pb from the calibrated
+    U-Pb-Th ratios.
+
+    A fixed composition can be supplied as scalars or column names. Otherwise
+    Stacey-Kramers compositions are iterated against the corrected 206Pb/238U
+    age. Uncertainty propagation follows the independent-input derivatives in
+    the legacy workbook and intentionally contains no covariance terms.
+    Common-Pb-composition uncertainties default to zero because they must be
+    supplied by the chosen geological model or independent measurement rather
+    than invented by the reduction software.
+    """
+    import pandas as pd
+
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("data must be a pandas DataFrame")
+    if common_pb_model not in (None, "stacey_kramers"):
+        raise ValueError("common_pb_model must be None or 'stacey_kramers'")
+    fixed_specs = (
+        common_pb206_pb204,
+        common_pb207_pb204,
+        common_pb208_pb204,
+    )
+    if common_pb_model is None and any(value is None for value in fixed_specs):
+        raise ValueError(
+            "A fixed 204-method correction requires 206Pb/204Pb, "
+            "207Pb/204Pb, and 208Pb/204Pb common-Pb compositions."
+        )
+
+    frame = data.copy()
+
+    def choose_column(explicit, candidates, label, required=True):
+        """Resolve an explicit or first-available mass-204 input column."""
+        if explicit is not None:
+            if explicit not in frame.columns:
+                raise KeyError(f"{label} column {explicit!r} is not present")
+            return explicit
+        for candidate in candidates:
+            if candidate in frame.columns:
+                return candidate
+        if required:
+            raise KeyError(
+                f"Could not find {label}; tried "
+                + ", ".join(repr(candidate) for candidate in candidates)
+            )
+        return None
+
+    def resolve_values(specification):
+        """Expand a scalar/column common-Pb specification to row values."""
+        if isinstance(specification, str):
+            if specification not in frame.columns:
+                raise KeyError(
+                    f"Common-Pb ratio column {specification!r} is not present"
+                )
+            return frame[specification].to_numpy(dtype=float)
+        if specification is None:
+            return np.full(len(frame), np.nan)
+        return np.full(len(frame), float(specification))
+
+    ratio_columns = {
+        "64": choose_column(
+            None,
+            ("206Pb/204Pb", "206Pb/204Pb_fractionation_corrected"),
+            "measured 206Pb/204Pb",
+        ),
+        "68pb": choose_column(
+            None,
+            ("206Pb/208Pb", "206Pb/208Pb_fractionation_corrected"),
+            "measured 206Pb/208Pb",
+        ),
+        "68": choose_column(
+            None,
+            ("206Pb/238U_fractionation_corrected", "206Pb/238U"),
+            "total 206Pb/238U",
+        ),
+        "76": choose_column(
+            None,
+            ("207Pb/206Pb_fractionation_corrected", "207Pb/206Pb"),
+            "total 207Pb/206Pb",
+        ),
+        "82": choose_column(
+            None,
+            ("208Pb/232Th_fractionation_corrected", "208Pb/232Th"),
+            "total 208Pb/232Th",
+        ),
+    }
+    uncertainty_columns = {}
+    for key, ratio_column in ratio_columns.items():
+        uncertainty_columns[(key, "with_calibration")] = choose_column(
+            None,
+            (
+                ratio_column + "_2e_with_calibration",
+                ratio_column + "_2e",
+            ),
+            f"2-sigma {ratio_column} uncertainty",
+        )
+        uncertainty_columns[(key, "no_calibration")] = choose_column(
+            None,
+            (ratio_column + "_2e_no_calibration", ratio_column + "_2e"),
+            f"2-sigma {ratio_column} uncertainty without calibration",
+        )
+
+    ratio_values = {
+        key: frame[column].to_numpy(dtype=float)
+        for key, column in ratio_columns.items()
+    }
+    common_fixed = {
+        "64": resolve_values(common_pb206_pb204),
+        "74": resolve_values(common_pb207_pb204),
+        "84": resolve_values(common_pb208_pb204),
+    }
+    common_sigmas = {
+        "64": float(common_pb206_pb204_1s),
+        "74": float(common_pb207_pb204_1s),
+        "84": float(common_pb208_pb204_1s),
+    }
+
+    ages = np.full(len(frame), np.nan)
+    iterations = np.zeros(len(frame), dtype=int)
+    converged = np.zeros(len(frame), dtype=bool)
+    common_values = {
+        "64": np.full(len(frame), np.nan),
+        "74": np.full(len(frame), np.nan),
+        "84": np.full(len(frame), np.nan),
+    }
+    corrected = {
+        "68": np.full(len(frame), np.nan),
+        "76": np.full(len(frame), np.nan),
+        "82": np.full(len(frame), np.nan),
+    }
+
+    for index in range(len(frame)):
+        total_64 = ratio_values["64"][index]
+        total_68 = ratio_values["68"][index]
+        total_76 = ratio_values["76"][index]
+        total_82 = ratio_values["82"][index]
+        total_68pb = ratio_values["68pb"][index]
+        if not np.all(
+            np.isfinite([total_64, total_68, total_76, total_82, total_68pb])
+        ) or total_64 <= 0:
+            continue
+
+        age = float(initial_age_ma)
+        row_converged = common_pb_model is None
+        used_iterations = 1
+        for iteration in range(1, max_iterations + 1):
+            if common_pb_model == "stacey_kramers":
+                model = stacey_kramers_common_pb(
+                    age,
+                    u238_u235=stacey_kramers_u238_u235,
+                )
+                common_64 = float(model["206Pb/204Pb"])
+                common_74 = float(model["207Pb/204Pb"])
+                common_84 = float(model["208Pb/204Pb"])
+            else:
+                common_64 = common_fixed["64"][index]
+                common_74 = common_fixed["74"][index]
+                common_84 = common_fixed["84"][index]
+
+            denominator = total_64 - common_64
+            if not np.isfinite(denominator) or denominator <= 0:
+                break
+            corrected_68 = total_68 * denominator / total_64
+            if corrected_68 <= -1 or not np.isfinite(corrected_68):
+                break
+            next_age = float(np.log1p(corrected_68) / LAMBDA_238 / 1e6)
+            used_iterations = iteration
+            if common_pb_model is None or abs(next_age - age) <= tolerance_ma:
+                age = next_age
+                row_converged = True
+                break
+            age = next_age
+
+        if common_pb_model == "stacey_kramers" and np.isfinite(age):
+            model = stacey_kramers_common_pb(
+                age,
+                u238_u235=stacey_kramers_u238_u235,
+            )
+            common_64 = float(model["206Pb/204Pb"])
+            common_74 = float(model["207Pb/204Pb"])
+            common_84 = float(model["208Pb/204Pb"])
+
+        denominator = total_64 - common_64
+        total_84 = total_64 / total_68pb
+        if denominator <= 0 or total_84 == 0:
+            continue
+        common_values["64"][index] = common_64
+        common_values["74"][index] = common_74
+        common_values["84"][index] = common_84
+        corrected["68"][index] = total_68 * denominator / total_64
+        corrected["76"][index] = (
+            total_64 * total_76 - common_74
+        ) / denominator
+        corrected["82"][index] = total_82 * (
+            total_84 - common_84
+        ) / total_84
+        ages[index] = age
+        iterations[index] = used_iterations
+        converged[index] = row_converged
+
+    frame["204Pb_corrected_206Pb/238U"] = corrected["68"]
+    frame["204Pb_corrected_207Pb/206Pb"] = corrected["76"]
+    frame["204Pb_corrected_208Pb/232Th"] = corrected["82"]
+    frame["204Pb_correction_common_206Pb/204Pb"] = common_values["64"]
+    frame["204Pb_correction_common_207Pb/204Pb"] = common_values["74"]
+    frame["204Pb_correction_common_208Pb/204Pb"] = common_values["84"]
+    frame["204Pb_correction_f206_radiogenic"] = (
+        1 - common_values["64"] / ratio_values["64"]
+    )
+    frame["204Pb_correction_iterations"] = iterations
+    frame["204Pb_correction_converged"] = converged
+    frame["204Pb_correction_valid"] = (
+        converged
+        & np.isfinite(corrected["68"])
+        & np.isfinite(corrected["76"])
+        & np.isfinite(corrected["82"])
+        & (corrected["68"] > 0)
+        & (corrected["76"] > 0)
+        & (corrected["82"] > 0)
+    )
+    frame["204Pb_correction_warning"] = np.where(
+        frame["204Pb_correction_valid"],
+        "",
+        "invalid or non-convergent mass-204 correction",
+    )
+
+    for uncertainty_mode in ("no_calibration", "with_calibration"):
+        sigmas = {
+            key: frame[column].to_numpy(dtype=float) / 2
+            for (key, mode), column in uncertainty_columns.items()
+            if mode == uncertainty_mode
+        }
+        total_64 = ratio_values["64"]
+        total_68pb = ratio_values["68pb"]
+        denominator = total_64 - common_values["64"]
+        numerator_76 = total_64 * ratio_values["76"] - common_values["74"]
+        total_84 = total_64 / total_68pb
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # The radiogenic 206Pb fraction is
+            # (measured 206/204 - common 206/204) / measured 206/204.
+            f206 = denominator / total_64
+            f206_variance = (
+                (common_values["64"] / total_64**2 * sigmas["64"]) ** 2
+                + (common_sigmas["64"] / total_64) ** 2
+            )
+            sigma_68 = np.abs(corrected["68"]) * np.sqrt(
+                (sigmas["68"] / ratio_values["68"]) ** 2
+                + f206_variance / f206**2
+            )
+
+            # Propagate the 207/206 correction analytically from
+            # (measured 206/204 * measured 207/206 - common 207/204)
+            # / (measured 206/204 - common 206/204).
+            derivative_64 = (
+                common_values["74"]
+                - ratio_values["76"] * common_values["64"]
+            ) / denominator**2
+            derivative_76 = total_64 / denominator
+            derivative_74 = -1 / denominator
+            derivative_common64 = numerator_76 / denominator**2
+            sigma_76 = np.sqrt(
+                (derivative_64 * sigmas["64"]) ** 2
+                + (derivative_76 * sigmas["76"]) ** 2
+                + (derivative_74 * common_sigmas["74"]) ** 2
+                + (derivative_common64 * common_sigmas["64"]) ** 2
+            )
+
+            # Convert measured 206/208 and 206/204 to total 208/204 before
+            # removing the common-208 fraction from measured 208Pb/232Th.
+            f208 = 1 - common_values["84"] * total_68pb / total_64
+            f208_variance = (
+                (
+                    common_values["84"]
+                    * total_68pb
+                    / total_64**2
+                    * sigmas["64"]
+                )
+                ** 2
+                + (common_values["84"] / total_64 * sigmas["68pb"]) ** 2
+                + (total_68pb / total_64 * common_sigmas["84"]) ** 2
+            )
+            sigma_82 = np.abs(corrected["82"]) * np.sqrt(
+                (sigmas["82"] / ratio_values["82"]) ** 2
+                + f208_variance / f208**2
+            )
+
+        for key, values in (
+            ("206Pb/238U", sigma_68),
+            ("207Pb/206Pb", sigma_76),
+            ("208Pb/232Th", sigma_82),
+        ):
+            frame[
+                f"204Pb_corrected_{key}_2e_{uncertainty_mode}"
+            ] = 2 * values
+
+    # Backward-compatible generic uncertainties use the inclusive branch.
+    for ratio_name in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
+        frame[f"204Pb_corrected_{ratio_name}_2e"] = frame[
+            f"204Pb_corrected_{ratio_name}_2e_with_calibration"
+        ]
+
+    # A local import avoids an isochron/isoplot import cycle at module load.
+    from .isoplot import (
+        calc_68_date,
+        calc_68_date_uncertainty,
+        calc_75_date,
+        calc_75_date_uncertainty,
+        calc_76_date,
+        calc_76_date_uncertainty,
+        calc_82_date,
+        calc_82_date_uncertainty,
+    )
+
+    frame["204Pb_corrected_207Pb/235U"] = (
+        frame["204Pb_corrected_207Pb/206Pb"]
+        * frame["204Pb_corrected_206Pb/238U"]
+        * U238_U235
+    )
+    frame["204Pb_corrected_206Pb/238U_age"] = calc_68_date(
+        frame["204Pb_corrected_206Pb/238U"]
+    )
+    frame["204Pb_corrected_208Pb/232Th_age"] = calc_82_date(
+        frame["204Pb_corrected_208Pb/232Th"]
+    )
+    frame["204Pb_corrected_207Pb/206Pb_age"] = [
+        calc_76_date(value) if np.isfinite(value) and value > 0 else np.nan
+        for value in frame["204Pb_corrected_207Pb/206Pb"]
+    ]
+    frame["204Pb_corrected_207Pb/235U_age"] = calc_75_date(
+        frame["204Pb_corrected_207Pb/235U"]
+    )
+    for uncertainty_mode in ("no_calibration", "with_calibration"):
+        ratio_68_uncertainty = frame[
+            f"204Pb_corrected_206Pb/238U_2e_{uncertainty_mode}"
+        ]
+        ratio_76_uncertainty = frame[
+            f"204Pb_corrected_207Pb/206Pb_2e_{uncertainty_mode}"
+        ]
+        ratio_82_uncertainty = frame[
+            f"204Pb_corrected_208Pb/232Th_2e_{uncertainty_mode}"
+        ]
+        ratio_75_relative = np.sqrt(
+            (
+                ratio_68_uncertainty
+                / frame["204Pb_corrected_206Pb/238U"]
+            )
+            ** 2
+            + (
+                ratio_76_uncertainty
+                / frame["204Pb_corrected_207Pb/206Pb"]
+            )
+            ** 2
+        )
+        ratio_75_uncertainty = (
+            frame["204Pb_corrected_207Pb/235U"] * ratio_75_relative
+        )
+        frame[
+            f"204Pb_corrected_207Pb/235U_2e_{uncertainty_mode}"
+        ] = ratio_75_uncertainty
+        frame[
+            f"204Pb_corrected_206Pb/238U_age_2e_{uncertainty_mode}"
+        ] = calc_68_date_uncertainty(
+            frame["204Pb_corrected_206Pb/238U"],
+            ratio_68_uncertainty,
+        )
+        frame[
+            f"204Pb_corrected_208Pb/232Th_age_2e_{uncertainty_mode}"
+        ] = calc_82_date_uncertainty(
+            frame["204Pb_corrected_208Pb/232Th"],
+            ratio_82_uncertainty,
+        )
+        frame[
+            f"204Pb_corrected_207Pb/235U_age_2e_{uncertainty_mode}"
+        ] = calc_75_date_uncertainty(
+            frame["204Pb_corrected_207Pb/235U"],
+            ratio_75_uncertainty,
+        )
+        frame[
+            f"204Pb_corrected_207Pb/206Pb_age_2e_{uncertainty_mode}"
+        ] = [
+            calc_76_date_uncertainty(ratio, uncertainty)
+            if np.isfinite(ratio) and ratio > 0
+            else np.nan
+            for ratio, uncertainty in zip(
+                frame["204Pb_corrected_207Pb/206Pb"],
+                ratio_76_uncertainty,
+            )
+        ]
+    for age_system in (
+        "206Pb/238U",
+        "207Pb/235U",
+        "207Pb/206Pb",
+        "208Pb/232Th",
+    ):
+        frame[f"204Pb_corrected_{age_system}_age_2e"] = frame[
+            f"204Pb_corrected_{age_system}_age_2e_with_calibration"
+        ]
+
+    frame.attrs = dict(data.attrs)
+    frame.attrs["mass_204_common_pb_correction"] = {
+        "model": common_pb_model or "fixed",
+        "common_pb206_pb204_1s": common_pb206_pb204_1s,
+        "common_pb207_pb204_1s": common_pb207_pb204_1s,
+        "common_pb208_pb204_1s": common_pb208_pb204_1s,
+        "stacey_kramers_u238_u235": stacey_kramers_u238_u235,
+    }
+    return frame
+
+
 def apply_common_pb_corrections(
     data,
     *,
@@ -578,8 +1043,15 @@ def apply_common_pb_corrections(
     ratio_82_column: str | None = None,
     ratio_82_2s_column: str | None = None,
     th_u_column: str = "Th/U",
+    include_204_method: bool = True,
+    common_pb206_pb204: float | str | None = None,
+    common_pb207_pb204: float | str | None = None,
+    common_pb208_pb204: float | str | None = None,
+    common_pb206_pb204_1s: float = 0.0,
+    common_pb207_pb204_1s: float = 0.0,
+    common_pb208_pb204_1s: float = 0.0,
 ):
-    """Append conventional 207- and 208-method common-Pb age columns.
+    """Append conventional 204-, 207-, and 208-method common-Pb outputs.
 
     The input is copied. Spot-mean and sweep-wise frames are both supported;
     their calibrated ratio column names are detected automatically. A fixed
@@ -607,8 +1079,27 @@ def apply_common_pb_corrections(
         )
 
     frame = data.copy()
+    if include_204_method and {
+        "206Pb/204Pb",
+        "206Pb/208Pb",
+    }.issubset(frame.columns):
+        frame = apply_204pb_common_pb_correction(
+            frame,
+            common_pb_model=common_pb_model,
+            common_pb206_pb204=common_pb206_pb204,
+            common_pb207_pb204=common_pb207_pb204,
+            common_pb208_pb204=common_pb208_pb204,
+            common_pb206_pb204_1s=common_pb206_pb204_1s,
+            common_pb207_pb204_1s=common_pb207_pb204_1s,
+            common_pb208_pb204_1s=common_pb208_pb204_1s,
+            initial_age_ma=initial_age_ma,
+            max_iterations=max_iterations,
+            tolerance_ma=tolerance_ma,
+            stacey_kramers_u238_u235=stacey_kramers_u238_u235,
+        )
 
     def choose_column(explicit, candidates, label):
+        """Resolve an explicit or first-available required input column."""
         if explicit is not None:
             if explicit not in frame.columns:
                 raise KeyError(f"{label} column {explicit!r} is not present")
@@ -673,6 +1164,7 @@ def apply_common_pb_corrections(
             frame[th_u_column] = frame["Th"] / frame["U"]
 
     def resolve_common(specification):
+        """Expand a fixed common-Pb scalar or column to a NumPy array."""
         if isinstance(specification, str):
             if specification not in frame.columns:
                 raise KeyError(
@@ -739,6 +1231,71 @@ def apply_common_pb_corrections(
             )
         )
 
+    def choose_optional_uncertainty_column(ratio_column):
+        """Find the analytical uncertainty branch for one calibrated ratio."""
+        for candidate in (
+            ratio_column + "_2e_no_calibration",
+            ratio_column.replace(
+                "_fractionation_corrected", ""
+            ) + "_2e_no_calibration",
+        ):
+            if candidate in frame.columns:
+                return candidate
+        return None
+
+    no_calibration_columns = {
+        "68": choose_optional_uncertainty_column(ratio_68_column),
+        "76": choose_optional_uncertainty_column(ratio_76_column),
+        "82": choose_optional_uncertainty_column(ratio_82_column),
+    }
+    no_calibration_sigmas = {
+        key: (
+            frame[column].to_numpy(dtype=float) / 2
+            if column is not None
+            else fallback
+        )
+        for key, column, fallback in (
+            ("68", no_calibration_columns["68"], ratio_68_1s),
+            ("76", no_calibration_columns["76"], ratio_76_1s),
+            ("82", no_calibration_columns["82"], ratio_82_1s),
+        )
+    }
+    no_calibration_age_sigmas = {
+        "207": np.asarray(
+            [
+                age_207_corrected_uncertainty(
+                    result.age_ma,
+                    ratio_68_values[index],
+                    no_calibration_sigmas["68"][index],
+                    ratio_76_values[index],
+                    no_calibration_sigmas["76"][index],
+                    result.common_ratio,
+                    common_pb207_pb206_1s,
+                    u238_u235=u238_u235,
+                )
+                for index, result in enumerate(results_207)
+            ],
+            dtype=float,
+        ),
+        "208": np.asarray(
+            [
+                age_208_corrected_uncertainty(
+                    result.age_ma,
+                    ratio_68_values[index],
+                    no_calibration_sigmas["68"][index],
+                    ratio_82_values[index],
+                    no_calibration_sigmas["82"][index],
+                    th_u_values[index],
+                    th_u_1s[index],
+                    result.common_ratio,
+                    common_pb206_pb208_1s,
+                )
+                for index, result in enumerate(results_208)
+            ],
+            dtype=float,
+        ),
+    }
+
     for method, results, common_label in (
         ("207", results_207, "207Pb/206Pb"),
         ("208", results_208, "206Pb/208Pb"),
@@ -747,8 +1304,20 @@ def apply_common_pb_corrections(
         sigmas = np.asarray([result.sigma_ma for result in results])
         frame[f"{method}Pb_corrected_age"] = ages
         frame[f"{method}Pb_corrected_age_2e"] = 2.0 * sigmas
+        frame[f"{method}Pb_corrected_age_2e_with_calibration"] = (
+            2.0 * sigmas
+        )
+        frame[f"{method}Pb_corrected_age_2e_no_calibration"] = (
+            2.0 * no_calibration_age_sigmas[method]
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
             frame[f"{method}Pb_corrected_age_2e%"] = 200.0 * sigmas / ages
+            frame[
+                f"{method}Pb_corrected_age_2e_with_calibration%"
+            ] = 200.0 * sigmas / ages
+            frame[
+                f"{method}Pb_corrected_age_2e_no_calibration%"
+            ] = 200.0 * no_calibration_age_sigmas[method] / ages
         frame[f"{method}Pb_correction_f206"] = [
             result.f206 for result in results
         ]
@@ -776,10 +1345,27 @@ def apply_common_pb_corrections(
             * np.exp(LAMBDA_238 * ages * 1e6)
             * sigmas
         )
+        frame[
+            f"206Pb/238U_{method}Pb_corrected_2e_with_calibration"
+        ] = frame[f"206Pb/238U_{method}Pb_corrected_2e"]
+        frame[
+            f"206Pb/238U_{method}Pb_corrected_2e_no_calibration"
+        ] = (
+            2.0
+            * LAMBDA_238
+            * 1e6
+            * np.exp(LAMBDA_238 * ages * 1e6)
+            * no_calibration_age_sigmas[method]
+        )
 
-    frame.attrs = dict(data.attrs)
+    # Retain mass-204 provenance when that optional branch was calculated.
+    frame.attrs = dict(frame.attrs)
     frame.attrs["common_pb_correction"] = {
-        "methods": ("207", "208"),
+        "methods": (
+            ("204", "207", "208")
+            if "204Pb_corrected_206Pb/238U" in frame.columns
+            else ("207", "208")
+        ),
         "model": common_pb_model or "fixed",
         "common_pb207_pb206_1s": common_pb207_pb206_1s,
         "common_pb206_pb208_1s": common_pb206_pb208_1s,
@@ -809,10 +1395,12 @@ class LineFit:
 
     @property
     def intercept_sigma(self) -> float:
+        """Return the one-sigma uncertainty of the fitted intercept."""
         return float(np.sqrt(self.cov[0, 0]))
 
     @property
     def slope_sigma(self) -> float:
+        """Return the one-sigma uncertainty of the fitted slope."""
         return float(np.sqrt(self.cov[1, 1]))
 
 
@@ -828,6 +1416,7 @@ class AgeIntercept:
 
     @property
     def two_sigma_ma(self) -> float:
+        """Return the concordia-intercept age uncertainty at two standard deviations."""
         return 2.0 * self.sigma_ma
 
 
@@ -841,7 +1430,19 @@ class MonteCarloIntercepts:
     line_slopes: np.ndarray
 
     def summary(self, confidence: float = 0.95) -> dict[str, dict[str, float]]:
-        """Return median and asymmetric confidence limits for each intercept."""
+        """Summarize finite Monte Carlo intercept ages.
+
+        Parameters
+        ----------
+        confidence
+            Central probability interval, between zero and one.
+
+        Returns
+        -------
+        dict
+            Median plus lower and upper asymmetric distances for the lower and
+            upper intercept distributions.
+        """
         alpha = (1.0 - confidence) / 2.0
         probs = [100 * alpha, 50.0, 100 * (1.0 - alpha)]
         out: dict[str, dict[str, float]] = {}
@@ -880,11 +1481,16 @@ class ConcordiaAgeResult:
 
     @property
     def two_sigma_ma(self) -> float:
+        """Return twice the fitted one-sigma common concordia-age uncertainty."""
         return 2.0 * self.sigma_ma
 
 
 def line_fit_summary(line: LineFit, *, prefix: str = "line") -> dict[str, float | bool]:
-    """Return a flat dictionary of line-fit parameters and diagnostics."""
+    """Flatten line-fit parameters and diagnostics for tabular export.
+
+    The covariance is represented by intercept/slope one-sigma uncertainties
+    plus their covariance term; the original matrix is not embedded in a cell.
+    """
     return {
         f"{prefix}_intercept": line.intercept,
         f"{prefix}_intercept_1s": line.intercept_sigma,
@@ -899,7 +1505,7 @@ def line_fit_summary(line: LineFit, *, prefix: str = "line") -> dict[str, float 
 
 
 def intercept_summary(intercepts: list[AgeIntercept], *, prefix: str = "") -> dict[str, float]:
-    """Return a flat dictionary of concordia-intercept age results."""
+    """Flatten concordia-intercept ages, uncertainties, flags, and plot coordinates."""
     out: dict[str, float] = {}
     stem = f"{prefix}_" if prefix else ""
     for intercept in intercepts:
@@ -913,14 +1519,14 @@ def intercept_summary(intercepts: list[AgeIntercept], *, prefix: str = "") -> di
 
 
 def fit_summary(line: LineFit, intercepts: list[AgeIntercept]) -> dict[str, float | bool]:
-    """Return a single flat summary for a line fit and its intercept ages."""
+    """Combine line-fit and concordia-intercept summaries for tabular export."""
     out = line_fit_summary(line)
     out.update(intercept_summary(intercepts))
     return out
 
 
 def concordia_age_summary(result: ConcordiaAgeResult, *, prefix: str = "concordia") -> dict[str, float | int | str]:
-    """Return a flat dictionary for common concordia-age results."""
+    """Flatten a common concordia-age result and fit diagnostics."""
     return {
         f"{prefix}_age": result.age_ma,
         f"{prefix}_age_1s": result.sigma_ma,
@@ -936,7 +1542,7 @@ def concordia_age_summary(result: ConcordiaAgeResult, *, prefix: str = "concordi
 
 
 def monte_carlo_summary_frame(mc: MonteCarloIntercepts, confidence: float = 0.95):
-    """Return a DataFrame summary of Monte Carlo intercept distributions."""
+    """Return finite-count and confidence summaries for MC intercept ages."""
     import pandas as pd
 
     rows = []
@@ -956,7 +1562,11 @@ def monte_carlo_summary_frame(mc: MonteCarloIntercepts, confidence: float = 0.95
 
 
 def wetherill_point(age_ma, lambda_235=LAMBDA_235, lambda_238=LAMBDA_238):
-    """Return Wetherill coordinates: 207Pb/235U, 206Pb/238U."""
+    """Return Wetherill concordia coordinates for one or more ages.
+
+    Ages are supplied in Ma; the returned x and y coordinates are
+    ``207Pb/235U`` and ``206Pb/238U``.
+    """
     age_years = np.asarray(age_ma, dtype=float) * 1e6
     return np.exp(lambda_235 * age_years) - 1.0, np.exp(lambda_238 * age_years) - 1.0
 
@@ -967,12 +1577,21 @@ def tera_wasserburg_point(
     lambda_238=LAMBDA_238,
     u238_u235=U238_U235,
 ):
-    """Return Tera-Wasserburg coordinates: 238U/206Pb, 207Pb/206Pb."""
+    """Return Tera-Wasserburg concordia coordinates for one or more ages.
+
+    Wetherill coordinates are inverted and combined with ``238U/235U`` to
+    return ``238U/206Pb`` and radiogenic ``207Pb/206Pb``.
+    """
     pb207_u235, pb206_u238 = wetherill_point(age_ma, lambda_235, lambda_238)
     return 1.0 / pb206_u238, pb207_u235 / pb206_u238 / u238_u235
 
 
 def as_arrays(x, y, sx, sy, rho, *, min_points=2):
+    """Validate, broadcast, and filter bivariate analytical observations.
+
+    Non-finite rows, non-positive uncertainties, and singular correlations are
+    removed. A scalar ``rho`` is broadcast to the length of ``x``.
+    """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     sx = np.asarray(sx, dtype=float)
@@ -996,6 +1615,12 @@ def as_arrays(x, y, sx, sy, rho, *, min_points=2):
 
 
 def covariance_inverses(sx, sy, rho):
+    """Return inverse 2×2 covariance matrices for correlated x-y errors.
+
+    Each covariance is ``[[sx², rho*sx*sy], [rho*sx*sy, sy²]]``. A
+    non-positive determinant is rejected because York and Mahalanobis fits
+    require positive-definite analytical covariance.
+    """
     cov_xx = sx**2
     cov_yy = sy**2
     cov_xy = rho * sx * sy
@@ -1010,7 +1635,12 @@ def covariance_inverses(sx, sy, rho):
 
 
 def york_fit(x, y, sx, sy, rho=0.0, *, inflate_mswd=False, max_iter=50, tol=1e-15) -> LineFit:
-    """Fit ``y = intercept + slope*x`` with the York et al. (2004) algorithm."""
+    """Fit ``y = intercept + slope*x`` with correlated x-y errors.
+
+    The York et al. (2004) iteration updates the slope-dependent weights until
+    convergence. Returned parameter covariance is internal unless
+    ``inflate_mswd`` requests multiplication by MSWD when MSWD exceeds one.
+    """
     x, y, sx, sy, rho = as_arrays(x, y, sx, sy, rho)
     if x.size < 3:
         raise ValueError("Unanchored York fits require at least three points.")
@@ -1053,6 +1683,7 @@ def york_fit(x, y, sx, sy, rho=0.0, *, inflate_mswd=False, max_iter=50, tol=1e-1
 
 
 def line_negloglike_slope(slope, x, y, sx, sy, rho, anchor):
+    """Evaluate the anchored-line negative log likelihood for one slope."""
     x0, y0 = anchor
     residual = y - y0 - slope * (x - x0)
     variance = sy**2 + slope**2 * sx**2 - 2.0 * slope * rho * sx * sy
@@ -1062,6 +1693,7 @@ def line_negloglike_slope(slope, x, y, sx, sy, rho, anchor):
 
 
 def second_derivative(fun, value):
+    """Estimate a scalar function's second derivative by central difference."""
     step = max(abs(value), 1.0) * 1e-5
     return (fun(value + step) - 2.0 * fun(value) + fun(value - step)) / step**2
 
@@ -1077,7 +1709,11 @@ def anchored_york_fit(
     anchor_cov: np.ndarray | None = None,
     inflate_mswd=False,
 ) -> LineFit:
-    """Fit a York-style line constrained through a fixed ``(x, y)`` anchor."""
+    """Fit a York-style line constrained through an ``(x, y)`` anchor.
+
+    Analytical x-y covariance controls the slope likelihood. Optional anchor
+    covariance is propagated into the intercept/slope covariance matrix.
+    """
     x, y, sx, sy, rho = as_arrays(x, y, sx, sy, rho)
     x0, y0 = map(float, anchor)
     initial_slope = np.linalg.lstsq((x - x0)[:, None], y - y0, rcond=None)[0][0]
@@ -1112,7 +1748,7 @@ def anchored_york_fit(
 
 
 def anchored_concordia_fit(x, y, sx, sy, rho=0.0, *, space="wetherill", age_ma: float) -> LineFit:
-    """Fit a line anchored to concordia at ``age_ma``."""
+    """Fit a York-style line anchored to concordia at ``age_ma``."""
     anchor = concordia_point(age_ma, space=space)
     return anchored_york_fit(x, y, sx, sy, rho, anchor=anchor)
 
@@ -1177,7 +1813,7 @@ def line_from_anchor_and_point(
 
 
 def concordia_point(age_ma, *, space="wetherill") -> tuple[float, float]:
-    """Return concordia coordinates for ``space``."""
+    """Return scalar concordia coordinates in the requested diagram space."""
     key = normalise_space(space)
     if key == "wetherill":
         x, y = wetherill_point(age_ma)
@@ -1187,6 +1823,7 @@ def concordia_point(age_ma, *, space="wetherill") -> tuple[float, float]:
 
 
 def normalise_space(space: str) -> str:
+    """Normalize common concordia-diagram aliases to one canonical name."""
     key = space.lower().replace("-", "_").replace(" ", "_")
     if key in {"wetherill", "wc"}:
         return "wetherill"
@@ -1196,11 +1833,17 @@ def normalise_space(space: str) -> str:
 
 
 def line_concordia_residual(age_ma, line: LineFit, space: str):
+    """Return vertical line-minus-concordia misfit at an age in Ma."""
     x, y = concordia_point(age_ma, space=space)
     return y - line.intercept - line.slope * x
 
 
 def line_concordia_derivative(age_ma, line: LineFit, space: str):
+    """Return the age derivative of the line-concordia residual.
+
+    The derivative is analytical in both Wetherill and Tera-Wasserburg space
+    and is used to propagate line-parameter uncertainty into intercept age.
+    """
     t = age_ma * 1e6
     if space == "wetherill":
         dx_dt = LAMBDA_235 * 1e6 * np.exp(LAMBDA_235 * t)
@@ -1216,6 +1859,7 @@ def line_concordia_derivative(age_ma, line: LineFit, space: str):
 
 
 def concordia_curve_derivative(age_ma, space: str):
+    """Return ``[dx/dt, dy/dt]`` for concordia at an age in Ma."""
     t = age_ma * 1e6
     if space == "wetherill":
         dx_dt = LAMBDA_235 * 1e6 * np.exp(LAMBDA_235 * t)
@@ -1231,6 +1875,7 @@ def concordia_curve_derivative(age_ma, space: str):
 
 
 def concordia_curve_second_derivative(age_ma, space: str):
+    """Estimate concordia's second age derivative by central difference."""
     step = max(abs(age_ma), 1.0) * 1e-5
     return (
         concordia_curve_derivative(age_ma + step, space)
@@ -1239,12 +1884,14 @@ def concordia_curve_second_derivative(age_ma, space: str):
 
 
 def concordia_age_objective(age_ma, xy, inv_cov, space):
+    """Return half the summed Mahalanobis distance to concordia."""
     c = np.array(concordia_point(age_ma, space=space), dtype=float)
     residual = xy - c
     return float(0.5 * np.einsum("ni,nij,nj->", residual, inv_cov, residual))
 
 
 def concordia_age_curvature(age_ma, xy, inv_cov, space):
+    """Return likelihood curvature used to estimate concordia-age uncertainty."""
     c = np.array(concordia_point(age_ma, space=space), dtype=float)
     dc = concordia_curve_derivative(age_ma, space)
     d2c = concordia_curve_second_derivative(age_ma, space)
@@ -1268,9 +1915,31 @@ def concordia_age(
 ) -> ConcordiaAgeResult:
     """Fit a common concordia age to multiple analyses.
 
-    The fit minimizes the summed Mahalanobis distance between the measured
-    points and the concordia curve. The age uncertainty is the first-order
-    curvature uncertainty of the one-parameter likelihood.
+    Parameters
+    ----------
+    x, y
+        Measured concordia coordinates.
+    sx, sy, rho
+        Absolute one-sigma uncertainties and their error correlation.
+    space
+        Wetherill or Tera-Wasserburg diagram.
+    age_bounds
+        Positive bounded search interval in Ma.
+    inflate_mswd
+        Multiply the internal age uncertainty by ``sqrt(MSWD)`` when MSWD is
+        greater than one.
+
+    Returns
+    -------
+    ConcordiaAgeResult
+        Maximum-likelihood age, uncertainty, concordia coordinates, and
+        goodness-of-fit statistics.
+
+    Notes
+    -----
+    The fit minimizes the summed Mahalanobis distance between measurements and
+    concordia. Age uncertainty is the inverse square root of the one-parameter
+    likelihood curvature.
     """
     key = normalise_space(space)
     x, y, sx, sy, rho = as_arrays(x, y, sx, sy, rho, min_points=1)
@@ -1317,7 +1986,11 @@ def concordia_age_from_frame(
     uncertainties_are_2sigma=True,
     **kwargs,
 ) -> ConcordiaAgeResult:
-    """DataFrame wrapper for :func:`concordia_age` using UPbRPy columns."""
+    """Fit a concordia age from canonical UPbRPy DataFrame columns.
+
+    Default columns are chosen from ``space``. Input uncertainties are treated
+    as two-sigma by default and divided by two before fitting.
+    """
     import pandas as pd
 
     data = pd.DataFrame(data)
@@ -1348,6 +2021,11 @@ def concordia_age_from_frame(
 
 
 def find_intersection_ages(line: LineFit, space: str, max_age_ma=EARTH_AGE_MA):
+    """Find unique line-concordia intersections over the Earth-age interval.
+
+    A dense age grid brackets sign changes, after which Brent's method refines
+    each root. Near-duplicate roots are collapsed at ``1e-4`` Ma.
+    """
     grid = np.linspace(0.001, max_age_ma, 1200)
     residual = np.array([line_concordia_residual(t, line, space) for t in grid])
     roots: list[float] = []
@@ -1369,7 +2047,11 @@ def find_intersection_ages(line: LineFit, space: str, max_age_ma=EARTH_AGE_MA):
 
 
 def concordia_intercepts(line: LineFit, *, space="wetherill") -> list[AgeIntercept]:
-    """Find line-concordia intersections and propagate line covariance."""
+    """Find line-concordia intersections and propagate line covariance.
+
+    The implicit-function gradient maps intercept/slope covariance into an age
+    variance using the derivative of the line-concordia residual.
+    """
     key = normalise_space(space)
     roots = find_intersection_ages(line, key)
     out: list[AgeIntercept] = []
@@ -1402,7 +2084,12 @@ def fit_discordia(
     anchor_cov: np.ndarray | None = None,
     inflate_mswd=False,
 ) -> tuple[LineFit, list[AgeIntercept]]:
-    """Fit a discordia line and return its concordia intersections."""
+    """Fit an anchored or unanchored discordia and return its intersections.
+
+    ``anchor_point`` accepts a fixed diagram coordinate, while
+    ``anchor_age_ma`` anchors directly to concordia. Supplying neither uses an
+    unconstrained York fit.
+    """
     key = normalise_space(space)
     if anchor_point is not None and anchor_age_ma is not None:
         raise ValueError("Use either anchor_point or anchor_age_ma, not both.")
@@ -1438,7 +2125,7 @@ def fit_discordia_from_frame(
     uncertainties_are_2sigma=True,
     **kwargs,
 ):
-    """DataFrame convenience wrapper for UPbRPy ratio tables."""
+    """Fit discordia from canonical UPbRPy ratio and uncertainty columns."""
     import pandas as pd
 
     data = pd.DataFrame(data)
@@ -1480,6 +2167,9 @@ def tw_single_sweep_intercept(
 ) -> SingleSweepResult:
     """Fit one TW sweep through assumed initial Pb and get lower age.
 
+    Parameters are one measured TW point, its one-sigma uncertainties and
+    correlation, plus an initial-Pb ``207Pb/206Pb`` anchor and uncertainty.
+
     The assumed initial composition is the Tera-Wasserburg point
     ``(238U/206Pb = 0, 207Pb/206Pb = initial_pb207_pb206)``.
     """
@@ -1518,6 +2208,12 @@ def single_sweep_mc_summary(
     confidence,
     rng,
 ):
+    """Monte Carlo-propagate one anchored TW sweep to a lower-intercept age.
+
+    Measurement coordinates are drawn from their correlated bivariate normal
+    distribution and the initial-Pb anchor is drawn independently. The result
+    reports a median and central asymmetric confidence interval.
+    """
     point_cov = np.array(
         [
             [sigma_u238_pb206**2, rho * sigma_u238_pb206 * sigma_pb207_pb206],
@@ -1787,6 +2483,7 @@ __all__ = [
     "age_208_corrected",
     "age_208_corrected_uncertainty",
     "calculate_common_pb_result",
+    "apply_204pb_common_pb_correction",
     "apply_common_pb_corrections",
     "line_fit_summary",
     "intercept_summary",
