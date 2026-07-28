@@ -32,7 +32,8 @@ notebook = [
 ]
 export = [
   "cairosvg>=2.8.2",
-  "selenium>=4.39.0"
+  "selenium>=4.39.0",
+  "xlsxwriter>=3.2.9"
 ]
 dev = [
   "ipykernel>=7.3.0",
@@ -41,6 +42,7 @@ dev = [
   "panel>=1.8.10",
   "cairosvg>=2.8.2",
   "selenium>=4.39.0",
+  "xlsxwriter>=3.2.9",
   "pytest>=9.1.1",
   "ruff>=0.15.21"
 ]

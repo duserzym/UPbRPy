@@ -17,6 +17,7 @@ from .uncertainty import *  # noqa: F401,F403
 from .fractionation import *  # noqa: F401,F403
 from .reduction import *  # noqa: F401,F403
 from .thermometry import *  # noqa: F401,F403
+from .results import *  # noqa: F401,F403
 
 from .constants import __all__ as _constants_all
 from .standards import __all__ as _standards_all
@@ -31,6 +32,7 @@ from .uncertainty import __all__ as _uncertainty_all
 from .fractionation import __all__ as _fractionation_all
 from .reduction import __all__ as _reduction_all
 from .thermometry import __all__ as _thermometry_all
+from .results import __all__ as _results_all
 
 __all__ = [
     *_constants_all,
@@ -46,4 +48,5 @@ __all__ = [
     *_fractionation_all,
     *_reduction_all,
     *_thermometry_all,
+    *_results_all,
 ]
