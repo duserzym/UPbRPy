@@ -43,7 +43,7 @@ class SelectionResult:
 
     @property
     def signal_start(self) -> int:
-        """Return the inclusive first detected sample-signal index."""
+        """Return the inclusive first sweep attributed to sample signal."""
         if self.signal_start_index is None:
             return self.detection_index
         return self.signal_start_index
@@ -54,7 +54,7 @@ class SelectionResult:
         return self.washout_start
 
     def as_tuple(self) -> tuple[int, int, int, int]:
-        """Return the historical UPbRPy index ordering."""
+        """Return plateau and baseline bounds in historical index order."""
         return (
             self.plateau_start,
             self.plateau_end,
@@ -85,7 +85,7 @@ def register_selection_method(
 
 
 def available_selection_methods() -> tuple[str, ...]:
-    """Return the canonical registered selection method names."""
+    """Return canonical names for all registered onset detectors."""
     return tuple(_SELECTORS)
 
 
@@ -100,10 +100,12 @@ def selection_method_label(method: str) -> str:
 
 
 def normalize_method_name(name: str) -> str:
+    """Normalize a user-facing selection-method label for stable alias lookup."""
     return str(name).strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def resolve_method(method: str) -> str:
+    """Resolve a selection-method name or alias to its canonical registry key."""
     normalized = normalize_method_name(method)
     try:
         return _ALIASES[normalized]
@@ -113,6 +115,11 @@ def resolve_method(method: str) -> str:
 
 
 def coerce_trace(data) -> np.ndarray:
+    """Return a finite one-dimensional signal trace for window selection.
+
+    Internal non-finite values are linearly interpolated only for the purpose
+    of detecting boundaries; the original analytical data remain unchanged.
+    """
     values = np.asarray(data, dtype=float)
     if values.ndim != 1:
         raise SelectionError("Selection data must be one-dimensional.")
@@ -135,6 +142,7 @@ def validate_common_options(
     baseline_offset: int,
     plateau_offset: int,
 ) -> tuple[int, int, int, int]:
+    """Validate and normalize integer options shared by selection-window methods."""
     baseline_sweep_n = int(baseline_sweep_n)
     peak_sweep_n = int(peak_sweep_n)
     baseline_offset = int(baseline_offset)
@@ -160,6 +168,12 @@ def selection_windows(
     plateau_offset: int,
     signal_end: int | None = None,
 ) -> tuple[int, int, int, int]:
+    """Construct baseline and plateau bounds around a detected signal onset.
+
+    Baseline and plateau ends are exclusive boundaries. ``signal_end`` is an
+    inclusive measured sweep and therefore caps the plateau's exclusive end at
+    or before that sweep.
+    """
     baseline_end = detection_index - baseline_offset
     baseline_start = baseline_end - baseline_sweep_n
     plateau_start = detection_index + plateau_offset
@@ -211,6 +225,7 @@ def find_signal_start(
     sigma_threshold: float = 3.0,
     relative_increase: float = 0.05,
 ) -> tuple[int, Mapping[str, float | int | str]]:
+    """Detect signal onset as a fraction of a high-percentile plateau mean."""
     """Backtrack a confirmed onset to the first contiguous elevated sweep.
 
     The primary selector still anchors the baseline and plateau windows. This
@@ -442,6 +457,7 @@ def threshold_onset(
     baseline_sweep_n: int = 0,
     **_: object,
 ) -> tuple[int, Mapping[str, float | int | str]]:
+    """Detect onset above a rolling mean plus a configurable sigma threshold."""
     percentile = float(filter_percentile)
     if not 0 <= percentile <= 100:
         raise ValueError("filter_percentile must be between 0 and 100.")
@@ -472,6 +488,13 @@ def rolling_sigma_onset(
     consecutive: int = 1,
     **_: object,
 ) -> tuple[int, Mapping[str, float | int | str]]:
+    """Detect sustained signal onset relative to immediately preceding sweeps.
+
+    At each candidate sweep the threshold is the mean of the preceding
+    ``rolling_window`` measurements plus ``sigma_threshold`` times their sample
+    standard deviation. Requiring consecutive exceedances suppresses isolated
+    baseline spikes.
+    """
     rolling_window = int(rolling_window)
     consecutive = int(consecutive)
     sigma_threshold = float(sigma_threshold)
@@ -741,7 +764,7 @@ def select_baseline_peak(
     method: str = "threshold",
     **method_options,
 ) -> tuple[int, int, int, int]:
-    """Compatibility wrapper returning the historical four-index tuple."""
+    """Return legacy four-index bounds from the modern selection result."""
     return select_signal_regions(
         data,
         method=method,

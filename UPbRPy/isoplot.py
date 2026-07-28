@@ -150,9 +150,7 @@ def construct_final_df(
     return final_df
 
 def calc_75_date(X):
-    '''
-    return age in Ma
-    '''
+    """Convert radiogenic ``207Pb/235U`` to an apparent age in Ma."""
     age = np.log(X+1)/lambda_235
     return age/1e6
 
@@ -163,9 +161,7 @@ def calc_75_date_uncertainty(ratio, ratio_uncertainty):
     return np.abs(ratio_uncertainty) / (lambda_235 * (1 + ratio)) / 1e6
 
 def calc_68_date(Y):
-    '''
-    return age in Ma
-    '''
+    """Convert radiogenic ``206Pb/238U`` to an apparent age in Ma."""
     age = np.log(Y+1)/lambda_238
     return age/1e6
 
@@ -224,6 +220,7 @@ def calc_76_date(ratio,x0=1e6, tol=1e-8):
     
     '''
     def ratio_diff(t):
+        """Return absolute misfit between measured and radiogenic Pb/Pb."""
         return abs(ratio-(np.exp(lambda_235*t)-1)/(np.exp(lambda_238*t)-1)/common_U238_U235)
     
     return minimize(ratio_diff, x0=x0, tol=tol, method='Nelder-Mead').x[0]/1e6
@@ -277,6 +274,7 @@ def get_tera_wasserburg_point(age):
     return 1/Pb206_U238, Pb207_U235/Pb206_U238/common_U238_U235
 
 def finite_array(values, positive=False):
+    """Return finite values, optionally restricted to positive numbers."""
     arr = np.asarray(values, dtype=float)
     mask = np.isfinite(arr)
     if positive:
@@ -284,6 +282,7 @@ def finite_array(values, positive=False):
     return arr[mask]
 
 def nice_step(value):
+    """Round a positive interval upward to a readable 1-2-5 axis step."""
     if not np.isfinite(value) or value <= 0:
         return 1.0
     exponent = np.floor(np.log10(value))
@@ -299,6 +298,7 @@ def nice_step(value):
     return nice_fraction * 10**exponent
 
 def format_age_label(age, step):
+    """Format an age label with precision implied by the label step."""
     if step >= 1:
         return str(int(round(age)))
     decimals = int(np.ceil(-np.log10(step)))
@@ -500,6 +500,7 @@ labels.data = {x: outX, y: outY, label: outLabel};
     return label_source
 
 def ratio_bounds(values, one_sigma_errors, extra_values=None, sigma=2):
+    """Return padded plot bounds enclosing values and uncertainty envelopes."""
     values = np.asarray(values, dtype=float)
     one_sigma_errors = np.asarray(one_sigma_errors, dtype=float)
     finite = np.isfinite(values)
@@ -527,6 +528,7 @@ def ratio_bounds(values, one_sigma_errors, extra_values=None, sigma=2):
     return min(lower, upper), max(lower, upper)
 
 def concordia_data_ages(plot_type, x, y):
+    """Estimate data-covered ages from Wetherill or TW coordinates."""
     if plot_type == "Wetherill":
         ages = np.concatenate([
             calc_75_date(finite_array(x, positive=True)),
@@ -541,6 +543,7 @@ def concordia_data_ages(plot_type, x, y):
     return ages
 
 def concordia_age_uncertainties(plot_type, x, y, sx, sy):
+    """Convert coordinate one-sigma errors to approximate two-sigma ages."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     sx = np.asarray(sx, dtype=float)
@@ -557,6 +560,11 @@ def concordia_age_uncertainties(plot_type, x, y, sx, sy):
     return age_2sigmas[age_2sigmas > 0]
 
 def concordia_plot_ranges(plot_type, x, y, sx, sy, age_min, age_max, xlim, ylim):
+    """Choose initial concordia curve and axis ranges around measured data.
+
+    Data-implied ages and propagated age uncertainties control padding. User
+    limits override the corresponding automatically selected range.
+    """
     data_ages = concordia_data_ages(plot_type, x, y)
     age_uncertainties = concordia_age_uncertainties(plot_type, x, y, sx, sy)
     age_uncertainty = np.nanmedian(age_uncertainties) if len(age_uncertainties) else 0
@@ -897,6 +905,7 @@ def concordia(data, type='Wetherill',
     return plot
 
 def get_Wetherill_concordia_uncertainty():
+    """Monte Carlo-sample decay constants to form a Wetherill uncertainty band."""
     Pb207_U235s = np.linspace(0.001,80, 1000)
 
     # resample Lambdas
@@ -922,6 +931,7 @@ def get_Wetherill_concordia_uncertainty():
     return Pb207_U235s, lower_68, upper_68
 
 def get_TW_concordia_uncertainty():
+    """Monte Carlo-sample decay constants to form a TW uncertainty band."""
     U238_Pb206s = np.linspace(1, 100, 1000)
 
     # resample Lambdas
@@ -946,6 +956,7 @@ def get_TW_concordia_uncertainty():
     return U238_Pb206s, lower_76, upper_76
 
 def cor2cov2(sx,sy,rxy):
+    """Build a 2×2 covariance matrix from standard errors and correlation."""
 
     covmat = np.empty(shape=(2,2))
     covmat[0][0] = sx**2

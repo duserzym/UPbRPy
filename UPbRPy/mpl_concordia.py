@@ -19,7 +19,7 @@ from .isoplot import get_wetherill_point, weighted_mean
 def ellipse_from_covariance(ax, x, y, sx_2sigma, sy_2sigma, rho,
                              facecolor, edgecolor=None, alpha=0.3,
                              linewidth=0.9, zorder=2):
-    """Draw a two-sigma covariance ellipse on ``ax``."""
+    """Draw the two-standard-deviation ellipse implied by ratio uncertainties."""
     covariance = np.array([
         [sx_2sigma**2, rho * sx_2sigma * sy_2sigma],
         [rho * sx_2sigma * sy_2sigma, sy_2sigma**2],

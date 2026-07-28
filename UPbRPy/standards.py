@@ -160,7 +160,7 @@ def _validate_format_version(document: dict, context: str) -> None:
 
 
 def _load_source_registry(root, filename: str) -> dict[str, dict]:
-    """Load and validate the shared source registry."""
+    """Load and validate publication metadata shared by material records."""
     document = _read_toml(_resolve_resource_case_insensitive(root, filename))
     _validate_format_version(document, filename)
     _reject_unknown_keys(document, {"format_version", "sources"}, filename)
@@ -214,6 +214,7 @@ def _measurement_record(
         raise ValueError(f"{standard}/{quantity} must have a numeric value.")
 
     def resolved(field: str, default=""):
+        """Resolve value-level metadata before falling back to its group."""
         return value_metadata.get(field, group.get(field, default))
 
     source_id = resolved("source")

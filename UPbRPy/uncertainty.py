@@ -19,9 +19,11 @@ class CovarianceStore(dict):
     """
 
     def __deepcopy__(self, memo):
+        """Return this immutable store instead of copying large covariance arrays."""
         return self
 
     def __eq__(self, other):
+        """Compare stores by identity to avoid ambiguous NumPy array equality."""
         return self is other
 
 
@@ -34,7 +36,7 @@ def inverse_standard_deviation_weights(standard_deviations):
     return 1 / safe_standard_deviations
 
 def polynomial_prediction_covariance(coefficient_covariance, x_values):
-    """Covariance of polynomial predictions for high-to-low coefficients."""
+    """Propagate fitted polynomial-coefficient covariance to predictions at ``x_values``."""
     coefficient_covariance = np.asarray(coefficient_covariance, dtype=float)
     x_values = np.asarray(x_values, dtype=float)
     degree = coefficient_covariance.shape[0] - 1

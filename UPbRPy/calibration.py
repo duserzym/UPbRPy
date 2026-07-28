@@ -32,15 +32,18 @@ class CalibrationModel:
     settings: dict
 
     def __call__(self, values):
+        """Evaluate the fitted correction model at one or more coordinates."""
         values = np.asarray(values, dtype=float)
         return np.asarray(self.predictor(values), dtype=float)
 
     @property
     def x_range(self):
+        """Return the minimum and maximum fitted calibration coordinates."""
         return float(np.nanmin(self.x)), float(np.nanmax(self.x))
 
 
 def _prepare_xy(x, y, weights=None):
+    """Validate, filter, and sort paired one-dimensional calibration observations."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     if x.shape != y.shape:
@@ -65,6 +68,7 @@ def _prepare_xy(x, y, weights=None):
 
 
 def _exponential(time, asymptote, amplitude, rate):
+    """Evaluate an asymptotic exponential-decay curve at calibration coordinates."""
     return asymptote + amplitude * np.exp(-rate * time)
 
 
@@ -230,7 +234,11 @@ def fit_calibration_model(
 
 
 def evaluate_correction_result(result, values):
-    """Evaluate a correction-result mapping with backward compatibility."""
+    """Evaluate either a modern or legacy correction-result mapping.
+
+    Modern mappings expose ``predictor``; older downhole results used
+    ``interpolation`` or polynomial coefficients stored in ``fit``.
+    """
     if "predictor" in result:
         return np.asarray(result["predictor"](values), dtype=float)
     if "interpolation" in result:

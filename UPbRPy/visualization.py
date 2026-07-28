@@ -58,6 +58,7 @@ class StandaloneBokehPlot:
     __slots__ = ("object",)
 
     def __init__(self, plot):
+        """Retain the Bokeh model that will be serialized for notebook display."""
         self.object = plot
 
     def _repr_html_(self):
@@ -140,6 +141,7 @@ def find_single_bokeh_plot(plot_like):
     visited = set()
 
     def visit(item):
+        """Traverse mappings and layout containers while avoiding repeated objects."""
         if item is None or id(item) in visited:
             return
         visited.add(id(item))
@@ -492,9 +494,11 @@ def depth_profile_concordia_editor(
         name="depth_profile_sweep_status",
     )
     def numeric_values(frame, column):
+        """Coerce one profile column to a floating-point NumPy array."""
         return pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
 
     def profile_record(spot_label, diagram_type):
+        """Build one spot's browser-side data record for the selected concordia."""
         selected = profile_data.loc[
             profile_data["spot_name"] == spot_lookup[spot_label]
         ]
@@ -1525,8 +1529,11 @@ def initialize_notebook(
     initialize_panel_extension(pn, comms)
 
     def wrap_plot(function, *, limit_display_data=False):
+        """Wrap a plotting function so its result renders as standalone HTML."""
+
         @wraps(function)
         def display_plot(*args, **kwargs):
+            """Call the source function and wrap its returned Bokeh model."""
             if limit_display_data:
                 kwargs.setdefault("max_display_points", display_max_points)
             return StandaloneBokehPlot(function(*args, **kwargs))
@@ -1534,15 +1541,21 @@ def initialize_notebook(
         return display_plot
 
     def wrap_correction_results(function):
+        """Wrap a correction routine and combine its diagnostic plots inline."""
+
         @wraps(function)
         def display_results(*args, **kwargs):
+            """Run the correction routine and adapt its plots for inline display."""
             return inline_correction_plots(function(*args, **kwargs))
 
         return display_results
 
     def wrap_plot_pair(function):
+        """Wrap a routine whose mapping contains a pair of related plots."""
+
         @wraps(function)
         def display_result(*args, **kwargs):
+            """Run the routine and combine its two diagnostic Bokeh plots."""
             return inline_plot_pair(function(*args, **kwargs))
 
         return display_result
@@ -1552,6 +1565,7 @@ def initialize_notebook(
 
         @wraps(function)
         def display_result(*args, **kwargs):
+            """Run the routine and wrap only the requested mapping entries."""
             result = function(*args, **kwargs)
             if not isinstance(result, Mapping):
                 raise TypeError("inline plot results must be a mapping.")
@@ -1720,6 +1734,7 @@ def selection_editor(
         saved_selection_parameters = {}
 
     def auto_pick_parameter(name: str, explicit, fallback, converter):
+        """Resolve an explicit picker option before saved and default values."""
         value = (
             explicit
             if explicit is not None
@@ -2092,12 +2107,14 @@ selection_filter.change.emit();
     pending_filter_settings: dict[str, tuple[str, str]] = {}
 
     def spot_frame(spot_name: str) -> pd.DataFrame:
+        """Return one spot's sweeps sorted into acquisition-time order."""
         frame = total_data.loc[
             total_data["spot_name"].astype(str) == spot_name
         ].copy()
         return frame.sort_values("Time").reset_index(drop=True)
 
     def saved_filter_settings(spot_name: str) -> tuple[str, str]:
+        """Read and validate a spot's persisted plateau-filter configuration."""
         row = experiment.loc[
             experiment["spot_names"].astype(str) == spot_name
         ].iloc[0]
@@ -2110,12 +2127,14 @@ selection_filter.change.emit();
         return method, channel
 
     def current_filter_settings() -> tuple[str, str]:
+        """Return the filter method and signal channel currently shown."""
         return (
             normalize_plateau_filter_method(plateau_filter_selector.value),
             str(channel_selector.value),
         )
 
     def record_pending_filter_settings() -> None:
+        """Track unsaved filter changes for the active spot."""
         current = current_filter_settings()
         if current == saved_filter_settings(current_spot):
             pending_filter_settings.pop(current_spot, None)
@@ -2123,6 +2142,7 @@ selection_filter.change.emit();
             pending_filter_settings[current_spot] = current
 
     def time_limits(frame: pd.DataFrame) -> tuple[float, float, float]:
+        """Return finite acquisition limits and the representative sweep spacing."""
         times = pd.to_numeric(frame["Time"], errors="coerce").dropna().to_numpy()
         if times.size < 2:
             raise ValueError("A spot needs at least two finite time points to edit.")
@@ -2140,6 +2160,7 @@ selection_filter.change.emit();
         end_time: float,
         step: float,
     ) -> tuple[float, float]:
+        """Clamp a time window to the trace while retaining one sweep of width."""
         start_value, end_value = sorted(float(value) for value in values)
         start_value = min(max(start_value, start_time), end_time)
         end_value = min(max(end_value, start_time), end_time)
@@ -2153,10 +2174,12 @@ selection_filter.change.emit();
         spot_name: str,
         frame: pd.DataFrame,
     ) -> dict[str, tuple[float, float]]:
+        """Return validated saved baseline and plateau bounds for one spot."""
         start_time, end_time, step = time_limits(frame)
         row = experiment.loc[experiment["spot_names"].astype(str) == spot_name].iloc[0]
 
         def window(start_column: str, end_column: str, fallback: tuple[float, float]):
+            """Read one window or normalize its fallback when values are invalid."""
             values = pd.to_numeric(
                 pd.Series([row[start_column], row[end_column]]), errors="coerce"
             ).to_numpy(dtype=float)
@@ -2179,6 +2202,7 @@ selection_filter.change.emit();
         }
 
     def configured_window_values() -> dict[str, tuple[float, float]]:
+        """Return normalized baseline and plateau bounds from the active sliders."""
         start_time, end_time, step = time_limits(current_frame)
         return {
             "baseline": normalize_window(
@@ -2190,6 +2214,7 @@ selection_filter.change.emit();
         }
 
     def active_selection_options() -> tuple[Mapping[str, object], dict[str, object]]:
+        """Translate the visible picker controls into validated selection-engine options."""
         settings = selection_module_settings[str(selection_module_selector.value)]
         method = str(settings["method"])
         options: dict[str, object] = {}
@@ -2215,6 +2240,7 @@ selection_filter.change.emit();
         spot_name: str,
         frame: pd.DataFrame,
     ) -> tuple[int | None, int | None]:
+        """Map persisted signal-edge times to their nearest sweep indices."""
         row = experiment.loc[experiment["spot_names"].astype(str) == spot_name].iloc[0]
         times = pd.to_numeric(frame["Time"], errors="coerce").to_numpy(dtype=float)
         if {"signal_start_times", "signal_end_times"}.issubset(experiment.columns):
@@ -2233,6 +2259,7 @@ selection_filter.change.emit();
         spot_name: str,
         frame: pd.DataFrame,
     ) -> tuple[int | None, int | None]:
+        """Return pending signal edges when present, otherwise persisted edges."""
         if spot_name in pending_signal_indices:
             return pending_signal_indices[spot_name]
         return persisted_signal_indices(spot_name, frame)
@@ -2240,6 +2267,7 @@ selection_filter.change.emit();
     def nearest_signal_indices(
         bounds: tuple[float, float],
     ) -> tuple[int, int]:
+        """Snap requested signal times to the nearest finite measurements."""
         times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
         finite_indices = np.flatnonzero(np.isfinite(times))
         if finite_indices.size == 0:
@@ -2265,6 +2293,7 @@ selection_filter.change.emit();
     def signal_times(
         indices: tuple[int | None, int | None],
     ) -> tuple[float, float] | None:
+        """Convert valid signal-edge indices back to measurement times."""
         if any(index is None for index in indices):
             return None
         times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
@@ -2276,6 +2305,7 @@ selection_filter.change.emit();
     def constrain_signal_to_plateau(
         indices: tuple[int, int],
     ) -> tuple[int, int]:
+        """Expand signal edges as needed to contain every plateau sweep."""
         plateau_bounds = configured_window_values()["plateau"]
         plateau_start_index, plateau_end_index = included_window_indices(
             plateau_bounds
@@ -2286,6 +2316,7 @@ selection_filter.change.emit();
         )
 
     def store_signal_indices(indices: tuple[int, int]) -> None:
+        """Store active signal edges and update the unsaved-change registry."""
         nonlocal current_signal_indices
         current_signal_indices = indices
         persisted = persisted_signal_indices(current_spot, current_frame)
@@ -2295,6 +2326,7 @@ selection_filter.change.emit();
             pending_signal_indices[current_spot] = indices
 
     def expand_signal_to_plateau() -> None:
+        """Synchronize controls after expanding signal edges around the plateau."""
         nonlocal syncing, selection_feedback
         if any(index is None for index in current_signal_indices):
             return
@@ -2319,6 +2351,7 @@ selection_filter.change.emit();
         values: np.ndarray,
         label: str,
     ) -> tuple[str, float | None, float | None]:
+        """Update one mean line and its mean ± 2σ display band."""
         band = baseline_band if label == "baseline" else plateau_band
         selected_values = values[np.asarray(indices, dtype=int)] if indices else np.array([])
         selected_values = selected_values[np.isfinite(selected_values)]
@@ -2345,6 +2378,7 @@ selection_filter.change.emit();
         )
 
     def update_selected_points(windows: Mapping[str, tuple[float, float]]) -> None:
+        """Refresh selected glyphs, filtered segments, and summary statistics."""
         times = pd.to_numeric(current_frame["Time"], errors="coerce").to_numpy(dtype=float)
         values = pd.to_numeric(
             current_frame[channel_selector.value], errors="coerce"
@@ -2352,6 +2386,7 @@ selection_filter.change.emit();
         valid = np.isfinite(times) & np.isfinite(values)
 
         def selected_indices(bounds: tuple[float, float]) -> list[int]:
+            """Return finite sweep indices inside a half-open time window."""
             mask = valid & (times >= bounds[0]) & (times < bounds[1])
             return np.flatnonzero(mask).tolist()
 
@@ -2418,6 +2453,7 @@ selection_filter.change.emit();
         )
 
     def update_status() -> None:
+        """Refresh validation feedback and enable Apply only for valid selections."""
         windows = configured_window_values()
         channel = channel_selector.value
         messages = []
@@ -2479,10 +2515,12 @@ selection_filter.change.emit();
         apply_button.disabled = not valid
 
     def set_band_bounds(windows: Mapping[str, tuple[float, float]]) -> None:
+        """Move the draggable Bokeh bands to the supplied window bounds."""
         baseline_band.left, baseline_band.right = windows["baseline"]
         plateau_band.left, plateau_band.right = windows["plateau"]
 
     def record_pending_windows() -> None:
+        """Track edited windows and refresh their plotted representation."""
         windows = configured_window_values()
         saved = saved_windows(current_spot, current_frame)
         equal_to_saved = all(
@@ -2496,6 +2534,7 @@ selection_filter.change.emit();
         update_status()
 
     def update_from_sliders(region: str, values: tuple[float, float]) -> None:
+        """Apply a baseline or plateau slider edit to the matching band."""
         nonlocal syncing, selection_feedback
         if syncing:
             return
@@ -2517,6 +2556,7 @@ selection_filter.change.emit();
         record_pending_windows()
 
     def update_signal_from_slider(values: tuple[float, float]) -> None:
+        """Snap a signal-range edit to sweeps and enforce plateau containment."""
         nonlocal current_signal_indices, syncing, selection_feedback
         if syncing or current_frame.empty:
             return
@@ -2538,6 +2578,7 @@ selection_filter.change.emit();
         update_status()
 
     def update_from_band(region: str) -> None:
+        """Apply a dragged Bokeh band edge to the corresponding slider."""
         nonlocal syncing, selection_feedback
         if syncing:
             return
@@ -2564,6 +2605,7 @@ selection_filter.change.emit();
         record_pending_windows()
 
     def refresh_spot(*_events: object) -> None:
+        """Load one spot's trace, selections, filters, and signal edges."""
         nonlocal current_frame, current_spot, current_signal_indices, syncing, selection_feedback
         current_spot = str(spot_selector.value)
         current_frame = spot_frame(current_spot)
@@ -2640,6 +2682,7 @@ selection_filter.change.emit();
         update_status()
 
     def refresh_channel(*_events: object) -> None:
+        """Redraw the active spot after the displayed signal channel changes."""
         nonlocal syncing, selection_feedback
         if current_frame.empty or syncing:
             return
@@ -2655,10 +2698,12 @@ selection_filter.change.emit();
         update_status()
 
     def change_spot(offset: int) -> None:
+        """Move cyclically through the spot list by ``offset`` entries."""
         current_index = spot_names.index(str(spot_selector.value))
         spot_selector.value = spot_names[(current_index + offset) % len(spot_names)]
 
     def auto_pick_region(region: str) -> None:
+        """Run the configured selector and stage its suggested region and edges."""
         nonlocal current_signal_indices, syncing, selection_feedback
         settings, method_options = active_selection_options()
         values = pd.to_numeric(
@@ -2715,6 +2760,7 @@ selection_filter.change.emit();
         record_pending_windows()
 
     def apply_windows(*_events: object) -> None:
+        """Persist the active spot's windows, signal edges, and filter settings."""
         nonlocal selection_feedback
         windows = configured_window_values()
         row_mask = experiment["spot_names"].astype(str) == current_spot
@@ -2759,18 +2805,21 @@ selection_filter.change.emit();
         update_status()
 
     def reset_windows(*_events: object) -> None:
+        """Discard pending edits for the active spot and reload saved values."""
         pending_windows.pop(current_spot, None)
         pending_signal_indices.pop(current_spot, None)
         pending_filter_settings.pop(current_spot, None)
         refresh_spot()
 
     def update_selection_controls(*_events: object) -> None:
+        """Show relevant picker parameters and refresh selection validity."""
         onset_sigma_input.visible = str(selection_module_selector.value) != "threshold"
         if current_frame.empty or syncing:
             return
         update_status()
 
     def refresh_plateau_filter(*_events: object) -> None:
+        """Recompute displayed plateau inclusion after filter controls change."""
         if current_frame.empty or syncing:
             return
         record_pending_filter_settings()
@@ -2870,6 +2919,7 @@ def extrema_preserving_display_sample(
         raise ValueError("max_display_points must be at least 4 or None.")
 
     def sample_one(frame: pd.DataFrame, budget: int) -> pd.DataFrame:
+        """Retain endpoints and each bin's local extrema within a point budget."""
         if len(frame) <= budget or budget < 4:
             return frame
         values = pd.to_numeric(frame[y], errors="coerce").to_numpy(dtype=float)
@@ -3059,6 +3109,7 @@ def plot_selected_data(
     time = pd.to_numeric(total_data["Time"], errors="coerce").to_numpy(dtype=float)
 
     def finite_bounds(start_column: str, end_column: str):
+        """Coerce a pair of reindexed experiment-window columns to arrays."""
         start = pd.to_numeric(
             spot_windows[start_column], errors="coerce"
         ).to_numpy(dtype=float)
@@ -3605,6 +3656,7 @@ def plot_tw_standard_calibration(
             )
 
     def selected(frame):
+        """Select rows belonging to the requested reference material."""
         return frame.loc[frame["sample"].astype(str) == str(standard)].copy()
 
     raw = selected(raw_ratios)
@@ -3614,6 +3666,7 @@ def plot_tw_standard_calibration(
         raise ValueError(f"No complete calibration stages found for {standard!r}.")
 
     def coordinates(frame, ratio_68, ratio_76):
+        """Convert a ratio table to finite Tera–Wasserburg coordinates."""
         result = frame[["spot_name", "Time"]].copy()
         values_68 = pd.to_numeric(frame[ratio_68], errors="coerce").to_numpy()
         result["x"] = np.divide(
@@ -3676,6 +3729,7 @@ def plot_tw_standard_calibration(
     sweep_projection = sweep_projection.loc[finite_projection].copy()
 
     def mean_coordinates(frame, ratio_68, ratio_76):
+        """Calculate unweighted spot-mean coordinates for a Tera–Wasserburg diagram."""
         means = frame.groupby("spot_name", sort=False).agg(
             Time=("Time", "mean"),
             ratio_68=(ratio_68, "mean"),
@@ -3723,6 +3777,7 @@ def plot_tw_standard_calibration(
     }
 
     def calibration_plot(stage_frames, projection, title, marker_size):
+        """Build a Tera–Wasserburg figure comparing successive calibration stages."""
         plot = figure(
             width=width,
             height=height,
