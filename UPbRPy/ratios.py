@@ -9,7 +9,19 @@ import warnings
 
 
 def normalize_plateau_filter_method(method) -> str:
-    """Return a canonical saved plateau-filter method name."""
+    """Return the canonical name for a saved plateau-filter method.
+
+    Parameters
+    ----------
+    method
+        User-facing method name or alias. Matching is case-insensitive and
+        ignores spaces, hyphens, and underscores.
+
+    Returns
+    -------
+    str
+        ``"none"`` or the canonical Excel-style two-sigma method name.
+    """
     if method is None or (not isinstance(method, str) and pd.isna(method)):
         return "none"
     normalized = str(method).strip().lower().replace("-", "_").replace(" ", "_")
@@ -90,7 +102,12 @@ def excel_plateau_inlier_mask(
 
 
 def plateau_inlier_mask(time, signal, method="none") -> np.ndarray:
-    """Return plateau inliers for a canonical saved filter method."""
+    """Return the Boolean plateau-inlier mask selected by ``method``.
+
+    ``method="none"`` retains all row positions for depth-profile work. The
+    Excel-compatible method evaluates residuals about a fitted time trend, so
+    a gently sloping plateau is not incorrectly treated as a set of outliers.
+    """
     method = normalize_plateau_filter_method(method)
     time_array = np.asarray(time, dtype=float)
     signal_array = np.asarray(signal, dtype=float)
@@ -157,7 +174,12 @@ def project_tw_206pb_238u(
     radiogenic_207pb_206pb,
     common_207pb_206pb,
 ):
-    """Return the projected ``206Pb/238U`` target for TW fractionation."""
+    """Project a total-Pb analysis to radiogenic ``206Pb/238U`` in TW space.
+
+    This reciprocal wrapper returns the Pb/U calibration target after
+    horizontally projecting the measured ``207Pb/206Pb`` value onto the line
+    between the reference material's radiogenic and common-Pb endmembers.
+    """
     projected_238u_206pb = project_tw_238u_206pb(
         corrected_207pb_206pb,
         radiogenic_206pb_238u,
@@ -172,19 +194,29 @@ def project_tw_206pb_238u(
     return projected
 
 def propagate_raw_ratio_uncertaintiess(nom, denom):
-    '''
-    function for propagating the uncertainty of the raw ratios
-        using Poisson distribution relative uncertainty where
-        uncertainty of each individual analyte is sqrt(cps)/cps
-        and the uncertainty of the ratio is given by the following formula:
-        relative uncertainty of the ratio = sqrt(1/nom + 1/denom)
+    """Return the two-sigma relative Poisson uncertainty of a raw ratio.
 
-        return 2 standard errors of the ratio
-    '''
-    # calculate the relative uncertainty of the numerator and denominator
+    Parameters
+    ----------
+    nom, denom
+        Integrated numerator and denominator counts. Although the instrument
+        columns are labelled ``cps``, the stored values are integrated counts.
+
+    Returns
+    -------
+    array-like
+        Fractional two-sigma uncertainty. Multiplying this value by
+        ``nom / denom`` gives the absolute ratio uncertainty.
+
+    Notes
+    -----
+    For independent Poisson counts and :math:`R=N/D`,
+    :math:`\\sigma_R/R = \\sqrt{1/N + 1/D}`.
+    """
+    # Independent numerator and denominator variances add in relative space.
     eR = np.sqrt(1/nom + 1/denom)
 
-    return 2 * eR # return 2 standard relative errors of the ratio, not in percentage format but in fraction format
+    return 2 * eR
 
 def calc_raw_ratios(
     experiment,
@@ -194,6 +226,25 @@ def calc_raw_ratios(
     region="plateau",
 ):
     """Calculate sweep-wise raw isotope ratios in a selected spot region.
+
+    Parameters
+    ----------
+    experiment
+        Selection table containing baseline, plateau, and signal boundaries.
+    total_data
+        Unsubtracted count data. Baseline mass-204 and mass-202 signals are
+        used to estimate the session's ``204Hg/202Hg`` ratio.
+    baseline_subtracted_total_data
+        Background-subtracted sweep data used for isotope-ratio calculation.
+    region
+        ``"plateau"`` for spot/session calculations or ``"signal"`` for the
+        complete depth-profile interval.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Sweep-wise ratios, two-sigma counting uncertainties, Hg-corrected
+        ``204Pb``, and time relative to signal start.
 
     ``region='signal'`` returns the inclusive signal-start through signal-end
     interval used to construct a full downhole correction and never applies a
@@ -231,7 +282,13 @@ def calc_raw_ratios(
         "spot_name",
         "Time",
         "signal_relative_time",
+        "204Pb",
+        "204Pb_2e",
         "206Pb/204Pb",
+        "206Pb/204Pb_2e",
+        "206Pb/208Pb",
+        "206Pb/208Pb_2e",
+        "238U",
         "206Pb/238U",
         "207Pb/206Pb",
         "208Pb/232Th",
@@ -361,9 +418,28 @@ def calc_raw_ratios(
         baseline_204 = baseline_total["204Hg"].mean()
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            ratio_64 = selected["206Pb"] / (
-                selected["204Hg"]
-                - selected["202Hg"] * (baseline_204 / baseline_202hg)
+            hg_204_scale = baseline_204 / baseline_202hg
+            pb_204 = selected["204Hg"] - selected["202Hg"] * hg_204_scale
+            # CPS values are integrated counts in the input format. Treat the
+            # two independent mass measurements as Poisson variables. The
+            # uncertainty of the baseline-derived 204Hg/202Hg scale is not
+            # included because the legacy Excel routine likewise treats that
+            # scale as fixed.
+            pb_204_1s = np.sqrt(
+                np.clip(selected["204Hg"], 0, None)
+                + hg_204_scale**2 * np.clip(selected["202Hg"], 0, None)
+            )
+            ratio_64 = selected["206Pb"] / pb_204
+            ratio_64_2e = 2 * np.abs(ratio_64) * np.sqrt(
+                1 / np.clip(selected["206Pb"], np.finfo(float).tiny, None)
+                + (pb_204_1s / pb_204) ** 2
+            )
+            ratio_68pb = selected["206Pb"] / selected["208Pb"]
+            ratio_68pb_2e = (
+                propagate_raw_ratio_uncertaintiess(
+                    selected["206Pb"], selected["208Pb"]
+                )
+                * ratio_68pb
             )
             ratio_82 = selected["208Pb"] / selected["232Th"]
             ratio_68 = selected["206Pb"] / selected["238U"]
@@ -386,9 +462,18 @@ def calc_raw_ratios(
                 )
                 * ratio_76
             )
+        selected["204Pb"] = pb_204.where(np.isfinite(pb_204), np.nan)
+        selected["204Pb_2e"] = (2 * pb_204_1s).where(
+            np.isfinite(pb_204_1s), np.nan
+        )
         selected["206Pb/204Pb"] = ratio_64.where(
             np.isfinite(ratio_64) & (ratio_64 >= 0), 0
         )
+        selected["206Pb/204Pb_2e"] = ratio_64_2e.where(
+            np.isfinite(ratio_64_2e) & (ratio_64 > 0), np.nan
+        )
+        selected["206Pb/208Pb"] = ratio_68pb
+        selected["206Pb/208Pb_2e"] = ratio_68pb_2e
         selected["206Pb/238U"] = ratio_68
         selected["206Pb/238U_2e"] = ratio_68_2e
         selected["207Pb/206Pb"] = ratio_76

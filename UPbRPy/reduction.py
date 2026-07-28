@@ -21,24 +21,27 @@ from .isoplot import (
 
 
 def calc_intercept_std(time, ratio):
-    '''
-    function for calculating the standard deviation of the measured isotope ratio
-        insted of just calculating the mean and std of the sweep-wise ratios,
-        we fit a line through the sweep-wise data with a slope and y intercept and calculate the std of the y intercept
-        in this way, we account for the systematic ratio variation as a function of time within a spot (i.e. the age variation as a function of space within a spot)
+    """Return residual scatter about a sweep-wise linear ratio trend.
 
     Parameters
     ----------
-    time : numpy.ndarray
-        an array containing the time values
-    ratio : numpy.ndarray
-        an array containing the ratio values
+    time, ratio
+        Equal-length arrays of sweep time and isotope ratio.
 
     Returns
     -------
-    intercept_std : float
-        the standard deviation of the y intercept of the linear fit
-    '''
+    float
+        Population standard deviation of residuals about the least-squares
+        line.
+
+    Notes
+    -----
+    Removing the fitted trend before calculating scatter prevents a genuine
+    downhole ratio gradient from being counted as random analytical noise.
+    The historical function name is retained for API compatibility even
+    though the returned quantity is residual scatter, not the formal standard
+    error of the fitted intercept.
+    """
     time = np.array(time)
     ratio = np.array(ratio)
     # fit a line to the data
@@ -48,19 +51,35 @@ def calc_intercept_std(time, ratio):
     return intercept_std
 
 def calc_err_corr_quotient(x, sx, u, su, v, sv):
-    '''
-    function for calculating the error correlation between two ratios
-        this is useful for calculating the error correlation between ratios such as 207Pb/235U-206Pb/238U 
-        in the example 75-68 case, x = 207Pb/206Pb, u = 207Pb/235U, v = 206Pb/238U, x = u/v, constant of 58 ratio does not matter
-        in terms of relative error (%), we have sx**2 = su**2 + sv**2 - 2*rho*su*sv
-        where rho is the error correlation between u and v
-        thus rho = (su/u)**2 + (sv/v)**2 - (sx/x)**2 * u * v /2 / (su * sv)
-    '''
+    """Infer correlation between two ratios that share a quotient.
+
+    Parameters
+    ----------
+    x, sx
+        Quotient ratio and its absolute one-sigma uncertainty. For a Wetherill
+        point this is ``207Pb/206Pb``.
+    u, su
+        First plotted ratio and its absolute one-sigma uncertainty, normally
+        ``207Pb/235U``.
+    v, sv
+        Second plotted ratio and its absolute one-sigma uncertainty, normally
+        ``206Pb/238U``.
+
+    Returns
+    -------
+    array-like
+        Error-correlation coefficient between ``u`` and ``v``.
+
+    Notes
+    -----
+    Because ``x`` is proportional to ``u / v``, relative variances satisfy
+    ``(sx/x)^2 = (su/u)^2 + (sv/v)^2 - 2*rho*(su/u)*(sv/v)``. Rearranging that
+    identity gives the returned correlation.
+    """
     return ((su/u)**2 + (sv/v)**2 - (sx/x)**2) * u * v /2 / (su * sv)
 
 def calc_68_76_discordance(t68, t76, s68, s76):
-    '''
-    function for calculating the discordance between 68 and 76 ratios
+    """Calculate conventional 206Pb/238U–207Pb/206Pb discordance.
 
     Parameters
     ----------
@@ -78,8 +97,13 @@ def calc_68_76_discordance(t68, t76, s68, s76):
     discordance : float
         the discordance between the 68 and 76 ages in percent
     discordance_2s : float
-        the propagated relative 2 standard error of the discordance
-    '''
+        Propagated relative two-sigma uncertainty of discordance, in percent.
+
+    Notes
+    -----
+    Discordance is ``100 * (1 - t68 / t76)``. The age uncertainties are
+    treated as independent; no cross-system covariance term is introduced.
+    """
     disc = 1 - (t68 / t76)
     # calculate the propagated uncertainty of the discordance
     s = np.sqrt((1/t76)**2 * s68**2 + (t68/t76**2)**2 * s76**2)
@@ -98,14 +122,21 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     Parameters
     ----------
     fractionation_corrected_ratios : pandas.DataFrame
-        a pandas dataframe containing the fractionation corrected ratios
+        Sweep-wise ratios after downhole and session correction. Each
+        calibrated ratio must retain its raw ``*_2e`` counting uncertainty.
     session_correction_results : dict
-        a dictionary containing the session-wide fractionation correction plots and fits for each isotope ratio
+        Session correction models and their residual one-sigma scatter.
 
     Returns
     -------
     depthpro_ratios : pandas.DataFrame
-        a pandas dataframe containing the depth profile ratios and their associated uncertainties
+        Depth-profile ratios, dates, and explicit uncertainty branches.
+
+    Notes
+    -----
+    ``*_2e_no_calibration`` contains counting uncertainty only.
+    ``*_2e_with_calibration`` adds the session residual scatter in quadrature.
+    The historical ``*_2e`` columns alias the calibration-inclusive branch.
     """
     # Every operation below is row-wise; no per-spot DataFrame split is needed.
     # Evaluating whole columns avoids repeated copies and concatenations while
@@ -120,7 +151,10 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
         corrected_ratio = depthpro_ratios[
             isotope_ratio + '_fractionation_corrected'
         ]
-        propagated_1sigma = corrected_ratio * np.sqrt(
+        no_calibration_1sigma = np.abs(
+            corrected_ratio * measured_ratio_1sigma / measured_ratio
+        )
+        with_calibration_1sigma = corrected_ratio * np.sqrt(
             (measured_ratio_1sigma / measured_ratio) ** 2
             + (session_scatter / session_factor) ** 2
         )
@@ -141,17 +175,54 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             depthpro_ratios[
                 isotope_ratio + '_session_correction_extrapolated'
             ] = False
+        for suffix, uncertainty_1sigma in (
+            ("_2e_no_calibration", no_calibration_1sigma),
+            ("_2e_with_calibration", with_calibration_1sigma),
+        ):
+            depthpro_ratios[
+                isotope_ratio + "_fractionation_corrected" + suffix
+            ] = uncertainty_1sigma * 2
+            depthpro_ratios[
+                isotope_ratio + "_fractionation_corrected" + suffix + "%"
+            ] = uncertainty_1sigma * 2 / corrected_ratio * 100
+
+        # The historical ``_2e`` columns remain aliases for uncertainties that
+        # include session-calibration scatter. New code can make the choice
+        # explicit by selecting one of the two named variants above.
         depthpro_ratios[
             isotope_ratio + '_fractionation_corrected_2e%'
-        ] = propagated_1sigma * 2 / corrected_ratio * 100
+        ] = depthpro_ratios[
+            isotope_ratio + '_fractionation_corrected_2e_with_calibration%'
+        ]
         depthpro_ratios[
             isotope_ratio + '_fractionation_corrected_2e'
-        ] = propagated_1sigma * 2
+        ] = depthpro_ratios[
+            isotope_ratio + '_fractionation_corrected_2e_with_calibration'
+        ]
 
     # calculate the 207Pb/235U ratio and error based on the 206Pb/238U and 207Pb/206Pb raw ratio calculations
     depthpro_ratios['207Pb/235U_fractionation_corrected'] = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] * depthpro_ratios['206Pb/238U_fractionation_corrected'] * common_U238_U235
     depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] = np.sqrt((depthpro_ratios['207Pb/206Pb_fractionation_corrected_2e%']**2 + depthpro_ratios['206Pb/238U_fractionation_corrected_2e%']**2))
     depthpro_ratios['207Pb/235U_fractionation_corrected_2e'] = depthpro_ratios['207Pb/235U_fractionation_corrected'] * depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] / 100
+    for uncertainty_mode in ("no_calibration", "with_calibration"):
+        percent_column = (
+            f"207Pb/235U_fractionation_corrected_2e_{uncertainty_mode}%"
+        )
+        depthpro_ratios[percent_column] = np.sqrt(
+            depthpro_ratios[
+                f"207Pb/206Pb_fractionation_corrected_2e_{uncertainty_mode}%"
+            ] ** 2
+            + depthpro_ratios[
+                f"206Pb/238U_fractionation_corrected_2e_{uncertainty_mode}%"
+            ] ** 2
+        )
+        depthpro_ratios[
+            f"207Pb/235U_fractionation_corrected_2e_{uncertainty_mode}"
+        ] = (
+            depthpro_ratios["207Pb/235U_fractionation_corrected"]
+            * depthpro_ratios[percent_column]
+            / 100
+        )
     
     # calculate the 238U/206Pb ratio and error based on the 206Pb/238U ratio and error
     depthpro_ratios['238U/206Pb_fractionation_corrected'] = 1 / depthpro_ratios['206Pb/238U_fractionation_corrected']
@@ -164,6 +235,22 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
         / depthpro_ratios['238U/206Pb_fractionation_corrected']
         * 100
     )
+    for uncertainty_mode in ("no_calibration", "with_calibration"):
+        uncertainty_column = (
+            f"206Pb/238U_fractionation_corrected_2e_{uncertainty_mode}"
+        )
+        reciprocal_column = (
+            f"238U/206Pb_fractionation_corrected_2e_{uncertainty_mode}"
+        )
+        depthpro_ratios[reciprocal_column] = propagate_reciprocal_uncertainty(
+            depthpro_ratios["206Pb/238U_fractionation_corrected"],
+            depthpro_ratios[uncertainty_column],
+        )
+        depthpro_ratios[reciprocal_column + "%"] = (
+            depthpro_ratios[reciprocal_column]
+            / depthpro_ratios["238U/206Pb_fractionation_corrected"]
+            * 100
+        )
 
     # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
     x = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] # 76 ratio
@@ -193,6 +280,27 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     depthpro_ratios['206Pb/238U_age_2e%'] = (
         depthpro_ratios['206Pb/238U_age_2e'] / depthpro_ratios['206Pb/238U_age'] * 100
     )
+    for isotope_ratio, uncertainty_function in (
+        ("207Pb/235U", calc_75_date_uncertainty),
+        ("206Pb/238U", calc_68_date_uncertainty),
+    ):
+        ratio_column = isotope_ratio + "_fractionation_corrected"
+        age_column = isotope_ratio + "_age"
+        for uncertainty_mode in ("no_calibration", "with_calibration"):
+            age_uncertainty_column = (
+                isotope_ratio + f"_age_2e_{uncertainty_mode}"
+            )
+            depthpro_ratios[age_uncertainty_column] = uncertainty_function(
+                depthpro_ratios[ratio_column],
+                depthpro_ratios[
+                    ratio_column + f"_2e_{uncertainty_mode}"
+                ],
+            )
+            depthpro_ratios[age_uncertainty_column + "%"] = (
+                depthpro_ratios[age_uncertainty_column]
+                / depthpro_ratios[age_column]
+                * 100
+            )
     if '208Pb/232Th_fractionation_corrected' in depthpro_ratios.columns:
         ratio_82 = depthpro_ratios['208Pb/232Th_fractionation_corrected']
         ratio_82_2e = depthpro_ratios[
@@ -208,6 +316,55 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             / depthpro_ratios['208Pb/232Th_age']
             * 100
         )
+        for uncertainty_mode in ("no_calibration", "with_calibration"):
+            age_uncertainty_column = (
+                f"208Pb/232Th_age_2e_{uncertainty_mode}"
+            )
+            depthpro_ratios[age_uncertainty_column] = calc_82_date_uncertainty(
+                ratio_82,
+                depthpro_ratios[
+                    f"208Pb/232Th_fractionation_corrected_2e_{uncertainty_mode}"
+                ],
+            )
+            depthpro_ratios[age_uncertainty_column + "%"] = (
+                depthpro_ratios[age_uncertainty_column]
+                / depthpro_ratios["208Pb/232Th_age"]
+                * 100
+            )
+
+    depthpro_ratios["207Pb/206Pb_age"] = [
+        calc_76_date(value) if np.isfinite(value) and value > 0 else np.nan
+        for value in depthpro_ratios[
+            "207Pb/206Pb_fractionation_corrected"
+        ]
+    ]
+    for uncertainty_mode in ("no_calibration", "with_calibration"):
+        age_uncertainty_column = (
+            f"207Pb/206Pb_age_2e_{uncertainty_mode}"
+        )
+        depthpro_ratios[age_uncertainty_column] = [
+            calc_76_date_uncertainty(ratio, uncertainty)
+            if np.isfinite(ratio) and ratio > 0
+            else np.nan
+            for ratio, uncertainty in zip(
+                depthpro_ratios["207Pb/206Pb_fractionation_corrected"],
+                depthpro_ratios[
+                    "207Pb/206Pb_fractionation_corrected"
+                    + f"_2e_{uncertainty_mode}"
+                ],
+            )
+        ]
+        depthpro_ratios[age_uncertainty_column + "%"] = (
+            depthpro_ratios[age_uncertainty_column]
+            / depthpro_ratios["207Pb/206Pb_age"]
+            * 100
+        )
+    depthpro_ratios["207Pb/206Pb_age_2e"] = depthpro_ratios[
+        "207Pb/206Pb_age_2e_with_calibration"
+    ]
+    depthpro_ratios["207Pb/206Pb_age_2e%"] = depthpro_ratios[
+        "207Pb/206Pb_age_2e_with_calibration%"
+    ]
 
     depthpro_ratios.attrs = {}
     return depthpro_ratios
@@ -227,9 +384,27 @@ def calc_ratio_mean_and_uncertainty(
     Parameters
     ----------
     fractionation_corrected_ratios : pandas.DataFrame
-        a pandas dataframe containing the fractionation corrected ratios
+        Plateau sweeps after downhole and session correction. Sweeps rejected
+        by the saved plateau filter must already be absent.
     session_correction_results : dict
-        a dictionary containing the session-wide fractionation correction plots and fits, and std of the fractionation correction factor for each isotope ratio
+        Session correction models and their residual one-sigma scatter.
+    sep : str
+        Retained for backward compatibility with older notebooks; column names
+        use the package's canonical slash notation.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per spot containing calibrated ratios, dates, discordance,
+        correlation, and uncertainty branches with and without session
+        calibration scatter.
+
+    Notes
+    -----
+    The analytical branch uses the standard error of the retained plateau
+    sweeps. The calibration-inclusive branch adds the scalar session residual
+    scatter in quadrature. Coefficient covariance and cross-ratio calibration
+    covariance are deliberately not propagated.
     """
     records = []
     for spot_name, spot_data in fractionation_corrected_ratios.groupby(
@@ -241,6 +416,37 @@ def calc_ratio_mean_and_uncertainty(
         }
         spot_mean_time = spot_data['Time'].mean()
         spot_size = spot_data.shape[0]
+
+        # Preserve the mass-204 and Pb/Pb measurements needed by the
+        # conventional 204-method correction. They are not session calibrated,
+        # so their spot uncertainties contain counting/within-spot scatter only.
+        for auxiliary_ratio in ("206Pb/204Pb", "206Pb/208Pb"):
+            if auxiliary_ratio not in spot_data.columns:
+                continue
+            auxiliary_values = pd.to_numeric(
+                spot_data[auxiliary_ratio], errors="coerce"
+            )
+            valid_values = auxiliary_values[
+                np.isfinite(auxiliary_values) & (auxiliary_values > 0)
+            ]
+            if valid_values.empty:
+                record[auxiliary_ratio] = np.nan
+                record[auxiliary_ratio + "_2e"] = np.nan
+                continue
+            record[auxiliary_ratio] = valid_values.mean()
+            auxiliary_sem = valid_values.std() / np.sqrt(valid_values.size)
+            if not np.isfinite(auxiliary_sem):
+                uncertainty_column = auxiliary_ratio + "_2e"
+                auxiliary_sem = (
+                    pd.to_numeric(
+                        spot_data.loc[valid_values.index, uncertainty_column],
+                        errors="coerce",
+                    ).mean()
+                    / 2
+                    if uncertainty_column in spot_data.columns
+                    else np.nan
+                )
+            record[auxiliary_ratio + "_2e"] = 2 * auxiliary_sem
 
         for isotope_ratio, session_result in session_correction_results.items():
             measured_mean = spot_data[isotope_ratio].mean()
@@ -260,7 +466,10 @@ def calc_ratio_mean_and_uncertainty(
             corrected_mean = spot_data[
                 isotope_ratio + '_fractionation_corrected'
             ].mean()
-            propagated_1sigma = corrected_mean * np.sqrt(
+            no_calibration_1sigma = np.abs(
+                corrected_mean * measured_sem / measured_mean
+            )
+            with_calibration_1sigma = corrected_mean * np.sqrt(
                 (measured_sem / measured_mean) ** 2
                 + (session_scatter / session_factor) ** 2
             )
@@ -278,10 +487,20 @@ def calc_ratio_mean_and_uncertainty(
                     or spot_mean_time > np.nanmax(fit_times)
                 )
             )
-            record[isotope_ratio + '_2e%'] = (
-                propagated_1sigma * 2 / corrected_mean * 100
-            )
-            record[isotope_ratio + '_2e'] = propagated_1sigma * 2
+            for suffix, uncertainty_1sigma in (
+                ("_2e_no_calibration", no_calibration_1sigma),
+                ("_2e_with_calibration", with_calibration_1sigma),
+            ):
+                record[isotope_ratio + suffix] = uncertainty_1sigma * 2
+                record[isotope_ratio + suffix + "%"] = (
+                    uncertainty_1sigma * 2 / corrected_mean * 100
+                )
+            record[isotope_ratio + '_2e%'] = record[
+                isotope_ratio + "_2e_with_calibration%"
+            ]
+            record[isotope_ratio + '_2e'] = record[
+                isotope_ratio + "_2e_with_calibration"
+            ]
 
         # Derived ratios and dates are calculated in a plain record before the
         # final DataFrame is constructed, avoiding fragmented scalar inserts.
@@ -297,6 +516,15 @@ def calc_ratio_mean_and_uncertainty(
         record['207Pb/235U_2e'] = (
             record['207Pb/235U'] * record['207Pb/235U_2e%'] / 100
         )
+        for uncertainty_mode in ("no_calibration", "with_calibration"):
+            percent_column = f"207Pb/235U_2e_{uncertainty_mode}%"
+            record[percent_column] = np.sqrt(
+                record[f"207Pb/206Pb_2e_{uncertainty_mode}%"] ** 2
+                + record[f"206Pb/238U_2e_{uncertainty_mode}%"] ** 2
+            )
+            record[f"207Pb/235U_2e_{uncertainty_mode}"] = (
+                record["207Pb/235U"] * record[percent_column] / 100
+            )
 
         record['238U/206Pb'] = 1 / record['206Pb/238U']
         record['238U/206Pb_2e'] = propagate_reciprocal_uncertainty(
@@ -305,6 +533,15 @@ def calc_ratio_mean_and_uncertainty(
         record['238U/206Pb_2e%'] = (
             record['238U/206Pb_2e'] / record['238U/206Pb'] * 100
         )
+        for uncertainty_mode in ("no_calibration", "with_calibration"):
+            uncertainty_column = f"238U/206Pb_2e_{uncertainty_mode}"
+            record[uncertainty_column] = propagate_reciprocal_uncertainty(
+                record["206Pb/238U"],
+                record[f"206Pb/238U_2e_{uncertainty_mode}"],
+            )
+            record[uncertainty_column + "%"] = (
+                record[uncertainty_column] / record["238U/206Pb"] * 100
+            )
 
         record['207Pb/235U_age'] = calc_75_date(record['207Pb/235U'])
         record['207Pb/235U_age_2e'] = calc_75_date_uncertainty(
@@ -321,6 +558,22 @@ def calc_ratio_mean_and_uncertainty(
         record['206Pb/238U_age_2e%'] = (
             record['206Pb/238U_age_2e'] / record['206Pb/238U_age'] * 100
         )
+        for isotope_ratio, uncertainty_function in (
+            ("207Pb/235U", calc_75_date_uncertainty),
+            ("206Pb/238U", calc_68_date_uncertainty),
+        ):
+            age_column = isotope_ratio + "_age"
+            for uncertainty_mode in ("no_calibration", "with_calibration"):
+                age_uncertainty_column = (
+                    isotope_ratio + f"_age_2e_{uncertainty_mode}"
+                )
+                record[age_uncertainty_column] = uncertainty_function(
+                    record[isotope_ratio],
+                    record[f"{isotope_ratio}_2e_{uncertainty_mode}"],
+                )
+                record[age_uncertainty_column + "%"] = (
+                    record[age_uncertainty_column] / record[age_column] * 100
+                )
 
         if '208Pb/232Th' in record:
             record['208Pb/232Th_age'] = calc_82_date(
@@ -335,6 +588,19 @@ def calc_ratio_mean_and_uncertainty(
                 / record['208Pb/232Th_age']
                 * 100
             )
+            for uncertainty_mode in ("no_calibration", "with_calibration"):
+                age_uncertainty_column = (
+                    f"208Pb/232Th_age_2e_{uncertainty_mode}"
+                )
+                record[age_uncertainty_column] = calc_82_date_uncertainty(
+                    record["208Pb/232Th"],
+                    record[f"208Pb/232Th_2e_{uncertainty_mode}"],
+                )
+                record[age_uncertainty_column + "%"] = (
+                    record[age_uncertainty_column]
+                    / record["208Pb/232Th_age"]
+                    * 100
+                )
 
         record['207Pb/206Pb_age'] = calc_76_date(record['207Pb/206Pb'])
         record['207Pb/206Pb_age_2e'] = calc_76_date_uncertainty(
@@ -343,6 +609,19 @@ def calc_ratio_mean_and_uncertainty(
         record['207Pb/206Pb_age_2e%'] = (
             record['207Pb/206Pb_age_2e'] / record['207Pb/206Pb_age'] * 100
         )
+        for uncertainty_mode in ("no_calibration", "with_calibration"):
+            age_uncertainty_column = (
+                f"207Pb/206Pb_age_2e_{uncertainty_mode}"
+            )
+            record[age_uncertainty_column] = calc_76_date_uncertainty(
+                record["207Pb/206Pb"],
+                record[f"207Pb/206Pb_2e_{uncertainty_mode}"],
+            )
+            record[age_uncertainty_column + "%"] = (
+                record[age_uncertainty_column]
+                / record["207Pb/206Pb_age"]
+                * 100
+            )
 
         record['disc%'], record['disc_2e%'] = calc_68_76_discordance(
             record['206Pb/238U_age'],
