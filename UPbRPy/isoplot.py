@@ -22,12 +22,16 @@ from scipy.stats import chi2, t
 from .constants import (
     common_U238_U235,
     lambda_235,
+    lambda_232,
     lambda_238,
     sigma_235,
     sigma_238,
 )
 
 EARTH_AGE_MA = 4567.3
+COMMON_PB_RICH_MATERIALS = frozenset(
+    {"apatite", "rutile", "titanite", "perovskite"}
+)
 
 def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     '''
@@ -59,23 +63,76 @@ def calc_TW_lower_intercept(initial_76, total_76, total_86, x0 = 5, tol=1e-6):
     else:
         return final_x # final 86 ratio
 
-def construct_final_depthpro_df(depthpro_concentration_df, depthpro_ratios_df):
-    '''
-    function for constructing the final depth profile dataframe that contains both the concentrations and the isotope ratios
-        we need to merge by Time column so that the profiles are aligned
-    '''
+def apply_default_common_pb_corrections(
+    frame,
+    *,
+    material,
+    common_pb_correction,
+    common_pb_options,
+):
+    """Apply model ages when explicitly enabled or selected by material."""
+    if common_pb_correction not in (True, False, "auto"):
+        raise ValueError("common_pb_correction must be True, False, or 'auto'")
+    material_key = str(material).strip().casefold() if material is not None else ""
+    enabled = common_pb_correction is True or (
+        common_pb_correction == "auto"
+        and material_key in COMMON_PB_RICH_MATERIALS
+    )
+    if not enabled:
+        return frame
+
+    # Local import avoids making the plotting module and numerical isochron
+    # module depend on each other while they are imported into the public API.
+    from .isochron import apply_common_pb_corrections
+
+    return apply_common_pb_corrections(frame, **(common_pb_options or {}))
+
+
+def construct_final_depthpro_df(
+    depthpro_concentration_df,
+    depthpro_ratios_df,
+    *,
+    material=None,
+    common_pb_correction="auto",
+    common_pb_options=None,
+):
+    """Merge concentration and isotope-ratio depth profiles.
+
+    Setting ``material`` to a common-Pb-rich phase such as ``"apatite"``
+    automatically appends conventional 207- and 208-corrected model ages.
+    Pass ``common_pb_correction=False`` to opt out, or ``True`` to enable the
+    calculations for another material. Method settings are forwarded through
+    ``common_pb_options`` to
+    :func:`UPbRPy.isochron.apply_common_pb_corrections`.
+    """
     # first drop the sample column from the concentration dataframe
     depthpro_ratios_df = depthpro_ratios_df.drop(columns=['sample', 'spot_name'])
     final_depthpro_df = pd.merge(depthpro_concentration_df, depthpro_ratios_df, on='Time')
     final_depthpro_df.sort_values(by='Time', inplace=True, ignore_index=True)
-    
+    final_depthpro_df = apply_default_common_pb_corrections(
+        final_depthpro_df,
+        material=material,
+        common_pb_correction=common_pb_correction,
+        common_pb_options=common_pb_options,
+    )
+    final_depthpro_df.attrs["material"] = material
     return final_depthpro_df
 
-def construct_final_df(final_concentration_df, final_isotope_ratio_df):
-    '''
-    function for constructing the final dataframe that contains both the concentrations and the isotope ratios
-        we need to merge by spot_name and only keep one sample name column
-    '''
+
+def construct_final_df(
+    final_concentration_df,
+    final_isotope_ratio_df,
+    *,
+    material=None,
+    common_pb_correction="auto",
+    common_pb_options=None,
+):
+    """Merge spot concentrations and isotope ratios into the final table.
+
+    Common-Pb model ages are added by default when ``material`` identifies
+    apatite, rutile, titanite, or perovskite. Other workflows remain unchanged.
+    See :func:`construct_final_depthpro_df` for override options.
+    """
     # first drop the sample column from the concentration dataframe
     final_concentration_df = final_concentration_df.drop(columns=['sample'])
     final_df = pd.merge(final_concentration_df, final_isotope_ratio_df, on='spot_name')
@@ -83,6 +140,13 @@ def construct_final_df(final_concentration_df, final_isotope_ratio_df):
     # move the sample column to the front
     cols = ['sample'] + [col for col in final_df.columns if col != 'sample']
     final_df = final_df[cols]
+    final_df = apply_default_common_pb_corrections(
+        final_df,
+        material=material,
+        common_pb_correction=common_pb_correction,
+        common_pb_options=common_pb_options,
+    )
+    final_df.attrs["material"] = material
     return final_df
 
 def calc_75_date(X):
@@ -110,6 +174,34 @@ def calc_68_date_uncertainty(ratio, ratio_uncertainty):
     ratio = np.asarray(ratio, dtype=float)
     ratio_uncertainty = np.asarray(ratio_uncertainty, dtype=float)
     return np.abs(ratio_uncertainty) / (lambda_238 * (1 + ratio)) / 1e6
+
+
+def calc_82_date(ratio, *, lambda232=lambda_232):
+    """Return a direct 208Pb/232Th date in Ma.
+
+    This is an apparent total-Pb date. It is not the conventional 208-method
+    common-Pb-corrected U-Pb age calculated in :mod:`UPbRPy.isochron`.
+    """
+    ratio = np.asarray(ratio, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.log1p(ratio) / lambda232 / 1e6
+
+
+def calc_82_date_uncertainty(
+    ratio,
+    ratio_uncertainty,
+    *,
+    lambda232=lambda_232,
+):
+    """Propagate an absolute 208Pb/232Th ratio uncertainty to date (Ma).
+
+    ``ratio_uncertainty`` may represent one sigma, two sigma, or another
+    confidence level; the returned date uncertainty retains that same level.
+    """
+    ratio = np.asarray(ratio, dtype=float)
+    ratio_uncertainty = np.asarray(ratio_uncertainty, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.abs(ratio_uncertainty) / (lambda232 * (1 + ratio)) / 1e6
 
 def calc_76_date(ratio,x0=1e6, tol=1e-8):
     '''
@@ -545,7 +637,8 @@ def concordia(data, type='Wetherill',
               concordia_color='grey', concordia_lw=1, concordia_alpha=0.5, concordia_uncertainty=False,
               ellipse_center_color='black', ellipse_center_alpha=0.5, ellipse_center_size=5, ellipse_center_marker='o',
               ellipse_fill_color='green', ellipse_fill_alpha=0.2, 
-              ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1):
+              ellipse_line_color='black', ellipse_line_width=1, ellipse_line_alpha=1,
+              width=800, height=600):
     '''
     function for plotting the U-Pb ellipses on a concordia diagram
 
@@ -608,6 +701,10 @@ def concordia(data, type='Wetherill',
         the line width of the ellipse line, by default 1
     ellipse_line_alpha : float, optional
         the alpha value of the ellipse line, by default 1
+    width, height : int, optional
+        Fixed Bokeh canvas dimensions in pixels, by default 800 by 600.
+        Supplying the final dimensions when the figure is constructed avoids
+        a stale initial browser layout when the plot is embedded in a notebook.
 
     Returns
     -------
@@ -636,8 +733,10 @@ def concordia(data, type='Wetherill',
     )
 
     plot = figure(
-        width=800,
-        height=600,
+        width=int(width),
+        height=int(height),
+        width_policy='fixed',
+        height_policy='fixed',
         title='Wetherill Concordia Diagram' if type == 'Wetherill' else 'Tera-Wasserburg Concordia Diagram',
         x_axis_label='207Pb/235U' if type == 'Wetherill' else '238U/206Pb',
         y_axis_label='206Pb/238U' if type == 'Wetherill' else '207Pb/206Pb',
@@ -1286,12 +1385,15 @@ def plot_sample_weighted_mean(means, uncertainties, student_T = True,
 
 __all__ = [
     'calc_TW_lower_intercept',
+    'apply_default_common_pb_corrections',
     'construct_final_depthpro_df',
     'construct_final_df',
     'calc_75_date',
     'calc_75_date_uncertainty',
     'calc_68_date',
     'calc_68_date_uncertainty',
+    'calc_82_date',
+    'calc_82_date_uncertainty',
     'calc_76_date',
     'calc_76_date_uncertainty',
     'propagate_reciprocal_uncertainty',

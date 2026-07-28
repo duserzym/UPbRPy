@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import common_U238_U235, lambda_235, lambda_238
+from .constants import common_U238_U235, lambda_235, lambda_232, lambda_238
 from .isoplot import calc_76_date
 
 
@@ -454,12 +454,14 @@ def propagate_reciprocal_covariance(values, covariance):
     }
 
 def date_derivatives(ratios, system):
-    """Return d(age Ma)/d(ratio) for supported U-Pb date systems."""
+    """Return d(age Ma)/d(ratio) for supported U-Pb and Th-Pb systems."""
     ratios = np.asarray(ratios, dtype=float)
     if system == "207Pb/235U":
         return 1 / (lambda_235 * (1 + ratios)) / 1e6
     if system == "206Pb/238U":
         return 1 / (lambda_238 * (1 + ratios)) / 1e6
+    if system == "208Pb/232Th":
+        return 1 / (lambda_232 * (1 + ratios)) / 1e6
     if system == "207Pb/206Pb":
         derivatives = []
         for ratio in ratios:

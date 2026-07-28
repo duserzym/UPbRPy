@@ -13,12 +13,782 @@ import numpy as np
 from scipy.optimize import brentq, minimize_scalar
 from scipy.stats import chi2
 
-from .constants import common_U238_U235, lambda_235, lambda_238
+from .constants import (
+    common_U238_U235,
+    lambda_235,
+    lambda_232,
+    lambda_238,
+    old_common_U238_U235,
+)
 
 U238_U235 = common_U238_U235
 LAMBDA_235 = lambda_235
 LAMBDA_238 = lambda_238
+LAMBDA_232 = lambda_232
 EARTH_AGE_MA = 4567.0
+
+# The conventional 208Pb correction becomes poorly conditioned as a sample's
+# radiogenic 208Pb/206Pb approaches the common-Pb composition. Chew et al.
+# (2011) advise against this correction for high-Th/U targets and use Th/U > 5
+# as a practical warning range.
+DEFAULT_208_MAX_TH_U = 5.0
+
+
+@dataclass
+class CommonPbAgeResult:
+    """Result of a single-analysis 207Pb- or 208Pb-corrected age.
+
+    ``f206`` is the inferred fraction of measured 206Pb that is common Pb.
+    ``valid`` is a conservative data-quality flag; a finite age is retained
+    even when the flag is false so anomalous measurements remain visible.
+    """
+
+    age_ma: float
+    sigma_ma: float
+    f206: float
+    common_ratio: float
+    iterations: int
+    converged: bool
+    valid: bool
+    warning: str = ""
+
+    @property
+    def two_sigma_ma(self) -> float:
+        return 2.0 * self.sigma_ma
+
+
+def stacey_kramers_common_pb(
+    age_ma,
+    *,
+    u238_u235: float = old_common_U238_U235,
+):
+    """Return the Stacey-Kramers (1975) two-stage common-Pb composition.
+
+    Parameters
+    ----------
+    age_ma
+        Model age in Ma. Scalars and array-like inputs are accepted.
+    u238_u235
+        Uranium isotope ratio used by the original model. The published and
+        legacy Excel value, 137.88, is the default. This parameter is distinct
+        from the modern package ratio used in U-Pb age equations.
+
+    Returns
+    -------
+    dict
+        Arrays named ``206Pb/204Pb``, ``207Pb/204Pb``, ``208Pb/204Pb``,
+        ``207Pb/206Pb``, ``208Pb/206Pb``, and ``206Pb/208Pb``.
+
+    Notes
+    -----
+    The first stage runs from 4.57 to 3.70 Ga and the second stage from
+    3.70 Ga to the requested age. Ages outside 0--4570 Ma are extrapolated so
+    slightly negative analytical ages can still be inspected.
+    """
+    age_years = np.asarray(age_ma, dtype=float) * 1e6
+    stage_boundary = 3.7e9
+    earth_age = 4.57e9
+    older = age_years > stage_boundary
+
+    ratio_64_first = 9.307 + 7.19 * (
+        np.exp(LAMBDA_238 * earth_age) - np.exp(LAMBDA_238 * age_years)
+    )
+    ratio_74_first = 10.294 + 7.19 / u238_u235 * (
+        np.exp(LAMBDA_235 * earth_age) - np.exp(LAMBDA_235 * age_years)
+    )
+    ratio_84_first = 29.487 + 33.21 * (
+        np.exp(LAMBDA_232 * earth_age) - np.exp(LAMBDA_232 * age_years)
+    )
+
+    ratio_64_second = 11.152 + 9.74 * (
+        np.exp(LAMBDA_238 * stage_boundary) - np.exp(LAMBDA_238 * age_years)
+    )
+    ratio_74_second = 12.998 + 9.74 / u238_u235 * (
+        np.exp(LAMBDA_235 * stage_boundary) - np.exp(LAMBDA_235 * age_years)
+    )
+    ratio_84_second = 31.23 + 36.84 * (
+        np.exp(LAMBDA_232 * stage_boundary) - np.exp(LAMBDA_232 * age_years)
+    )
+
+    ratio_64 = np.where(older, ratio_64_first, ratio_64_second)
+    ratio_74 = np.where(older, ratio_74_first, ratio_74_second)
+    ratio_84 = np.where(older, ratio_84_first, ratio_84_second)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio_76 = ratio_74 / ratio_64
+        ratio_86 = ratio_84 / ratio_64
+        ratio_68 = ratio_64 / ratio_84
+    return {
+        "206Pb/204Pb": ratio_64,
+        "207Pb/204Pb": ratio_74,
+        "208Pb/204Pb": ratio_84,
+        "207Pb/206Pb": ratio_76,
+        "208Pb/206Pb": ratio_86,
+        "206Pb/208Pb": ratio_68,
+    }
+
+
+def solve_common_pb_age_equation(
+    residual,
+    derivative,
+    *,
+    initial_age_ma: float,
+    age_bounds_ma: tuple[float, float],
+    tolerance_ma: float,
+    max_iterations: int,
+) -> tuple[float, int, bool]:
+    """Solve a scalar age equation, retaining the legacy Newton behaviour.
+
+    Newton iteration reproduces the Excel VBA path. A bounded Brent fallback
+    makes the public functions robust when the derivative is nearly singular.
+    """
+    age = float(initial_age_ma)
+    lower, upper = map(float, age_bounds_ma)
+    for iteration in range(1, max_iterations + 1):
+        value = float(residual(age))
+        slope = float(derivative(age))
+        if not np.isfinite(value) or not np.isfinite(slope) or slope == 0:
+            break
+        next_age = age - value / slope
+        if not np.isfinite(next_age):
+            break
+        if abs(next_age - age) <= tolerance_ma:
+            return float(next_age), iteration, True
+        age = next_age
+
+    # Scan the allowed interval because a residual need not have opposite signs
+    # exactly at its endpoints. Choose the root nearest the initial estimate.
+    grid = np.linspace(lower, upper, 513)
+    values = np.asarray([residual(point) for point in grid], dtype=float)
+    candidates: list[tuple[float, float]] = []
+    for left, right, f_left, f_right in zip(
+        grid[:-1], grid[1:], values[:-1], values[1:]
+    ):
+        if not np.isfinite(f_left) or not np.isfinite(f_right):
+            continue
+        if f_left == 0:
+            return float(left), max_iterations, True
+        if f_left * f_right < 0:
+            candidates.append((float(left), float(right)))
+    if not candidates:
+        return np.nan, max_iterations, False
+    left, right = min(
+        candidates,
+        key=lambda bracket: abs(np.mean(bracket) - initial_age_ma),
+    )
+    try:
+        root = brentq(residual, left, right, xtol=tolerance_ma)
+    except ValueError:
+        return np.nan, max_iterations, False
+    return float(root), max_iterations, True
+
+
+def age_207_corrected(
+    total_pb206_u238: float,
+    total_pb207_pb206: float,
+    common_pb207_pb206: float,
+    *,
+    u238_u235: float = U238_U235,
+    initial_age_ma: float = 1000.0,
+    age_bounds_ma: tuple[float, float] = (-1000.0, EARTH_AGE_MA),
+    tolerance_ma: float = 1e-7,
+    max_iterations: int = 100,
+    return_solver_info: bool = False,
+):
+    """Calculate a concordance-assuming 207Pb-corrected age in Ma.
+
+    This is the semi-total-Pb/U, or conventional ``207 method``, implemented
+    by the legacy Excel ``Age7corr`` VBA function. The inputs are calibrated
+    *total* ratios. Common Pb is removed by solving the concordance equation,
+    so this result cannot be used to test concordance or Pb loss.
+    """
+    ratio_68 = float(total_pb206_u238)
+    ratio_76 = float(total_pb207_pb206)
+    common_76 = float(common_pb207_pb206)
+    l238_ma = LAMBDA_238 * 1e6
+    l235_ma = LAMBDA_235 * 1e6
+
+    if not all(np.isfinite([ratio_68, ratio_76, common_76])):
+        result = (np.nan, 0, False)
+        return result if return_solver_info else result[0]
+
+    def residual(age_ma):
+        radiogenic_68 = np.expm1(l238_ma * age_ma)
+        radiogenic_75 = np.expm1(l235_ma * age_ma)
+        return (
+            u238_u235 * common_76 * (ratio_68 - radiogenic_68)
+            - u238_u235 * ratio_76 * ratio_68
+            + radiogenic_75
+        )
+
+    def derivative(age_ma):
+        return (
+            l235_ma * np.exp(l235_ma * age_ma)
+            - u238_u235
+            * common_76
+            * l238_ma
+            * np.exp(l238_ma * age_ma)
+        )
+
+    result = solve_common_pb_age_equation(
+        residual,
+        derivative,
+        initial_age_ma=initial_age_ma,
+        age_bounds_ma=age_bounds_ma,
+        tolerance_ma=tolerance_ma,
+        max_iterations=max_iterations,
+    )
+    return result if return_solver_info else result[0]
+
+
+def age_207_corrected_uncertainty(
+    age_ma: float,
+    total_pb206_u238: float,
+    total_pb206_u238_1s: float,
+    total_pb207_pb206: float,
+    total_pb207_pb206_1s: float,
+    common_pb207_pb206: float,
+    common_pb207_pb206_1s: float,
+    *,
+    u238_u235: float = U238_U235,
+) -> float:
+    """Propagate independent one-sigma inputs to a 207-corrected age.
+
+    The implicit-derivative form is algebraically equivalent to the
+    ``AgeEr7corr`` VBA routine. Ratio covariance is deliberately not included,
+    matching the legacy data-reduction pipeline.
+    """
+    values = np.asarray(
+        [
+            age_ma,
+            total_pb206_u238,
+            total_pb206_u238_1s,
+            total_pb207_pb206,
+            total_pb207_pb206_1s,
+            common_pb207_pb206,
+            common_pb207_pb206_1s,
+        ],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(values)):
+        return np.nan
+
+    l238_ma = LAMBDA_238 * 1e6
+    l235_ma = LAMBDA_235 * 1e6
+    radiogenic_68 = np.expm1(l238_ma * age_ma)
+    d_age = (
+        l235_ma * np.exp(l235_ma * age_ma)
+        - u238_u235
+        * common_pb207_pb206
+        * l238_ma
+        * np.exp(l238_ma * age_ma)
+    )
+    variance_residual = (
+        (
+            u238_u235
+            * (common_pb207_pb206 - total_pb207_pb206)
+            * total_pb206_u238_1s
+        )
+        ** 2
+        + (
+            u238_u235
+            * total_pb206_u238
+            * total_pb207_pb206_1s
+        )
+        ** 2
+        + (
+            u238_u235
+            * (total_pb206_u238 - radiogenic_68)
+            * common_pb207_pb206_1s
+        )
+        ** 2
+    )
+    if d_age == 0 or variance_residual < 0:
+        return np.nan
+    return float(np.sqrt(variance_residual) / abs(d_age))
+
+
+def age_208_corrected(
+    total_pb206_u238: float,
+    total_pb208_th232: float,
+    th232_u238: float,
+    common_pb206_pb208: float,
+    *,
+    initial_age_ma: float = 1000.0,
+    age_bounds_ma: tuple[float, float] = (-1000.0, EARTH_AGE_MA),
+    tolerance_ma: float = 1e-7,
+    max_iterations: int = 100,
+    return_solver_info: bool = False,
+):
+    """Calculate a concordance-assuming 208Pb-corrected age in Ma.
+
+    ``common_pb206_pb208`` is intentionally expressed as 206Pb/208Pb.
+    The legacy workbook's cell label reverses this ratio, but its VBA algebra
+    and formula call pass 206Pb/208Pb. The method also assumes that Th/U has
+    remained closed since crystallisation.
+    """
+    ratio_68 = float(total_pb206_u238)
+    ratio_82 = float(total_pb208_th232)
+    th_u = float(th232_u238)
+    common_68 = float(common_pb206_pb208)
+    l238_ma = LAMBDA_238 * 1e6
+    l232_ma = LAMBDA_232 * 1e6
+
+    if not all(np.isfinite([ratio_68, ratio_82, th_u, common_68])):
+        result = (np.nan, 0, False)
+        return result if return_solver_info else result[0]
+
+    def residual(age_ma):
+        radiogenic_68 = np.expm1(l238_ma * age_ma)
+        radiogenic_82 = np.expm1(l232_ma * age_ma)
+        return (
+            ratio_68
+            - radiogenic_68
+            - th_u * common_68 * (ratio_82 - radiogenic_82)
+        )
+
+    def derivative(age_ma):
+        return (
+            th_u * common_68 * l232_ma * np.exp(l232_ma * age_ma)
+            - l238_ma * np.exp(l238_ma * age_ma)
+        )
+
+    result = solve_common_pb_age_equation(
+        residual,
+        derivative,
+        initial_age_ma=initial_age_ma,
+        age_bounds_ma=age_bounds_ma,
+        tolerance_ma=tolerance_ma,
+        max_iterations=max_iterations,
+    )
+    return result if return_solver_info else result[0]
+
+
+def age_208_corrected_uncertainty(
+    age_ma: float,
+    total_pb206_u238: float,
+    total_pb206_u238_1s: float,
+    total_pb208_th232: float,
+    total_pb208_th232_1s: float,
+    th232_u238: float,
+    th232_u238_1s: float,
+    common_pb206_pb208: float,
+    common_pb206_pb208_1s: float,
+) -> float:
+    """Propagate independent one-sigma inputs to a 208-corrected age.
+
+    This implicit-derivative form is equivalent to the workbook's
+    ``AgeEr8corr`` function and intentionally omits covariance terms.
+    """
+    values = np.asarray(
+        [
+            age_ma,
+            total_pb206_u238,
+            total_pb206_u238_1s,
+            total_pb208_th232,
+            total_pb208_th232_1s,
+            th232_u238,
+            th232_u238_1s,
+            common_pb206_pb208,
+            common_pb206_pb208_1s,
+        ],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(values)):
+        return np.nan
+
+    l238_ma = LAMBDA_238 * 1e6
+    l232_ma = LAMBDA_232 * 1e6
+    radiogenic_82 = np.expm1(l232_ma * age_ma)
+    excess_82 = total_pb208_th232 - radiogenic_82
+    d_age = (
+        th232_u238
+        * common_pb206_pb208
+        * l232_ma
+        * np.exp(l232_ma * age_ma)
+        - l238_ma * np.exp(l238_ma * age_ma)
+    )
+    variance_residual = (
+        total_pb206_u238_1s**2
+        + (th232_u238 * common_pb206_pb208 * total_pb208_th232_1s) ** 2
+        + (common_pb206_pb208 * excess_82 * th232_u238_1s) ** 2
+        + (th232_u238 * excess_82 * common_pb206_pb208_1s) ** 2
+    )
+    if d_age == 0 or variance_residual < 0:
+        return np.nan
+    return float(np.sqrt(variance_residual) / abs(d_age))
+
+
+def calculate_common_pb_result(
+    *,
+    method: str,
+    ratio_68: float,
+    ratio_68_1s: float,
+    ratio_other: float,
+    ratio_other_1s: float,
+    common_ratio: float | None,
+    common_ratio_1s: float,
+    th_u: float,
+    th_u_1s: float,
+    initial_age_ma: float,
+    use_stacey_kramers: bool,
+    stacey_kramers_u238_u235: float,
+    u238_u235: float,
+    tolerance_ma: float,
+    max_iterations: int,
+    age_bounds_ma: tuple[float, float],
+    max_208_th_u: float,
+) -> CommonPbAgeResult:
+    """Evaluate one row for :func:`apply_common_pb_corrections`."""
+    age_guess = float(initial_age_ma)
+    common = float(common_ratio) if common_ratio is not None else np.nan
+    converged = False
+    solver_iterations = 0
+    model_iterations = max_iterations if use_stacey_kramers else 1
+
+    for model_iteration in range(1, model_iterations + 1):
+        if use_stacey_kramers:
+            composition = stacey_kramers_common_pb(
+                age_guess,
+                u238_u235=stacey_kramers_u238_u235,
+            )
+            ratio_name = "207Pb/206Pb" if method == "207" else "206Pb/208Pb"
+            common = float(composition[ratio_name])
+
+        if method == "207":
+            age, solver_iterations, solved = age_207_corrected(
+                ratio_68,
+                ratio_other,
+                common,
+                u238_u235=u238_u235,
+                initial_age_ma=age_guess,
+                age_bounds_ma=age_bounds_ma,
+                tolerance_ma=tolerance_ma,
+                max_iterations=max_iterations,
+                return_solver_info=True,
+            )
+        else:
+            age, solver_iterations, solved = age_208_corrected(
+                ratio_68,
+                ratio_other,
+                th_u,
+                common,
+                initial_age_ma=age_guess,
+                age_bounds_ma=age_bounds_ma,
+                tolerance_ma=tolerance_ma,
+                max_iterations=max_iterations,
+                return_solver_info=True,
+            )
+        if not solved or not np.isfinite(age):
+            break
+        if not use_stacey_kramers or abs(age - age_guess) <= tolerance_ma:
+            converged = True
+            age_guess = float(age)
+            break
+        age_guess = float(age)
+
+    age = age_guess if converged else (float(age) if "age" in locals() else np.nan)
+    if use_stacey_kramers and np.isfinite(age):
+        composition = stacey_kramers_common_pb(
+            age,
+            u238_u235=stacey_kramers_u238_u235,
+        )
+        ratio_name = "207Pb/206Pb" if method == "207" else "206Pb/208Pb"
+        common = float(composition[ratio_name])
+
+    l238_ma = LAMBDA_238 * 1e6
+    radiogenic_68 = np.expm1(l238_ma * age) if np.isfinite(age) else np.nan
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f206 = 1.0 - radiogenic_68 / ratio_68
+
+    if method == "207":
+        sigma = age_207_corrected_uncertainty(
+            age,
+            ratio_68,
+            ratio_68_1s,
+            ratio_other,
+            ratio_other_1s,
+            common,
+            common_ratio_1s,
+            u238_u235=u238_u235,
+        )
+    else:
+        sigma = age_208_corrected_uncertainty(
+            age,
+            ratio_68,
+            ratio_68_1s,
+            ratio_other,
+            ratio_other_1s,
+            th_u,
+            th_u_1s,
+            common,
+            common_ratio_1s,
+        )
+
+    warnings = []
+    lower, upper = age_bounds_ma
+    if not converged:
+        warnings.append("age solver did not converge")
+    if np.isfinite(f206) and not 0 <= f206 <= 1:
+        warnings.append("inferred f206 is outside 0-1")
+    if np.isfinite(age) and not lower <= age <= upper:
+        warnings.append("age is outside configured bounds")
+    if method == "208" and np.isfinite(th_u) and th_u > max_208_th_u:
+        warnings.append(f"Th/U exceeds {max_208_th_u:g}")
+    valid = bool(
+        converged
+        and np.isfinite(age)
+        and np.isfinite(sigma)
+        and np.isfinite(f206)
+        and 0 <= f206 <= 1
+        and lower <= age <= upper
+        and (method != "208" or th_u <= max_208_th_u)
+    )
+    return CommonPbAgeResult(
+        age_ma=float(age),
+        sigma_ma=float(sigma),
+        f206=float(f206),
+        common_ratio=float(common),
+        iterations=model_iteration if use_stacey_kramers else solver_iterations,
+        converged=bool(converged),
+        valid=valid,
+        warning="; ".join(warnings),
+    )
+
+
+def apply_common_pb_corrections(
+    data,
+    *,
+    common_pb_model: str | None = "stacey_kramers",
+    common_pb207_pb206: float | str | None = None,
+    common_pb206_pb208: float | str | None = None,
+    common_pb207_pb206_1s: float = 0.001,
+    common_pb206_pb208_1s: float = 0.002,
+    th_u_relative_1s: float = 0.02,
+    initial_age_ma: float = 1000.0,
+    max_iterations: int = 20,
+    tolerance_ma: float = 1e-5,
+    age_bounds_ma: tuple[float, float] = (-1000.0, EARTH_AGE_MA),
+    max_208_th_u: float = DEFAULT_208_MAX_TH_U,
+    u238_u235: float = U238_U235,
+    stacey_kramers_u238_u235: float = old_common_U238_U235,
+    ratio_68_column: str | None = None,
+    ratio_68_2s_column: str | None = None,
+    ratio_76_column: str | None = None,
+    ratio_76_2s_column: str | None = None,
+    ratio_82_column: str | None = None,
+    ratio_82_2s_column: str | None = None,
+    th_u_column: str = "Th/U",
+):
+    """Append conventional 207- and 208-method common-Pb age columns.
+
+    The input is copied. Spot-mean and sweep-wise frames are both supported;
+    their calibrated ratio column names are detected automatically. A fixed
+    common-Pb composition can be supplied as a scalar or column name. When it
+    is omitted, ``common_pb_model='stacey_kramers'`` iterates each analysis
+    from a 1000 Ma initial estimate following Chew et al. (2011).
+
+    The uncertainty equations follow the independent-input propagation in the
+    Excel VBA routines. The defaults reproduce its absolute one-sigma common
+    ratio uncertainties (0.001 for 207Pb/206Pb and 0.002 for 206Pb/208Pb) and
+    its 2% relative one-sigma Th/U uncertainty. No ratio covariance is added.
+    """
+    import pandas as pd
+
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("data must be a pandas DataFrame")
+    if common_pb_model not in (None, "stacey_kramers"):
+        raise ValueError("common_pb_model must be None or 'stacey_kramers'")
+    if common_pb_model is None and (
+        common_pb207_pb206 is None or common_pb206_pb208 is None
+    ):
+        raise ValueError(
+            "Fixed correction requires both common_pb207_pb206 and "
+            "common_pb206_pb208."
+        )
+
+    frame = data.copy()
+
+    def choose_column(explicit, candidates, label):
+        if explicit is not None:
+            if explicit not in frame.columns:
+                raise KeyError(f"{label} column {explicit!r} is not present")
+            return explicit
+        for candidate in candidates:
+            if candidate in frame.columns:
+                return candidate
+        raise KeyError(
+            f"Could not find {label}; tried " + ", ".join(repr(c) for c in candidates)
+        )
+
+    ratio_68_column = choose_column(
+        ratio_68_column,
+        ("206Pb/238U_fractionation_corrected", "206Pb/238U"),
+        "total 206Pb/238U",
+    )
+    ratio_76_column = choose_column(
+        ratio_76_column,
+        ("207Pb/206Pb_fractionation_corrected", "207Pb/206Pb"),
+        "total 207Pb/206Pb",
+    )
+    ratio_82_column = choose_column(
+        ratio_82_column,
+        ("208Pb/232Th_fractionation_corrected", "208Pb/232Th"),
+        "total 208Pb/232Th",
+    )
+    ratio_68_2s_column = choose_column(
+        ratio_68_2s_column,
+        (
+            f"{ratio_68_column}_2e",
+            "206Pb/238U_2e",
+            "206Pb/238U_fractionation_corrected_2e",
+        ),
+        "2-sigma total 206Pb/238U uncertainty",
+    )
+    ratio_76_2s_column = choose_column(
+        ratio_76_2s_column,
+        (
+            f"{ratio_76_column}_2e",
+            "207Pb/206Pb_2e",
+            "207Pb/206Pb_fractionation_corrected_2e",
+        ),
+        "2-sigma total 207Pb/206Pb uncertainty",
+    )
+    ratio_82_2s_column = choose_column(
+        ratio_82_2s_column,
+        (
+            f"{ratio_82_column}_2e",
+            "208Pb/232Th_2e",
+            "208Pb/232Th_fractionation_corrected_2e",
+        ),
+        "2-sigma total 208Pb/232Th uncertainty",
+    )
+
+    if th_u_column not in frame.columns:
+        if "Th" not in frame.columns or "U" not in frame.columns:
+            raise KeyError(
+                f"{th_u_column!r} is absent and calibrated Th and U columns "
+                "are not available to derive it."
+            )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frame[th_u_column] = frame["Th"] / frame["U"]
+
+    def resolve_common(specification):
+        if isinstance(specification, str):
+            if specification not in frame.columns:
+                raise KeyError(
+                    f"Common-Pb ratio column {specification!r} is not present"
+                )
+            return frame[specification].to_numpy(dtype=float)
+        if specification is None:
+            return np.full(len(frame), np.nan)
+        return np.full(len(frame), float(specification))
+
+    common_76_values = resolve_common(common_pb207_pb206)
+    common_68_values = resolve_common(common_pb206_pb208)
+    ratio_68_values = frame[ratio_68_column].to_numpy(dtype=float)
+    ratio_68_1s = frame[ratio_68_2s_column].to_numpy(dtype=float) / 2.0
+    ratio_76_values = frame[ratio_76_column].to_numpy(dtype=float)
+    ratio_76_1s = frame[ratio_76_2s_column].to_numpy(dtype=float) / 2.0
+    ratio_82_values = frame[ratio_82_column].to_numpy(dtype=float)
+    ratio_82_1s = frame[ratio_82_2s_column].to_numpy(dtype=float) / 2.0
+    th_u_values = frame[th_u_column].to_numpy(dtype=float)
+    th_u_1s = np.abs(th_u_values) * float(th_u_relative_1s)
+    use_model_207 = common_pb_model == "stacey_kramers" and common_pb207_pb206 is None
+    use_model_208 = common_pb_model == "stacey_kramers" and common_pb206_pb208 is None
+
+    results_207 = []
+    results_208 = []
+    for index in range(len(frame)):
+        shared = dict(
+            ratio_68=ratio_68_values[index],
+            ratio_68_1s=ratio_68_1s[index],
+            th_u=th_u_values[index],
+            th_u_1s=th_u_1s[index],
+            initial_age_ma=initial_age_ma,
+            stacey_kramers_u238_u235=stacey_kramers_u238_u235,
+            u238_u235=u238_u235,
+            tolerance_ma=tolerance_ma,
+            max_iterations=max_iterations,
+            age_bounds_ma=age_bounds_ma,
+            max_208_th_u=max_208_th_u,
+        )
+        results_207.append(
+            calculate_common_pb_result(
+                method="207",
+                ratio_other=ratio_76_values[index],
+                ratio_other_1s=ratio_76_1s[index],
+                common_ratio=(
+                    None if use_model_207 else common_76_values[index]
+                ),
+                common_ratio_1s=common_pb207_pb206_1s,
+                use_stacey_kramers=use_model_207,
+                **shared,
+            )
+        )
+        results_208.append(
+            calculate_common_pb_result(
+                method="208",
+                ratio_other=ratio_82_values[index],
+                ratio_other_1s=ratio_82_1s[index],
+                common_ratio=(
+                    None if use_model_208 else common_68_values[index]
+                ),
+                common_ratio_1s=common_pb206_pb208_1s,
+                use_stacey_kramers=use_model_208,
+                **shared,
+            )
+        )
+
+    for method, results, common_label in (
+        ("207", results_207, "207Pb/206Pb"),
+        ("208", results_208, "206Pb/208Pb"),
+    ):
+        ages = np.asarray([result.age_ma for result in results])
+        sigmas = np.asarray([result.sigma_ma for result in results])
+        frame[f"{method}Pb_corrected_age"] = ages
+        frame[f"{method}Pb_corrected_age_2e"] = 2.0 * sigmas
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frame[f"{method}Pb_corrected_age_2e%"] = 200.0 * sigmas / ages
+        frame[f"{method}Pb_correction_f206"] = [
+            result.f206 for result in results
+        ]
+        frame[f"{method}Pb_correction_common_{common_label}"] = [
+            result.common_ratio for result in results
+        ]
+        frame[f"{method}Pb_correction_iterations"] = [
+            result.iterations for result in results
+        ]
+        frame[f"{method}Pb_correction_converged"] = [
+            result.converged for result in results
+        ]
+        frame[f"{method}Pb_correction_valid"] = [
+            result.valid for result in results
+        ]
+        frame[f"{method}Pb_correction_warning"] = [
+            result.warning for result in results
+        ]
+        radiogenic_68 = np.expm1(LAMBDA_238 * ages * 1e6)
+        frame[f"206Pb/238U_{method}Pb_corrected"] = radiogenic_68
+        frame[f"206Pb/238U_{method}Pb_corrected_2e"] = (
+            2.0
+            * LAMBDA_238
+            * 1e6
+            * np.exp(LAMBDA_238 * ages * 1e6)
+            * sigmas
+        )
+
+    frame.attrs = dict(data.attrs)
+    frame.attrs["common_pb_correction"] = {
+        "methods": ("207", "208"),
+        "model": common_pb_model or "fixed",
+        "common_pb207_pb206_1s": common_pb207_pb206_1s,
+        "common_pb206_pb208_1s": common_pb206_pb208_1s,
+        "th_u_relative_1s": th_u_relative_1s,
+        "max_208_th_u": max_208_th_u,
+        "u238_u235": u238_u235,
+        "stacey_kramers_u238_u235": stacey_kramers_u238_u235,
+    }
+    return frame
 
 
 @dataclass
@@ -806,6 +1576,7 @@ def tw_depth_profile_sweep_ages(
     sy_col="207Pb/206Pb_fractionation_corrected_2e",
     rho_col: str | None = None,
     uncertainties_are_2sigma=True,
+    initial_uncertainties_are_2sigma=False,
     monte_carlo_n: int = 0,
     monte_carlo_confidence: float = 0.95,
     random_state=None,
@@ -815,8 +1586,19 @@ def tw_depth_profile_sweep_ages(
     Each row is treated as a single Tera-Wasserburg isochron line from an
     assumed initial ``207Pb/206Pb`` composition at ``x=0`` to the measured
     sweep point. The initial composition can be a scalar or a per-row column.
+    ``uncertainties_are_2sigma`` describes the sweep-ratio uncertainty
+    columns. ``initial_uncertainties_are_2sigma`` independently describes the
+    TIMS/common-Pb uncertainty, regardless of whether it is supplied as a
+    scalar or column. Both are converted to one-sigma before propagation.
+
+    This is the single-analysis special case of an anchored total-Pb/U
+    isochron. IsoplotR's Ludwig regression treats an uncertain common-Pb
+    composition as a Gaussian constraint; here the same constraint is
+    propagated through the two-point line analytically, with optional Monte
+    Carlo verification.
+
     The returned object is a copy of ``data`` with line and age columns
-    appended.
+    appended. Ages and analytical uncertainties are in Ma.
     """
     import pandas as pd
 
@@ -829,10 +1611,12 @@ def tw_depth_profile_sweep_ages(
         raise ValueError(f"Missing initial Pb uncertainty column: {sigma_initial_pb207_pb206_col}")
 
     divisor = 2.0 if uncertainties_are_2sigma else 1.0
+    initial_divisor = 2.0 if initial_uncertainties_are_2sigma else 1.0
     rng = np.random.default_rng(random_state)
 
     result_columns = {
         "tw_initial_207Pb_206Pb": [],
+        "tw_initial_207Pb_206Pb_1s": [],
         "tw_line_slope": [],
         "tw_line_intercept": [],
         "tw_lower_intercept_age": [],
@@ -858,14 +1642,15 @@ def tw_depth_profile_sweep_ages(
             else float(initial_pb207_pb206)
         )
         sigma_initial = (
-            float(row[sigma_initial_pb207_pb206_col]) / divisor
+            float(row[sigma_initial_pb207_pb206_col]) / initial_divisor
             if sigma_initial_pb207_pb206_col is not None
-            else float(sigma_initial_pb207_pb206)
+            else float(sigma_initial_pb207_pb206) / initial_divisor
         )
 
         for key in result_columns:
             result_columns[key].append(np.nan)
         result_columns["tw_initial_207Pb_206Pb"][-1] = initial
+        result_columns["tw_initial_207Pb_206Pb_1s"][-1] = sigma_initial
 
         if not np.all(np.isfinite([x, y, sx, sy, rho, initial, sigma_initial])):
             continue
@@ -992,6 +1777,17 @@ __all__ = [
     "MonteCarloIntercepts",
     "SingleSweepResult",
     "ConcordiaAgeResult",
+    "CommonPbAgeResult",
+    "LAMBDA_232",
+    "DEFAULT_208_MAX_TH_U",
+    "stacey_kramers_common_pb",
+    "solve_common_pb_age_equation",
+    "age_207_corrected",
+    "age_207_corrected_uncertainty",
+    "age_208_corrected",
+    "age_208_corrected_uncertainty",
+    "calculate_common_pb_result",
+    "apply_common_pb_corrections",
     "line_fit_summary",
     "intercept_summary",
     "fit_summary",

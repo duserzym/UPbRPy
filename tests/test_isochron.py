@@ -220,6 +220,42 @@ def test_depth_profile_sweep_ages_accept_per_row_initial_pb_columns():
     assert np.all(out["tw_lower_intercept_age_2s"] > 0)
 
 
+def test_depth_profile_initial_pb_uncertainty_level_is_explicit():
+    age = 230.0
+    initial = 0.905
+    x_conc, y_conc = tera_wasserburg_point(age)
+    fraction = 0.7
+    frame = {
+        "238U/206Pb_fractionation_corrected": [x_conc * fraction],
+        "207Pb/206Pb_fractionation_corrected": [
+            initial + (y_conc - initial) * fraction
+        ],
+        "238U/206Pb_fractionation_corrected_2e": [0.20],
+        "207Pb/206Pb_fractionation_corrected_2e": [0.002],
+    }
+
+    from_two_sigma = tw_depth_profile_sweep_ages(
+        frame,
+        initial_pb207_pb206=initial,
+        sigma_initial_pb207_pb206=0.00006,
+        initial_uncertainties_are_2sigma=True,
+    )
+    from_one_sigma = tw_depth_profile_sweep_ages(
+        frame,
+        initial_pb207_pb206=initial,
+        sigma_initial_pb207_pb206=0.00003,
+    )
+
+    np.testing.assert_allclose(
+        from_two_sigma["tw_initial_207Pb_206Pb_1s"],
+        0.00003,
+    )
+    np.testing.assert_allclose(
+        from_two_sigma["tw_lower_intercept_age_2s"],
+        from_one_sigma["tw_lower_intercept_age_2s"],
+    )
+
+
 def test_fit_summary_and_mc_summary_frame_are_flat_and_exportable():
     lower_age = 100.0
     upper_age = 1100.0

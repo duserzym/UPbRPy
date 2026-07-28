@@ -10,6 +10,8 @@ from .constants import common_U238_U235
 from .isoplot import (
     calc_68_date,
     calc_68_date_uncertainty,
+    calc_82_date,
+    calc_82_date_uncertainty,
     calc_75_date,
     calc_75_date_uncertainty,
     calc_76_date,
@@ -191,6 +193,21 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     depthpro_ratios['206Pb/238U_age_2e%'] = (
         depthpro_ratios['206Pb/238U_age_2e'] / depthpro_ratios['206Pb/238U_age'] * 100
     )
+    if '208Pb/232Th_fractionation_corrected' in depthpro_ratios.columns:
+        ratio_82 = depthpro_ratios['208Pb/232Th_fractionation_corrected']
+        ratio_82_2e = depthpro_ratios[
+            '208Pb/232Th_fractionation_corrected_2e'
+        ]
+        depthpro_ratios['208Pb/232Th_age'] = calc_82_date(ratio_82)
+        depthpro_ratios['208Pb/232Th_age_2e'] = calc_82_date_uncertainty(
+            ratio_82,
+            ratio_82_2e,
+        )
+        depthpro_ratios['208Pb/232Th_age_2e%'] = (
+            depthpro_ratios['208Pb/232Th_age_2e']
+            / depthpro_ratios['208Pb/232Th_age']
+            * 100
+        )
 
     depthpro_ratios.attrs = {}
     return depthpro_ratios
@@ -305,6 +322,20 @@ def calc_ratio_mean_and_uncertainty(
             record['206Pb/238U_age_2e'] / record['206Pb/238U_age'] * 100
         )
 
+        if '208Pb/232Th' in record:
+            record['208Pb/232Th_age'] = calc_82_date(
+                record['208Pb/232Th']
+            )
+            record['208Pb/232Th_age_2e'] = calc_82_date_uncertainty(
+                record['208Pb/232Th'],
+                record['208Pb/232Th_2e'],
+            )
+            record['208Pb/232Th_age_2e%'] = (
+                record['208Pb/232Th_age_2e']
+                / record['208Pb/232Th_age']
+                * 100
+            )
+
         record['207Pb/206Pb_age'] = calc_76_date(record['207Pb/206Pb'])
         record['207Pb/206Pb_age_2e'] = calc_76_date_uncertainty(
             record['207Pb/206Pb'], record['207Pb/206Pb_2e']
@@ -339,6 +370,7 @@ def calc_ratio_mean_and_uncertainty(
                         '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
                         '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
                         '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
+                        '208Pb/232Th_age', '208Pb/232Th_age_2e%', '208Pb/232Th_age_2e',
                         'disc%', 'disc_2e%',
                         '238U/206Pb', '238U/206Pb_2e%',
                         '207Pb/206Pb', '207Pb/206Pb_2e%',

@@ -13,6 +13,10 @@ lambda_235 = 9.8485e-10
 sigma_235 = lambda_235 * 0.14 / 100 / 2
 lambda_238 = 1.55125e-10
 sigma_238 = lambda_238 * 0.11 / 100 / 2
+# 232Th decay constant (year^-1), matching the value used by the legacy
+# common-Pb correction routines. The direct spreadsheet Th-Pb date formula
+# carries two additional insignificant digits (4.94752e-11).
+lambda_232 = 4.9475e-11
 
 # Retain the historical CSV archive as an explicit compatibility option. The
 # primary ``standard_archive`` is constructed from the TOML library in
@@ -30,6 +34,7 @@ __all__ = [
     "sigma_235",
     "lambda_238",
     "sigma_238",
+    "lambda_232",
     "standard_archive_csv",
     "standard_archive_legacy",
 ]

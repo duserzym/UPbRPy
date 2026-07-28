@@ -13,6 +13,8 @@ from UPbRPy import (
     calc_75_date_uncertainty,
     calc_76_date,
     calc_76_date_uncertainty,
+    calc_82_date,
+    calc_82_date_uncertainty,
     get_wetherill_point,
     propagate_date_covariance,
     propagate_discordance_covariance,
@@ -421,6 +423,34 @@ def test_207pb_235u_age_uncertainty_matches_finite_difference():
     ) / 2
 
     np.testing.assert_allclose(analytic, finite_difference, rtol=1e-5)
+
+
+def test_208pb_232th_age_uncertainty_matches_finite_difference():
+    ratio = 0.12
+    uncertainty = 0.002
+    analytic = calc_82_date_uncertainty(ratio, uncertainty)
+    finite_difference = (
+        calc_82_date(ratio + uncertainty)
+        - calc_82_date(ratio - uncertainty)
+    ) / 2
+
+    np.testing.assert_allclose(analytic, finite_difference, rtol=1e-5)
+
+
+def test_208pb_232th_age_reproduces_zircon_spreadsheet_formula():
+    ratio = 0.4746695621005803
+    ratio_1s = 0.010767270632896358
+    spreadsheet_lambda_232 = 4.94752e-11
+
+    age = calc_82_date(ratio, lambda232=spreadsheet_lambda_232)
+    age_2s = calc_82_date_uncertainty(
+        ratio,
+        2 * ratio_1s,
+        lambda232=spreadsheet_lambda_232,
+    )
+
+    np.testing.assert_allclose(age, 7851.083755088551)
+    np.testing.assert_allclose(age_2s, 295.1571783865583)
 
 
 def test_207pb_206pb_age_uncertainty_matches_finite_difference():

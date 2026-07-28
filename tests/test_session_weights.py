@@ -8,6 +8,7 @@ from UPbRPy.UPbRPy import (
     apply_DH_correction,
     apply_session_correction,
     build_downhole_fractionation_metadata,
+    calc_82_date,
     calc_session_nominal_fractionation,
     calc_depth_profile,
     calc_ratio_mean_and_uncertainty,
@@ -269,6 +270,47 @@ def test_depth_profile_uses_poisson_and_scalar_session_scatter_only():
         expected_1sigma,
     )
     assert depth_profile.attrs == {}
+
+
+def test_thpb_dates_are_added_to_spot_and_sweep_outputs():
+    ratios = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th")
+    data = pd.DataFrame(
+        {
+            "sample": ["unknown", "unknown"],
+            "spot_name": ["u1", "u1"],
+            "Time": [10.0, 11.0],
+            "206Pb/238U": [0.10, 0.102],
+            "206Pb/238U_2e": [0.002, 0.002],
+            "207Pb/206Pb": [0.052, 0.0522],
+            "207Pb/206Pb_2e": [0.0002, 0.0002],
+            "208Pb/232Th": [0.025, 0.027],
+            "208Pb/232Th_2e": [0.001, 0.001],
+        }
+    )
+    session_results = {
+        ratio: {
+            "fit": np.array([1.0]),
+            "std": 0.001,
+            "fit_observations": {"time": np.array([9.0, 12.0])},
+        }
+        for ratio in ratios
+    }
+    for ratio in ratios:
+        data[f"{ratio}_fractionation_corrected"] = data[ratio]
+
+    depth_profile = calc_depth_profile(data, session_results)
+    spot_summary = calc_ratio_mean_and_uncertainty(data, session_results)
+
+    np.testing.assert_allclose(
+        depth_profile["208Pb/232Th_age"],
+        calc_82_date(depth_profile["208Pb/232Th_fractionation_corrected"]),
+    )
+    np.testing.assert_allclose(
+        spot_summary.loc[0, "208Pb/232Th_age"],
+        calc_82_date(spot_summary.loc[0, "208Pb/232Th"]),
+    )
+    assert "208Pb/232Th_age_2e" in depth_profile
+    assert "208Pb/232Th_age_2e" in spot_summary
 
 
 def test_session_corrected_covariance_includes_shared_fit_terms():
