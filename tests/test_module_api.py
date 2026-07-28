@@ -359,6 +359,16 @@ def test_tw_standard_calibration_plot_projects_sweeps_and_spot_means():
     assert {"layout", "sweepwise", "spot_mean"}.issubset(result)
     assert len(result["sweepwise_projection"]) == 4
     assert len(result["spot_mean_projection"]) == 2
+    for plot in (result["sweepwise"], result["spot_mean"]):
+        concordia = plot.select(name="full_earth_concordia")[0]
+        legend = plot.legend[0]
+        assert max(concordia.data_source.data["age"]) == pytest.approx(4567.3)
+        assert plot.x_range.start == 0
+        assert plot.x_range.end < max(concordia.data_source.data["x"])
+        assert len(plot.select(name="concordia_age_labels")) == 1
+        assert legend in plot.below
+        assert legend.orientation == "horizontal"
+        assert legend.ncols == 2
     slope = (0.055 - 0.71) / (1 / 0.08)
     projection = result["sweepwise_projection"]
     expected_y = 0.71 + slope * projection["x_target"]
@@ -414,8 +424,19 @@ def test_tw_spot_mean_session_projection_matches_session_factor_geometry():
     )
     source = plot.select(name="tw_session_spot_projection_source")[0]
     projection = pd.DataFrame(source.data)
+    concordia = plot.select(name="full_earth_concordia")[0]
+    concordia_source = concordia.data_source
+    legend = plot.legend[0]
 
     assert len(projection) == 2
+    assert len(concordia_source.data["age"]) == 2500
+    assert max(concordia_source.data["age"]) == pytest.approx(4567.3)
+    assert plot.x_range.start == 0
+    assert plot.x_range.end < max(concordia_source.data["x"])
+    assert len(plot.select(name="concordia_age_labels")) == 1
+    assert legend in plot.below
+    assert legend.orientation == "horizontal"
+    assert legend.ncols == 2
     np.testing.assert_allclose(
         projection["y_pbpb_corrected"],
         projection["y_measured"] * 1.01,
@@ -824,13 +845,19 @@ def test_depth_profile_editor_buttons_refresh_spot_and_diagram():
     editor = visualization.depth_profile_concordia_editor(pd.DataFrame(rows))
     interactive_layout = editor.object
     spot_controls = interactive_layout.children[0]
-    plot = interactive_layout.children[2]
+    isochron_controls = interactive_layout.children[1]
+    plot = interactive_layout.children[4]
     previous_button, spot_selector, next_button, diagram_selector = (
         spot_controls.children
+    )
+    view_selector, previous_sweep, sweep_slider, next_sweep = (
+        isochron_controls.children
     )
 
     assert plot.width == 1100
     assert plot.height == 500
+    assert plot.width_policy == "fixed"
+    assert plot.height_policy == "fixed"
     assert plot.title.text.startswith("spot-a | Wetherill")
     assert isinstance(editor, visualization.StandaloneBokehPlot)
     assert plot.output_backend == "svg"
@@ -840,11 +867,94 @@ def test_depth_profile_editor_buttons_refresh_spot_and_diagram():
     assert diagram_selector.js_property_callbacks
     assert previous_button.js_event_callbacks
     assert next_button.js_event_callbacks
+    assert view_selector.disabled
+    assert sweep_slider.disabled
+    assert previous_sweep.disabled
+    assert next_sweep.disabled
     assert len(
         list(interactive_layout.select({"name": "depth_profile_switch_data"}))
     ) == 1
     assert "application/vnd.jupyter.widget-view+json" not in editor._repr_html_()
     assert visualization.find_single_bokeh_plot(editor) is plot
+
+
+def test_depth_profile_editor_exposes_selected_anchored_isochron_view():
+    rows = []
+    for sweep in range(3):
+        ratio_68 = 0.04 + sweep * 0.001
+        ratio_86 = 1.0 / ratio_68
+        rows.append(
+            {
+                "spot_name": "apatite-1",
+                "sample": "apatite",
+                "signal_relative_time": float(sweep) * 0.25,
+                "206Pb/238U_fractionation_corrected": ratio_68,
+                "206Pb/238U_fractionation_corrected_2e": 0.001,
+                "207Pb/206Pb_fractionation_corrected": 0.15,
+                "207Pb/206Pb_fractionation_corrected_2e": 0.002,
+                "207Pb/235U_fractionation_corrected": 0.8,
+                "207Pb/235U_fractionation_corrected_2e": 0.02,
+                "238U/206Pb_fractionation_corrected": ratio_86,
+                "238U/206Pb_fractionation_corrected_2e": 0.6,
+                "err_corr": 0.4,
+                "tw_initial_207Pb_206Pb": 0.90,
+                "tw_initial_207Pb_206Pb_1s": 0.001,
+                "tw_line_slope": -0.03,
+                "tw_line_intercept": 0.90,
+                "tw_lower_intercept_age": 950.0 + sweep,
+                "tw_lower_intercept_238U_206Pb": 7.5,
+                "tw_lower_intercept_207Pb_206Pb": 0.075,
+            }
+        )
+
+    editor = visualization.depth_profile_concordia_editor(
+        pd.DataFrame(rows),
+        initial_type="TW",
+        initial_view="isochron",
+    )
+    layout = editor.object
+    plot = layout.children[4]
+    view_selector, previous_sweep, sweep_slider, next_sweep = (
+        layout.children[1].children
+    )
+
+    assert not view_selector.disabled
+    assert view_selector.active == 1
+    assert not sweep_slider.disabled
+    assert sweep_slider.end == 2
+    assert previous_sweep.js_event_callbacks
+    assert next_sweep.js_event_callbacks
+    assert plot.js_event_callbacks
+    for name in (
+        "depth_profile_selected_ellipse_source",
+        "depth_profile_common_pb_anchor_source",
+        "depth_profile_selected_isochron_source",
+        "depth_profile_intercept_source",
+    ):
+        assert len(list(layout.select({"name": name}))) == 1
+
+
+def test_depth_age_profile_uses_signal_time_until_depth_is_calibrated():
+    frame = pd.DataFrame(
+        {
+            "spot_name": ["MA1 31"] * 3,
+            "Time": [100.0, 100.25, 100.50],
+            "tw_lower_intercept_age": [950.0, 940.0, 930.0],
+            "tw_lower_intercept_age_2s": [20.0, 22.0, 24.0],
+        }
+    )
+
+    plot = visualization.plot_depth_age_profile(frame)
+
+    assert plot.xaxis[0].axis_label == "Time from signal start (s)"
+    assert plot.yaxis[0].axis_label == "Lower-intercept age (Ma)"
+    assert plot.output_backend == "svg"
+    save_tool = plot.select(type=visualization.SaveTool)[0]
+    assert save_tool.filename == "MA1_31_TW_depth_age.svg"
+    source = plot.renderers[0].data_source
+    np.testing.assert_allclose(source.data["x"], [0.0, 0.25, 0.50])
+    np.testing.assert_allclose(source.data["lower"], [930.0, 918.0, 906.0])
+    np.testing.assert_allclose(source.data["upper"], [970.0, 962.0, 954.0])
 
 
 def test_concordia_initial_range_includes_discordant_data_and_curve():

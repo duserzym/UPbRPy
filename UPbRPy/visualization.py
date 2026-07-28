@@ -11,6 +11,7 @@ import re
 import tempfile
 
 from bokeh.embed import components
+from bokeh.events import DocumentReady
 from bokeh.models import (
     BoxAnnotation,
     Button as BokehButton,
@@ -24,6 +25,7 @@ from bokeh.models import (
     Range1d,
     SaveTool,
     Select as BokehSelect,
+    Slider as BokehSlider,
 )
 from bokeh.layouts import (
     column as bokeh_column,
@@ -293,24 +295,34 @@ def depth_profile_concordia_editor(
     *,
     initial_spot=None,
     initial_type="Wetherill",
+    initial_view="ellipses",
     output_directory="vector_plots",
     width=1100,
     height=500,
     comms: str | None = None,
 ):
-    """Build a browser-responsive sweep-wise concordia explorer.
+    """Build a browser-responsive sweep-wise concordia/isochron explorer.
 
     Spot and diagram navigation run through Bokeh ``CustomJS`` callbacks, so
     they continue to work when a notebook's Python comm channel is busy or has
     disconnected. The toolbar Save action downloads the current view as vector
     SVG. Use :func:`export_bokeh_vector` for programmatic PDF export.
 
+    When the input contains the standard columns returned by
+    :func:`UPbRPy.isochron.tw_depth_profile_sweep_ages`, a second view exposes
+    one sweep at a time as an anchored Tera--Wasserburg isochron. It shows the
+    common-Pb anchor and its two-sigma uncertainty, the selected sweep ellipse,
+    the two-point isochron line, and the lower concordia intercept. Other
+    sweeps are reduced to a faint center trace so the figure remains legible.
+    The sweep slider makes every line inspectable without drawing hundreds of
+    overlapping isochrons simultaneously.
+
     ``output_directory`` and ``comms`` remain accepted for compatibility with
     earlier Panel-backed notebooks. Browser downloads choose their destination
     according to browser settings, while programmatic exports take an explicit
     path.
     """
-    from .isoplot import concordia, concordia_plot_ranges
+    from .isoplot import calc_concordia_ellipse, concordia, concordia_plot_ranges
 
     if not isinstance(depth_profile, pd.DataFrame):
         raise TypeError("depth_profile must be a pandas DataFrame")
@@ -333,6 +345,29 @@ def depth_profile_concordia_editor(
         raise ValueError("depth_profile must contain at least one sweep")
     if initial_type not in {"Wetherill", "TW"}:
         raise ValueError("initial_type must be either Wetherill or TW")
+    if initial_view not in {"ellipses", "isochron"}:
+        raise ValueError("initial_view must be either ellipses or isochron")
+
+    isochron_columns = {
+        "tw_initial_207Pb_206Pb",
+        "tw_initial_207Pb_206Pb_1s",
+        "tw_line_slope",
+        "tw_line_intercept",
+        "tw_lower_intercept_age",
+        "tw_lower_intercept_238U_206Pb",
+        "tw_lower_intercept_207Pb_206Pb",
+    }
+    has_isochron_data = isochron_columns.issubset(depth_profile.columns)
+    if initial_view == "isochron" and not has_isochron_data:
+        missing_isochron = sorted(isochron_columns.difference(depth_profile.columns))
+        raise KeyError(
+            "Isochron view requires columns from tw_depth_profile_sweep_ages: "
+            + ", ".join(missing_isochron)
+        )
+    if initial_view == "isochron":
+        # The anchored common-Pb construction exists only in
+        # Tera--Wasserburg coordinates.
+        initial_type = "TW"
 
     # The viewer needs only tabular columns. Keep its working copy attr-free so
     # ancillary metadata is not repeatedly compared or copied while building
@@ -384,6 +419,77 @@ def depth_profile_concordia_editor(
         button_type="primary",
         width=310,
         name="depth_profile_diagram_selector",
+    )
+    view_selector = BokehRadioButtonGroup(
+        labels=["Sweep ellipses", "Selected sweep isochron"],
+        active=0 if initial_view == "ellipses" else 1,
+        button_type="primary",
+        width=360,
+        disabled=not has_isochron_data,
+        name="depth_profile_view_selector",
+    )
+    previous_sweep_button = BokehButton(
+        label="◀ Sweep",
+        width=90,
+        disabled=not has_isochron_data,
+        name="depth_profile_previous_sweep",
+    )
+    next_sweep_button = BokehButton(
+        label="Sweep ▶",
+        width=90,
+        disabled=not has_isochron_data,
+        name="depth_profile_next_sweep",
+    )
+    initial_sweep_count = int(
+        (profile_data["spot_name"] == spot_lookup[initial_label]).sum()
+    )
+    initial_sweep_index = 0
+    if has_isochron_data:
+        initial_isochron_rows = profile_data.loc[
+            profile_data["spot_name"] == spot_lookup[initial_label]
+        ]
+        finite_initial = (
+            initial_isochron_rows[
+                [
+                    "238U/206Pb_fractionation_corrected",
+                    "207Pb/206Pb_fractionation_corrected",
+                    "238U/206Pb_fractionation_corrected_2e",
+                    "207Pb/206Pb_fractionation_corrected_2e",
+                    *sorted(isochron_columns),
+                ]
+            ]
+            .apply(pd.to_numeric, errors="coerce")
+            .notna()
+            .all(axis=1)
+            .to_numpy()
+        )
+        finite_indices = np.flatnonzero(finite_initial)
+        if len(finite_indices):
+            initial_sweep_index = int(finite_indices[0])
+        elif initial_view == "isochron":
+            raise ValueError(
+                f"Spot {initial_label!r} has no finite anchored-isochron sweep."
+            )
+    sweep_slider = BokehSlider(
+        title="Sweep index",
+        start=0,
+        end=max(0, initial_sweep_count - 1),
+        value=initial_sweep_index,
+        step=1,
+        width=420,
+        disabled=not has_isochron_data,
+        name="depth_profile_sweep_slider",
+    )
+    sweep_status = Div(
+        text=(
+            "Select “Selected sweep isochron” to inspect the common-Pb anchor, "
+            "one sweep line, and its lower concordia intercept."
+            if has_isochron_data
+            else "Isochron controls require output from tw_depth_profile_sweep_ages."
+        ),
+        width=720,
+        styles={"color": "#555", "font-size": "12px"},
+        name="depth_profile_sweep_status",
     )
     def numeric_values(frame, column):
         return pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
@@ -474,6 +580,13 @@ def depth_profile_concordia_editor(
         "time": [],
         "age_75": [],
         "age_68": [],
+        "anchor_76": [],
+        "anchor_76_1s": [],
+        "line_slope": [],
+        "line_intercept": [],
+        "intercept_age": [],
+        "intercept_x": [],
+        "intercept_y": [],
     }
     # Store every sweep once. The former browser source duplicated all points
     # for Wetherill and Tera-Wasserburg views and repeated spot/diagram strings
@@ -501,6 +614,24 @@ def depth_profile_concordia_editor(
             point_data[target_name].extend(tera_wasserburg[source_name])
         for field in ("time", "age_75", "age_68"):
             point_data[field].extend(wetherill[field])
+        selected = profile_data.loc[
+            profile_data["spot_name"] == spot_lookup[spot_label]
+        ]
+        for source_name, target_name in (
+            ("tw_initial_207Pb_206Pb", "anchor_76"),
+            ("tw_initial_207Pb_206Pb_1s", "anchor_76_1s"),
+            ("tw_line_slope", "line_slope"),
+            ("tw_line_intercept", "line_intercept"),
+            ("tw_lower_intercept_age", "intercept_age"),
+            ("tw_lower_intercept_238U_206Pb", "intercept_x"),
+            ("tw_lower_intercept_207Pb_206Pb", "intercept_y"),
+        ):
+            if source_name in selected:
+                point_data[target_name].extend(
+                    numeric_values(selected, source_name).tolist()
+                )
+            else:
+                point_data[target_name].extend([np.nan] * point_count)
     for field in point_data:
         point_data[field] = np.asarray(point_data[field])
     profile_source = ColumnDataSource(
@@ -523,25 +654,28 @@ def depth_profile_concordia_editor(
     initial_selected = profile_data.loc[
         profile_data["spot_name"] == spot_lookup[initial_label]
     ].copy()
+    # Construct the figure at its final size. Resizing it after construction
+    # leaves Bokeh's initial browser layout at the concordia default until the
+    # first CustomJS callback, which visibly changes the aspect ratio.
     plot = concordia(
-            initial_selected,
-            type=initial_type,
-            r75="207Pb/235U_fractionation_corrected",
-            r68="206Pb/238U_fractionation_corrected",
-            r86="238U/206Pb_fractionation_corrected",
-            r76="207Pb/206Pb_fractionation_corrected",
-            s75="207Pb/235U_fractionation_corrected_2e",
-            s68="206Pb/238U_fractionation_corrected_2e",
-            s86="238U/206Pb_fractionation_corrected_2e",
-            s76="207Pb/206Pb_fractionation_corrected_2e",
-            rho="err_corr",
-            color_by="signal_relative_time",
-            color_key="legend",
-            ellipse_fill_alpha=0.35,
-            ellipse_center_size=6,
-        )
-    plot.width = int(width)
-    plot.height = int(height)
+        initial_selected,
+        type=initial_type,
+        r75="207Pb/235U_fractionation_corrected",
+        r68="206Pb/238U_fractionation_corrected",
+        r86="238U/206Pb_fractionation_corrected",
+        r76="207Pb/206Pb_fractionation_corrected",
+        s75="207Pb/235U_fractionation_corrected_2e",
+        s68="206Pb/238U_fractionation_corrected_2e",
+        s86="238U/206Pb_fractionation_corrected_2e",
+        s76="207Pb/206Pb_fractionation_corrected_2e",
+        rho="err_corr",
+        color_by="signal_relative_time",
+        color_key="legend",
+        ellipse_fill_alpha=0.35,
+        ellipse_center_size=6,
+        width=width,
+        height=height,
+    )
     plot.name = "depth_profile_concordia_plot"
     plot.title.text = f"{initial_label} | {initial_type} depth profile"
     plot.output_backend = "svg"
@@ -558,6 +692,230 @@ def depth_profile_concordia_editor(
     curve_source = plot.select(name="full_earth_concordia_source")[0]
     label_source = plot.select(name="concordia_age_labels")[0]
     color_mapper = plot.select(name="concordia_color_mapper")[0]
+    ellipse_renderer = next(
+        renderer
+        for renderer in plot.renderers
+        if getattr(renderer, "data_source", None) is ellipse_source
+    )
+    center_renderer = next(
+        renderer
+        for renderer in plot.renderers
+        if getattr(renderer, "data_source", None) is center_source
+    )
+
+    trace_source = ColumnDataSource(
+        {"x": [], "y": []},
+        name="depth_profile_isochron_trace_source",
+    )
+    trace_renderer = plot.line(
+        "x",
+        "y",
+        source=trace_source,
+        color="#777777",
+        line_width=1,
+        line_alpha=0.35,
+        visible=False,
+        legend_label="Sweep-center trace",
+        name="depth_profile_isochron_trace",
+    )
+    selected_ellipse_source = ColumnDataSource(
+        {"xs": [], "ys": []},
+        name="depth_profile_selected_ellipse_source",
+    )
+    selected_ellipse_renderer = plot.patches(
+        "xs",
+        "ys",
+        source=selected_ellipse_source,
+        fill_color="#ffffff",
+        fill_alpha=0.7,
+        line_color="#1565c0",
+        line_width=2,
+        visible=False,
+        legend_label="Selected sweep (95%)",
+        name="depth_profile_selected_ellipse",
+    )
+    anchor_source = ColumnDataSource(
+        {"x": [], "y": [], "lower": [], "upper": []},
+        name="depth_profile_common_pb_anchor_source",
+    )
+    anchor_error_renderer = plot.segment(
+        "x",
+        "lower",
+        "x",
+        "upper",
+        source=anchor_source,
+        color="#2e7d32",
+        line_width=2,
+        visible=False,
+        name="depth_profile_common_pb_anchor_uncertainty",
+    )
+    anchor_renderer = plot.scatter(
+        "x",
+        "y",
+        source=anchor_source,
+        marker="diamond",
+        size=13,
+        fill_color="#00c853",
+        line_color="#1b5e20",
+        line_width=1.5,
+        visible=False,
+        legend_label="Common-Pb anchor",
+        name="depth_profile_common_pb_anchor",
+    )
+    isochron_source = ColumnDataSource(
+        {"x": [], "y": []},
+        name="depth_profile_selected_isochron_source",
+    )
+    isochron_renderer = plot.line(
+        "x",
+        "y",
+        source=isochron_source,
+        color="#6a1b9a",
+        line_width=2,
+        visible=False,
+        legend_label="Anchored sweep isochron",
+        name="depth_profile_selected_isochron",
+    )
+    intercept_source = ColumnDataSource(
+        {"x": [], "y": [], "age": []},
+        name="depth_profile_intercept_source",
+    )
+    intercept_renderer = plot.scatter(
+        "x",
+        "y",
+        source=intercept_source,
+        marker="star",
+        size=15,
+        fill_color="#ff9800",
+        line_color="#e65100",
+        line_width=1.5,
+        visible=False,
+        legend_label="Lower concordia intercept",
+        name="depth_profile_lower_intercept",
+    )
+    plot.add_tools(
+        HoverTool(
+            renderers=[intercept_renderer],
+            tooltips=[("Lower-intercept age", "@age{0.0} Ma")],
+        )
+    )
+
+    if initial_view == "isochron":
+        first = initial_selected.iloc[initial_sweep_index]
+        initial_x = float(first["238U/206Pb_fractionation_corrected"])
+        initial_y = float(first["207Pb/206Pb_fractionation_corrected"])
+        initial_sx = (
+            float(first["238U/206Pb_fractionation_corrected_2e"]) / 2.0
+        )
+        initial_sy = (
+            float(first["207Pb/206Pb_fractionation_corrected_2e"]) / 2.0
+        )
+        ellipse_x, ellipse_y = calc_concordia_ellipse(
+            initial_x,
+            initial_y,
+            initial_sx,
+            initial_sy,
+            0.0,
+        )
+        initial_anchor = float(first["tw_initial_207Pb_206Pb"])
+        initial_anchor_1s = float(first["tw_initial_207Pb_206Pb_1s"])
+        initial_slope = float(first["tw_line_slope"])
+        initial_line_intercept = float(first["tw_line_intercept"])
+        initial_intercept_age = float(first["tw_lower_intercept_age"])
+        initial_intercept_x = float(
+            first["tw_lower_intercept_238U_206Pb"]
+        )
+        initial_intercept_y = float(
+            first["tw_lower_intercept_207Pb_206Pb"]
+        )
+        finite_trace = initial_selected[
+            [
+                "238U/206Pb_fractionation_corrected",
+                "207Pb/206Pb_fractionation_corrected",
+            ]
+        ].apply(pd.to_numeric, errors="coerce").dropna()
+        trace_source.data = {
+            "x": finite_trace[
+                "238U/206Pb_fractionation_corrected"
+            ].to_numpy(float),
+            "y": finite_trace[
+                "207Pb/206Pb_fractionation_corrected"
+            ].to_numpy(float),
+        }
+        selected_ellipse_source.data = {"xs": [ellipse_x], "ys": [ellipse_y]}
+        anchor_source.data = {
+            "x": [0.0],
+            "y": [initial_anchor],
+            "lower": [initial_anchor - 2.0 * initial_anchor_1s],
+            "upper": [initial_anchor + 2.0 * initial_anchor_1s],
+        }
+        line_end = 1.05 * max(initial_x, initial_intercept_x)
+        isochron_source.data = {
+            "x": [0.0, line_end],
+            "y": [
+                initial_line_intercept,
+                initial_line_intercept + initial_slope * line_end,
+            ],
+        }
+        intercept_source.data = {
+            "x": [initial_intercept_x],
+            "y": [initial_intercept_y],
+            "age": [initial_intercept_age],
+        }
+        ellipse_renderer.visible = False
+        center_renderer.visible = False
+        for renderer in (
+            trace_renderer,
+            selected_ellipse_renderer,
+            anchor_renderer,
+            anchor_error_renderer,
+            isochron_renderer,
+            intercept_renderer,
+        ):
+            renderer.visible = True
+        range_x = np.concatenate(
+            [
+                np.asarray([0.0, initial_x, initial_intercept_x]),
+                np.asarray(ellipse_x, dtype=float),
+            ]
+        )
+        range_y = np.concatenate(
+            [
+                np.asarray(
+                    [
+                        initial_anchor - 2.0 * initial_anchor_1s,
+                        initial_anchor + 2.0 * initial_anchor_1s,
+                        initial_y,
+                        initial_intercept_y,
+                    ]
+                ),
+                np.asarray(ellipse_y, dtype=float),
+            ]
+        )
+        finite_x = range_x[np.isfinite(range_x)]
+        finite_y = range_y[np.isfinite(range_y)]
+        x_span = max(np.ptp(finite_x), 1e-6)
+        y_span = max(np.ptp(finite_y), 1e-6)
+        plot.x_range.start = max(0.0, float(finite_x.min() - 0.08 * x_span))
+        plot.x_range.end = float(finite_x.max() + 0.08 * x_span)
+        plot.y_range.start = float(finite_y.min() - 0.12 * y_span)
+        plot.y_range.end = float(finite_y.max() + 0.12 * y_span)
+        initial_time = float(first["signal_relative_time"])
+        sweep_status.text = (
+            f"Sweep {initial_sweep_index + 1} of {len(initial_selected)} | "
+            f"{initial_time:.3f} s | "
+            f"lower intercept {initial_intercept_age:.1f} Ma"
+        )
+        plot.title.text = (
+            f"{initial_label} | selected sweep anchored TW isochron"
+        )
+        if save_tools:
+            safe_spot = re.sub(
+                r"[^A-Za-z0-9._-]+", "_", initial_label
+            ).strip("._")
+            save_tools[0].filename = (
+                f"{safe_spot}_TW_sweep_{initial_sweep_index + 1}_isochron.svg"
+            )
 
     switch_callback = CustomJS(
         args={
@@ -565,8 +923,24 @@ def depth_profile_concordia_editor(
             "ranges": range_source,
             "spot_selector": spot_selector,
             "type_selector": type_selector,
+            "view_selector": view_selector,
+            "sweep_slider": sweep_slider,
+            "sweep_status": sweep_status,
             "ellipses": ellipse_source,
             "centers": center_source,
+            "ellipse_renderer": ellipse_renderer,
+            "center_renderer": center_renderer,
+            "trace": trace_source,
+            "trace_renderer": trace_renderer,
+            "selected_ellipse": selected_ellipse_source,
+            "selected_ellipse_renderer": selected_ellipse_renderer,
+            "anchor": anchor_source,
+            "anchor_renderer": anchor_renderer,
+            "anchor_error_renderer": anchor_error_renderer,
+            "isochron": isochron_source,
+            "isochron_renderer": isochron_renderer,
+            "intercept": intercept_source,
+            "intercept_renderer": intercept_renderer,
             "curve": curve_source,
             "age_labels": label_source,
             "mapper": color_mapper,
@@ -579,6 +953,11 @@ def depth_profile_concordia_editor(
             "uranium_ratio": common_U238_U235,
         },
         code="""
+const isIsochronView = view_selector.active === 1;
+if (isIsochronView && type_selector.active !== 1) {
+  type_selector.active = 1;
+  return;
+}
 const diagram = type_selector.active === 0 ? "Wetherill" : "TW";
 const selectedSpotIndex = spot_selector.options.indexOf(spot_selector.value);
 const spotIndices = profiles.data.spot_index;
@@ -596,6 +975,13 @@ const time = [];
 const sample = [];
 const age75 = [];
 const age68 = [];
+const anchor76 = [];
+const anchor76_1s = [];
+const lineSlope = [];
+const lineIntercept = [];
+const interceptAge = [];
+const interceptX = [];
+const interceptY = [];
 for (let i = 0; i < spotIndices.length; i += 1) {
   if (spotIndices[i] === selectedSpotIndex) {
     x.push(xValues[i]);
@@ -607,9 +993,23 @@ for (let i = 0; i < spotIndices.length; i += 1) {
     sample.push(spot_selector.value);
     age75.push(profiles.data.age_75[i]);
     age68.push(profiles.data.age_68[i]);
+    anchor76.push(profiles.data.anchor_76[i]);
+    anchor76_1s.push(profiles.data.anchor_76_1s[i]);
+    lineSlope.push(profiles.data.line_slope[i]);
+    lineIntercept.push(profiles.data.line_intercept[i]);
+    interceptAge.push(profiles.data.intercept_age[i]);
+    interceptX.push(profiles.data.intercept_x[i]);
+    interceptY.push(profiles.data.intercept_y[i]);
   }
 }
 if (x.length === 0) return;
+sweep_slider.end = Math.max(0, x.length - 1);
+const selectedSweep = Math.min(
+  Math.max(0, Math.round(sweep_slider.value)),
+  x.length - 1,
+);
+if (sweep_slider.value !== selectedSweep) sweep_slider.value = selectedSweep;
+
 let rangeIndex = -1;
 for (let i = 0; i < ranges.data.spot.length; i += 1) {
   if (ranges.data.spot[i] === spot_selector.value &&
@@ -619,15 +1019,15 @@ for (let i = 0; i < ranges.data.spot.length; i += 1) {
   }
 }
 if (rangeIndex < 0) return;
-const polygonXs = [];
-const polygonYs = [];
-const polygonTime = [];
+
 const cutoff = 5.991464547107979;
-for (let i = 0; i < x.length; i += 1) {
-  if (![x[i], y[i], sx[i], sy[i], rho[i]].every(Number.isFinite)) continue;
-  const a = sx[i] * sx[i];
-  const d = sy[i] * sy[i];
-  const b = rho[i] * sx[i] * sy[i];
+function ellipsePolygon(index) {
+  if (![x[index], y[index], sx[index], sy[index], rho[index]].every(Number.isFinite)) {
+    return null;
+  }
+  const a = sx[index] * sx[index];
+  const d = sy[index] * sy[index];
+  const b = rho[index] * sx[index] * sy[index];
   const discriminant = Math.sqrt(Math.max(0, (a - d) ** 2 + 4 * b * b));
   const major = Math.max(0, 0.5 * (a + d + discriminant));
   const minor = Math.max(0, 0.5 * (a + d - discriminant));
@@ -638,13 +1038,22 @@ for (let i = 0; i < x.length; i += 1) {
   const ellipseY = [];
   for (let point = 0; point < 60; point += 1) {
     const theta = 2 * Math.PI * point / 59;
-    ellipseX.push(x[i] + majorRadius * Math.cos(theta) * Math.cos(angle) -
+    ellipseX.push(x[index] + majorRadius * Math.cos(theta) * Math.cos(angle) -
       minorRadius * Math.sin(theta) * Math.sin(angle));
-    ellipseY.push(y[i] + majorRadius * Math.cos(theta) * Math.sin(angle) +
+    ellipseY.push(y[index] + majorRadius * Math.cos(theta) * Math.sin(angle) +
       minorRadius * Math.sin(theta) * Math.cos(angle));
   }
-  polygonXs.push(ellipseX);
-  polygonYs.push(ellipseY);
+  return {x: ellipseX, y: ellipseY};
+}
+
+const polygonXs = [];
+const polygonYs = [];
+const polygonTime = [];
+for (let i = 0; i < x.length; i += 1) {
+  const polygon = ellipsePolygon(i);
+  if (polygon == null) continue;
+  polygonXs.push(polygon.x);
+  polygonYs.push(polygon.y);
   polygonTime.push(time[i]);
 }
 ellipses.data = {xs: polygonXs, ys: polygonYs, value: polygonTime};
@@ -678,19 +1087,130 @@ for (const age of ages) {
 }
 curve.data = {age: ages, x: curveX, y: curveY};
 age_labels.data = {x: [], y: [], label: []};
-plot.x_range.start = ranges.data.x_start[rangeIndex];
-plot.x_range.end = ranges.data.x_end[rangeIndex];
-plot.y_range.start = ranges.data.y_start[rangeIndex];
-plot.y_range.end = ranges.data.y_end[rangeIndex];
 x_axis.axis_label = diagram === "Wetherill" ? "207Pb/235U" : "238U/206Pb";
 y_axis.axis_label = diagram === "Wetherill" ? "206Pb/238U" : "207Pb/206Pb";
-plot.title.text = `${spot_selector.value} | ${diagram} depth profile`;
+
+ellipse_renderer.visible = !isIsochronView;
+center_renderer.visible = !isIsochronView;
+trace_renderer.visible = isIsochronView;
+selected_ellipse_renderer.visible = isIsochronView;
+anchor_renderer.visible = isIsochronView;
+anchor_error_renderer.visible = isIsochronView;
+isochron_renderer.visible = isIsochronView;
+intercept_renderer.visible = isIsochronView;
+
+if (isIsochronView) {
+  const polygon = ellipsePolygon(selectedSweep);
+  selected_ellipse.data = polygon == null
+    ? {xs: [], ys: []}
+    : {xs: [polygon.x], ys: [polygon.y]};
+  const finiteTraceX = [];
+  const finiteTraceY = [];
+  for (let i = 0; i < x.length; i += 1) {
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
+      finiteTraceX.push(x[i]);
+      finiteTraceY.push(y[i]);
+    }
+  }
+  trace.data = {x: finiteTraceX, y: finiteTraceY};
+
+  const anchorY = anchor76[selectedSweep];
+  const anchorSigma = anchor76_1s[selectedSweep];
+  const slope = lineSlope[selectedSweep];
+  const fittedIntercept = lineIntercept[selectedSweep];
+  const concordiaX = interceptX[selectedSweep];
+  const concordiaY = interceptY[selectedSweep];
+  const age = interceptAge[selectedSweep];
+  if ([anchorY, anchorSigma].every(Number.isFinite)) {
+    anchor.data = {
+      x: [0],
+      y: [anchorY],
+      lower: [anchorY - 2 * anchorSigma],
+      upper: [anchorY + 2 * anchorSigma],
+    };
+  } else {
+    anchor.data = {x: [], y: [], lower: [], upper: []};
+  }
+  if ([slope, fittedIntercept, x[selectedSweep]].every(Number.isFinite)) {
+    const lineEnd = Math.max(
+      x[selectedSweep],
+      Number.isFinite(concordiaX) ? concordiaX : 0,
+    ) * 1.05;
+    isochron.data = {
+      x: [0, lineEnd],
+      y: [fittedIntercept, fittedIntercept + slope * lineEnd],
+    };
+  } else {
+    isochron.data = {x: [], y: []};
+  }
+  if ([concordiaX, concordiaY, age].every(Number.isFinite)) {
+    intercept.data = {x: [concordiaX], y: [concordiaY], age: [age]};
+  } else {
+    intercept.data = {x: [], y: [], age: []};
+  }
+
+  const rangeX = [0, x[selectedSweep], concordiaX].filter(Number.isFinite);
+  const rangeY = [
+    anchorY,
+    Number.isFinite(anchorY) && Number.isFinite(anchorSigma)
+      ? anchorY - 2 * anchorSigma : NaN,
+    Number.isFinite(anchorY) && Number.isFinite(anchorSigma)
+      ? anchorY + 2 * anchorSigma : NaN,
+    y[selectedSweep],
+    concordiaY,
+  ].filter(Number.isFinite);
+  if (polygon != null) {
+    rangeX.push(...polygon.x.filter(Number.isFinite));
+    rangeY.push(...polygon.y.filter(Number.isFinite));
+  }
+  const minX = rangeX.length ? Math.min(...rangeX) : 0;
+  const maxX = rangeX.length ? Math.max(...rangeX) : 1;
+  const minY = rangeY.length ? Math.min(...rangeY) : 0;
+  const maxY = rangeY.length ? Math.max(...rangeY) : 1;
+  const padX = Math.max((maxX - minX) * 0.08, 1e-6);
+  const padY = Math.max((maxY - minY) * 0.12, 1e-6);
+  plot.x_range.start = Math.max(0, minX - padX);
+  plot.x_range.end = maxX + padX;
+  plot.y_range.start = minY - padY;
+  plot.y_range.end = maxY + padY;
+  const timeLabel = Number.isFinite(time[selectedSweep])
+    ? `${time[selectedSweep].toFixed(3)} s`
+    : "unknown time";
+  const ageLabel = Number.isFinite(age) ? `${age.toFixed(1)} Ma` : "no finite intercept";
+  sweep_status.text = (
+    `Sweep ${selectedSweep + 1} of ${x.length} | ${timeLabel} | ` +
+    `lower intercept ${ageLabel}`
+  );
+  plot.title.text = `${spot_selector.value} | selected sweep anchored TW isochron`;
+} else {
+  trace.data = {x: [], y: []};
+  selected_ellipse.data = {xs: [], ys: []};
+  anchor.data = {x: [], y: [], lower: [], upper: []};
+  isochron.data = {x: [], y: []};
+  intercept.data = {x: [], y: [], age: []};
+  plot.x_range.start = ranges.data.x_start[rangeIndex];
+  plot.x_range.end = ranges.data.x_end[rangeIndex];
+  plot.y_range.start = ranges.data.y_start[rangeIndex];
+  plot.y_range.end = ranges.data.y_end[rangeIndex];
+  sweep_status.text = (
+    "Select “Selected sweep isochron” to inspect the common-Pb anchor, " +
+    "one sweep line, and its lower concordia intercept."
+  );
+  plot.title.text = `${spot_selector.value} | ${diagram} depth profile`;
+}
 if (save_tool != null) {
   const safeSpot = spot_selector.value.replace(/[^A-Za-z0-9._-]+/g, "_");
-  save_tool.filename = `${safeSpot}_${diagram}_depth_profile.svg`;
+  save_tool.filename = isIsochronView
+    ? `${safeSpot}_TW_sweep_${selectedSweep + 1}_isochron.svg`
+    : `${safeSpot}_${diagram}_depth_profile.svg`;
 }
 ellipses.change.emit();
 centers.change.emit();
+trace.change.emit();
+selected_ellipse.change.emit();
+anchor.change.emit();
+isochron.change.emit();
+intercept.change.emit();
 curve.change.emit();
 age_labels.change.emit();
 plot.change.emit();
@@ -698,6 +1218,9 @@ plot.change.emit();
     )
     spot_selector.js_on_change("value", switch_callback)
     type_selector.js_on_change("active", switch_callback)
+    view_selector.js_on_change("active", switch_callback)
+    sweep_slider.js_on_change("value", switch_callback)
+    plot.js_on_event(DocumentReady, switch_callback)
 
     previous_spot_button.js_on_click(
         CustomJS(
@@ -717,6 +1240,22 @@ selector.value = selector.options[(index + 1) % selector.options.length];
 """,
         )
     )
+    previous_sweep_button.js_on_click(
+        CustomJS(
+            args={"slider": sweep_slider},
+            code="""
+slider.value = slider.value <= slider.start ? slider.end : slider.value - 1;
+""",
+        )
+    )
+    next_sweep_button.js_on_click(
+        CustomJS(
+            args={"slider": sweep_slider},
+            code="""
+slider.value = slider.value >= slider.end ? slider.start : slider.value + 1;
+""",
+        )
+    )
 
     browser_status = Div(
         text=(
@@ -732,8 +1271,164 @@ selector.value = selector.options[(index + 1) % selector.options.length];
         next_spot_button,
         type_selector,
     )
-    interactive_layout = bokeh_column(bokeh_controls, browser_status, plot)
+    isochron_controls = bokeh_row(
+        view_selector,
+        previous_sweep_button,
+        sweep_slider,
+        next_sweep_button,
+    )
+    interactive_layout = bokeh_column(
+        bokeh_controls,
+        isochron_controls,
+        sweep_status,
+        browser_status,
+        plot,
+    )
     return StandaloneBokehPlot(interactive_layout)
+
+
+def plot_depth_age_profile(
+    depth_profile,
+    *,
+    spot=None,
+    x_col: str | None = None,
+    age_col="tw_lower_intercept_age",
+    age_2sigma_col="tw_lower_intercept_age_2s",
+    signal_time_col="signal_relative_time",
+    absolute_time_col="Time",
+    spot_col="spot_name",
+    width=900,
+    height=420,
+    line_color="#4c78a8",
+):
+    """Plot one sweep-wise anchored TW age profile with two-sigma errors.
+
+    Parameters
+    ----------
+    depth_profile
+        Table returned by :func:`UPbRPy.isochron.tw_depth_profile_sweep_ages`.
+    spot
+        Spot label to plot. It may be omitted only when the table contains one
+        spot.
+    x_col
+        Horizontal coordinate. When omitted, ``depth_um`` is preferred. If no
+        calibrated depth is available, signal-relative time is used and
+        labelled explicitly as a time coordinate rather than physical depth.
+    age_col, age_2sigma_col
+        Age and absolute two-sigma age-uncertainty columns, in Ma.
+
+    Notes
+    -----
+    Converting ablation time to depth requires an independently measured
+    ablation rate or crater-depth calibration. This function never invents
+    that calibration. Set ``x_col='depth_um'`` only after such a coordinate
+    has been added to the table.
+    """
+    if not isinstance(depth_profile, pd.DataFrame):
+        raise TypeError("depth_profile must be a pandas DataFrame")
+    if depth_profile.empty:
+        raise ValueError("depth_profile must contain at least one sweep")
+    if spot_col not in depth_profile:
+        raise KeyError(f"Missing spot column: {spot_col}")
+
+    spot_values = list(pd.unique(depth_profile[spot_col]))
+    if spot is None:
+        if len(spot_values) != 1:
+            raise ValueError("Provide spot when depth_profile contains multiple spots.")
+        spot = spot_values[0]
+    selected = depth_profile.loc[depth_profile[spot_col] == spot].copy()
+    if selected.empty:
+        raise ValueError(f"Unknown spot: {spot!r}")
+    for column in (age_col, age_2sigma_col):
+        if column not in selected:
+            raise KeyError(f"Missing age-profile column: {column}")
+
+    if signal_time_col not in selected:
+        if absolute_time_col not in selected:
+            raise KeyError(
+                f"Missing both {signal_time_col!r} and {absolute_time_col!r}"
+            )
+        absolute_time = pd.to_numeric(selected[absolute_time_col], errors="coerce")
+        selected[signal_time_col] = absolute_time - absolute_time.min()
+
+    if x_col is None:
+        x_col = "depth_um" if "depth_um" in selected else signal_time_col
+    if x_col not in selected:
+        raise KeyError(f"Missing profile coordinate column: {x_col}")
+
+    x = pd.to_numeric(selected[x_col], errors="coerce").to_numpy(float)
+    age = pd.to_numeric(selected[age_col], errors="coerce").to_numpy(float)
+    age_2s = pd.to_numeric(selected[age_2sigma_col], errors="coerce").to_numpy(float)
+    time = pd.to_numeric(selected[signal_time_col], errors="coerce").to_numpy(float)
+    finite = np.isfinite(x) & np.isfinite(age) & np.isfinite(age_2s)
+    x = x[finite]
+    age = age[finite]
+    age_2s = age_2s[finite]
+    time = time[finite]
+    if not len(x):
+        raise ValueError(f"Spot {spot!r} has no finite age-profile sweeps.")
+
+    order = np.argsort(x)
+    x, age, age_2s, time = x[order], age[order], age_2s[order], time[order]
+    source = ColumnDataSource(
+        {
+            "x": x,
+            "age": age,
+            "age_2s": age_2s,
+            "lower": age - age_2s,
+            "upper": age + age_2s,
+            "signal_relative_time": time,
+        }
+    )
+    x_label = (
+        "Depth (µm)"
+        if x_col == "depth_um"
+        else "Time from signal start (s)"
+        if x_col == signal_time_col
+        else x_col
+    )
+    plot = figure(
+        width=width,
+        height=height,
+        title=f"{spot} | fixed-common-Pb TW age profile",
+        x_axis_label=x_label,
+        y_axis_label="Lower-intercept age (Ma)",
+        tools="pan,wheel_zoom,box_zoom,reset,save,hover",
+    )
+    plot.output_backend = "svg"
+    plot.line("x", "age", source=source, color=line_color, line_width=1.5, alpha=0.7)
+    plot.segment(
+        "x",
+        "lower",
+        "x",
+        "upper",
+        source=source,
+        color=line_color,
+        line_width=1,
+        alpha=0.55,
+    )
+    plot.scatter(
+        "x",
+        "age",
+        source=source,
+        size=7,
+        fill_color="white",
+        line_color=line_color,
+        line_width=1.5,
+    )
+    hover = next((tool for tool in plot.tools if isinstance(tool, HoverTool)), None)
+    if hover is not None:
+        hover.tooltips = [
+            (x_label, "@x{0.000}"),
+            ("Age", "@age{0.0} Ma"),
+            ("2σ", "@age_2s{0.0} Ma"),
+            ("Signal time", "@signal_relative_time{0.000} s"),
+        ]
+    save_tools = list(plot.select(type=SaveTool))
+    if save_tools:
+        safe_spot = re.sub(r"[^A-Za-z0-9._-]+", "_", str(spot)).strip("._")
+        save_tools[0].filename = f"{safe_spot}_TW_depth_age.svg"
+    return plot
 
 
 def initialize_bokeh():
@@ -3188,6 +3883,7 @@ __all__ = [
     'selection_editor',
     'plot_series',
     'plot_selected_data',
+    'plot_depth_age_profile',
     'plot_time_series',
     'plot_tw_spot_mean_session_projection',
     'plot_tw_standard_calibration',
