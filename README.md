@@ -31,8 +31,135 @@ UPbRPy is developed with a goal of providing a Python-based reproducible data re
 
 <img src="./examples/example_Wetherill_concordia.png" alt="Wetherill Concordia diagram" width="500">
 
+## Executable examples
+
+Compact, executed notebooks now live in the separate private
+[UPbRPy-examples](https://github.com/duserzym/UPbRPy-examples) repository.
+This source repository keeps the reusable calculation and visualization code;
+production analytical sessions remain in the LAICPMS database repository.
+
 ## Installation
-pip release will be made available. During the development stage, you can download or clone this repository and add the path to the `UPbRPy` folder to your Python path by adding the following lines to your script:
+pip release will be made available. During development, the most reproducible setup is the conda environment defined in `UPbR_environment.yml`.
+
+Create the development environment:
+
+```bash
+conda env create -f UPbR_environment.yml
+conda activate UPbRPy
+```
+
+If you already have the environment and pull new dependencies from the repo, update it with:
+
+```bash
+conda env update -f UPbR_environment.yml --prune
+conda activate UPbRPy
+```
+
+The environment targets Python 3.14 and installs the current scientific,
+plotting, notebook, test, and desktop GUI stacks declared in `pyproject.toml`.
+The package itself supports Python 3.12 and newer.
+
+For packaging and release work, the repo now also includes a `pyproject.toml` so the project can move toward standard `pip` installs instead of being conda-only.
+
+Install the library in editable mode:
+
+```bash
+pip install -e .
+```
+
+Install the library plus the desktop GUI dependencies:
+
+```bash
+pip install -e ".[gui]"
+```
+
+Install all development, notebook, test, and GUI dependencies without Conda:
+
+```bash
+python3.14 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[gui,dev]"
+```
+
+That editable install is the recommended way to make a repo-local `.venv` usable for both VS Code analysis and `python -m GUI` launches.
+
+### Baseline and peak selection
+
+Window selection is implemented in `UPbRPy.io` so experiment import, notebooks,
+and the GUI use the same algorithms. `UPbRPy.selection` remains as a compatibility
+import path. The original percentile-based threshold remains the default. A
+running-baseline method detects signal when one or more sweeps exceed the
+preceding running mean by a configurable number of standard deviations:
+
+```python
+from UPbRPy.io import select_signal_regions
+
+selection = select_signal_regions(
+    signal,
+    method="rolling_sigma",
+    baseline_sweep_n=10,
+    peak_sweep_n=20,
+    rolling_window=5,
+    sigma_threshold=5,
+    consecutive=2,
+)
+print(selection.as_tuple(), selection.diagnostics)
+print(selection.signal_start, selection.signal_end)
+```
+
+The `excel_expanding_sigma` method reproduces the onset test extracted from
+`Zircon_28Mar25_Zhang1-i193-LA-UPbR22.xlsm`: beginning with six baseline
+sweeps, compare each following value against the mean of all preceding sweeps
+plus a configurable positive number of sample standard deviations (eight by
+default). The workbook then takes the median onset
+across samples to align its column-oriented raw data; UPbRPy's file-per-spot
+workflow applies the same onset detector independently to each spot. Selection
+also locates the falling washout edge using a rolling robust signal trend. The
+inclusive signal end is the last falling-tail sweep that remains above both
+the configurable washout sigma threshold (three sigma by default) and a small
+fraction of the baseline-to-plateau elevation (five percent by default). A
+later run of baseline-like sweeps confirms stable washout recovery. Plateau end
+is clamped to the signal boundary so a fixed plateau length cannot include the
+washout tail or post-signal baseline.
+
+An optional elapsed-time ceiling can make this endpoint stricter for sessions
+whose isotope ratios become unstable during a low-signal tail. It is measured
+from the detected signal start and snaps to the nearest measured sweep. The
+default is `None`, which preserves the unrestricted algorithmic pick:
+
+```python
+selection = select_signal_regions(
+    signal,
+    time=time,
+    signal_duration_limit_seconds=9.0,
+)
+```
+
+The notebook `selection_editor` marks signal start and end separately from the
+baseline and plateau windows. It offers the Excel expanding-sigma detector with
+an editable sigma threshold, and an Excel-style iterative 95% (approximately
+2-sigma) detrended plateau filter. Included plateau points are filled, rejected
+points are hollow, and live mean bars plus mean ± 2-sigma rectangles update as
+either window is moved. Exact statistics sit outside the plotting canvas.
+
+The same method can be applied during experiment import:
+
+```python
+from UPbRPy import read_experiment_data
+
+experiment, channels, total_data = read_experiment_data(
+    directory,
+    signal_duration_limit_seconds=9.0,  # omit or use None for no time cap
+    selection_method="rolling_sigma",
+    selection_options={
+        "rolling_window": 5,
+        "sigma_threshold": 5,
+        "consecutive": 2,
+    },
+)
+```
+
+If you prefer to work from source without installing the package, add the path to the `UPbRPy` folder to your Python path by adding the following lines to your script:
 ```python
 import sys
 import os
@@ -47,6 +174,31 @@ export PYTHONPATH=$PYTHONPATH:/path/to/UPbRPy
 For Windows, I assume you can do this by adding the following line to your `Environment Variables`:
 ```bash
 set PYTHONPATH=%PYTHONPATH%;C:\path\to\UPbRPy
+```
+
+### Desktop GUI
+The active GUI implementation now lives in `GUI/` and uses `PySide6 + pyqtgraph`.
+
+The current UI includes notebook-derived mineral workflow presets for zircon, apatite, rutile, and titanite. Each preset exposes import defaults, an ordered processing sequence, and step-specific hints so the reduction flow matches the existing notebooks more closely.
+
+Run the desktop application from source with:
+
+```bash
+python -m GUI
+```
+
+Or run the console script after installing with `pip install -e ".[gui]"`:
+
+```bash
+upbrpy-gui
+```
+
+The early styling prototype remains in `examples/gui_restart/pyside6_pyqtgraph_demo.py` as a design reference.
+
+With the conda environment activated, you can still launch the original preview with:
+
+```bash
+python examples/gui_restart/pyside6_pyqtgraph_demo.py
 ```
 
 ### Input file format
