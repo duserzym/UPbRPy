@@ -18,6 +18,8 @@ from .fractionation import *  # noqa: F401,F403
 from .reduction import *  # noqa: F401,F403
 from .thermometry import *  # noqa: F401,F403
 from .results import *  # noqa: F401,F403
+from .pipeline import *  # noqa: F401,F403
+from .reproducibility import *  # noqa: F401,F403
 
 from .constants import __all__ as _constants_all
 from .standards import __all__ as _standards_all
@@ -33,6 +35,8 @@ from .fractionation import __all__ as _fractionation_all
 from .reduction import __all__ as _reduction_all
 from .thermometry import __all__ as _thermometry_all
 from .results import __all__ as _results_all
+from .pipeline import __all__ as _pipeline_all
+from .reproducibility import __all__ as _reproducibility_all
 
 __all__ = [
     *_constants_all,
@@ -49,4 +53,6 @@ __all__ = [
     *_reduction_all,
     *_thermometry_all,
     *_results_all,
+    *_pipeline_all,
+    *_reproducibility_all,
 ]

@@ -332,28 +332,31 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
                 * 100
             )
 
-    depthpro_ratios["207Pb/206Pb_age"] = [
-        calc_76_date(value) if np.isfinite(value) and value > 0 else np.nan
-        for value in depthpro_ratios[
-            "207Pb/206Pb_fractionation_corrected"
-        ]
-    ]
+    ratio_76 = depthpro_ratios[
+        "207Pb/206Pb_fractionation_corrected"
+    ].to_numpy(dtype=float)
+    valid_ratio_76 = np.isfinite(ratio_76) & (ratio_76 > 0)
+    age_76 = np.full(ratio_76.shape, np.nan, dtype=float)
+    age_76[valid_ratio_76] = calc_76_date(ratio_76[valid_ratio_76])
+    depthpro_ratios["207Pb/206Pb_age"] = age_76
     for uncertainty_mode in ("no_calibration", "with_calibration"):
         age_uncertainty_column = (
             f"207Pb/206Pb_age_2e_{uncertainty_mode}"
         )
-        depthpro_ratios[age_uncertainty_column] = [
-            calc_76_date_uncertainty(ratio, uncertainty)
-            if np.isfinite(ratio) and ratio > 0
-            else np.nan
-            for ratio, uncertainty in zip(
-                depthpro_ratios["207Pb/206Pb_fractionation_corrected"],
-                depthpro_ratios[
-                    "207Pb/206Pb_fractionation_corrected"
-                    + f"_2e_{uncertainty_mode}"
-                ],
-            )
-        ]
+        uncertainty_76 = depthpro_ratios[
+            "207Pb/206Pb_fractionation_corrected"
+            + f"_2e_{uncertainty_mode}"
+        ].to_numpy(dtype=float)
+        age_uncertainty_76 = np.full(
+            ratio_76.shape,
+            np.nan,
+            dtype=float,
+        )
+        age_uncertainty_76[valid_ratio_76] = calc_76_date_uncertainty(
+            ratio_76[valid_ratio_76],
+            uncertainty_76[valid_ratio_76],
+        )
+        depthpro_ratios[age_uncertainty_column] = age_uncertainty_76
         depthpro_ratios[age_uncertainty_column + "%"] = (
             depthpro_ratios[age_uncertainty_column]
             / depthpro_ratios["207Pb/206Pb_age"]

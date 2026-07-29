@@ -72,6 +72,30 @@ def _exponential(time, asymptote, amplitude, rate):
     return asymptote + amplitude * np.exp(-rate * time)
 
 
+def running_mean_curve(values, window=5):
+    """Return an edge-padded odd-window running mean.
+
+    The output retains the input length, which permits direct interpolation
+    back onto arbitrary downhole or session coordinates.
+    """
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1:
+        raise ValueError("values must be one-dimensional")
+    if values.size == 0:
+        return values.copy()
+    window = max(int(window), 1)
+    if window % 2 == 0:
+        window += 1
+    maximum = values.size if values.size % 2 else values.size - 1
+    window = min(window, max(maximum, 1))
+    if window <= 1:
+        return values.copy()
+    padding = window // 2
+    padded = np.pad(values, (padding, padding), mode="edge")
+    kernel = np.full(window, 1.0 / window)
+    return np.convolve(padded, kernel, mode="valid")
+
+
 def fit_calibration_model(
     x,
     y,
@@ -80,6 +104,8 @@ def fit_calibration_model(
     weights=None,
     degree=2,
     smoothing=None,
+    running_mean_window=5,
+    exponential_initial_decay=None,
     p0=None,
     bounds=(-np.inf, np.inf),
 ):
@@ -91,10 +117,11 @@ def fit_calibration_model(
         Calibration coordinates and correction factors.
     method : str or callable
         Built-ins are ``'interpolate'``, ``'mean'``, ``'linear'``,
-        ``'polynomial'``, ``'orthogonal_polynomial'``, ``'exponential'``, and
-        ``'spline'``. A callable is treated as ``f(x, *parameters)`` and fitted
-        with :func:`scipy.optimize.curve_fit`; a one-argument callable is used
-        directly as an already-calibrated predictor.
+        ``'polynomial'``, ``'orthogonal_polynomial'``, ``'exponential'``,
+        ``'spline'``, and ``'running_mean'``. A callable is treated as
+        ``f(x, *parameters)`` and fitted with :func:`scipy.optimize.curve_fit`;
+        a one-argument callable is used directly as an already-calibrated
+        predictor.
     weights : array-like, optional
         Relative least-squares weights. These affect fitting only; UPbRPy does
         not propagate coefficient covariance.
@@ -103,12 +130,22 @@ def fit_calibration_model(
     smoothing : float, optional
         Smoothing factor passed to ``UnivariateSpline``. ``None`` uses SciPy's
         default.
+    running_mean_window : int, optional
+        Odd smoothing window used by the running-mean model.
+    exponential_initial_decay : float, optional
+        Positive starting decay rate for exponential optimization. When
+        omitted, the reciprocal calibration-span heuristic is used.
     p0, bounds : optional
         Initial parameters and bounds for exponential or custom parametric
         functions.
     """
     x, y, weights = _prepare_xy(x, y, weights)
-    settings = {"degree": int(degree), "smoothing": smoothing}
+    settings = {
+        "degree": int(degree),
+        "smoothing": smoothing,
+        "running_mean_window": int(running_mean_window),
+        "exponential_initial_decay": exponential_initial_decay,
+    }
 
     if callable(method):
         method_name = getattr(method, "__name__", "custom")
@@ -143,6 +180,7 @@ def fit_calibration_model(
             "average": "mean",
             "constant": "mean",
             "linear_interpolation": "interpolate",
+            "interpolated": "interpolate",
             "pointwise_mean": "interpolate",
             "poly": "polynomial",
             "orthogonal": "orthogonal_polynomial",
@@ -187,7 +225,20 @@ def fit_calibration_model(
             shifted_x = x - x_origin
             if p0 is None:
                 span = max(float(np.ptp(shifted_x)), np.finfo(float).eps)
-                p0 = (float(y[-1]), float(y[0] - y[-1]), 1 / span)
+                initial_decay = (
+                    1 / span
+                    if exponential_initial_decay is None
+                    else float(exponential_initial_decay)
+                )
+                if not np.isfinite(initial_decay) or initial_decay <= 0:
+                    raise ValueError(
+                        "exponential_initial_decay must be positive"
+                    )
+                p0 = (
+                    float(y[-1]),
+                    float(y[0] - y[-1]),
+                    initial_decay,
+                )
             if bounds == (-np.inf, np.inf):
                 bounds = ((-np.inf, -np.inf, 0.0), (np.inf, np.inf, np.inf))
             sigma = None if weights is None else 1 / weights
@@ -209,10 +260,30 @@ def fit_calibration_model(
             predictor = spline
             parameters = spline.get_coeffs().copy()
             parameter_count = len(parameters)
+        elif method_name == "running_mean":
+            if x.size < 2:
+                raise ValueError(
+                    "Running-mean fitting requires at least two observations."
+                )
+            smoothed = running_mean_curve(y, running_mean_window)
+            interpolator = interp1d(
+                x,
+                smoothed,
+                kind="linear",
+                fill_value="extrapolate",
+            )
+            predictor = interpolator
+            parameters = smoothed
+            parameter_count = 1
+            settings["running_mean_window"] = min(
+                int(running_mean_window),
+                len(smoothed),
+            )
         else:
             raise ValueError(
                 "Unknown calibration method. Choose mean, interpolate, linear, "
-                "polynomial, orthogonal_polynomial, exponential, spline, or pass a callable."
+                "polynomial, orthogonal_polynomial, exponential, spline, "
+                "running_mean, or pass a callable."
             )
 
     residuals = y - np.asarray(predictor(x), dtype=float)
@@ -250,4 +321,5 @@ __all__ = [
     "CalibrationModel",
     "fit_calibration_model",
     "evaluate_correction_result",
+    "running_mean_curve",
 ]
