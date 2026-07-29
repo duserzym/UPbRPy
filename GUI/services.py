@@ -8,58 +8,65 @@ from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
-from scipy.interpolate import CubicSpline, interp1d
-from scipy.optimize import curve_fit
 
 from GUI.state import ReductionSession
-from GUI.workflows import WorkflowPreset, format_import_defaults, infer_workflow_preset
+from GUI.workflows import (
+    WorkflowPreset,
+    format_import_defaults,
+    get_workflow_preset,
+    infer_workflow_preset,
+)
 from UPbRPy import (
-    align_downhole_traces,
-    apply_DH_correction,
-    calc_concentration,
-    calc_concentration_calibration_factor,
-    calc_raw_ratios,
-    internal_normalization,
+    FitSettings,
+    PipelineConfig,
+    PipelineStage,
+    ReductionDecision,
+    ReductionPipeline,
+    build_standard_archive,
+    evaluate_correction_result,
+    inverse_standard_deviation_weights,
+    load_standard_measurements,
     read_experiment_data,
-    relative_time_by_spot,
     select_signal_regions,
     standard_archive,
-    subtract_baseline,
+    standard_archive_legacy,
 )
 
 
-DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "standards.csv")
-_active_standard_archive = standard_archive.copy()
+DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "reference_materials")
+_active_standard_archive = standard_archive.combine_first(
+    standard_archive_legacy
+)
 _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
 
 
 FIT_METHOD_LABELS: dict[str, str] = {
+    "mean": "Pointwise mean",
     "interpolated": "Interpolated",
     "linear": "Linear",
     "exponential": "Exponential",
     "cubic_spline": "Cubic spline",
     "running_mean": "Running mean",
-    "lowess": "LOWESS",
     "polynomial": "Polynomial",
 }
 
 DOWNHOLE_FIT_METHODS: tuple[str, ...] = (
+    "mean",
     "interpolated",
     "linear",
     "exponential",
     "cubic_spline",
     "running_mean",
-    "lowess",
     "polynomial",
 )
 
 SESSION_FIT_METHODS: tuple[str, ...] = (
+    "mean",
     "interpolated",
     "linear",
     "exponential",
     "cubic_spline",
     "running_mean",
-    "lowess",
     "polynomial",
 )
 
@@ -68,275 +75,181 @@ def fit_method_label(method: str) -> str:
     return FIT_METHOD_LABELS.get(method, method.replace("_", " ").title())
 
 
-def _exp_decay(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
-    return a + b * np.exp(-c * x)
+def session_fit_weights(
+    fractions: np.ndarray,
+    stds: np.ndarray,
+) -> np.ndarray:
+    """Return core inverse-standard-deviation weights for session fitting.
+
+    ``fractions`` is retained in the adapter signature because older GUI
+    callers supplied it, although weighting depends only on the reported
+    standard deviations.
+    """
+    del fractions
+    return inverse_standard_deviation_weights(stds)
 
 
-def _coerce_running_mean_window(value: object, size: int) -> int:
-    window = int(value) if value is not None else 5
-    window = max(3, window)
-    if window % 2 == 0:
-        window += 1
-    if size <= 2:
-        return size
-    return min(window, size if size % 2 == 1 else size - 1)
+# Temporary compatibility for third-party code that imported the old GUI
+# helper. New code should use ``session_fit_weights`` or the core function.
+_session_fit_weights = session_fit_weights
 
 
-def _running_mean(values: np.ndarray, window: int) -> np.ndarray:
-    if values.size == 0 or window <= 1:
-        return values
-    pad = window // 2
-    padded = np.pad(values, (pad, pad), mode="edge")
-    kernel = np.ones(window, dtype=float) / window
-    return np.convolve(padded, kernel, mode="valid")
+def core_fit_method(method: str) -> str:
+    """Translate legacy GUI labels to shared calibration-model names."""
+    return {
+        "interpolated": "interpolate",
+        "cubic_spline": "spline",
+    }.get(method, method)
 
 
-def _session_fit_weights(fractions: np.ndarray, stds: np.ndarray) -> np.ndarray:
-    del fractions  # retained in the signature for compatibility with existing callers
-    valid = np.isfinite(stds) & (stds > 0)
-    fallback = np.nanmedian(stds[valid]) if np.any(valid) else 1.0
-    safe_stds = np.where(valid, stds, fallback)
-    # np.polyfit minimizes sum((w * residual)**2), so w = 1/sigma.
-    return (1 / safe_stds).astype(float)
-
-
-def _evaluate_fit_model(model: dict[str, Any], x_values: np.ndarray | pd.Series | list[float]) -> np.ndarray:
-    evaluator = model.get("evaluator")
-    x_arr = np.asarray(x_values, dtype=float)
-    if callable(evaluator):
-        return np.asarray(evaluator(x_arr), dtype=float)
-    raise ValueError("Invalid fit model: missing evaluator.")
-
-
-def _fit_fractionation_model(
-    x_values: np.ndarray,
-    y_values: np.ndarray,
-    method: str,
-    options: dict[str, float | int | str],
-    *,
-    weights: np.ndarray | None = None,
-) -> tuple[dict[str, Any], np.ndarray]:
-    x_arr = np.asarray(x_values, dtype=float)
-    y_arr = np.asarray(y_values, dtype=float)
-    weights_arr = None if weights is None else np.asarray(weights, dtype=float)
-
-    if method == "lowess":
-        raise NotImplementedError("LOWESS is planned but not yet implemented in this GUI build.")
-
-    if method == "interpolated":
-        interpolator = interp1d(x_arr, y_arr, kind="linear", fill_value="extrapolate")
-        model = {"kind": method, "evaluator": interpolator, "parameter_count": 0}
-    elif method == "linear":
-        coeffs = np.polyfit(x_arr, y_arr, 1, w=weights_arr)
-        model = {
-            "kind": method,
-            "coeffs": coeffs,
-            "evaluator": lambda x, c=coeffs: np.polyval(c, x),
-            "parameter_count": 2,
-        }
-    elif method == "polynomial":
-        degree = max(1, int(options.get("polynomial_degree", 2)))
-        coeffs = np.polyfit(x_arr, y_arr, degree, w=weights_arr)
-        model = {
-            "kind": method,
-            "coeffs": coeffs,
-            "degree": degree,
-            "evaluator": lambda x, c=coeffs: np.polyval(c, x),
-            "parameter_count": degree + 1,
-        }
-    elif method == "exponential":
-        initial_decay = max(float(options.get("exponential_initial_decay", 0.1)), 1e-6)
-        p0 = (float(y_arr[-1]), float(y_arr[0] - y_arr[-1]), initial_decay)
-        params, _cov = curve_fit(
-            _exp_decay,
-            x_arr,
-            y_arr,
-            p0=p0,
-            bounds=([-np.inf, -np.inf, 0.0], [np.inf, np.inf, np.inf]),
-            maxfev=20000,
+def core_fit_options(
+    options: Mapping[str, float | int | str],
+) -> dict[str, object]:
+    """Translate GUI control names to shared calibration-model options."""
+    translated: dict[str, object] = {}
+    if "polynomial_degree" in options:
+        translated["degree"] = int(options["polynomial_degree"])
+    if "running_mean_window" in options:
+        translated["running_mean_window"] = int(
+            options["running_mean_window"]
         )
-        model = {
-            "kind": method,
-            "params": params,
-            "evaluator": lambda x, p=params: _exp_decay(np.asarray(x, dtype=float), *p),
-            "parameter_count": 3,
-        }
-    elif method == "cubic_spline":
-        spline = CubicSpline(x_arr, y_arr, bc_type="natural", extrapolate=True)
-        model = {"kind": method, "spline": spline, "evaluator": spline, "parameter_count": 4}
-    elif method == "running_mean":
-        window = _coerce_running_mean_window(options.get("running_mean_window", 5), len(y_arr))
-        smoothed = _running_mean(y_arr, window)
-        interpolator = interp1d(x_arr, smoothed, kind="linear", fill_value="extrapolate")
-        model = {
-            "kind": method,
-            "window": window,
-            "smoothed": smoothed,
-            "evaluator": interpolator,
-            "parameter_count": 1,
-        }
+    if "exponential_initial_decay" in options:
+        translated["exponential_initial_decay"] = float(
+            options["exponential_initial_decay"]
+        )
+    return translated
+
+
+def pipeline_config_from_session(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+) -> PipelineConfig:
+    """Build the shared scientific configuration represented by GUI controls."""
+    return PipelineConfig(
+        workflow_key=preset.key,
+        material=preset.internal_material,
+        primary_channel=session.primary_channel,
+        selection_method=str(
+            session.import_settings.get(
+                "selection_method",
+                preset.read_kwargs.get("selection_method", "threshold"),
+            )
+        ),
+        selection_options=dict(session.import_settings),
+        concentration_standards=(
+            session.concentration_standards
+            or preset.concentration_standards
+        ),
+        primary_68_standard=(
+            session.primary_68_standard or preset.primary_standard
+        ),
+        primary_76_standard=(
+            session.primary_76_standard
+            or preset.pb_ratio_standard
+            or preset.primary_standard
+        ),
+        primary_82_standard=(
+            session.primary_82_standard
+            or preset.th_ratio_standard
+            or preset.pb_ratio_standard
+            or preset.primary_standard
+        ),
+        secondary_standards=(
+            session.secondary_standards or preset.secondary_standards
+        ),
+        common_pb_calibration=preset.common_pb_calibration,
+        downhole=FitSettings(
+            method=core_fit_method(session.downhole_fit_method),
+            options=core_fit_options(session.downhole_fit_options),
+            outlier_sigma=session.downhole_outlier_sigma,
+        ),
+        session=FitSettings(
+            method=core_fit_method(session.session_fit_method),
+            options=core_fit_options(session.session_fit_options),
+        ),
+        decision=ReductionDecision(
+            common_pb_method=session.common_pb_method,
+            include_calibration_uncertainty=(
+                session.include_calibration_uncertainty
+            ),
+            age_transition_ma=session.age_transition_ma,
+        ),
+    )
+
+
+def config_invalidation_stage(
+    previous: PipelineConfig,
+    current: PipelineConfig,
+) -> PipelineStage:
+    """Return the earliest stage affected by a configuration change."""
+    if (
+        previous.material != current.material
+        or previous.primary_channel != current.primary_channel
+    ):
+        return PipelineStage.NORMALIZATION
+    if previous.concentration_standards != current.concentration_standards:
+        return PipelineStage.CONCENTRATION
+    if (
+        previous.primary_68_standard != current.primary_68_standard
+        or previous.primary_76_standard != current.primary_76_standard
+        or previous.primary_82_standard != current.primary_82_standard
+        or previous.ratio_names != current.ratio_names
+        or previous.common_pb_calibration != current.common_pb_calibration
+        or previous.downhole != current.downhole
+    ):
+        return PipelineStage.DOWNHOLE
+    if previous.session != current.session:
+        return PipelineStage.SESSION
+    if (
+        previous.decision != current.decision
+        or previous.automatic_flags != current.automatic_flags
+        or previous.common_pb_options != current.common_pb_options
+    ):
+        return PipelineStage.FINALIZE
+    return PipelineStage.FINALIZE
+
+
+def ensure_shared_pipeline(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+) -> ReductionPipeline:
+    """Return the session's core pipeline, synchronizing current GUI choices."""
+    config = pipeline_config_from_session(session, preset)
+    if session.pipeline is None:
+        input_files = tuple(
+            path
+            for path in Path(session.directory).iterdir()
+            if path.is_file()
+        ) if session.directory and Path(session.directory).is_dir() else ()
+        session.pipeline = ReductionPipeline(
+            session.experiment,
+            session.total_data,
+            session.channels,
+            current_standard_archive(),
+            config,
+            source_directory=session.directory or None,
+            reference_library_path=current_standard_archive_path(),
+            input_files=input_files,
+        )
     else:
-        raise ValueError(f"Unsupported fit method: {method}")
-
-    return model, _evaluate_fit_model(model, x_arr)
-
-
-def _build_session_primary_standard_summary(
-    dh_corrected: pd.DataFrame,
-    primary_standard: str,
-    ratio_name: str,
-    known_ratio: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    corrected_col = f"{ratio_name}_DH_corrected"
-    ps_rows = dh_corrected[dh_corrected["sample"] == primary_standard]
-    if ps_rows.empty or corrected_col not in ps_rows.columns:
-        return np.array([]), np.array([]), np.array([]), []
-
-    spot_mean_times: list[float] = []
-    spot_mean_fracs: list[float] = []
-    spot_frac_errs: list[float] = []
-    spot_names_out: list[str] = []
-    for spot_name in ps_rows["spot_name"].unique():
-        this_spot = ps_rows[ps_rows["spot_name"] == spot_name]
-        r_vals = this_spot[corrected_col].to_numpy(dtype=float)
-        valid = np.isfinite(r_vals) & (r_vals > 0)
-        if valid.sum() < 2:
-            continue
-        with np.errstate(divide="ignore", invalid="ignore"):
-            spot_fractionations = np.where(r_vals[valid] > 0, known_ratio / r_vals[valid], np.nan)
-        spot_fractionations = spot_fractionations[np.isfinite(spot_fractionations)]
-        if spot_fractionations.size < 2:
-            continue
-        spot_mean_times.append(float(this_spot["Time"].mean()))
-        spot_mean_fracs.append(float(known_ratio / np.mean(r_vals[valid])))
-        spot_frac_errs.append(float(np.std(spot_fractionations)))
-        spot_names_out.append(str(spot_name))
-
-    if len(spot_mean_times) < 2:
-        return np.array([]), np.array([]), np.array([]), []
-
-    times = np.array(spot_mean_times, dtype=float)
-    fracs = np.array(spot_mean_fracs, dtype=float)
-    errs = np.array(spot_frac_errs, dtype=float)
-    order = np.argsort(times)
-    return times[order], fracs[order], errs[order], [spot_names_out[i] for i in order]
-
-
-def _build_downhole_correction_results(
-    primary_standard_ratios: pd.DataFrame,
-    standard_archive_frame: pd.DataFrame,
-    *,
-    method: str,
-    options: dict[str, float | int | str],
-    ratio_names: tuple[str, ...] = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"),
-) -> dict[str, Any]:
-    primary_standard = str(primary_standard_ratios["sample"].iloc[0])
-    results: dict[str, Any] = {}
-
-    for ratio_name in ratio_names:
-        known_ratio = float(standard_archive_frame.loc[primary_standard, ratio_name + "*"])
-        spot_times: list[np.ndarray] = []
-        spot_ratios: list[np.ndarray] = []
-        for spot_name in primary_standard_ratios["spot_name"].unique():
-            this_spot = primary_standard_ratios[primary_standard_ratios["spot_name"] == spot_name].copy()
-            rel_t = relative_time_by_spot(this_spot)
-            ratios = this_spot[ratio_name].to_numpy(dtype=float)
-            valid = np.isfinite(ratios) & (ratios > 0)
-            if valid.sum() < 2:
-                continue
-            spot_times.append(rel_t[valid])
-            spot_ratios.append(ratios[valid])
-
-        if not spot_times:
-            continue
-
-        unified_time, stacked, spot_times, spot_ratios = align_downhole_traces(
-            spot_times, spot_ratios
-        )
-        mean_ratio = np.nanmean(stacked, axis=0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            mean_fractionation = np.where(mean_ratio > 0, known_ratio / mean_ratio, np.nan)
-
-        fit_model, fit_values = _fit_fractionation_model(unified_time, mean_fractionation, method, options)
-        all_times = np.concatenate(spot_times)
-        all_fractionations = np.concatenate([np.where(ratios > 0, known_ratio / ratios, np.nan) for ratios in spot_ratios])
-        valid = np.isfinite(all_times) & np.isfinite(all_fractionations)
-        residuals = all_fractionations[valid] - _evaluate_fit_model(fit_model, all_times[valid])
-        std_value = float(np.std(residuals)) if residuals.size else 0.0
-
-        results[ratio_name] = {
-            "plot": None,
-            "method": method,
-            "fit_label": fit_method_label(method),
-            "model": fit_model,
-            "interpolation": lambda x, model=fit_model: _evaluate_fit_model(model, x),
-            "fit_time": unified_time,
-            "fit_values": fit_values,
-            "mean_fractionation": mean_fractionation,
-            "std": std_value,
-        }
-
-    return results
-
-
-def _build_session_correction_results(
-    primary_standard_dh_corrected: pd.DataFrame,
-    standard_archive_frame: pd.DataFrame,
-    *,
-    primary_standard: str,
-    method: str,
-    options: dict[str, float | int | str],
-    ratio_names: tuple[str, ...] = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"),
-) -> dict[str, Any]:
-    results: dict[str, Any] = {}
-
-    for ratio_name in ratio_names:
-        known_ratio = float(standard_archive_frame.loc[primary_standard, ratio_name + "*"])
-        times, fracs, errs, spot_names = _build_session_primary_standard_summary(
-            primary_standard_dh_corrected,
-            primary_standard,
-            ratio_name,
-            known_ratio,
-        )
-        if times.size < 2:
-            continue
-        weights = _session_fit_weights(fracs, errs)
-        fit_model, fit_at_points = _fit_fractionation_model(times, fracs, method, options, weights=weights)
-        residuals = fracs - fit_at_points
-        parameter_count = max(int(fit_model.get("parameter_count", 1)), 1)
-        dof = max(len(residuals) - parameter_count, 1)
-        fit_std = float(np.sqrt(np.sum(residuals**2) / dof)) if residuals.size else 0.0
-        fit_times = np.linspace(float(times[0]), float(times[-1]), 200)
-        fit_values = _evaluate_fit_model(fit_model, fit_times)
-        results[ratio_name] = {
-            "plot": None,
-            "method": method,
-            "fit_label": fit_method_label(method),
-            "fit_model": fit_model,
-            "fit": fit_model,
-            "std": fit_std,
-            "fit_times": fit_times,
-            "fit_values": fit_values,
-            "spot_mean_times": times,
-            "spot_mean_fracs": fracs,
-            "spot_frac_errs": errs,
-            "spot_names": spot_names,
-        }
-
-    return results
-
-
-def _apply_session_correction_models(
-    dh_corrected_ratios: pd.DataFrame,
-    session_correction_results: dict[str, Any],
-) -> pd.DataFrame:
-    corrected = dh_corrected_ratios.copy()
-    for ratio_name, result in session_correction_results.items():
-        model = result.get("fit_model") or result.get("fit")
-        corrected[f"{ratio_name}_fractionation_corrected"] = (
-            corrected[f"{ratio_name}_DH_corrected"] * _evaluate_fit_model(model, corrected["Time"].to_numpy(dtype=float))
-        )
-    return corrected
+        pipeline = session.pipeline
+        if pipeline.config != config:
+            pipeline.update_config(
+                config,
+                invalidate_from=config_invalidation_stage(
+                    pipeline.config,
+                    config,
+                ),
+            )
+        if pipeline.experiment is not session.experiment:
+            pipeline.update_experiment(session.experiment)
+        if pipeline.standard_archive is not current_standard_archive():
+            pipeline.standard_archive = current_standard_archive()
+            pipeline.reference_library_path = Path(
+                current_standard_archive_path()
+            )
+            pipeline.cache.invalidate(PipelineStage.NORMALIZATION)
+    return session.pipeline
 
 
 # ── Isotope channel parsing ────────────────────────────────────────────────
@@ -447,9 +360,24 @@ def spot_base_name(name: str) -> str:
 
 
 def default_visible_channels(channels: Iterable[str], primary_channel: str) -> list[str]:
-    ordered = [str(channel) for channel in channels]
-    if primary_channel in ordered:
-        ordered = [primary_channel] + [channel for channel in ordered if channel != primary_channel]
+    """Choose a compact, geochronologically useful initial trace set."""
+    available = [str(channel) for channel in channels]
+    priority = [
+        primary_channel,
+        "206Pb",
+        "207Pb",
+        "238U",
+        "208Pb",
+        "232Th",
+    ]
+    ordered = [
+        channel
+        for channel in priority
+        if channel in available
+    ]
+    ordered.extend(
+        channel for channel in available if channel not in ordered
+    )
     return ordered[: min(4, len(ordered))]
 
 
@@ -506,16 +434,25 @@ def current_standard_archive_path() -> str:
 
 
 def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
+    """Load the primary TOML library or an explicitly selected legacy CSV."""
     global _active_standard_archive
     global _active_standard_archive_path
 
     if not path:
-        _active_standard_archive = standard_archive.copy()
+        _active_standard_archive = standard_archive.combine_first(
+            standard_archive_legacy
+        )
         _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
         return _active_standard_archive
 
     target_path = Path(path).expanduser().resolve()
-    loaded_archive = pd.read_csv(target_path, index_col=0)
+    if target_path.suffix.lower() == ".csv":
+        loaded_archive = pd.read_csv(target_path, index_col=0)
+    else:
+        measurements = load_standard_measurements(target_path)
+        loaded_archive = build_standard_archive(measurements).combine_first(
+            standard_archive_legacy
+        )
     _active_standard_archive = loaded_archive
     _active_standard_archive_path = str(target_path)
     return _active_standard_archive
@@ -540,7 +477,7 @@ def load_session(
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
-    return ReductionSession(
+    session = ReductionSession(
         directory=directory,
         experiment=experiment,
         total_data=total_data,
@@ -548,16 +485,33 @@ def load_session(
         primary_channel=resolved_primary,
         workflow_key=workflow_preset.key,
         workflow_title=workflow_preset.title,
+        concentration_standards=workflow_preset.concentration_standards,
+        primary_68_standard=workflow_preset.primary_standard,
+        primary_76_standard=(
+            workflow_preset.pb_ratio_standard
+            or workflow_preset.primary_standard
+        ),
+        primary_82_standard=(
+            workflow_preset.th_ratio_standard
+            or workflow_preset.pb_ratio_standard
+            or workflow_preset.primary_standard
+        ),
+        secondary_standards=workflow_preset.secondary_standards,
         selected_spot=selected_spot,
         visible_channels=default_visible_channels(clean_channels, resolved_primary),
         import_settings={"primary_channel": resolved_primary, **read_kwargs},
         plot_mode="raw",
         reduction_cache={},
     )
+    ensure_shared_pipeline(session, workflow_preset)
+    return session
 
 
 def clear_reduction_cache(session: ReductionSession) -> None:
+    """Discard calculated products while preserving import and selections."""
     session.reduction_cache.clear()
+    if session.pipeline is not None:
+        session.pipeline.cache.invalidate(PipelineStage.BASELINE)
 
 
 def update_selection_region(
@@ -566,18 +520,68 @@ def update_selection_region(
     *,
     baseline: tuple[float, float] | None = None,
     plateau: tuple[float, float] | None = None,
+    signal: tuple[float, float] | None = None,
 ) -> None:
+    """Save reviewed windows while requiring signal bounds to contain plateau."""
     if not session.loaded:
         return
+    row_mask = session.experiment["spot_names"].eq(spot_name)
+    row = session.experiment[row_mask]
+    if row.empty:
+        raise KeyError(f"Unknown spot {spot_name!r}")
+
+    effective_plateau = (
+        tuple(sorted(float(value) for value in plateau))
+        if plateau is not None
+        else (
+            float(row["plateau_start_times"].iloc[0]),
+            float(row["plateau_end_times"].iloc[0]),
+        )
+    )
+    if signal is not None:
+        effective_signal = tuple(sorted(float(value) for value in signal))
+    elif {
+        "signal_start_times",
+        "signal_end_times",
+    }.issubset(row.columns):
+        saved_start = row["signal_start_times"].iloc[0]
+        saved_end = row["signal_end_times"].iloc[0]
+        effective_signal = (
+            tuple(sorted((float(saved_start), float(saved_end))))
+            if pd.notna(saved_start) and pd.notna(saved_end)
+            else effective_plateau
+        )
+    else:
+        effective_signal = effective_plateau
+    if (
+        effective_signal[0] > effective_plateau[0]
+        or effective_signal[1] < effective_plateau[1]
+    ):
+        raise ValueError(
+            "Signal start/end must enclose the complete plateau window."
+        )
+
     if baseline is not None:
         start_time, end_time = sorted(float(value) for value in baseline)
-        session.experiment.loc[session.experiment["spot_names"] == spot_name, "baseline_start_times"] = start_time
-        session.experiment.loc[session.experiment["spot_names"] == spot_name, "baseline_end_times"] = end_time
+        session.experiment.loc[row_mask, "baseline_start_times"] = start_time
+        session.experiment.loc[row_mask, "baseline_end_times"] = end_time
     if plateau is not None:
-        start_time, end_time = sorted(float(value) for value in plateau)
-        session.experiment.loc[session.experiment["spot_names"] == spot_name, "plateau_start_times"] = start_time
-        session.experiment.loc[session.experiment["spot_names"] == spot_name, "plateau_end_times"] = end_time
+        session.experiment.loc[row_mask, "plateau_start_times"] = (
+            effective_plateau[0]
+        )
+        session.experiment.loc[row_mask, "plateau_end_times"] = (
+            effective_plateau[1]
+        )
+    if signal is not None:
+        session.experiment.loc[row_mask, "signal_start_times"] = (
+            effective_signal[0]
+        )
+        session.experiment.loc[row_mask, "signal_end_times"] = (
+            effective_signal[1]
+        )
     clear_reduction_cache(session)
+    if session.pipeline is not None:
+        session.pipeline.update_experiment(session.experiment)
 
 
 def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dict[str, tuple[float, float] | None]:
@@ -658,6 +662,10 @@ def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dic
     session.experiment.loc[row_mask, "signal_end_times"] = float(
         spot_data.iloc[min(selection.signal_end, max_index)]["Time"]
     )
+    if session.pipeline is not None:
+        # Signal limits are written after the baseline/plateau update above.
+        # Refresh once more so the pipeline sees the complete reviewed pick.
+        session.pipeline.update_experiment(session.experiment)
     return {"baseline": baseline, "plateau": plateau}
 
 
@@ -675,12 +683,14 @@ def extract_spot_frame(frame: pd.DataFrame, spot_name: str | None) -> pd.DataFra
 
 def get_selection_regions(session: ReductionSession, spot_name: str | None) -> dict[str, tuple[float, float] | None]:
     if not session.loaded or not spot_name:
-        return {"baseline": None, "plateau": None}
+        return {"baseline": None, "plateau": None, "signal": None}
     row = session.experiment[session.experiment["spot_names"] == spot_name]
     if row.empty:
-        return {"baseline": None, "plateau": None}
+        return {"baseline": None, "plateau": None, "signal": None}
 
     def _pair(start_key: str, end_key: str) -> tuple[float, float] | None:
+        if start_key not in row.columns or end_key not in row.columns:
+            return None
         start_value = row[start_key].iloc[0]
         end_value = row[end_key].iloc[0]
         if pd.isna(start_value) or pd.isna(end_value):
@@ -690,6 +700,7 @@ def get_selection_regions(session: ReductionSession, spot_name: str | None) -> d
     return {
         "baseline": _pair("baseline_start_times", "baseline_end_times"),
         "plateau": _pair("plateau_start_times", "plateau_end_times"),
+        "signal": _pair("signal_start_times", "signal_end_times"),
     }
 
 
@@ -710,11 +721,18 @@ def selection_quality(session: ReductionSession, spot_name: str | None) -> dict[
 
     baseline_region = regions["baseline"]
     plateau_region = regions["plateau"]
+    signal_region = regions["signal"]
     if baseline_region and plateau_region:
         overlap_start = max(baseline_region[0], plateau_region[0])
         overlap_end = min(baseline_region[1], plateau_region[1])
         if overlap_start < overlap_end:
             warnings.append("baseline and plateau windows overlap")
+    if plateau_region and signal_region:
+        if (
+            signal_region[0] > plateau_region[0]
+            or signal_region[1] < plateau_region[1]
+        ):
+            warnings.append("signal limits do not enclose the plateau")
 
     status = "ready" if not warnings else "review"
     return {
@@ -726,78 +744,58 @@ def selection_quality(session: ReductionSession, spot_name: str | None) -> dict[
 
 
 def ensure_baseline_subtracted(session: ReductionSession) -> pd.DataFrame:
+    """Return baseline-subtracted sweeps from the shared reduction pipeline."""
     cache_key = "baseline_subtracted_total_data"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached
     if not session.loaded:
         return pd.DataFrame()
-    baseline_subtracted = subtract_baseline(session.experiment.copy(), session.channels, session.total_data.copy())
+    preset = get_workflow_preset(session.workflow_key)
+    baseline_subtracted = ensure_shared_pipeline(session, preset).run_baseline()
     session.reduction_cache[cache_key] = baseline_subtracted
     return baseline_subtracted
 
 
 def ensure_normalized_plateau(session: ReductionSession, preset: WorkflowPreset) -> pd.DataFrame:
+    """Return internally normalized plateau data from the shared pipeline."""
     cache_key = "normalized_plateau_data"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached
-    baseline_subtracted = ensure_baseline_subtracted(session)
-    if baseline_subtracted.empty:
+    if not session.loaded:
         return pd.DataFrame()
-    normalized = internal_normalization(
-        session.experiment.copy(),
-        session.channels,
-        baseline_subtracted.copy(),
-        current_standard_archive(),
-        material=preset.internal_material,
-    )
+    normalized = ensure_shared_pipeline(session, preset).run_normalization()
     session.reduction_cache[cache_key] = normalized
     return normalized
 
 
 def ensure_concentration_results(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
+    """Return concentration calibration and result products from the core."""
     cache_key = "concentration_results"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, dict) and cached:
         return cached
     if not preset.concentration_standards:
         raise ValueError(f"{preset.title} does not yet define concentration standards for the GUI workflow.")
-
-    normalized = ensure_normalized_plateau(session, preset)
-    if normalized.empty:
-        raise ValueError("Internal normalization did not produce any plateau data.")
-
-    _require_samples(session, preset.concentration_standards, "concentration standards")
-    nist_data = normalized[normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
-    calibration, calibration_plot = calc_concentration_calibration_factor(nist_data, session.channels, current_standard_archive())
-    unknown_standard_data = normalized[~normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
-    final_concentration_df = calc_concentration(unknown_standard_data, calibration)
-    results = {
-        "calibration": calibration,
-        "calibration_plot": calibration_plot,
-        "final_concentration_df": final_concentration_df,
-        "calibrant_count": int(len(nist_data)),
-        "result_count": int(len(final_concentration_df)),
-    }
+    results = ensure_shared_pipeline(session, preset).run_concentration()
+    session.reduction_cache["normalized_plateau_data"] = (
+        ensure_shared_pipeline(session, preset).run_normalization()
+    )
     session.reduction_cache[cache_key] = results
     return results
 
 
 def ensure_raw_ratios(session: ReductionSession) -> pd.DataFrame:
+    """Return plateau ratios calculated by the shared pipeline."""
     cache_key = "plateau_data_with_raw_ratios"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached
-    baseline_subtracted = ensure_baseline_subtracted(session)
-    if baseline_subtracted.empty:
+    if not session.loaded:
         return pd.DataFrame()
-    ratios = calc_raw_ratios(
-        session.experiment.copy(),
-        session.total_data.copy(),
-        baseline_subtracted.copy(),
-        region="plateau",
-    )
+    preset = get_workflow_preset(session.workflow_key)
+    ratios = ensure_shared_pipeline(session, preset).run_ratios()["plateau"]
     session.reduction_cache[cache_key] = ratios
     return ratios
 
@@ -808,80 +806,103 @@ def ensure_signal_raw_ratios(session: ReductionSession) -> pd.DataFrame:
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached
-    baseline_subtracted = ensure_baseline_subtracted(session)
-    if baseline_subtracted.empty:
+    if not session.loaded:
         return pd.DataFrame()
-    ratios = calc_raw_ratios(
-        session.experiment.copy(),
-        session.total_data.copy(),
-        baseline_subtracted.copy(),
-        region="signal",
-    )
+    preset = get_workflow_preset(session.workflow_key)
+    ratios = ensure_shared_pipeline(session, preset).run_ratios()["signal"]
     session.reduction_cache[cache_key] = ratios
     return ratios
 
 
 def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
+    """Return shared downhole models and corrected plateau/signal ratios."""
     cache_key = "downhole_results"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, dict) and cached:
         return cached
     if not preset.primary_standard:
         raise ValueError(f"{preset.title} does not yet define a primary standard for downhole correction.")
-
-    plateau_ratios = ensure_raw_ratios(session)
-    signal_ratios = ensure_signal_raw_ratios(session)
-    if plateau_ratios.empty or signal_ratios.empty:
-        raise ValueError("Raw isotope ratios are not available for downhole correction.")
-
-    _require_samples(session, (preset.primary_standard,), "primary standard")
-    primary_standard_ratios = signal_ratios[
-        signal_ratios["sample"] == preset.primary_standard
-    ].reset_index(drop=True)
-    correction_results = _build_downhole_correction_results(
-        primary_standard_ratios.copy(),
-        current_standard_archive(),
-        method=session.downhole_fit_method,
-        options=session.downhole_fit_options,
-    )
-    corrected = apply_DH_correction(plateau_ratios.copy(), correction_results)
+    pipeline = ensure_shared_pipeline(session, preset)
+    core_results = pipeline.run_downhole()
     results = {
-        "correction_results": correction_results,
-        "corrected_ratios": corrected,
+        **core_results,
+        # Compatibility aliases keep existing widgets working while new stages
+        # consume the explicit plateau/signal products.
+        "corrected_ratios": core_results["plateau_corrected"],
         "fit_method": session.downhole_fit_method,
         "fit_label": fit_method_label(session.downhole_fit_method),
         "fit_options": dict(session.downhole_fit_options),
     }
+    ratios = pipeline.run_ratios()
+    session.reduction_cache["plateau_data_with_raw_ratios"] = ratios["plateau"]
+    session.reduction_cache["signal_data_with_raw_ratios"] = ratios["signal"]
     session.reduction_cache[cache_key] = results
     return results
 
 
 def ensure_session_corrected(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
+    """Return shared session models and fully corrected ratio products."""
     cache_key = "session_correction_results"
     cached = session.reduction_cache.get(cache_key)
     if isinstance(cached, dict) and cached:
         return cached
-
-    downhole_results = ensure_downhole_results(session, preset)
-    corrected = downhole_results["corrected_ratios"]
-    primary_standard = corrected[corrected["sample"] == preset.primary_standard].reset_index(drop=True)
-    session_results = _build_session_correction_results(
-        primary_standard.copy(),
-        current_standard_archive(),
-        primary_standard=preset.primary_standard,
-        method=session.session_fit_method,
-        options=session.session_fit_options,
-    )
-    session_corrected = _apply_session_correction_models(corrected.copy(), session_results)
+    pipeline = ensure_shared_pipeline(session, preset)
+    core_results = pipeline.run_session()
     results = {
-        "correction_results": session_results,
-        "corrected_ratios": session_corrected,
+        **core_results,
+        "corrected_ratios": core_results["plateau_corrected"],
         "fit_method": session.session_fit_method,
         "fit_label": fit_method_label(session.session_fit_method),
         "fit_options": dict(session.session_fit_options),
     }
+    ensure_downhole_results(session, preset)
     session.reduction_cache[cache_key] = results
     return results
+
+
+def ensure_spot_means(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+) -> pd.DataFrame:
+    """Return final corrected spot means before optional common-Pb decisions."""
+    cache_key = "spot_mean_results"
+    cached = session.reduction_cache.get(cache_key)
+    if isinstance(cached, pd.DataFrame) and not cached.empty:
+        return cached
+    result = ensure_shared_pipeline(session, preset).run_spot_means()
+    ensure_session_corrected(session, preset)
+    session.reduction_cache[cache_key] = result
+    return result
+
+
+def ensure_depth_profile(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+) -> pd.DataFrame:
+    """Return fully corrected sweep-wise depth-profile results."""
+    cache_key = "depth_profile_results"
+    cached = session.reduction_cache.get(cache_key)
+    if isinstance(cached, pd.DataFrame) and not cached.empty:
+        return cached
+    result = ensure_shared_pipeline(session, preset).run_depth_profile()
+    ensure_session_corrected(session, preset)
+    session.reduction_cache[cache_key] = result
+    return result
+
+
+def ensure_finalized_results(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+):
+    """Return common-Pb calculations, flags, and preferred-age decisions."""
+    cache_key = "finalized_results"
+    cached = session.reduction_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = ensure_shared_pipeline(session, preset).run_finalize()
+    ensure_spot_means(session, preset)
+    session.reduction_cache[cache_key] = result
+    return result
 
 
 def reference_material_summary(session: ReductionSession, preset: WorkflowPreset) -> str:
@@ -889,10 +910,23 @@ def reference_material_summary(session: ReductionSession, preset: WorkflowPreset
         return ""
     counts = session.total_data["sample"].value_counts()
     parts: list[str] = []
-    if preset.primary_standard:
-        parts.append(f"{preset.primary_standard}: {int(counts.get(preset.primary_standard, 0))} primary rows")
-    if preset.concentration_standards:
-        standard_counts = [f"{name} {int(counts.get(name, 0))}" for name in preset.concentration_standards]
+    primary_standard = (
+        session.primary_68_standard or preset.primary_standard
+    )
+    concentration_standards = (
+        session.concentration_standards
+        or preset.concentration_standards
+    )
+    if primary_standard:
+        parts.append(
+            f"{primary_standard}: "
+            f"{int(counts.get(primary_standard, 0))} primary rows"
+        )
+    if concentration_standards:
+        standard_counts = [
+            f"{name} {int(counts.get(name, 0))}"
+            for name in concentration_standards
+        ]
         parts.append("Glasses " + ", ".join(standard_counts))
     return " | ".join(parts)
 
@@ -980,11 +1014,13 @@ def get_downhole_plot_data(
 
     Returns None if the prerequisite cache entries are absent.
     """
-    raw_ratios = session.reduction_cache.get("plateau_data_with_raw_ratios")
+    raw_ratios = session.reduction_cache.get("signal_data_with_raw_ratios")
     downhole_results = session.reduction_cache.get("downhole_results")
     if not isinstance(raw_ratios, pd.DataFrame) or raw_ratios.empty:
         return None
-    primary_standard = preset.primary_standard
+    primary_standard = (
+        session.primary_68_standard or preset.primary_standard
+    )
     if not primary_standard:
         return None
     if ratio_name not in raw_ratios.columns:
@@ -1020,28 +1056,51 @@ def get_downhole_plot_data(
     max_t = float(max(t[-1] for t in spot_times))
     n_pts = max(len(t) for t in spot_times)
     unified_time = np.linspace(0.0, max_t, n_pts)
-
-    stacked = np.array([np.interp(unified_time, t, r) for t, r in zip(spot_times, spot_ratios)])
-    mean_ratio = np.nanmean(stacked, axis=0)
+    stacked = np.array(
+        [
+            np.interp(unified_time, time, ratio)
+            for time, ratio in zip(spot_times, spot_ratios)
+        ]
+    )
     with np.errstate(divide="ignore", invalid="ignore"):
-        mean_frac = np.where(mean_ratio > 0, known_ratio / mean_ratio, np.nan)
-
-    # Std of individual fractionation residuals vs the mean curve (scalar, like notebook)
-    all_frac_flat = np.concatenate([
-        np.where(r > 0, known_ratio / r, np.nan) for r in stacked
-    ])
-    valid_mask = np.isfinite(all_frac_flat)
-    mean_frac_repeated = np.tile(mean_frac, len(spot_times))[valid_mask]
-    std_frac = float(np.std(all_frac_flat[valid_mask] - mean_frac_repeated))
-
+        mean_frac = known_ratio / np.nanmean(stacked, axis=0)
     fit_curve = mean_frac
     fit_label = fit_method_label(session.downhole_fit_method)
+    std_frac = float("nan")
     if isinstance(downhole_results, dict):
         correction_results = downhole_results.get("correction_results")
         if isinstance(correction_results, dict) and ratio_name in correction_results:
             ratio_result = correction_results[ratio_name]
-            fit_curve = np.asarray(ratio_result.get("fit_values", mean_frac), dtype=float)
-            fit_label = str(ratio_result.get("fit_label", fit_label))
+            metadata = ratio_result.get("metadata", {})
+            model_time = np.asarray(
+                metadata.get(
+                    "time",
+                    ratio_result.get("fit_prediction_x", unified_time),
+                ),
+                dtype=float,
+            )
+            model_values = np.asarray(
+                metadata.get("fitted_fractionation", []),
+                dtype=float,
+            )
+            if model_time.size and model_values.size == model_time.size:
+                unified_time = model_time
+                fit_curve = model_values
+            else:
+                fit_curve = evaluate_correction_result(
+                    ratio_result,
+                    unified_time,
+                )
+            std_frac = float(
+                metadata.get(
+                    "residual_standard_deviation",
+                    ratio_result.get(
+                        "fit_residual_standard_deviation",
+                        float("nan"),
+                    ),
+                )
+            )
+            fit_label = str(ratio_result.get("model", fit_label))
 
     return {
         "ratio_name": ratio_name,
@@ -1068,11 +1127,9 @@ def get_session_plot_data(
     if not isinstance(session_results, dict) or not isinstance(downhole_results, dict):
         return None
 
-    dh_corrected = downhole_results.get("corrected_ratios")
-    if not isinstance(dh_corrected, pd.DataFrame) or dh_corrected.empty:
-        return None
-
-    primary_standard = preset.primary_standard
+    primary_standard = (
+        session.primary_68_standard or preset.primary_standard
+    )
     if not primary_standard:
         return None
     try:
@@ -1081,24 +1138,42 @@ def get_session_plot_data(
     except Exception:
         return None
 
-    t_arr, f_arr, e_arr, spot_names_out = _build_session_primary_standard_summary(
-        dh_corrected,
-        primary_standard,
-        ratio_name,
-        known_ratio,
-    )
-    if t_arr.size < 2:
-        return None
-
     ratio_results = session_results.get("correction_results", {}).get(ratio_name)
     if not ratio_results:
         return None
-    p_std = float(ratio_results.get("std", 0.0))
-    fit_times = np.asarray(ratio_results.get("fit_times", np.linspace(float(t_arr[0]), float(t_arr[-1]), 200)), dtype=float)
-    fit_vals = np.asarray(ratio_results.get("fit_values", []), dtype=float)
-    if fit_vals.size == 0:
-        fit_model = ratio_results.get("fit_model") or ratio_results.get("fit")
-        fit_vals = _evaluate_fit_model(fit_model, fit_times)
+    observations = ratio_results.get("fit_observations", {})
+    t_arr = np.asarray(observations.get("time", []), dtype=float)
+    f_arr = np.asarray(observations.get("fractionation", []), dtype=float)
+    e_arr = np.asarray(observations.get("std", []), dtype=float)
+    if t_arr.size < 1 or f_arr.size != t_arr.size:
+        return None
+    if e_arr.size != t_arr.size:
+        e_arr = np.full(t_arr.size, np.nan)
+    fit_times = np.asarray(
+        ratio_results.get(
+            "fit_prediction_x",
+            np.linspace(float(np.nanmin(t_arr)), float(np.nanmax(t_arr)), 200),
+        ),
+        dtype=float,
+    )
+    fit_vals = evaluate_correction_result(ratio_results, fit_times)
+    p_std = float(
+        ratio_results.get(
+            "fit_residual_standard_deviation",
+            ratio_results.get("std", 0.0),
+        )
+    )
+
+    dh_corrected = downhole_results.get("plateau_corrected")
+    spot_names_out: list[str] = []
+    if isinstance(dh_corrected, pd.DataFrame):
+        selected = dh_corrected[dh_corrected["sample"].eq(primary_standard)]
+        spot_names_out = [
+            str(name)
+            for name in selected.groupby("spot_name", sort=False).groups
+        ]
+    if len(spot_names_out) != len(t_arr):
+        spot_names_out = [f"standard {index + 1}" for index in range(len(t_arr))]
 
     return {
         "ratio_name": ratio_name,
@@ -1111,7 +1186,12 @@ def get_session_plot_data(
         "fit_times": fit_times,
         "fit_vals": fit_vals,
         "fit_std": p_std,
-        "fit_label": str(ratio_results.get("fit_label", fit_method_label(session.session_fit_method))),
+        "fit_label": str(
+            ratio_results.get(
+                "model",
+                fit_method_label(session.session_fit_method),
+            )
+        ),
         "show_uncertainty": False,
     }
 

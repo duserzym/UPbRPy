@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from GUI.icon import build_app_icon, build_brand_pixmap
+from GUI.icon import (
+    build_app_icon,
+    build_brand_pixmap,
+    build_workflow_stage_icon,
+)
 from GUI.services import (
     DOWNHOLE_FIT_METHODS,
     SESSION_FIT_METHODS,
@@ -19,10 +24,14 @@ from GUI.services import (
     default_reference_material_library_path,
     ensure_baseline_subtracted,
     ensure_concentration_results,
+    ensure_depth_profile,
     ensure_downhole_results,
+    ensure_finalized_results,
     ensure_normalized_plateau,
     ensure_raw_ratios,
     ensure_session_corrected,
+    ensure_shared_pipeline,
+    ensure_spot_means,
     get_calibration_slope_data,
     get_downhole_plot_data,
     get_selection_regions,
@@ -43,6 +52,7 @@ from GUI.widgets import (
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
     IsotopeGridWidget,
+    ResultsTableWidget,
     SessionFractionationWidget,
     SessionOverviewWidget,
     SpotTree,
@@ -50,18 +60,28 @@ from GUI.widgets import (
     TracePlotWidget,
     make_list_item,
 )
+from GUI.workers import FunctionWorker
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
-from UPbRPy import SELECTION_METHODS, selection_method_label
+from UPbRPy import (
+    PIPELINE_STAGE_BY_ID,
+    PipelineStage,
+    SELECTION_METHODS,
+    export_reduction_bundle,
+    selection_method_label,
+    write_reproducibility_notebook,
+)
 
 
 PLOT_MODE_LABELS = {
-    "raw": "Raw traces",
+    "raw": "Raw",
     "baseline_subtracted": "Baseline",
     "normalized_plateau": "Normalized",
-    "calibration_slopes": "Cal. slopes",
-    "raw_ratios": "Raw ratios",
-    "downhole_ratios": "Downhole\nfractionation",
-    "session_ratios": "Session\nfractionation",
+    "calibration_slopes": "Calibration",
+    "raw_ratios": "Ratios",
+    "downhole_ratios": "Downhole",
+    "session_ratios": "Session",
+    "depth_profile": "Depth",
+    "final_results": "Final",
 }
 
 _STAGE_CACHE_KEYS: dict[str, str | None] = {
@@ -72,6 +92,8 @@ _STAGE_CACHE_KEYS: dict[str, str | None] = {
     "raw_ratios": "plateau_data_with_raw_ratios",
     "downhole_ratios": "downhole_results",
     "session_ratios": "session_correction_results",
+    "depth_profile": "depth_profile_results",
+    "final_results": "finalized_results",
 }
 
 # Stack index for the plot QStackedWidget
@@ -83,26 +105,8 @@ _PLOT_STACK_IDX: dict[str, int] = {
     "raw_ratios": 0,
     "downhole_ratios": 2,
     "session_ratios": 3,
-}
-
-# Maps a lowercase keyword from a workflow step title to the cache key that
-# must be present before that step becomes interactive.  Steps whose titles
-# contain "import", "review", or "subtract" are gated only by having a
-# loaded session (None = needs session but no prior cache entry).
-_STEP_PREREQUISITE: dict[str, str | None] = {
-    "import":           None,           # always enabled once loaded
-    "review":           None,
-    "subtract":         None,
-    "internal norm":    "baseline_subtracted_total_data",
-    "normalization":    "baseline_subtracted_total_data",
-    "calibrate":        "normalized_plateau_data",
-    "concentration":    "normalized_plateau_data",
-    "raw isotope":      "normalized_plateau_data",
-    "raw ratio":        "normalized_plateau_data",
-    "downhole":         "plateau_data_with_raw_ratios",
-    "session fraction": "downhole_results",
-    "session-wide":     "downhole_results",
-    "final":            "session_correction_results",
+    "depth_profile": 4,
+    "final_results": 4,
 }
 
 RATIO_COLORS = {
@@ -114,6 +118,21 @@ RATIO_COLORS = {
 DEFAULT_REGION_COLORS = {
     "baseline": "#8a4c34",
     "plateau": "#2c5e87",
+}
+
+WORKFLOW_STAGE_LABELS = {
+    PipelineStage.IMPORT: "Import",
+    PipelineStage.SELECTION: "Selections",
+    PipelineStage.BASELINE: "Baseline",
+    PipelineStage.NORMALIZATION: "Normalize",
+    PipelineStage.CONCENTRATION: "Concentrations",
+    PipelineStage.RATIOS: "Ratios",
+    PipelineStage.DOWNHOLE: "Downhole",
+    PipelineStage.SESSION: "Session",
+    PipelineStage.SPOT_MEANS: "Spot means",
+    PipelineStage.DEPTH_PROFILE: "Depth profiles",
+    PipelineStage.FINALIZE: "Final review",
+    PipelineStage.EXPORT: "Export",
 }
 
 
@@ -137,12 +156,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reference_library_path = default_reference_material_library_path()
         self.default_reference_library_path = default_reference_material_library_path()
         self._reference_library_notice: str | None = None
+        self.thread_pool = QtCore.QThreadPool.globalInstance()
+        self._active_worker: FunctionWorker | None = None
+        self._busy_label = ""
         self.selection_colors = self._resolve_selection_colors()
         self.session.session_fit_options["polynomial_degree"] = self.workflow_preset.session_polynomial_degree
 
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
-        self.setMinimumSize(960, 680)
+        self.setMinimumSize(760, 620)
         self._apply_initial_window_geometry()
 
         self._build_menu()
@@ -155,14 +177,118 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         open_action = file_menu.addAction("Open Experiment Folder…")
+        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.choose_experiment_directory)
 
         reload_action = file_menu.addAction("Reload Current Folder")
+        reload_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
         reload_action.triggered.connect(self.reload_current_directory)
 
         file_menu.addSeparator()
+        library_action = file_menu.addAction("Reference Material Library…")
+        library_action.triggered.connect(
+            self.choose_reference_material_library
+        )
+
+        export_menu = file_menu.addMenu("Export")
+        bundle_action = export_menu.addAction(
+            "Export Publication + Reproducibility Bundle…"
+        )
+        bundle_action.triggered.connect(self.choose_reduction_bundle_export)
+        notebook_action = export_menu.addAction(
+            "Export Reproducible Jupyter Notebook…"
+        )
+        notebook_action.triggered.connect(self.choose_notebook_export)
+
+        file_menu.addSeparator()
         exit_action = file_menu.addAction("Quit")
+        exit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(self.close)
+
+        workflow_menu = self.menuBar().addMenu("Workflow")
+        mineral_menu = workflow_menu.addMenu("Mineral Preset")
+        self.workflow_menu_group = QtGui.QActionGroup(self)
+        self.workflow_menu_group.setExclusive(True)
+        self.workflow_menu_actions: dict[str, QtGui.QAction] = {}
+        for key, preset in WORKFLOW_PRESETS.items():
+            action = mineral_menu.addAction(preset.title)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, workflow_key=key:
+                self.select_workflow_preset(workflow_key)
+            )
+            self.workflow_menu_group.addAction(action)
+            self.workflow_menu_actions[key] = action
+
+        selection_menu = workflow_menu.addMenu("Auto-pick Method")
+        self.selection_menu_group = QtGui.QActionGroup(self)
+        self.selection_menu_group.setExclusive(True)
+        self.selection_menu_actions: dict[str, QtGui.QAction] = {}
+        for method in SELECTION_METHODS:
+            action = selection_menu.addAction(selection_method_label(method))
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selection_method=method:
+                self.select_selection_method(selection_method)
+            )
+            self.selection_menu_group.addAction(action)
+            self.selection_menu_actions[method] = action
+
+        workflow_menu.addSeparator()
+        previous_step = workflow_menu.addAction("Previous Step")
+        previous_step.setShortcut(QtGui.QKeySequence("Ctrl+["))
+        previous_step.triggered.connect(
+            lambda: self.go_to_workflow_step(-1)
+        )
+        next_step = workflow_menu.addAction("Next Step")
+        next_step.setShortcut(QtGui.QKeySequence("Ctrl+]"))
+        next_step.triggered.connect(lambda: self.go_to_workflow_step(1))
+        run_step = workflow_menu.addAction("Run Primary Action for This Step")
+        run_step.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
+        run_step.triggered.connect(self.run_current_workflow_action)
+        workflow_menu.addSeparator()
+        auto_pick_action = workflow_menu.addAction("Auto-pick Current Spot")
+        auto_pick_action.triggered.connect(self.run_autopick_current_spot)
+        apply_windows_action = workflow_menu.addAction(
+            "Apply Current Selection Windows"
+        )
+        apply_windows_action.triggered.connect(self.apply_current_windows)
+
+        calibration_menu = self.menuBar().addMenu("Calibration")
+        downhole_menu = calibration_menu.addMenu("Downhole Model")
+        session_menu = calibration_menu.addMenu("Session Model")
+        for method in DOWNHOLE_FIT_METHODS:
+            action = downhole_menu.addAction(fit_method_label(method))
+            action.triggered.connect(
+                lambda _checked=False, fit_method=method:
+                self.select_fit_method("downhole", fit_method)
+            )
+        for method in SESSION_FIT_METHODS:
+            action = session_menu.addAction(fit_method_label(method))
+            action.triggered.connect(
+                lambda _checked=False, fit_method=method:
+                self.select_fit_method("session", fit_method)
+            )
+        calibration_menu.addSeparator()
+        show_inspector = calibration_menu.addAction(
+            "Show Calibration Inspector"
+        )
+        show_inspector.triggered.connect(
+            lambda: self.set_workspace_panel_visible("inspector", True)
+        )
+
+        results_menu = self.menuBar().addMenu("Results")
+        final_action = results_menu.addAction("Calculate Final Results")
+        final_action.triggered.connect(self.run_final_review)
+        depth_action = results_menu.addAction("Calculate Depth Profiles")
+        depth_action.triggered.connect(self.run_depth_profile_review)
+        results_menu.addSeparator()
+        results_bundle_action = results_menu.addAction(
+            "Export Publication + Reproducibility Bundle…"
+        )
+        results_bundle_action.triggered.connect(
+            self.choose_reduction_bundle_export
+        )
 
         view_menu = self.menuBar().addMenu("View")
         theme_menu = view_menu.addMenu("Theme")
@@ -180,27 +306,194 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_action = view_menu.addAction("Return to Raw Traces")
         raw_action.triggered.connect(self.show_raw_traces)
 
+        view_menu.addSeparator()
+        self.sidebar_action = view_menu.addAction("Workflow Rail")
+        self.sidebar_action.setCheckable(True)
+        self.sidebar_action.setChecked(True)
+        self.sidebar_action.triggered.connect(
+            lambda visible: self.set_workspace_panel_visible(
+                "sidebar",
+                visible,
+            )
+        )
+        self.inspector_action = view_menu.addAction("Spot and isotope inspector")
+        self.inspector_action.setCheckable(True)
+        self.inspector_action.setChecked(True)
+        self.inspector_action.triggered.connect(
+            lambda visible: self.set_workspace_panel_visible(
+                "inspector",
+                visible,
+            )
+        )
+
+        help_menu = self.menuBar().addMenu("Help")
+        guide_action = help_menu.addAction("Reduction Workflow Guide")
+        guide_action.triggered.connect(self.show_pipeline_guide)
+        about_action = help_menu.addAction("About UPbRPy Studio")
+        about_action.triggered.connect(self.show_about_dialog)
+
+    def select_workflow_preset(self, workflow_key: str) -> None:
+        """Select a mineral workflow from the native menu."""
+        if not hasattr(self, "workflow_combo"):
+            return
+        index = self.workflow_combo.findData(workflow_key)
+        if index >= 0:
+            self.workflow_combo.setCurrentIndex(index)
+
+    def select_selection_method(self, method: str) -> None:
+        """Select an auto-pick method from the native menu."""
+        if not hasattr(self, "selection_method_combo"):
+            return
+        index = self.selection_method_combo.findData(method)
+        if index >= 0:
+            self.selection_method_combo.setCurrentIndex(index)
+
+    def select_fit_method(self, correction: str, method: str) -> None:
+        """Select a downhole or session model from the Calibration menu."""
+        combo = (
+            self.downhole_fit_combo
+            if correction == "downhole"
+            else self.session_fit_combo
+        )
+        index = combo.findData(method)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        self.set_workspace_panel_visible("inspector", True)
+
+    def go_to_workflow_step(self, offset: int) -> None:
+        """Move to the next selectable workflow stage."""
+        if not hasattr(self, "workflow_step_list"):
+            return
+        row = self.workflow_step_list.currentRow()
+        candidate = max(
+            0,
+            min(self.workflow_step_list.count() - 1, row + offset),
+        )
+        while candidate != row:
+            item = self.workflow_step_list.item(candidate)
+            if item is not None and (
+                item.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled
+            ):
+                self.workflow_step_list.setCurrentRow(candidate)
+                return
+            candidate += 1 if offset > 0 else -1
+            if candidate < 0 or candidate >= self.workflow_step_list.count():
+                return
+
+    def run_current_workflow_action(self) -> None:
+        """Run the primary action attached to the selected workflow stage."""
+        actions = self._workflow_action_specs()
+        if actions:
+            actions[0][1]()
+
+    def show_pipeline_guide(self) -> None:
+        """Show the ordered reduction stages without leaving the application."""
+        lines = [
+            f"{index + 1}. {step.title}"
+            for index, step in enumerate(self.workflow_preset.steps)
+        ]
+        QtWidgets.QMessageBox.information(
+            self,
+            f"{self.workflow_preset.title} reduction workflow",
+            "\n".join(lines)
+            + "\n\nSelect a stage in the left rail for its explanation "
+            "and available actions.",
+        )
+
+    def show_about_dialog(self) -> None:
+        """Show concise application and shared-core information."""
+        QtWidgets.QMessageBox.about(
+            self,
+            "About UPbRPy Studio",
+            "<b>UPbRPy Studio</b><br>"
+            "Native, reproducible LA-ICP-MS U-Pb and depth-profile "
+            "data reduction.<br><br>"
+            "The desktop interface and exported notebooks use the same "
+            "open Python calculation pipeline.",
+        )
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         outer = QtWidgets.QHBoxLayout(central)
-        outer.setContentsMargins(18, 18, 18, 18)
-        outer.setSpacing(18)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(10)
 
-        workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        workspace_splitter.setChildrenCollapsible(False)
-        workspace_splitter.addWidget(self._build_sidebar())
-        workspace_splitter.addWidget(self._build_main_column())
-        workspace_splitter.addWidget(self._build_inspector())
-        workspace_splitter.setStretchFactor(0, 0)
-        workspace_splitter.setStretchFactor(1, 1)
-        workspace_splitter.setStretchFactor(2, 0)
-        workspace_splitter.setSizes([380, 1000, 300])
-        outer.addWidget(workspace_splitter, 1)
+        self.workspace_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Horizontal
+        )
+        self.workspace_splitter.setChildrenCollapsible(True)
+        self.workspace_splitter.setHandleWidth(6)
+        self.sidebar_panel = self._build_workflow_rail()
+        self.main_panel = self._build_main_column()
+        self.inspector_panel = self._build_inspector()
+        self.workspace_splitter.addWidget(self.sidebar_panel)
+        self.workspace_splitter.addWidget(self.main_panel)
+        self.workspace_splitter.addWidget(self.inspector_panel)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setStretchFactor(2, 0)
+        self.workspace_splitter.setSizes([210, 1180, 310])
+        outer.addWidget(self.workspace_splitter, 1)
 
         self.setCentralWidget(central)
+        self.busy_progress = QtWidgets.QProgressBar()
+        self.busy_progress.setRange(0, 0)
+        self.busy_progress.setFixedWidth(150)
+        self.busy_progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self.busy_progress)
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
         self._sync_fit_controls()
+
+    def set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
+        """Expose responsive side panels through the View menu."""
+        widget = (
+            self.sidebar_panel
+            if panel == "sidebar"
+            else self.inspector_panel
+        )
+        widget.setVisible(visible)
+        action = (
+            self.sidebar_action
+            if panel == "sidebar"
+            else self.inspector_action
+        )
+        action.blockSignals(True)
+        action.setChecked(visible)
+        action.blockSignals(False)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        """Simplify side panels automatically on compact displays."""
+        super().resizeEvent(event)
+        if not hasattr(self, "workspace_splitter"):
+            return
+        width = event.size().width()
+        if width < 1100:
+            self.set_workspace_panel_visible("sidebar", False)
+            self.set_workspace_panel_visible("inspector", False)
+        elif width < 1420:
+            self.set_workspace_panel_visible("sidebar", True)
+            self.set_workspace_panel_visible("inspector", False)
+        else:
+            self.set_workspace_panel_visible("sidebar", True)
+            self.set_workspace_panel_visible("inspector", True)
+        if hasattr(self, "lower_container"):
+            self.lower_container.setVisible(event.size().height() >= 780)
+        if hasattr(self, "workflow_step_list"):
+            self.adapt_workflow_rail_height(event.size().height())
+
+    def adapt_workflow_rail_height(self, height: int) -> None:
+        """Keep every workflow stage visible on short displays."""
+        compact = height < 850
+        very_compact = height < 700
+        self.selection_method_combo.setVisible(not compact)
+        self.reference_library_button.setVisible(not compact)
+        self.workflow_combo.setVisible(not very_compact)
+        item_height = 37 if compact else 45
+        for index in range(self.workflow_step_list.count()):
+            item = self.workflow_step_list.item(index)
+            if item is not None:
+                item.setSizeHint(QtCore.QSize(0, item_height))
 
     def _apply_initial_window_geometry(self) -> None:
         screen = QtGui.QGuiApplication.primaryScreen()
@@ -212,158 +505,151 @@ class MainWindow(QtWidgets.QMainWindow):
         height = min(1150, max(680, int(available.height() * 0.90)))
         self.resize(width, height)
 
-    def _build_sidebar(self) -> QtWidgets.QWidget:
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        scroll.setMinimumWidth(300)
-        scroll.setMaximumWidth(420)
-        scroll.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Preferred,
+    def _build_workflow_rail(self) -> QtWidgets.QWidget:
+        """Build the always-readable icon rail for ordered reduction stages."""
+        frame = QtWidgets.QFrame()
+        frame.setObjectName("WorkflowRail")
+        frame.setMinimumWidth(184)
+        frame.setMaximumWidth(224)
+        frame.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-
-        frame = QtWidgets.QFrame()
-        frame.setObjectName("SidebarPanel")
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(10, 12, 10, 12)
+        layout.setSpacing(8)
 
         brand_row = QtWidgets.QHBoxLayout()
-        brand_row.setSpacing(12)
-        icon_label = QtWidgets.QLabel()
-        icon_label.setPixmap(build_brand_pixmap(56))
-        icon_label.setFixedSize(56, 56)
-        brand_copy = QtWidgets.QVBoxLayout()
-        brand = QtWidgets.QLabel("UPbRPy Studio")
-        brand.setObjectName("Brand")
-        caption = QtWidgets.QLabel("Open-source UPb data reduction software for zircon, depth-profile, and trace element workflows.")
-        caption.setWordWrap(True)
-        caption.setObjectName("SecondaryText")
-        brand_copy.addWidget(brand)
-        brand_copy.addWidget(caption)
-        brand_row.addWidget(icon_label)
-        brand_row.addLayout(brand_copy, 1)
+        brand_row.setSpacing(8)
+        brand_icon = QtWidgets.QLabel()
+        brand_icon.setPixmap(build_brand_pixmap(38))
+        brand_icon.setFixedSize(38, 38)
+        brand_text = QtWidgets.QLabel("UPbRPy")
+        brand_text.setObjectName("RailBrand")
+        brand_row.addWidget(brand_icon)
+        brand_row.addWidget(brand_text, 1)
         layout.addLayout(brand_row)
 
-        self.import_button = QtWidgets.QPushButton("Import experiment directory")
+        self.workflow_combo = StyledComboBox()
+        for key, preset in WORKFLOW_PRESETS.items():
+            self.workflow_combo.addItem(preset.title, key)
+        self.workflow_combo.setToolTip("Choose the mineral-specific workflow")
+        self.workflow_combo.currentIndexChanged.connect(
+            self.on_workflow_preset_changed
+        )
+        layout.addWidget(self.workflow_combo)
+
+        self.selection_method_combo = StyledComboBox()
+        for method in SELECTION_METHODS:
+            self.selection_method_combo.addItem(
+                selection_method_label(method),
+                method,
+            )
+        self.selection_method_combo.setToolTip(
+            "Baseline and signal auto-pick method"
+        )
+        self.selection_method_combo.currentIndexChanged.connect(
+            self.on_selection_method_changed
+        )
+        layout.addWidget(self.selection_method_combo)
+
+        section_label = QtWidgets.QLabel("Reduction workflow")
+        section_label.setObjectName("SectionTitle")
+        layout.addWidget(section_label)
+
+        self.workflow_step_list = QtWidgets.QListWidget()
+        self.workflow_step_list.setObjectName("WorkflowStepRail")
+        self.workflow_step_list.setIconSize(QtCore.QSize(28, 28))
+        self.workflow_step_list.setWordWrap(False)
+        self.workflow_step_list.setTextElideMode(
+            QtCore.Qt.TextElideMode.ElideRight
+        )
+        self.workflow_step_list.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.workflow_step_list.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.workflow_step_list.setSpacing(1)
+        self.workflow_step_list.currentRowChanged.connect(
+            self.on_workflow_step_changed
+        )
+        layout.addWidget(self.workflow_step_list, 1)
+
+        self.import_button = QtWidgets.QPushButton("Open experiment…")
         self.import_button.setProperty("accent", True)
         self.import_button.clicked.connect(self.choose_experiment_directory)
         layout.addWidget(self.import_button)
 
-        library_card = QtWidgets.QFrame()
-        library_card.setObjectName("SessionCard")
-        library_layout = QtWidgets.QVBoxLayout(library_card)
-        library_layout.setContentsMargins(16, 16, 16, 16)
-        library_layout.setSpacing(8)
-        library_label = QtWidgets.QLabel("Reference material library")
-        library_label.setObjectName("SectionTitle")
-        self.reference_library_label = QtWidgets.QLabel()
-        self.reference_library_label.setWordWrap(True)
-        self.reference_library_label.setObjectName("SecondaryText")
-        self.reference_library_default_label = QtWidgets.QLabel()
-        self.reference_library_default_label.setWordWrap(True)
-        self.reference_library_default_label.setObjectName("SecondaryText")
-        self.reference_library_button = QtWidgets.QPushButton("Import reference material library")
-        self.reference_library_button.clicked.connect(self.choose_reference_material_library)
-        library_layout.addWidget(library_label)
-        library_layout.addWidget(self.reference_library_label)
-        library_layout.addWidget(self.reference_library_default_label)
-        library_layout.addWidget(self.reference_library_button)
-        layout.addWidget(library_card)
+        self.reference_library_button = QtWidgets.QPushButton(
+            "Reference library…"
+        )
+        self.reference_library_button.clicked.connect(
+            self.choose_reference_material_library
+        )
+        layout.addWidget(self.reference_library_button)
 
-        # Mineral workflow combo — now part of workflow_card; description/defaults become tooltip
-        self.workflow_combo = StyledComboBox()
-        for key, preset in WORKFLOW_PRESETS.items():
-            self.workflow_combo.addItem(preset.title, key)
-        self.workflow_combo.currentIndexChanged.connect(self.on_workflow_preset_changed)
-        self.selection_method_combo = StyledComboBox()
-        for method in SELECTION_METHODS:
-            self.selection_method_combo.addItem(selection_method_label(method), method)
-        self.selection_method_combo.currentIndexChanged.connect(self.on_selection_method_changed)
-        # description / defaults labels kept for back-compat but hidden (tooltip carries the text)
+        # These labels retain programmatic access to the resolved library
+        # paths; the compact rail exposes them as a tooltip rather than as two
+        # permanently wrapped path labels.
+        self.reference_library_label = QtWidgets.QLabel()
+        self.reference_library_label.setVisible(False)
+        self.reference_library_default_label = QtWidgets.QLabel()
+        self.reference_library_default_label.setVisible(False)
+
         self.workflow_description_label = QtWidgets.QLabel()
         self.workflow_description_label.setVisible(False)
         self.workflow_defaults_label = QtWidgets.QLabel()
         self.workflow_defaults_label.setVisible(False)
-
-        workflow_card = QtWidgets.QFrame()
-        workflow_card.setObjectName("WorkflowCard")
-        workflow_layout = QtWidgets.QVBoxLayout(workflow_card)
-        workflow_layout.setContentsMargins(16, 16, 16, 16)
-        workflow_layout.setSpacing(10)
-
-        # "Mineral workflow" row with tooltip carrying description + defaults
-        workflow_preset_row = QtWidgets.QHBoxLayout()
-        workflow_preset_row.setSpacing(6)
-        preset_label = QtWidgets.QLabel("Mineral workflow")
-        preset_label.setObjectName("SectionTitle")
         self._workflow_info_btn = QtWidgets.QToolButton()
-        self._workflow_info_btn.setText("?")
-        self._workflow_info_btn.setObjectName("InfoToolButton")
-        self._workflow_info_btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self._workflow_info_btn.setFixedSize(18, 18)
-        workflow_preset_row.addWidget(preset_label)
-        workflow_preset_row.addWidget(self._workflow_info_btn)
-        workflow_preset_row.addStretch(1)
-        workflow_layout.addLayout(workflow_preset_row)
-        workflow_layout.addWidget(self.workflow_combo)
+        self._workflow_info_btn.setVisible(False)
+        return frame
 
-        selection_method_title = QtWidgets.QLabel("Baseline / peak auto-pick")
-        selection_method_title.setObjectName("SectionTitle")
-        workflow_layout.addWidget(selection_method_title)
-        workflow_layout.addWidget(self.selection_method_combo)
+    def _build_workflow_context_bar(self) -> QtWidgets.QWidget:
+        """Show the selected stage explanation and actions beside the plot."""
+        card = QtWidgets.QFrame()
+        card.setObjectName("WorkflowContextBar")
+        card_layout = QtWidgets.QHBoxLayout(card)
+        card_layout.setContentsMargins(14, 10, 14, 10)
+        card_layout.setSpacing(12)
 
-        workflow_label = QtWidgets.QLabel("Processing sequence")
-        workflow_label.setObjectName("SectionTitle")
-        self.workflow_step_list = QtWidgets.QListWidget()
-        self.workflow_step_list.setObjectName("WorkflowStepList")
-        self.workflow_step_list.setWordWrap(True)
-        self.workflow_step_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        self.workflow_step_list.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.workflow_step_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.workflow_step_list.setSpacing(4)
-        self.workflow_step_list.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Maximum,
+        self.workflow_context_icon = QtWidgets.QLabel()
+        self.workflow_context_icon.setFixedSize(38, 38)
+        self.workflow_context_icon.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignCenter
         )
-        self.workflow_step_list.currentRowChanged.connect(self.on_workflow_step_changed)
-        hint_card = QtWidgets.QFrame()
-        hint_card.setObjectName("WorkflowHintCard")
-        hint_layout = QtWidgets.QVBoxLayout(hint_card)
-        hint_layout.setContentsMargins(12, 12, 12, 12)
-        hint_layout.setSpacing(6)
+        card_layout.addWidget(self.workflow_context_icon)
+
+        copy_layout = QtWidgets.QVBoxLayout()
+        copy_layout.setSpacing(2)
         self.workflow_hint_title = QtWidgets.QLabel()
-        self.workflow_hint_title.setObjectName("WorkflowLabel")
-        self.workflow_hint_title.setWordWrap(True)
+        self.workflow_hint_title.setObjectName("WorkflowContextTitle")
         self.workflow_hint_body = QtWidgets.QLabel()
         self.workflow_hint_body.setObjectName("PanelBody")
         self.workflow_hint_body.setWordWrap(True)
-        hint_layout.addWidget(self.workflow_hint_title)
-        hint_layout.addWidget(self.workflow_hint_body)
-        actions_label = QtWidgets.QLabel("Interactive actions")
-        actions_label.setObjectName("SectionTitle")
-        actions_card = QtWidgets.QFrame()
-        actions_card.setObjectName("WorkflowActionsCard")
-        self.workflow_actions_layout = QtWidgets.QVBoxLayout(actions_card)
-        self.workflow_actions_layout.setContentsMargins(12, 12, 12, 12)
-        self.workflow_actions_layout.setSpacing(8)
-        self.workflow_status_label = QtWidgets.QLabel()
-        self.workflow_status_label.setObjectName("SecondaryText")
-        self.workflow_status_label.setWordWrap(True)
-        workflow_layout.addWidget(workflow_label)
-        workflow_layout.addWidget(self.workflow_step_list)
-        workflow_layout.addWidget(hint_card)
-        workflow_layout.addWidget(actions_label)
-        workflow_layout.addWidget(actions_card)
-        workflow_layout.addWidget(self.workflow_status_label)
-        layout.addWidget(workflow_card, 1)
+        self.workflow_hint_body.setMaximumHeight(38)
+        copy_layout.addWidget(self.workflow_hint_title)
+        copy_layout.addWidget(self.workflow_hint_body)
+        card_layout.addLayout(copy_layout, 1)
 
-        layout.addStretch(1)
-        scroll.setWidget(frame)
-        return scroll
+        actions_card = QtWidgets.QFrame()
+        actions_card.setObjectName("WorkflowActionsInline")
+        self.workflow_actions_card = actions_card
+        self.workflow_actions_layout = QtWidgets.QHBoxLayout(actions_card)
+        self.workflow_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.workflow_actions_layout.setSpacing(6)
+        card_layout.addWidget(actions_card)
+
+        self.workflow_status_label = QtWidgets.QLabel()
+        self.workflow_status_label.setObjectName("WorkflowStatusCompact")
+        self.workflow_status_label.setWordWrap(False)
+        self.workflow_status_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.workflow_status_label.setMinimumWidth(0)
+        self.workflow_status_label.setMaximumWidth(240)
+        card_layout.addWidget(self.workflow_status_label)
+        return card
 
     def _build_main_column(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -373,6 +659,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         header = QtWidgets.QFrame()
         header.setObjectName("HeaderCard")
+        self.header_card = header
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(24, 20, 24, 20)
         title_box = QtWidgets.QVBoxLayout()
@@ -383,7 +670,10 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        subtitle = QtWidgets.QLabel("Notebook-derived zircon workflow, editable selections, and reduction-stage previews guided by iolite-style review steps.")
+        subtitle = QtWidgets.QLabel(
+            "Shared scientific pipeline, editable selections, and "
+            "stage-by-stage diagnostic review."
+        )
         subtitle.setObjectName("SecondaryText")
         subtitle.setWordWrap(True)
         subtitle.setSizePolicy(
@@ -441,6 +731,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header_right.addLayout(theme_row)
         header_layout.addLayout(header_right, 1)
         layout.addWidget(header)
+        layout.addWidget(self._build_workflow_context_bar())
 
         plot_card = QtWidgets.QFrame()
         plot_card.setObjectName("PlotCard")
@@ -512,21 +803,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
         plots_vbox.addWidget(self.session_overview_plot)
 
-        # Page 1: calibration slopes, Page 2: downhole fractionation, Page 3: session fractionation
+        # Diagnostic plots and the final publication-oriented review table.
         self.calibration_slopes_plot = CalibrationSlopesWidget()
         self.downhole_frac_plot = DownholeFractionationWidget()
         self.session_frac_plot = SessionFractionationWidget()
+        self.results_table = ResultsTableWidget()
 
         self.plots_stack = QtWidgets.QStackedWidget()
         self.plots_stack.addWidget(plots_page0)               # index 0
         self.plots_stack.addWidget(self.calibration_slopes_plot)  # index 1
         self.plots_stack.addWidget(self.downhole_frac_plot)   # index 2
         self.plots_stack.addWidget(self.session_frac_plot)    # index 3
+        self.plots_stack.addWidget(self.results_table)        # index 4
         plot_layout.addWidget(self.plots_stack)
 
         # ── Control bar below both plots ───────────────────────────────────
         control_bar = QtWidgets.QFrame()
         control_bar.setObjectName("PlotControlBar")
+        self.plot_control_bar = control_bar
         cb_layout = QtWidgets.QHBoxLayout(control_bar)
         cb_layout.setContentsMargins(8, 6, 8, 6)
         cb_layout.setSpacing(8)
@@ -625,6 +919,7 @@ class MainWindow(QtWidgets.QMainWindow):
         content_splitter.addWidget(plot_card)
 
         lower_container = QtWidgets.QWidget()
+        self.lower_container = lower_container
         lower = QtWidgets.QHBoxLayout()
         lower.setSpacing(18)
         lower.setContentsMargins(0, 0, 0, 0)
@@ -683,8 +978,11 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMinimumWidth(260)
-        scroll.setMaximumWidth(340)
+        scroll.setMinimumWidth(0)
+        scroll.setMaximumWidth(360)
+        scroll.setSizeAdjustPolicy(
+            QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
         scroll.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -692,12 +990,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         frame = QtWidgets.QFrame()
         frame.setObjectName("InspectorPanel")
+        frame.setMinimumWidth(0)
+        frame.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         selector_card = QtWidgets.QFrame()
         selector_card.setObjectName("SelectorCard")
+        selector_card.setMinimumWidth(0)
         selector_layout = QtWidgets.QVBoxLayout(selector_card)
         selector_layout.setContentsMargins(16, 16, 16, 16)
         selector_layout.setSpacing(10)
@@ -780,8 +1084,62 @@ class MainWindow(QtWidgets.QMainWindow):
         selector_layout.addLayout(selection_colors_row)
         layout.addWidget(selector_card, 1)
 
+        standards_card = QtWidgets.QFrame()
+        standards_card.setObjectName("SessionCard")
+        self.standards_card = standards_card
+        standards_layout = QtWidgets.QFormLayout(standards_card)
+        standards_layout.setContentsMargins(16, 16, 16, 16)
+        standards_layout.setSpacing(9)
+        standards_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        standards_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        standards_title = QtWidgets.QLabel("Calibration materials")
+        standards_title.setObjectName("SectionTitle")
+        standards_layout.addRow(standards_title)
+
+        self.primary_68_combo = StyledComboBox()
+        self.primary_76_combo = StyledComboBox()
+        self.primary_82_combo = StyledComboBox()
+        self.primary_68_combo.currentTextChanged.connect(
+            self.on_primary_68_standard_changed
+        )
+        self.primary_76_combo.currentTextChanged.connect(
+            self.on_primary_76_standard_changed
+        )
+        self.primary_82_combo.currentTextChanged.connect(
+            self.on_primary_82_standard_changed
+        )
+        standards_layout.addRow("Pb/U primary", self.primary_68_combo)
+        standards_layout.addRow("Pb/Pb primary", self.primary_76_combo)
+        standards_layout.addRow("Th/Pb primary", self.primary_82_combo)
+
+        self.concentration_standards_edit = QtWidgets.QLineEdit()
+        self.concentration_standards_edit.setPlaceholderText(
+            "NIST610, NIST612"
+        )
+        self.concentration_standards_edit.editingFinished.connect(
+            self.on_concentration_standards_changed
+        )
+        standards_layout.addRow(
+            "Concentration",
+            self.concentration_standards_edit,
+        )
+        self.secondary_standards_edit = QtWidgets.QLineEdit()
+        self.secondary_standards_edit.setPlaceholderText(
+            "Comma-separated secondary materials"
+        )
+        self.secondary_standards_edit.editingFinished.connect(
+            self.on_secondary_standards_changed
+        )
+        standards_layout.addRow("Secondary", self.secondary_standards_edit)
+        layout.addWidget(standards_card, 0)
+
         fit_card = QtWidgets.QFrame()
         fit_card.setObjectName("SessionCard")
+        self.fit_card = fit_card
         fit_layout = QtWidgets.QVBoxLayout(fit_card)
         fit_layout.setContentsMargins(16, 16, 16, 16)
         fit_layout.setSpacing(10)
@@ -808,6 +1166,32 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         fit_layout.addWidget(self.downhole_fit_stack)
 
+        outlier_row = QtWidgets.QHBoxLayout()
+        self.downhole_outlier_check = QtWidgets.QCheckBox(
+            "Filter primary-sweep anomalies"
+        )
+        self.downhole_outlier_check.setChecked(
+            self.session.downhole_outlier_sigma is not None
+        )
+        self.downhole_outlier_check.toggled.connect(
+            self.on_downhole_outlier_filter_toggled
+        )
+        self.downhole_outlier_sigma_spin = QtWidgets.QDoubleSpinBox()
+        self.downhole_outlier_sigma_spin.setRange(1.0, 20.0)
+        self.downhole_outlier_sigma_spin.setDecimals(1)
+        self.downhole_outlier_sigma_spin.setSingleStep(0.5)
+        self.downhole_outlier_sigma_spin.setSuffix(" σ")
+        self.downhole_outlier_sigma_spin.setValue(
+            self.session.downhole_outlier_sigma or 5.0
+        )
+        self.downhole_outlier_sigma_spin.valueChanged.connect(
+            self.on_downhole_outlier_sigma_changed
+        )
+        outlier_row.addWidget(self.downhole_outlier_check)
+        outlier_row.addStretch(1)
+        outlier_row.addWidget(self.downhole_outlier_sigma_spin)
+        fit_layout.addLayout(outlier_row)
+
         session_label = QtWidgets.QLabel("Session fit")
         session_label.setObjectName("WorkflowLabel")
         self.session_fit_combo = StyledComboBox()
@@ -831,6 +1215,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_settings_note_label.setWordWrap(True)
         fit_layout.addWidget(self.fit_settings_note_label)
         layout.addWidget(fit_card, 0)
+
+        decision_card = QtWidgets.QFrame()
+        decision_card.setObjectName("SessionCard")
+        self.decision_card = decision_card
+        decision_layout = QtWidgets.QFormLayout(decision_card)
+        decision_layout.setContentsMargins(16, 16, 16, 16)
+        decision_layout.setSpacing(10)
+        decision_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        decision_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        decision_title = QtWidgets.QLabel("Final result decisions")
+        decision_title.setObjectName("SectionTitle")
+        decision_layout.addRow(decision_title)
+
+        self.common_pb_method_combo = StyledComboBox()
+        for label, method in (
+            ("No common-Pb correction", "none"),
+            ("204Pb method", "204"),
+            ("207 method", "207"),
+            ("208 method", "208"),
+        ):
+            self.common_pb_method_combo.addItem(label, method)
+        self.common_pb_method_combo.currentIndexChanged.connect(
+            self.on_common_pb_method_changed
+        )
+        decision_layout.addRow("Preferred branch", self.common_pb_method_combo)
+
+        self.calibration_uncertainty_check = QtWidgets.QCheckBox(
+            "Include calibration uncertainty"
+        )
+        self.calibration_uncertainty_check.setChecked(
+            self.session.include_calibration_uncertainty
+        )
+        self.calibration_uncertainty_check.toggled.connect(
+            self.on_calibration_uncertainty_toggled
+        )
+        decision_layout.addRow(self.calibration_uncertainty_check)
+
+        self.age_transition_spin = QtWidgets.QDoubleSpinBox()
+        self.age_transition_spin.setRange(0.0, 4600.0)
+        self.age_transition_spin.setDecimals(1)
+        self.age_transition_spin.setSingleStep(50.0)
+        self.age_transition_spin.setSuffix(" Ma")
+        self.age_transition_spin.setValue(self.session.age_transition_ma)
+        self.age_transition_spin.valueChanged.connect(
+            self.on_age_transition_changed
+        )
+        decision_layout.addRow("Age transition", self.age_transition_spin)
+        layout.addWidget(decision_card, 0)
         scroll.setWidget(frame)
         return scroll
 
@@ -942,7 +1378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lowess_layout.addWidget(lowess_label)
         pages["lowess"] = stack.addWidget(lowess_page)
 
-        for method in ("interpolated", "linear", "cubic_spline"):
+        for method in ("mean", "interpolated", "linear", "cubic_spline"):
             pages[method] = pages["none"]
 
         return pages
@@ -953,13 +1389,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _invalidate_downhole_fit_cache(self) -> None:
         self.session.reduction_cache.pop("downhole_results", None)
         self.session.reduction_cache.pop("session_correction_results", None)
+        self.session.reduction_cache.pop("spot_mean_results", None)
+        self.session.reduction_cache.pop("depth_profile_results", None)
+        self.session.reduction_cache.pop("finalized_results", None)
+        if self.session.pipeline is not None:
+            self.session.pipeline.cache.invalidate(PipelineStage.DOWNHOLE)
 
     def _invalidate_session_fit_cache(self) -> None:
         self.session.reduction_cache.pop("session_correction_results", None)
+        self.session.reduction_cache.pop("spot_mean_results", None)
+        self.session.reduction_cache.pop("depth_profile_results", None)
+        self.session.reduction_cache.pop("finalized_results", None)
+        if self.session.pipeline is not None:
+            self.session.pipeline.cache.invalidate(PipelineStage.SESSION)
 
     def _sync_fit_controls(self) -> None:
         self._is_populating = True
         try:
+            self.populate_standard_controls()
             for combo, method, methods in [
                 (self.downhole_fit_combo, self.session.downhole_fit_method, DOWNHOLE_FIT_METHODS),
                 (self.session_fit_combo, self.session.session_fit_method, SESSION_FIT_METHODS),
@@ -972,10 +1419,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.downhole_polynomial_degree_spin.setValue(int(self.session.downhole_fit_options.get("polynomial_degree", 2)))
             self.downhole_running_mean_window_spin.setValue(int(self.session.downhole_fit_options.get("running_mean_window", 5)))
             self.downhole_exponential_decay_spin.setValue(float(self.session.downhole_fit_options.get("exponential_initial_decay", 0.1)))
+            self.downhole_outlier_check.setChecked(
+                self.session.downhole_outlier_sigma is not None
+            )
+            self.downhole_outlier_sigma_spin.setEnabled(
+                self.session.downhole_outlier_sigma is not None
+            )
+            if self.session.downhole_outlier_sigma is not None:
+                self.downhole_outlier_sigma_spin.setValue(
+                    float(self.session.downhole_outlier_sigma)
+                )
 
             self.session_polynomial_degree_spin.setValue(int(self.session.session_fit_options.get("polynomial_degree", self.workflow_preset.session_polynomial_degree)))
             self.session_running_mean_window_spin.setValue(int(self.session.session_fit_options.get("running_mean_window", 5)))
             self.session_exponential_decay_spin.setValue(float(self.session.session_fit_options.get("exponential_initial_decay", 0.001)))
+            decision_index = self.common_pb_method_combo.findData(
+                self.session.common_pb_method
+            )
+            if decision_index >= 0:
+                self.common_pb_method_combo.setCurrentIndex(decision_index)
+            self.calibration_uncertainty_check.setChecked(
+                self.session.include_calibration_uncertainty
+            )
+            self.age_transition_spin.setValue(
+                float(self.session.age_transition_ma)
+            )
         finally:
             self._is_populating = False
 
@@ -983,12 +1451,65 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_fit_stack_page(self.session_fit_stack, self._session_fit_pages, self.session.session_fit_method)
         self._update_fit_settings_note()
 
+    def populate_standard_controls(self) -> None:
+        """Populate standard selectors from configured and observed samples."""
+        configured = [
+            self.session.primary_68_standard
+            or self.workflow_preset.primary_standard,
+            self.session.primary_76_standard
+            or self.workflow_preset.pb_ratio_standard,
+            self.session.primary_82_standard
+            or self.workflow_preset.th_ratio_standard,
+        ]
+        observed = (
+            self.session.total_data["sample"]
+            .dropna()
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+            if self.session.loaded and "sample" in self.session.total_data
+            else []
+        )
+        choices = [
+            value
+            for value in dict.fromkeys([*configured, *observed])
+            if value
+        ]
+        for combo, selected in zip(
+            (
+                self.primary_68_combo,
+                self.primary_76_combo,
+                self.primary_82_combo,
+            ),
+            configured,
+        ):
+            combo.clear()
+            combo.addItems(choices)
+            index = combo.findText(selected)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        concentration = (
+            self.session.concentration_standards
+            or self.workflow_preset.concentration_standards
+        )
+        secondary = (
+            self.session.secondary_standards
+            or self.workflow_preset.secondary_standards
+        )
+        self.concentration_standards_edit.setText(", ".join(concentration))
+        self.secondary_standards_edit.setText(", ".join(secondary))
+
     def _update_fit_settings_note(self) -> None:
         downhole_label = fit_method_label(self.session.downhole_fit_method)
         session_label = fit_method_label(self.session.session_fit_method)
         parts = [
             f"Downhole: {downhole_label}",
             f"Session: {session_label}",
+            (
+                f"primary-sweep filter {self.session.downhole_outlier_sigma:g} σ"
+                if self.session.downhole_outlier_sigma is not None
+                else "primary-sweep filter off"
+            ),
         ]
         if self.session.downhole_fit_method == "polynomial":
             parts.append(f"downhole degree {int(self.session.downhole_fit_options.get('polynomial_degree', 2))}")
@@ -1005,7 +1526,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_downhole_fit_method_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
             return
-        method = str(self.downhole_fit_combo.itemData(index) or "interpolated")
+        method = str(self.downhole_fit_combo.itemData(index) or "mean")
         self.session.downhole_fit_method = method
         self._set_fit_stack_page(self.downhole_fit_stack, self._downhole_fit_pages, method)
         self._invalidate_downhole_fit_cache()
@@ -1025,6 +1546,100 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Session fit method set to {fit_method_label(method)}.")
         if self.session.loaded:
             self.refresh_view()
+
+    def invalidate_final_decisions(self) -> None:
+        """Discard only products affected by common-Pb or age choices."""
+        self.session.reduction_cache.pop("finalized_results", None)
+        if self.session.pipeline is not None:
+            self.session.pipeline.cache.invalidate(PipelineStage.FINALIZE)
+
+    def on_primary_68_standard_changed(self, value: str) -> None:
+        """Set the Pb/U reference material used by both correction stages."""
+        if self._is_populating or not value:
+            return
+        self.session.primary_68_standard = value
+        self._invalidate_downhole_fit_cache()
+        self._refresh_workflow_status()
+
+    def on_primary_76_standard_changed(self, value: str) -> None:
+        """Set the Pb/Pb reference material used by both correction stages."""
+        if self._is_populating or not value:
+            return
+        self.session.primary_76_standard = value
+        self._invalidate_downhole_fit_cache()
+        self._refresh_workflow_status()
+
+    def on_primary_82_standard_changed(self, value: str) -> None:
+        """Set the Th/Pb reference material used by both correction stages."""
+        if self._is_populating or not value:
+            return
+        self.session.primary_82_standard = value
+        self._invalidate_downhole_fit_cache()
+        self._refresh_workflow_status()
+
+    def on_concentration_standards_changed(self) -> None:
+        """Parse comma-separated elemental calibration materials."""
+        if self._is_populating:
+            return
+        values = tuple(
+            value.strip()
+            for value in self.concentration_standards_edit.text().split(",")
+            if value.strip()
+        )
+        if not values:
+            self.statusBar().showMessage(
+                "Keep at least one concentration standard."
+            )
+            self._sync_fit_controls()
+            return
+        self.session.concentration_standards = values
+        for key in (
+            "concentration_results",
+            "spot_mean_results",
+            "finalized_results",
+        ):
+            self.session.reduction_cache.pop(key, None)
+        if self.session.pipeline is not None:
+            self.session.pipeline.cache.invalidate(PipelineStage.CONCENTRATION)
+        self._refresh_workflow_status()
+
+    def on_secondary_standards_changed(self) -> None:
+        """Parse materials used for weighted-mean and MSWD summaries."""
+        if self._is_populating:
+            return
+        self.session.secondary_standards = tuple(
+            value.strip()
+            for value in self.secondary_standards_edit.text().split(",")
+            if value.strip()
+        )
+        self.invalidate_final_decisions()
+        self._refresh_workflow_status()
+
+    def on_common_pb_method_changed(self, index: int) -> None:
+        """Choose the common-Pb branch used in the concise final table."""
+        if self._is_populating or index < 0:
+            return
+        self.session.common_pb_method = str(
+            self.common_pb_method_combo.itemData(index) or "none"
+        )
+        self.invalidate_final_decisions()
+        self._refresh_workflow_status()
+
+    def on_calibration_uncertainty_toggled(self, checked: bool) -> None:
+        """Choose the calibrated or analytical-only uncertainty branch."""
+        if self._is_populating:
+            return
+        self.session.include_calibration_uncertainty = bool(checked)
+        self.invalidate_final_decisions()
+        self._refresh_workflow_status()
+
+    def on_age_transition_changed(self, value: float) -> None:
+        """Set the age boundary for Pb/U versus Pb/Pb preferred ages."""
+        if self._is_populating:
+            return
+        self.session.age_transition_ma = float(value)
+        self.invalidate_final_decisions()
+        self._refresh_workflow_status()
 
     def on_downhole_polynomial_degree_changed(self, value: int) -> None:
         if self._is_populating:
@@ -1052,6 +1667,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_fit_settings_note()
         if self.session.loaded and self.session.downhole_fit_method == "running_mean":
             self.refresh_view()
+
+    def on_downhole_outlier_filter_toggled(self, checked: bool) -> None:
+        """Enable or disable robust cross-standard sweep filtering."""
+        if self._is_populating:
+            return
+        self.downhole_outlier_sigma_spin.setEnabled(checked)
+        self.session.downhole_outlier_sigma = (
+            float(self.downhole_outlier_sigma_spin.value())
+            if checked
+            else None
+        )
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+
+    def on_downhole_outlier_sigma_changed(self, value: float) -> None:
+        """Update the active robust downhole anomaly cutoff."""
+        if self._is_populating or not self.downhole_outlier_check.isChecked():
+            return
+        self.session.downhole_outlier_sigma = float(value)
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
 
     def on_session_running_mean_window_changed(self, value: int) -> None:
         if self._is_populating:
@@ -1120,6 +1756,10 @@ class MainWindow(QtWidgets.QMainWindow):
         current_path = self.reference_library_path or current_standard_archive_path()
         self.reference_library_label.setText(f"Current library: {current_path}")
         self.reference_library_default_label.setText(f"Default library: {self.default_reference_library_path}")
+        self.reference_library_button.setToolTip(
+            f"Current: {current_path}\n"
+            f"Default: {self.default_reference_library_path}"
+        )
 
     def choose_reference_material_library(self) -> None:
         start_directory = str(Path(self.reference_library_path).expanduser().parent) if self.reference_library_path else str(Path.home())
@@ -1127,7 +1767,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             "Select reference material library",
             start_directory,
-            "CSV Files (*.csv)",
+            "UPbRPy libraries (library.toml *.csv);;"
+            "TOML manifest (library.toml);;Legacy CSV (*.csv)",
         )
         if not file_path:
             return
@@ -1154,11 +1795,90 @@ class MainWindow(QtWidgets.QMainWindow):
         if directory:
             self.load_experiment_directory(directory)
 
+    def choose_notebook_export(self) -> None:
+        """Save the current GUI settings and reviewed windows as a notebook."""
+        if not self._require_loaded() or self.session.pipeline is None:
+            return
+        default_name = (
+            Path(self.session.directory).name
+            + "_UPbRPy_reproducible.ipynb"
+        )
+        target, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export reproducible Jupyter notebook",
+            str(Path(self.session.directory).parent / default_name),
+            "Jupyter Notebook (*.ipynb)",
+        )
+        if not target:
+            return
+        try:
+            pipeline = ensure_shared_pipeline(
+                self.session,
+                self.workflow_preset,
+            )
+            written = write_reproducibility_notebook(
+                pipeline,
+                target,
+            )
+        except Exception as exc:
+            self._handle_action_error("Notebook export failed", exc)
+            return
+        self.append_log(f"Exported reproducible notebook: {written}")
+        self.statusBar().showMessage(f"Notebook saved to {written}")
+
+    def choose_reduction_bundle_export(self) -> None:
+        """Export publication tables, audit products, and replay notebook."""
+        if not self._require_loaded() or self.session.pipeline is None:
+            return
+        target = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Choose reduction export folder",
+            str(Path(self.session.directory).parent),
+        )
+        if not target:
+            return
+        pipeline = ensure_shared_pipeline(
+            self.session,
+            self.workflow_preset,
+        )
+
+        def show_result(result: object) -> None:
+            bundle = result
+            self.append_log(
+                f"Exported {len(bundle.files)} files to {bundle.directory}."
+            )
+            for warning in bundle.warnings:
+                self.append_log(f"Export warning: {warning}")
+            self.statusBar().showMessage(
+                f"Reduction bundle saved to {bundle.directory}"
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Exporting reduction bundle",
+            lambda: export_reduction_bundle(
+                pipeline,
+                target,
+                include_depth_profile=(
+                    self.workflow_preset.supports_depth_profiles
+                ),
+                hash_inputs=False,
+            ),
+            show_result,
+        )
+
     def reload_current_directory(self) -> None:
         if self.session.directory:
             self.load_experiment_directory(self.session.directory, primary_channel=self.session.primary_channel)
 
-    def load_experiment_directory(self, directory: str, primary_channel: str | None = None) -> None:
+    def load_experiment_directory(
+        self,
+        directory: str,
+        primary_channel: str | None = None,
+        *,
+        background: bool = True,
+    ) -> None:
+        """Load an experiment, using a worker for normal interactive use."""
         inferred_preset = infer_workflow_preset(directory)
         if inferred_preset.key != self.workflow_preset.key:
             self.workflow_preset = inferred_preset
@@ -1167,26 +1887,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self.append_log(f"Inferred {self.workflow_preset.title.lower()} workflow from folder name.")
 
         chosen_primary = primary_channel or self.primary_channel_combo.currentText() or self.workflow_preset.primary_channel or self.session.primary_channel or "238U"
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-        try:
-            self.session = load_session(
+        calculation = lambda: load_session(
                 directory,
                 primary_channel=chosen_primary,
                 preset=self.workflow_preset,
                 selection_method=self.selection_method,
             )
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Failed to load experiment", str(exc))
-            self.append_log(f"Load failed for {directory}: {exc}")
-            return
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
 
+        if background:
+            self.run_background(
+                "Loading experiment",
+                calculation,
+                lambda result: self.install_loaded_session(
+                    result,
+                    directory,
+                ),
+            )
+            return
+        try:
+            loaded_session = calculation()
+        except Exception as exc:
+            self._handle_action_error("Failed to load experiment", exc)
+            return
+        self.install_loaded_session(loaded_session, directory)
+
+    def install_loaded_session(
+        self,
+        loaded_session: ReductionSession,
+        directory: str,
+    ) -> None:
+        """Install a worker-produced session and refresh lightweight widgets."""
+        self.session = loaded_session
         self.pending_region_updates.clear()
         self._focused_spot_name = None
         self.channel_colors = self._resolve_channel_colors(self.session.channels)
         self._populate_selectors()
+        self._sync_fit_controls()
         self._set_default_ratio_for_preset()
+        self._rebuild_workflow_actions()
         self.set_plot_mode("raw", refresh=False)
         self.refresh_view()
         self.append_log(f"Loaded experiment directory: {directory}")
@@ -1211,6 +1949,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_slopes_plot.apply_theme(active_theme(app))
         self.downhole_frac_plot.apply_theme(active_theme(app))
         self.session_frac_plot.apply_theme(active_theme(app))
+        self._update_workflow_hint(self.workflow_step_list.currentRow())
         # Rebuild channel colours for new background when a session is loaded
         if self.session.loaded:
             self.channel_colors = self._resolve_channel_colors(self.session.channels)
@@ -1246,6 +1985,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.workflow_combo.itemData(index) == self.workflow_preset.key:
                     self.workflow_combo.setCurrentIndex(index)
                     break
+            action = self.workflow_menu_actions.get(
+                self.workflow_preset.key
+            )
+            if action is not None:
+                action.setChecked(True)
         finally:
             self._is_populating = False
 
@@ -1256,6 +2000,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.selection_method_combo.itemData(index) == self.selection_method:
                     self.selection_method_combo.setCurrentIndex(index)
                     break
+            action = self.selection_menu_actions.get(self.selection_method)
+            if action is not None:
+                action.setChecked(True)
         finally:
             self._is_populating = False
 
@@ -1274,22 +2021,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_populating = True
         try:
             self.workflow_step_list.clear()
-            for index, step in enumerate(self.workflow_preset.steps, start=1):
-                item = QtWidgets.QListWidgetItem(f"  {index}.  {step.title}")
-                item.setToolTip(step.summary)
-                item_height = 72 if len(step.title) > 38 else 56
-                item.setSizeHint(QtCore.QSize(0, item_height))
+            theme = active_theme(QtWidgets.QApplication.instance())
+            for index, step in enumerate(self.workflow_preset.steps):
+                stage = self.workflow_preset.stage_sequence[index]
+                label = WORKFLOW_STAGE_LABELS.get(stage, step.title)
+                item = QtWidgets.QListWidgetItem(
+                    build_workflow_stage_icon(
+                        stage.value,
+                        state="ready",
+                        accent=theme.accent,
+                        muted=theme.muted,
+                        success=theme.success,
+                    ),
+                    f"{index + 1}  {label}",
+                )
+                item.setToolTip(
+                    f"<b>{index + 1}. {step.title}</b><br>{step.summary}"
+                )
+                item.setSizeHint(QtCore.QSize(0, 45))
                 self.workflow_step_list.addItem(item)
             if self.workflow_step_list.count() > 0:
                 self.workflow_step_list.setCurrentRow(0)
         finally:
             self._is_populating = False
         self._resize_workflow_step_list_to_contents()
+        self.adapt_workflow_rail_height(self.height())
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._rebuild_workflow_actions()
         self._refresh_workflow_status()
 
     def _resize_workflow_step_list_to_contents(self) -> None:
+        if self.workflow_step_list.objectName() == "WorkflowStepRail":
+            self.workflow_step_list.setMinimumHeight(180)
+            self.workflow_step_list.setMaximumHeight(16777215)
+            return
         count = self.workflow_step_list.count()
         total_height = self.workflow_step_list.frameWidth() * 2 + 8
         for index in range(count):
@@ -1308,14 +2073,36 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self.workflow_preset.steps[row].title
 
+    def current_workflow_stage(self) -> PipelineStage | None:
+        """Return the explicit core stage represented by the selected step."""
+        row = self.workflow_step_list.currentRow()
+        if row < 0 or row >= len(self.workflow_preset.stage_sequence):
+            return None
+        return self.workflow_preset.stage_sequence[row]
+
     def _update_workflow_hint(self, row: int) -> None:
         if row < 0 or row >= len(self.workflow_preset.steps):
             self.workflow_hint_title.setText("")
             self.workflow_hint_body.setText("")
+            self.workflow_context_icon.clear()
             return
         step = self.workflow_preset.steps[row]
-        self.workflow_hint_title.setText(step.summary)
+        stage = self.workflow_preset.stage_sequence[row]
+        self.workflow_hint_title.setText(
+            f"{row + 1}. {step.title}"
+        )
         self.workflow_hint_body.setText(step.hint)
+        theme = active_theme(QtWidgets.QApplication.instance())
+        self.workflow_context_icon.setPixmap(
+            build_workflow_stage_icon(
+                stage.value,
+                state="current",
+                size=34,
+                accent=theme.accent,
+                muted=theme.muted,
+                success=theme.success,
+            ).pixmap(34, 34)
+        )
 
     def on_workflow_preset_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
@@ -1330,7 +2117,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.directory:
             self.session.workflow_key = self.workflow_preset.key
             self.session.workflow_title = self.workflow_preset.title
-            self.session.reduction_cache.clear()
+            self.session.concentration_standards = (
+                self.workflow_preset.concentration_standards
+            )
+            self.session.primary_68_standard = (
+                self.workflow_preset.primary_standard
+            )
+            self.session.primary_76_standard = (
+                self.workflow_preset.pb_ratio_standard
+                or self.workflow_preset.primary_standard
+            )
+            self.session.primary_82_standard = (
+                self.workflow_preset.th_ratio_standard
+                or self.workflow_preset.pb_ratio_standard
+                or self.workflow_preset.primary_standard
+            )
+            self.session.secondary_standards = (
+                self.workflow_preset.secondary_standards
+            )
+            clear_reduction_cache(self.session)
+            ensure_shared_pipeline(self.session, self.workflow_preset)
+            self._sync_fit_controls()
             self.append_log(f"Workflow preset changed to {self.workflow_preset.title}; reload to apply notebook defaults.")
             self.refresh_view()
 
@@ -1373,10 +2180,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_reference_material(self, sample_name: str) -> bool:
         """Return True if *sample_name* fuzzy-matches any known RM name."""
         rm_names: set[str] = set()
-        if self.workflow_preset.primary_standard:
-            rm_names.add(self.workflow_preset.primary_standard)
-        rm_names.update(self.workflow_preset.secondary_standards)
-        rm_names.update(self.workflow_preset.concentration_standards)
+        for primary in (
+            self.session.primary_68_standard,
+            self.session.primary_76_standard,
+            self.session.primary_82_standard,
+            self.workflow_preset.primary_standard,
+        ):
+            if primary:
+                rm_names.add(primary)
+        rm_names.update(
+            self.session.secondary_standards
+            or self.workflow_preset.secondary_standards
+        )
+        rm_names.update(
+            self.session.concentration_standards
+            or self.workflow_preset.concentration_standards
+        )
         try:
             archive = current_standard_archive()
             rm_names.update(str(s) for s in archive.index.tolist() if s)
@@ -1963,7 +2782,14 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 button.setEnabled(cache_key is not None and cache_key in cache)
             button.blockSignals(False)
-        self.ratio_combo.setEnabled(self.session.plot_mode in {"raw_ratios", "downhole_ratios", "session_ratios"})
+        self.ratio_combo.setEnabled(
+            self.session.plot_mode
+            in {"raw_ratios", "downhole_ratios", "session_ratios"}
+        )
+        self.plot_control_bar.setEnabled(
+            self.session.plot_mode
+            not in {"depth_profile", "final_results"}
+        )
 
     def show_raw_traces(self) -> None:
         self.set_plot_mode("raw", refresh=True)
@@ -2099,6 +2925,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session_frac_plot.show_data(data, theme)
             return
 
+        if self.session.plot_mode == "final_results":
+            finalized = self.session.reduction_cache.get("finalized_results")
+            if finalized is not None:
+                self.results_table.show_results(finalized)
+            return
+
+        if self.session.plot_mode == "depth_profile":
+            depth_profile = self.session.reduction_cache.get(
+                "depth_profile_results"
+            )
+            if depth_profile is not None:
+                self.results_table.show_depth_profile(
+                    depth_profile,
+                    selected_spot,
+                )
+            return
+
         if self.session.plot_mode == "raw":
             self.trace_plot.show_spot(
                 self.session.total_data,
@@ -2166,9 +3009,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_spots_label.setText(summary["spots"])
         self.project_engine_label.setText(summary["engine"])
 
-    def _apply_metrics(self, metrics: dict[str, str]) -> None:
-        pass  # metric cards removed
-
     def _rebuild_workflow_actions(self) -> None:
         while self.workflow_actions_layout.count():
             item = self.workflow_actions_layout.takeAt(0)
@@ -2183,68 +3023,77 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setProperty("accent", True)
             button.clicked.connect(handler)
             self.workflow_actions_layout.addWidget(button)
-            if index >= 2:
+            if index >= 1:
                 break
 
     def _workflow_action_specs(self) -> list[tuple[str, object, bool]]:
         if not self.session.loaded:
             return [("Import experiment directory", self.choose_experiment_directory, True)]
 
-        title = (self.current_workflow_step_title() or "").lower()
-        if "import" in title:
+        stage = self.current_workflow_stage()
+        if stage == PipelineStage.IMPORT:
             return [
                 ("Auto-pick current spot", self.run_autopick_current_spot, True),
                 ("Reload session defaults", self.reload_current_directory, False),
             ]
-        if "review baseline" in title:
+        if stage == PipelineStage.SELECTION:
             return [
                 ("Apply baseline and plateau edits", self.apply_current_windows, True),
                 ("Reset current spot", self.run_autopick_current_spot, False),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
-        if "subtract baseline" in title:
+        if stage == PipelineStage.BASELINE:
             return [
                 ("Subtract baseline", self.run_baseline_preview, True),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
-        if "internal normalization" in title:
+        if stage == PipelineStage.NORMALIZATION:
             return [
                 ("Apply internal normalization", self.run_internal_normalization_preview, True),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
-        if "calibrate" in title or "concentration" in title or "thermometry" in title:
+        if stage == PipelineStage.CONCENTRATION:
             return [
                 ("Calibrate and calculate concentrations", self.run_concentration_stage, True),
                 ("Show normalized plateau", self.run_internal_normalization_preview, False),
             ]
-        if "raw isotope" in title or "raw ratio" in title:
+        if stage == PipelineStage.RATIOS:
             return [
                 ("Build raw isotope ratios", self.run_raw_ratio_preview, True),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
-        if "downhole" in title:
+        if stage == PipelineStage.DOWNHOLE:
             return [
                 ("Apply downhole fractionation", self.run_downhole_preview, True),
                 ("Show raw isotope ratios", self.run_raw_ratio_preview, False),
             ]
-        if "session fractionation" in title or "session-wide" in title:
+        if stage == PipelineStage.SESSION:
             return [
                 ("Apply session fractionation", self.run_session_correction_preview, True),
                 ("Show downhole fractionation", self.run_downhole_preview, False),
             ]
+        if stage == PipelineStage.DEPTH_PROFILE:
+            return [
+                ("Calculate depth profiles", self.run_depth_profile_review, True),
+                ("Show final spot means", self.run_final_review, False),
+            ]
         return [
-            ("Show final corrected ratios", self.run_final_review, True),
-            ("Show raw traces", self.show_raw_traces, False),
+            ("Calculate final results", self.run_final_review, True),
+            ("Show session correction", self.run_session_correction_preview, False),
         ]
 
     def _workflow_step_allows_region_edits(self) -> bool:
-        title = (self.current_workflow_step_title() or "").lower()
-        return "import" in title or "review baseline" in title
+        return self.current_workflow_stage() in {
+            PipelineStage.IMPORT,
+            PipelineStage.SELECTION,
+        }
 
     def _refresh_workflow_status(self) -> None:
         self._sync_workflow_step_locks()
         if not self.session.loaded:
-            self.workflow_status_label.setText("Load a session to activate workflow actions and selection checks.")
+            message = "Open an experiment to begin"
+            self.workflow_status_label.setText(message)
+            self.workflow_status_label.setToolTip(message)
             return
         quality = selection_quality(self.session, self.current_spot_name())
         parts = [
@@ -2260,46 +3109,22 @@ class MainWindow(QtWidgets.QMainWindow):
         materials = reference_material_summary(self.session, self.workflow_preset)
         if materials:
             parts.append(materials)
-        self.workflow_status_label.setText(" | ".join(parts))
-
-    def _step_is_unlocked(self, step_title: str, cache: dict) -> bool:
-        """Return True if the workflow step with the given title is available."""
-        title_lower = step_title.lower()
-        for keyword, prereq_key in _STEP_PREREQUISITE.items():
-            if keyword in title_lower:
-                if prereq_key is None:
-                    return True  # needs only a loaded session
-                return prereq_key in cache
-        # Unknown step keyword: unlock only if session is loaded
-        return True
-
-    def _step_completion_cache_key(self, step_title: str) -> str | None:
-        title_lower = step_title.lower()
-        if "import" in title_lower:
-            return "__loaded__"
-        if "review baseline" in title_lower:
-            return "baseline_subtracted_total_data"
-        if "subtract baseline" in title_lower:
-            return "baseline_subtracted_total_data"
-        if "internal normalization" in title_lower:
-            return "normalized_plateau_data"
-        if "filter glass outliers" in title_lower:
-            return "concentration_results"
-        if "calibrate" in title_lower or "concentration" in title_lower or "thermometry" in title_lower:
-            return "concentration_results"
-        if "raw isotope" in title_lower or "raw ratio" in title_lower:
-            return "plateau_data_with_raw_ratios"
-        if "downhole" in title_lower:
-            return "downhole_results"
-        if "session fractionation" in title_lower or "session-wide" in title_lower:
-            return "session_correction_results"
-        if "dates" in title_lower or "final" in title_lower or "review" in title_lower or "depth-profile" in title_lower:
-            return "session_correction_results"
-        return None
+        full_status = " | ".join(parts)
+        compact_status = (
+            f"B {quality['baseline_points']} · "
+            f"P {quality['plateau_points']} · "
+            f"{'Review warning' if quality['warnings'] else 'Selections ready'}"
+        )
+        self.workflow_status_label.setText(compact_status)
+        self.workflow_status_label.setToolTip(full_status)
 
     def _sync_workflow_step_locks(self) -> None:
-        """Grey out workflow steps whose prerequisites are not yet met, and show status symbols."""
-        cache = self.session.reduction_cache if self.session.loaded else {}
+        """Show ordered stage state from the shared dependency-aware cache."""
+        completed = (
+            set(self.session.pipeline.cache.stages())
+            if self.session.loaded and self.session.pipeline is not None
+            else set()
+        )
         app = QtWidgets.QApplication.instance()
         theme = active_theme(app) if app else None
         muted_color = QtGui.QColor(theme.muted) if theme else QtGui.QColor("#888888")
@@ -2309,38 +3134,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for index in range(self.workflow_step_list.count()):
             item = self.workflow_step_list.item(index)
-            if index >= len(self.workflow_preset.steps):
+            if index >= len(self.workflow_preset.stage_sequence):
                 continue
-            step = self.workflow_preset.steps[index]
-            unlocked = self.session.loaded and self._step_is_unlocked(step.title, cache)
-            # Step 0 (Import) is always clickable even before session loads
+            stage = self.workflow_preset.stage_sequence[index]
+            is_done = stage in completed
             if index == 0:
                 unlocked = True
+            else:
+                previous_stage = self.workflow_preset.stage_sequence[index - 1]
+                unlocked = self.session.loaded and previous_stage in completed
 
-            step_cache_key = self._step_completion_cache_key(step.title)
-            is_done = False
-            if step_cache_key == "__loaded__":
-                is_done = self.session.loaded
-            elif step_cache_key is not None:
-                is_done = step_cache_key in cache
-
-            # Choose prefix symbol
             if not unlocked:
-                prefix = "⊘ "
                 color = muted_color
+                icon_state = "locked"
             elif is_done:
-                prefix = "✓ "
                 color = done_color
+                icon_state = "complete"
             elif unlocked and not is_done:
                 is_current = self.workflow_step_list.currentRow() == index
-                prefix = "• " if is_current else "○ "
                 color = accent_color if is_current else normal_color
+                icon_state = "current" if is_current else "ready"
             else:
-                prefix = "  "
                 color = normal_color
+                icon_state = "ready"
 
-            title_text = f"  {index + 1}.  {step.title}"
-            item.setText(f"{prefix}{index + 1}.  {step.title}")
+            label = WORKFLOW_STAGE_LABELS.get(
+                stage,
+                self.workflow_preset.steps[index].title,
+            )
+            item.setText(f"{index + 1}  {label}")
+            item.setIcon(
+                build_workflow_stage_icon(
+                    stage.value,
+                    state=icon_state,
+                    accent=theme.accent if theme else "#2468d4",
+                    muted=theme.muted if theme else "#788da6",
+                    success=theme.success if theme else "#159a76",
+                )
+            )
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, stage.value)
 
             if unlocked:
                 item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
@@ -2393,6 +3225,62 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.critical(self, title, str(exc))
         self.append_log(f"{title} failed: {exc}")
 
+    def run_background(
+        self,
+        label: str,
+        calculation: Callable[[], object],
+        on_success: Callable[[object], None],
+    ) -> None:
+        """Run one scientific task without blocking Qt event processing."""
+        if self._active_worker is not None:
+            self.statusBar().showMessage(
+                f"Please wait for {self._busy_label.lower()} to finish."
+            )
+            return
+
+        worker = FunctionWorker(calculation)
+        self._active_worker = worker
+        self._busy_label = label
+        self.busy_progress.setVisible(True)
+        self.workflow_actions_card.setEnabled(False)
+        self.workflow_step_list.setEnabled(False)
+        self.fit_card.setEnabled(False)
+        self.standards_card.setEnabled(False)
+        self.decision_card.setEnabled(False)
+        self.primary_channel_combo.setEnabled(False)
+        self.workflow_combo.setEnabled(False)
+        self.selection_method_combo.setEnabled(False)
+        self.statusBar().showMessage(f"{label}…")
+
+        def report_success(result: object) -> None:
+            try:
+                on_success(result)
+            except Exception as exc:
+                self._handle_action_error(f"{label} display failed", exc)
+
+        def report_failure(message: str, details: str) -> None:
+            QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
+            self.append_log(f"{label} failed: {message}")
+            self.append_log(details.rstrip())
+
+        def finish() -> None:
+            self._active_worker = None
+            self._busy_label = ""
+            self.busy_progress.setVisible(False)
+            self.workflow_actions_card.setEnabled(True)
+            self.workflow_step_list.setEnabled(True)
+            self.fit_card.setEnabled(True)
+            self.standards_card.setEnabled(True)
+            self.decision_card.setEnabled(True)
+            self.primary_channel_combo.setEnabled(True)
+            self.workflow_combo.setEnabled(True)
+            self.selection_method_combo.setEnabled(True)
+
+        worker.signals.succeeded.connect(report_success)
+        worker.signals.failed.connect(report_failure)
+        worker.signals.finished.connect(finish)
+        self.thread_pool.start(worker)
+
     def _require_loaded(self) -> bool:
         if self.session.loaded:
             return True
@@ -2426,99 +3314,198 @@ class MainWindow(QtWidgets.QMainWindow):
         if not regions:
             self.statusBar().showMessage("Switch to the raw trace view to edit and apply windows.")
             return
-        update_selection_region(
-            self.session,
-            spot_name,
-            baseline=regions.get("baseline"),
-            plateau=regions.get("plateau"),
-        )
+        try:
+            update_selection_region(
+                self.session,
+                spot_name,
+                baseline=regions.get("baseline"),
+                plateau=regions.get("plateau"),
+                signal=regions.get("signal"),
+            )
+        except Exception as exc:
+            self._handle_action_error("Selection update failed", exc)
+            return
         self.pending_region_updates.clear()
-        self.append_log(f"Applied edited baseline/plateau windows for {spot_name}.")
+        self.append_log(
+            f"Applied baseline, plateau, and signal limits for {spot_name}."
+        )
         self.refresh_view()
 
     def run_baseline_preview(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            baseline_subtracted = ensure_baseline_subtracted(self.session)
-        except Exception as exc:
-            self._handle_action_error("Baseline preview failed", exc)
-            return
-        self.set_plot_mode("baseline_subtracted", refresh=False)
-        self.append_log(f"Baseline subtraction ready for {len(baseline_subtracted)} sweep rows.")
-        self.refresh_view()
+        def show_result(result: object) -> None:
+            baseline_subtracted = result
+            self.set_plot_mode("baseline_subtracted", refresh=False)
+            self.append_log(
+                f"Baseline subtraction ready for "
+                f"{len(baseline_subtracted)} sweep rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Subtracting baselines",
+            lambda: ensure_baseline_subtracted(self.session),
+            show_result,
+        )
 
     def run_internal_normalization_preview(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            normalized = ensure_normalized_plateau(self.session, self.workflow_preset)
-        except Exception as exc:
-            self._handle_action_error("Internal normalization failed", exc)
-            return
-        self.set_plot_mode("normalized_plateau", refresh=False)
-        self.append_log(f"Internal normalization ready for {len(normalized)} plateau rows.")
-        self.refresh_view()
+        def show_result(result: object) -> None:
+            normalized = result
+            self.set_plot_mode("normalized_plateau", refresh=False)
+            self.append_log(
+                f"Internal normalization ready for {len(normalized)} "
+                "plateau rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Applying internal normalization",
+            lambda: ensure_normalized_plateau(
+                self.session,
+                self.workflow_preset,
+            ),
+            show_result,
+        )
 
     def run_concentration_stage(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            results = ensure_concentration_results(self.session, self.workflow_preset)
-        except Exception as exc:
-            self._handle_action_error("Concentration stage failed", exc)
-            return
-        self.set_plot_mode("calibration_slopes", refresh=False)
-        self.append_log(
-            f"Concentration calibration ready with {results['calibrant_count']} calibrant rows and {results['result_count']} output rows."
+        def show_result(result: object) -> None:
+            results = result
+            self.set_plot_mode("calibration_slopes", refresh=False)
+            self.append_log(
+                f"Concentration calibration ready with "
+                f"{results['calibrant_count']} calibrant rows and "
+                f"{results['result_count']} output rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Calibrating concentrations",
+            lambda: ensure_concentration_results(
+                self.session,
+                self.workflow_preset,
+            ),
+            show_result,
         )
-        self.refresh_view()
 
     def run_raw_ratio_preview(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            ratios = ensure_raw_ratios(self.session)
-        except Exception as exc:
-            self._handle_action_error("Raw ratio preview failed", exc)
-            return
-        self.set_plot_mode("raw_ratios", refresh=False)
-        self.append_log(f"Raw isotope ratios ready for {len(ratios)} plateau rows.")
-        self.refresh_view()
+        def show_result(result: object) -> None:
+            ratios = result
+            self.set_plot_mode("raw_ratios", refresh=False)
+            self.append_log(
+                f"Raw isotope ratios ready for {len(ratios)} plateau rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Building isotope ratios",
+            lambda: ensure_raw_ratios(self.session),
+            show_result,
+        )
 
     def run_downhole_preview(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            results = ensure_downhole_results(self.session, self.workflow_preset)
-        except Exception as exc:
-            self._handle_action_error("Downhole correction failed", exc)
-            return
-        self.set_plot_mode("downhole_ratios", refresh=False)
-        self.append_log(
-            f"Downhole correction ready using {results.get('fit_label', 'Interpolated')} smoothing with {self.workflow_preset.primary_standard} and {len(results['corrected_ratios'])} plateau rows."
+        def show_result(result: object) -> None:
+            results = result
+            self.set_plot_mode("downhole_ratios", refresh=False)
+            self.append_log(
+                f"Downhole correction ready using "
+                f"{results.get('fit_label', 'Pointwise mean')} with "
+                f"{self.session.primary_68_standard} and "
+                f"{len(results['corrected_ratios'])} plateau rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Fitting downhole fractionation",
+            lambda: ensure_downhole_results(
+                self.session,
+                self.workflow_preset,
+            ),
+            show_result,
         )
-        self.refresh_view()
 
     def run_session_correction_preview(self) -> None:
         if not self._require_loaded():
             return
-        try:
-            results = ensure_session_corrected(self.session, self.workflow_preset)
-        except Exception as exc:
-            self._handle_action_error("Session correction failed", exc)
-            return
-        self.set_plot_mode("session_ratios", refresh=False)
-        self.append_log(
-            f"Session correction ready using {results.get('fit_label', 'Polynomial')} smoothing for {len(results['corrected_ratios'])} corrected plateau rows."
+        def show_result(result: object) -> None:
+            results = result
+            self.set_plot_mode("session_ratios", refresh=False)
+            self.append_log(
+                f"Session correction ready using "
+                f"{results.get('fit_label', 'Polynomial')} for "
+                f"{len(results['corrected_ratios'])} corrected plateau rows."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Fitting session fractionation",
+            lambda: ensure_session_corrected(
+                self.session,
+                self.workflow_preset,
+            ),
+            show_result,
         )
-        self.refresh_view()
 
     def run_final_review(self) -> None:
         if not self._require_loaded():
             return
-        self.run_session_correction_preview()
-        self.append_log("Final corrected ratio preview ready for concordia and export review.")
+        def calculate_final():
+            spot_means = ensure_spot_means(
+                self.session,
+                self.workflow_preset,
+            )
+            final = ensure_finalized_results(
+                self.session,
+                self.workflow_preset,
+            )
+            return spot_means, final
+
+        def show_result(result: object) -> None:
+            spot_means, final = result
+            self.set_plot_mode("final_results", refresh=False)
+            final_table = getattr(final, "selected_results", spot_means)
+            self.append_log(
+                f"Final reduction ready for {len(final_table)} spots, "
+                "including parallel common-Pb outputs, automatic flags, "
+                "and preferred ages."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Finalizing reduction",
+            calculate_final,
+            show_result,
+        )
+
+    def run_depth_profile_review(self) -> None:
+        """Calculate and retain the corrected full-signal sweep product."""
+        if not self._require_loaded():
+            return
+        def show_result(result: object) -> None:
+            depth_profile = result
+            self.set_plot_mode("depth_profile", refresh=False)
+            self.append_log(
+                f"Depth-profile reduction ready for {len(depth_profile)} "
+                "corrected signal sweeps."
+            )
+            self.refresh_view()
+
+        self.run_background(
+            "Calculating depth profiles",
+            lambda: ensure_depth_profile(
+                self.session,
+                self.workflow_preset,
+            ),
+            show_result,
+        )
 
     def append_log(self, message: str) -> None:
         current = self.log_view.toPlainText().rstrip()

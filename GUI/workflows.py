@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from UPbRPy.pipeline import PipelineStage
+
 
 @dataclass(frozen=True)
 class WorkflowStep:
@@ -22,8 +24,12 @@ class WorkflowPreset:
     supports_depth_profiles: bool
     special_note: str
     steps: tuple[WorkflowStep, ...]
+    stage_sequence: tuple[PipelineStage, ...]
     concentration_standards: tuple[str, ...] = ()
     primary_standard: str = ""
+    pb_ratio_standard: str = ""
+    th_ratio_standard: str = ""
+    common_pb_calibration: str = "radiogenic"
     secondary_standards: tuple[str, ...] = ()
     session_polynomial_degree: int = 2
     default_ratio: str = "206Pb/238U"
@@ -55,6 +61,8 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         special_note="Zircon notebooks treat 206Pb/238U and related ratios as highly radiogenic, so initial Pb can usually be ignored for the primary SRM correction path.",
         concentration_standards=("NIST610", "NIST612"),
         primary_standard="PL",
+        pb_ratio_standard="PL",
+        th_ratio_standard="PL",
         secondary_standards=("FC1", "91500", "Seiland"),
         default_ratio="206Pb/238U",
         steps=(
@@ -105,6 +113,18 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="Depth-profile work should preserve the corrected sweep-level data, not only spot means. The GUI should make that export obvious and separate from the spot table.",
             ),
         ),
+        stage_sequence=(
+            PipelineStage.IMPORT,
+            PipelineStage.SELECTION,
+            PipelineStage.BASELINE,
+            PipelineStage.NORMALIZATION,
+            PipelineStage.CONCENTRATION,
+            PipelineStage.RATIOS,
+            PipelineStage.DOWNHOLE,
+            PipelineStage.SESSION,
+            PipelineStage.FINALIZE,
+            PipelineStage.DEPTH_PROFILE,
+        ),
     ),
     "apatite": WorkflowPreset(
         key="apatite",
@@ -119,10 +139,16 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             "filter_percentile": 90,
             "baseline_offset": 4,
             "plateau_offset": 2,
+            "sep": " ",
         },
         internal_material="apatite",
         supports_depth_profiles=True,
         special_note="Apatite notebooks use longer measurement windows and emphasize that 206Pb/238U correction can require handling initial Pb rather than assuming a fully radiogenic SRM.",
+        concentration_standards=("NIST610", "NIST612"),
+        primary_standard="MADUCSB",
+        pb_ratio_standard="NIST610",
+        th_ratio_standard="NIST610",
+        common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(
@@ -167,6 +193,17 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="For apatite, the final review should emphasize standards behavior and consistency of the Pb-ratio treatment rather than only producing a final age table.",
             ),
         ),
+        stage_sequence=(
+            PipelineStage.IMPORT,
+            PipelineStage.SELECTION,
+            PipelineStage.BASELINE,
+            PipelineStage.NORMALIZATION,
+            PipelineStage.CONCENTRATION,
+            PipelineStage.RATIOS,
+            PipelineStage.DOWNHOLE,
+            PipelineStage.SESSION,
+            PipelineStage.FINALIZE,
+        ),
     ),
     "rutile": WorkflowPreset(
         key="rutile",
@@ -185,6 +222,11 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         internal_material="rutile",
         supports_depth_profiles=True,
         special_note="Rutile notebooks add a dedicated NIST outlier-filter step before concentration calibration and often branch into Zr-in-rutile thermometry and profile-level review after final concentrations.",
+        concentration_standards=("NIST610", "NIST612"),
+        primary_standard="TR1",
+        pb_ratio_standard="NIST610",
+        th_ratio_standard="NIST610",
+        common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(
@@ -234,6 +276,18 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 hint="The MA1 rutile depth-profile notebook reads both final spot and final depth-profile tables. The GUI should make users aware that these are related but separate products.",
             ),
         ),
+        stage_sequence=(
+            PipelineStage.IMPORT,
+            PipelineStage.SELECTION,
+            PipelineStage.BASELINE,
+            PipelineStage.NORMALIZATION,
+            PipelineStage.CONCENTRATION,
+            PipelineStage.CONCENTRATION,
+            PipelineStage.RATIOS,
+            PipelineStage.DOWNHOLE,
+            PipelineStage.SESSION,
+            PipelineStage.DEPTH_PROFILE,
+        ),
     ),
     "titanite": WorkflowPreset(
         key="titanite",
@@ -252,6 +306,11 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         internal_material="rutile",
         supports_depth_profiles=True,
         special_note="The titanite notebook currently calls the rutile internal-normalization material mode even though the broader workflow is titanite-specific. The GUI should make that current backend caveat explicit.",
+        concentration_standards=("NIST610", "NIST612"),
+        primary_standard="MKED",
+        pb_ratio_standard="NIST610",
+        th_ratio_standard="NIST610",
+        common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(
@@ -295,6 +354,17 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 summary="Review corrected ratios, concentration outputs, and any thermometry products together.",
                 hint="This final page should keep the backend caveat visible so users know when they are still following a provisional notebook convention.",
             ),
+        ),
+        stage_sequence=(
+            PipelineStage.IMPORT,
+            PipelineStage.SELECTION,
+            PipelineStage.BASELINE,
+            PipelineStage.NORMALIZATION,
+            PipelineStage.CONCENTRATION,
+            PipelineStage.RATIOS,
+            PipelineStage.DOWNHOLE,
+            PipelineStage.SESSION,
+            PipelineStage.FINALIZE,
         ),
     ),
 }

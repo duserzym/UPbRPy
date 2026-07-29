@@ -37,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     window = MainWindow(theme_mode=theme_mode, app_icon=icon)
 
     if args.open:
-        window.load_experiment_directory(args.open)
+        window.load_experiment_directory(
+            args.open,
+            background=not bool(args.export),
+        )
 
     if args.export:
         export_window(window, args.export)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from UPbRPy.pipeline import ReductionPipeline
 
 
 @dataclass
@@ -15,11 +18,16 @@ class ReductionSession:
     primary_channel: str = "238U"
     workflow_key: str = "zircon"
     workflow_title: str = "Zircon"
+    concentration_standards: tuple[str, ...] = ()
+    primary_68_standard: str = ""
+    primary_76_standard: str = ""
+    primary_82_standard: str = ""
+    secondary_standards: tuple[str, ...] = ()
     selected_spot: Optional[str] = None
     visible_channels: list[str] = field(default_factory=list)
     import_settings: dict[str, object] = field(default_factory=dict)
     plot_mode: str = "raw"
-    downhole_fit_method: str = "interpolated"
+    downhole_fit_method: str = "mean"
     downhole_fit_options: dict[str, float | int | str] = field(
         default_factory=lambda: {
             "running_mean_window": 5,
@@ -27,6 +35,7 @@ class ReductionSession:
             "exponential_initial_decay": 0.1,
         }
     )
+    downhole_outlier_sigma: float | None = 5.0
     session_fit_method: str = "polynomial"
     session_fit_options: dict[str, float | int | str] = field(
         default_factory=lambda: {
@@ -35,7 +44,11 @@ class ReductionSession:
             "exponential_initial_decay": 0.001,
         }
     )
+    common_pb_method: str = "none"
+    include_calibration_uncertainty: bool = True
+    age_transition_ma: float = 1000.0
     reduction_cache: dict[str, object] = field(default_factory=dict)
+    pipeline: Optional["ReductionPipeline"] = None
 
     @property
     def loaded(self) -> bool:

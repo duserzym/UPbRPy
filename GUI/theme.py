@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import sys
+import os
 from dataclasses import dataclass
 
-import pyqtgraph as pg
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
+
 from PySide6 import QtCore, QtGui, QtWidgets
+
+import pyqtgraph as pg
 
 
 @dataclass(frozen=True)
@@ -181,10 +185,21 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QMenu::item:selected {{
         background: {theme.accent_soft};
     }}
-    #SidebarPanel, #InspectorPanel, #HeaderCard, #PlotCard, #MetricCard, #NotesCard, #SessionCard, #WorkflowCard, #SelectorCard, #WorkflowHintCard, #WorkflowActionsCard {{
+    #SidebarPanel, #WorkflowRail, #InspectorPanel, #HeaderCard, #PlotCard, #MetricCard, #NotesCard, #SessionCard, #WorkflowCard, #SelectorCard, #WorkflowHintCard, #WorkflowActionsCard, #WorkflowContextBar {{
         background: {theme.surface};
         border: 1px solid {theme.input_border};
         border-radius: 20px;
+    }}
+    #WorkflowRail {{
+        border-radius: 16px;
+    }}
+    #WorkflowContextBar {{
+        background: {theme.surface_soft};
+        border-radius: 14px;
+    }}
+    #WorkflowActionsInline {{
+        background: transparent;
+        border: none;
     }}
     #WorkflowCard {{
         background: {theme.surface};
@@ -236,6 +251,11 @@ def _stylesheet(theme: ThemeSpec) -> str:
         font-weight: 700;
         letter-spacing: 0.03em;
     }}
+    #RailBrand {{
+        font-size: 18px;
+        font-weight: 750;
+        letter-spacing: 0.02em;
+    }}
     #HeroTitle {{
         font-size: 28px;
         font-weight: 700;
@@ -251,6 +271,15 @@ def _stylesheet(theme: ThemeSpec) -> str:
         color: {theme.text};
         font-size: 12px;
         font-weight: 700;
+    }}
+    #WorkflowContextTitle {{
+        color: {theme.text};
+        font-size: 13px;
+        font-weight: 700;
+    }}
+    #WorkflowStatusCompact {{
+        color: {theme.muted};
+        font-size: 10px;
     }}
     #MetricValue {{
         font-size: 22px;
@@ -409,6 +438,24 @@ def _stylesheet(theme: ThemeSpec) -> str:
         padding: 10px 10px;
         margin: 2px 0px;
         border-radius: 12px;
+    }}
+    #WorkflowStepRail {{
+        background: transparent;
+        border: none;
+        border-radius: 10px;
+        padding: 2px;
+        font-size: 12px;
+        font-weight: 650;
+        outline: none;
+    }}
+    #WorkflowStepRail::item {{
+        padding: 4px 5px;
+        margin: 1px 0px;
+        border-radius: 9px;
+    }}
+    #WorkflowStepRail::item:selected {{
+        background: {theme.accent_soft};
+        color: {theme.text};
     }}
     QListWidget::item:selected {{
         background: {theme.accent_soft};

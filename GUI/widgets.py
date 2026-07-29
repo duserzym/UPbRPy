@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import os
 import re
 
 import numpy as np
 import pandas as pd
-import pyqtgraph as pg
+
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
+
 from PySide6 import QtCore, QtGui, QtWidgets
+
+import pyqtgraph as pg
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
 from GUI.theme import ThemeSpec
@@ -119,9 +124,132 @@ class StyledComboBox(QtWidgets.QComboBox):
         popup.setMask(QtGui.QRegion(path.toFillPolygon().toPolygon()))
 
 class ChipButton(QtWidgets.QPushButton):
-    """QPushButton that also emits doubleClicked via mouseDoubleClickEvent."""
+    """Accessible periodic-table isotope tile with an explicit active marker."""
 
     doubleClicked = QtCore.Signal()
+
+    def __init__(
+        self,
+        element: str,
+        mass: str,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        """Create a tile whose mass and element use separate typography."""
+        super().__init__(parent)
+        self.element = element
+        self.mass = mass
+        self.tile_color = QtGui.QColor("#6177a2")
+        self.tile_active = True
+        self.tile_selected = False
+        self.dark_theme = True
+        self.hovered = False
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f"{mass}{element} isotope channel")
+
+    def set_visual_state(
+        self,
+        color: str,
+        *,
+        active: bool,
+        selected: bool,
+        dark_theme: bool,
+    ) -> None:
+        """Update the tile without relying on hue as the only state cue."""
+        self.tile_color = QtGui.QColor(color)
+        self.tile_active = active
+        self.tile_selected = selected
+        self.dark_theme = dark_theme
+        self.update()
+
+    def enterEvent(self, event: QtCore.QEvent) -> None:
+        self.hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self.hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        """Paint a high-contrast miniature periodic-table cell."""
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        rect = QtCore.QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+
+        if self.tile_active:
+            background = QtGui.QColor(self.tile_color)
+            background = (
+                background.lighter(112)
+                if self.hovered
+                else background
+            )
+        else:
+            background = QtGui.QColor(
+                "#242a34" if self.dark_theme else "#edf0f4"
+            )
+
+        border = QtGui.QColor(
+            "#ffffff" if self.dark_theme else "#111827"
+        )
+        if not self.tile_selected:
+            border = (
+                self.tile_color.darker(145)
+                if self.tile_active
+                else QtGui.QColor(
+                    "#667085" if self.dark_theme else "#98a2b3"
+                )
+            )
+        pen = QtGui.QPen(border, 2.6 if self.tile_selected else 1.2)
+        if not self.tile_active:
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 8, 8)
+
+        luminance = (
+            0.2126 * background.redF()
+            + 0.7152 * background.greenF()
+            + 0.0722 * background.blueF()
+        )
+        foreground = QtGui.QColor(
+            "#111318" if luminance > 0.58 else "#ffffff"
+        )
+        if not self.tile_active:
+            foreground = QtGui.QColor(
+                "#98a2b3" if self.dark_theme else "#667085"
+            )
+        painter.setPen(foreground)
+
+        mass_font = QtGui.QFont(self.font())
+        mass_font.setPointSizeF(max(7.0, self.height() * 0.17))
+        mass_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        painter.setFont(mass_font)
+        painter.drawText(
+            QtCore.QRectF(rect.left() + 5, rect.top() + 2, 22, 12),
+            QtCore.Qt.AlignmentFlag.AlignLeft,
+            self.mass,
+        )
+
+        element_font = QtGui.QFont(self.font())
+        element_font.setPointSizeF(max(10.0, self.height() * 0.28))
+        element_font.setWeight(QtGui.QFont.Weight.Bold)
+        painter.setFont(element_font)
+        painter.drawText(
+            rect.adjusted(0, 8, 0, 0),
+            QtCore.Qt.AlignmentFlag.AlignCenter,
+            self.element,
+        )
+
+        marker_center = QtCore.QPointF(rect.right() - 6, rect.bottom() - 6)
+        marker_pen = QtGui.QPen(foreground, 1.4)
+        painter.setPen(marker_pen)
+        painter.setBrush(
+            foreground if self.tile_active else QtCore.Qt.BrushStyle.NoBrush
+        )
+        painter.drawEllipse(marker_center, 2.6, 2.6)
+        painter.end()
 
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
         self.doubleClicked.emit()
@@ -295,11 +423,14 @@ class IsotopeGridWidget(QtWidgets.QWidget):
 
     def _make_chip(self, channel: str, isotope_index: int = 0) -> ChipButton:
         parsed = _parse_channel(channel)
-        label = f"{parsed[1]}\n{parsed[0]}" if parsed else channel
-        btn = ChipButton(label)
+        element, mass = parsed if parsed else (channel, "")
+        btn = ChipButton(element, mass)
         btn.setObjectName("IsotopeChip")
-        btn.setFixedSize(44, 40)
-        btn.setToolTip(channel)
+        btn.setFixedSize(48, 46)
+        btn.setToolTip(
+            f"{channel}\nClick: use for selection statistics\n"
+            "Double-click: show or hide trace\nRight-click: choose color"
+        )
         btn.setProperty("isotope_index", isotope_index)
         self._apply_chip_style(btn, channel, isotope_index=isotope_index)
         btn.clicked.connect(lambda _checked=False, ch=channel: self._on_chip_clicked(ch))
@@ -311,11 +442,6 @@ class IsotopeGridWidget(QtWidgets.QWidget):
         self._buttons[channel] = btn
         return btn
 
-    # -- Chip styling ------------------------------------------------------
-    # Border styles cycle per isotope index so isotopes of the same element
-    # are visually distinguishable even though they share the same hue.
-    _BORDER_STYLES = ["solid", "dashed", "dotted", "double"]
-
     def _apply_chip_style(
         self,
         btn: ChipButton,
@@ -324,47 +450,15 @@ class IsotopeGridWidget(QtWidgets.QWidget):
         isotope_index: int = 0,
     ) -> None:
         color = self._colors.get(channel, "#6c7a8a")
-        border_style = self._BORDER_STYLES[isotope_index % len(self._BORDER_STYLES)]
         is_active = self._checked.get(channel, True)
         is_selected = (channel == self._selected_channel)
         is_dark = (self._theme_name == "dark")
-
-        if is_active:
-            if is_selected:
-                bg       = f"{color}55"
-                border_w = "2.5px"
-                border_c = color
-                text_c   = "#ffffff" if is_dark else "#111111"
-                fw       = "800"
-            else:
-                bg       = f"{color}28"
-                border_w = "1.5px"
-                border_c = f"{color}99"
-                text_c   = "#dddddd" if is_dark else "#111111"
-                fw       = "700"
-        else:
-            # Inactive (hidden from trace)
-            bg       = "transparent"
-            border_w = "1px"
-            border_c = f"{color}44"
-            text_c   = "#666666" if is_dark else "#aaaaaa"
-            fw       = "600"
-
-        btn.setStyleSheet(f"""
-            QPushButton#IsotopeChip {{
-                background: {bg};
-                border: {border_w} {border_style} {border_c};
-                border-radius: 8px;
-                color: {text_c};
-                font-size: 9px;
-                font-weight: {fw};
-                padding: 0px;
-            }}
-            QPushButton#IsotopeChip:hover {{
-                background: {color}44;
-                border: 2px {border_style} {color};
-            }}
-        """)
+        btn.set_visual_state(
+            color,
+            active=is_active,
+            selected=is_selected,
+            dark_theme=is_dark,
+        )
 
     # -- Interaction handlers ----------------------------------------------
 
@@ -387,6 +481,185 @@ class IsotopeGridWidget(QtWidgets.QWidget):
             idx = self._buttons[channel].property("isotope_index") or 0
             self._apply_chip_style(self._buttons[channel], channel, isotope_index=idx)
         self.channelToggled.emit(channel, new_state)
+
+
+class DataFrameTableModel(QtCore.QAbstractTableModel):
+    """Memory-efficient, read-only Qt view of a pandas DataFrame."""
+
+    def __init__(
+        self,
+        frame: pd.DataFrame | None = None,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.frame = pd.DataFrame() if frame is None else frame.copy()
+
+    def set_frame(self, frame: pd.DataFrame | None) -> None:
+        """Replace the displayed frame with one model reset notification."""
+        self.beginResetModel()
+        self.frame = pd.DataFrame() if frame is None else frame.copy()
+        self.endResetModel()
+
+    def rowCount(
+        self,
+        parent: QtCore.QModelIndex = QtCore.QModelIndex(),
+    ) -> int:
+        return 0 if parent.isValid() else len(self.frame)
+
+    def columnCount(
+        self,
+        parent: QtCore.QModelIndex = QtCore.QModelIndex(),
+    ) -> int:
+        return 0 if parent.isValid() else len(self.frame.columns)
+
+    def data(
+        self,
+        index: QtCore.QModelIndex,
+        role: int = int(QtCore.Qt.ItemDataRole.DisplayRole),
+    ) -> object:
+        if not index.isValid():
+            return None
+        value = self.frame.iat[index.row(), index.column()]
+        if role == int(QtCore.Qt.ItemDataRole.DisplayRole):
+            if pd.isna(value):
+                return ""
+            if isinstance(value, (float, np.floating)):
+                return f"{float(value):.7g}"
+            return str(value)
+        if role == int(QtCore.Qt.ItemDataRole.TextAlignmentRole):
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                return int(
+                    QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+        if role == int(QtCore.Qt.ItemDataRole.UserRole):
+            if pd.isna(value):
+                return ""
+            return value.item() if isinstance(value, np.generic) else value
+        return None
+
+    def headerData(
+        self,
+        section: int,
+        orientation: QtCore.Qt.Orientation,
+        role: int = int(QtCore.Qt.ItemDataRole.DisplayRole),
+    ) -> object:
+        if role != int(QtCore.Qt.ItemDataRole.DisplayRole):
+            return None
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            return str(self.frame.columns[section])
+        return str(section + 1)
+
+
+class ResultsTableWidget(QtWidgets.QWidget):
+    """Compact sortable review of final results and secondary standards."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
+        self.summary_label = QtWidgets.QLabel(
+            "Calculate final results to review preferred ages and flags."
+        )
+        self.summary_label.setObjectName("SecondaryText")
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        self.tabs = QtWidgets.QTabWidget()
+        self.results_table, self.results_model = self.create_table()
+        self.secondary_table, self.secondary_model = self.create_table()
+        self.depth_table, self.depth_model = self.create_table()
+        self.tabs.addTab(self.results_table, "Final results")
+        self.tabs.addTab(self.secondary_table, "Secondary standards")
+        self.tabs.addTab(self.depth_table, "Depth profile")
+        layout.addWidget(self.tabs, 1)
+
+    def create_table(
+        self,
+    ) -> tuple[QtWidgets.QTableView, DataFrameTableModel]:
+        """Create one sortable table backed by a Qt proxy."""
+        view = QtWidgets.QTableView()
+        model = DataFrameTableModel(parent=view)
+        proxy = QtCore.QSortFilterProxyModel(view)
+        proxy.setSourceModel(model)
+        proxy.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
+        view.setModel(proxy)
+        view.setSortingEnabled(True)
+        view.setAlternatingRowColors(True)
+        view.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        view.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        view.setWordWrap(False)
+        view.verticalHeader().setVisible(False)
+        view.horizontalHeader().setStretchLastSection(False)
+        view.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        return view, model
+
+    def show_results(self, finalized: object) -> None:
+        """Display a FinalizedReduction without duplicating reduction logic."""
+        final_frame = getattr(finalized, "selected_results", pd.DataFrame())
+        secondary = getattr(
+            finalized,
+            "secondary_standard_summary",
+            pd.DataFrame(),
+        )
+        self.results_model.set_frame(final_frame)
+        self.secondary_model.set_frame(secondary)
+        decision = getattr(finalized, "decision", None)
+        method = getattr(decision, "common_pb_method", "none")
+        uncertainty = getattr(
+            decision,
+            "include_calibration_uncertainty",
+            True,
+        )
+        self.summary_label.setText(
+            f"{len(final_frame):,} spots · common-Pb method {method} · "
+            f"calibration uncertainty {'included' if uncertainty else 'excluded'}"
+        )
+        self.tabs.setCurrentWidget(self.results_table)
+
+    def show_depth_profile(
+        self,
+        depth_profile: pd.DataFrame,
+        spot_name: str | None,
+    ) -> None:
+        """Review the useful sweep-wise columns for one selected spot."""
+        selected = depth_profile
+        if spot_name and "spot_name" in selected:
+            selected = selected[selected["spot_name"].eq(spot_name)]
+        review_columns = [
+            column
+            for column in (
+                "sample",
+                "spot_name",
+                "signal_relative_time",
+                "206Pb/238U_fractionation_corrected",
+                "206Pb/238U_fractionation_corrected_2e",
+                "207Pb/206Pb_fractionation_corrected",
+                "207Pb/206Pb_fractionation_corrected_2e",
+                "208Pb/232Th_fractionation_corrected",
+                "208Pb/232Th_fractionation_corrected_2e",
+                "206Pb/238U_age",
+                "206Pb/238U_age_2e",
+                "207Pb/206Pb_age",
+                "207Pb/206Pb_age_2e",
+                "208Pb/232Th_age",
+                "208Pb/232Th_age_2e",
+            )
+            if column in selected.columns
+        ]
+        self.depth_model.set_frame(selected.loc[:, review_columns])
+        target = spot_name or "all spots"
+        self.summary_label.setText(
+            f"{len(selected):,} corrected signal sweeps · {target}"
+        )
+        self.tabs.setCurrentWidget(self.depth_table)
 
 
 class MetricCard(QtWidgets.QFrame):
@@ -918,6 +1191,7 @@ class TracePlotWidget(pg.PlotWidget):
             grid_alpha=0.13,
         )
         self._region_overlays: dict[str, dict[str, object]] = {}
+        self._signal_boundaries: dict[str, pg.InfiniteLine] = {}
         self._hover_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._sigma_level = 2
         self._zoom_mode = "xy"
@@ -1009,6 +1283,7 @@ class TracePlotWidget(pg.PlotWidget):
             self.plot_item.legend = None
         self.plot_item.clear()
         self._region_overlays = {}
+        self._signal_boundaries = {}
         self._hover_series = {}
         self._configure_plot()
         self.plot_item.addLegend(offset=(16, 8), labelTextColor=self._theme.axis_text, labelTextSize="14pt", colCount=2)
@@ -1057,6 +1332,22 @@ class TracePlotWidget(pg.PlotWidget):
         )
         self._add_region("preview_baseline", (18.0, 42.0), colors["baseline"], 44, movable=False, frame=preview_frame, stats_channel="238U")
         self._add_region("preview_plateau", (47.0, 62.0), colors["plateau"], 52, movable=False, frame=preview_frame, stats_channel="238U")
+        self._add_signal_boundary(
+            "signal_start",
+            43.0,
+            "#00e676",
+            "signal start",
+            movable=False,
+            bounds=(0.0, 47.0),
+        )
+        self._add_signal_boundary(
+            "signal_end",
+            70.0,
+            "#ff8c1a",
+            "signal end",
+            movable=False,
+            bounds=(62.0, 80.0),
+        )
         self.set_x_window((10.0, 80.0))  # zoom to first spot; user can pan to others
         self.fit_y_to_visible_data()
 
@@ -1112,6 +1403,37 @@ class TracePlotWidget(pg.PlotWidget):
             self._add_region("baseline", regions["baseline"], colors["baseline"], 44, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
         if regions.get("plateau"):
             self._add_region("plateau", regions["plateau"], colors["plateau"], 52, movable=editable_regions, frame=spot_data, stats_channel=region_channel)
+        signal_region = regions.get("signal")
+        if signal_region:
+            plateau_region = regions.get("plateau")
+            minimum_time = float(np.nanmin(x_values))
+            maximum_time = float(np.nanmax(x_values))
+            start_maximum = (
+                float(plateau_region[0])
+                if plateau_region
+                else float(signal_region[1])
+            )
+            end_minimum = (
+                float(plateau_region[1])
+                if plateau_region
+                else float(signal_region[0])
+            )
+            self._add_signal_boundary(
+                "signal_start",
+                float(signal_region[0]),
+                "#00e676",
+                "signal start",
+                movable=editable_regions,
+                bounds=(minimum_time, start_maximum),
+            )
+            self._add_signal_boundary(
+                "signal_end",
+                float(signal_region[1]),
+                "#ff8c1a",
+                "signal end",
+                movable=editable_regions,
+                bounds=(end_minimum, maximum_time),
+            )
 
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
         if y_min is not None and y_max is not None:
@@ -1176,10 +1498,25 @@ class TracePlotWidget(pg.PlotWidget):
             self.setYRange(lower, upper, padding=0.02)
 
     def current_regions(self) -> dict[str, tuple[float, float] | None]:
-        return {
+        regions = {
             name: tuple(sorted(float(value) for value in region["region"].getRegion()))
             for name, region in self._region_overlays.items()
         }
+        signal_start = self._signal_boundaries.get("signal_start")
+        signal_end = self._signal_boundaries.get("signal_end")
+        regions["signal"] = (
+            tuple(
+                sorted(
+                    (
+                        float(signal_start.value()),
+                        float(signal_end.value()),
+                    )
+                )
+            )
+            if signal_start is not None and signal_end is not None
+            else None
+        )
+        return regions
 
     def show_empty(self, message: str, *, y_label: str = "Counts / cps") -> None:
         self._reset_items()
@@ -1328,6 +1665,51 @@ class TracePlotWidget(pg.PlotWidget):
         if movable:
             region.sigRegionChanged.connect(lambda _item, region_name=name: self._update_region_overlay(region_name))
             region.sigRegionChangeFinished.connect(lambda _item, region_name=name: self._emit_region_change(region_name))
+
+    def _add_signal_boundary(
+        self,
+        name: str,
+        value: float,
+        color: str,
+        label: str,
+        *,
+        movable: bool,
+        bounds: tuple[float, float],
+    ) -> None:
+        """Add a draggable signal edge constrained around the plateau."""
+        line = pg.InfiniteLine(
+            pos=value,
+            angle=90,
+            movable=movable,
+            pen=pg.mkPen(color, width=2.6),
+            hoverPen=pg.mkPen(color, width=4.0),
+            label=label,
+            labelOpts={
+                "position": 0.93,
+                "color": color,
+                "fill": pg.mkBrush(0, 0, 0, 125),
+                "movable": movable,
+            },
+        )
+        line.setBounds(tuple(sorted(float(item) for item in bounds)))
+        line.setZValue(12)
+        self.plot_item.addItem(line)
+        self._signal_boundaries[name] = line
+        if movable:
+            line.sigPositionChangeFinished.connect(
+                lambda _item, boundary_name=name: self._emit_signal_change(
+                    boundary_name
+                )
+            )
+
+    def _emit_signal_change(self, boundary_name: str) -> None:
+        """Report the combined signal interval after either edge moves."""
+        start = self._signal_boundaries.get("signal_start")
+        end = self._signal_boundaries.get("signal_end")
+        if start is None or end is None:
+            return
+        bounds = tuple(sorted((float(start.value()), float(end.value()))))
+        self.regionChanged.emit(boundary_name, bounds)
 
     def _update_region_overlay(self, region_name: str) -> None:
         overlay = self._region_overlays.get(region_name)
