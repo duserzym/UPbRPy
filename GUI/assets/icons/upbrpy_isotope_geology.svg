@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="120" y1="90" x2="900" y2="940" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#162b55"/>
+      <stop offset="0.52" stop-color="#304b89"/>
+      <stop offset="1" stop-color="#735092"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(310 210) rotate(48) scale(670)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#91e8ff" stop-opacity=".46"/>
+      <stop offset=".55" stop-color="#89b9ff" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#291f59" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="facetLeft" x1="300" y1="210" x2="610" y2="815" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d8f6ff"/>
+      <stop offset=".38" stop-color="#71d7e6"/>
+      <stop offset="1" stop-color="#3e68b8"/>
+    </linearGradient>
+    <linearGradient id="facetRight" x1="510" y1="180" x2="760" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a8e8f2"/>
+      <stop offset=".45" stop-color="#6686d4"/>
+      <stop offset="1" stop-color="#76509f"/>
+    </linearGradient>
+    <linearGradient id="mountain" x1="330" y1="530" x2="690" y2="735" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f1f6ff" stop-opacity=".92"/>
+      <stop offset=".52" stop-color="#bec9e7" stop-opacity=".78"/>
+      <stop offset="1" stop-color="#7e86b9" stop-opacity=".72"/>
+    </linearGradient>
+    <clipPath id="crystalClip">
+      <path d="M512 145 713 333v358L512 879 311 691V333z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Modern macOS-style tile. -->
+  <rect x="48" y="42" width="928" height="928" rx="224" fill="#0c1730" opacity=".24"/>
+  <rect x="38" y="32" width="948" height="948" rx="228" fill="url(#background)"/>
+  <rect x="38" y="32" width="948" height="948" rx="228" fill="url(#glow)"/>
+
+  <!-- Isotope paths derived from the laboratory mark, simplified for icon scale. -->
+  <g fill="none" stroke-linecap="round">
+    <ellipse cx="512" cy="510" rx="385" ry="152" transform="rotate(-18 512 510)"
+             stroke="#fff4ea" stroke-opacity=".78" stroke-width="15"/>
+    <ellipse cx="512" cy="510" rx="355" ry="126" transform="rotate(48 512 510)"
+             stroke="#f1e7ff" stroke-opacity=".62" stroke-width="12"/>
+    <ellipse cx="512" cy="510" rx="330" ry="112" transform="rotate(104 512 510)"
+             stroke="#bceeff" stroke-opacity=".54" stroke-width="10"/>
+  </g>
+
+  <!-- Elongated tetragonal zircon with dipyramidal terminations. -->
+  <path d="M512 145 713 333v358L512 879 311 691V333z"
+        fill="#14224e" stroke="#edfaff" stroke-opacity=".92" stroke-width="12"
+        stroke-linejoin="round"/>
+  <path d="M512 145 311 333v358l201 188V145z" fill="url(#facetLeft)"/>
+  <path d="M512 145 713 333v358L512 879V145z" fill="url(#facetRight)"/>
+  <path d="M512 145 311 333h402z" fill="#d5f5ff" fill-opacity=".62"/>
+  <path d="M311 691h402L512 879z" fill="#405fa8" fill-opacity=".72"/>
+  <path d="M512 145v734M311 333h402M311 691h402"
+        fill="none" stroke="#eefaff" stroke-opacity=".60" stroke-width="8"/>
+
+  <!-- Geological relief embedded in the crystal, echoing the Boise lab logo. -->
+  <g clip-path="url(#crystalClip)">
+    <path d="M250 704 362 607l62 50 94-137 64 75 66-51 126 160v102H250z"
+          fill="url(#mountain)"/>
+    <path d="m362 607 62 50 94-137 64 75 30-23-61 126-78-53-47 48z"
+          fill="#ffffff" fill-opacity=".52"/>
+    <path d="M270 741c98-34 187-33 269-7 89 28 157 23 240-9"
+          fill="none" stroke="#f6fbff" stroke-opacity=".65" stroke-width="9"/>
+    <path d="M270 777c105-27 195-23 278 2 81 24 148 22 231-3"
+          fill="none" stroke="#c4d8ef" stroke-opacity=".52" stroke-width="8"/>
+  </g>
+
+  <!-- Isotope particles sit above the mineral and remain visible at 16 px. -->
+  <g stroke="#271418" stroke-width="8">
+    <circle cx="805" cy="322" r="27" fill="#ff9b73"/>
+    <circle cx="235" cy="657" r="23" fill="#ffd76e"/>
+    <circle cx="444" cy="134" r="19" fill="#8ff2d1"/>
+  </g>
+  <g fill="#fff" opacity=".72">
+    <circle cx="797" cy="313" r="7"/>
+    <circle cx="228" cy="650" r="6"/>
+    <circle cx="438" cy="128" r="5"/>
+  </g>
+</svg>

@@ -1,15 +1,10 @@
-from __future__ import annotations
+"""Native application-icon rendering and asset export."""
 
-import math
+from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6 import QtCore, QtGui
-
-try:
-    from PySide6 import QtSvg
-except ImportError:
-    QtSvg = None
+from PySide6 import QtCore, QtGui, QtSvg
 
 
 PNG_ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 256, 512, 1024]
@@ -27,303 +22,235 @@ ICONSET_EXPORT_SPECS = [
 ]
 
 ICON_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "icons"
-ZIRCON_SVG_PATH = ICON_ASSET_DIR / "zircon_tetragonal_crystal.svg"
-_ZIRCON_RENDERER = None
-_ZIRCON_SVG_VIEWBOX = QtCore.QRectF(0.0, 0.0, 612.0, 620.0)
-_ZIRCON_SVG_CRYSTAL_BOUNDS = QtCore.QRectF(198.0, 148.0, 162.0, 324.0)
+LAB_ICON_SVG_PATH = ICON_ASSET_DIR / "upbrpy_isotope_geology.svg"
+LAB_ICON_RENDERER: QtSvg.QSvgRenderer | None = None
 
 
 def render_icon_image(size: int = 256) -> QtGui.QImage:
-    image = QtGui.QImage(size, size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+    """Render the scalable isotope-geology laboratory application mark.
+
+    The primary source is an SVG that combines the laboratory mark's isotope
+    orbits and mountain relief with an idealized tetragonal zircon. The
+    programmatic crystal renderer remains as a packaging fallback.
+    """
+    image = QtGui.QImage(
+        size,
+        size,
+        QtGui.QImage.Format.Format_ARGB32_Premultiplied,
+    )
     image.fill(QtCore.Qt.GlobalColor.transparent)
 
     painter = QtGui.QPainter(image)
     painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-    painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.setRenderHint(
+        QtGui.QPainter.RenderHint.SmoothPixmapTransform,
+        True,
+    )
+    renderer = load_lab_icon_renderer()
+    if renderer is not None:
+        renderer.render(
+            painter,
+            QtCore.QRectF(0.0, 0.0, float(size), float(size)),
+        )
+        painter.end()
+        return image
 
-    center = QtCore.QPointF(size * 0.51, size * 0.49)
-
+    icon_rect = QtCore.QRectF(
+        size * 0.055,
+        size * 0.045,
+        size * 0.89,
+        size * 0.89,
+    )
+    radius = size * 0.205
     painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    painter.setBrush(QtGui.QColor(31, 20, 64, 22))
-    painter.drawEllipse(QtCore.QRectF(size * 0.24, size * 0.79, size * 0.44, size * 0.06))
+    for offset, alpha in (
+        (size * 0.025, 18),
+        (size * 0.016, 28),
+        (size * 0.009, 36),
+    ):
+        shadow = icon_rect.translated(0, offset)
+        painter.setBrush(QtGui.QColor(13, 21, 42, alpha))
+        painter.drawRoundedRect(shadow, radius, radius)
 
-    painter.save()
-    painter.translate(center)
-    painter.rotate(-8)
-    painter.translate(-center)
+    background = QtGui.QLinearGradient(
+        icon_rect.topLeft(),
+        icon_rect.bottomRight(),
+    )
+    background.setColorAt(0.0, QtGui.QColor("#172a52"))
+    background.setColorAt(0.52, QtGui.QColor("#304985"))
+    background.setColorAt(1.0, QtGui.QColor("#6f4e91"))
+    painter.setBrush(background)
+    painter.drawRoundedRect(icon_rect, radius, radius)
 
-    crystal_rect = QtCore.QRectF(size * 0.335, size * 0.07, size * 0.33, size * 0.64)
-    if not _draw_svg_crystal(painter, crystal_rect, size):
-        crystal_path = _build_zircon_path(size)
-        crystal_gradient = QtGui.QLinearGradient(size * 0.28, size * 0.10, size * 0.70, size * 0.88)
-        crystal_gradient.setColorAt(0.0, QtGui.QColor(214, 205, 255, 232))
-        crystal_gradient.setColorAt(0.15, QtGui.QColor(170, 150, 246, 224))
-        crystal_gradient.setColorAt(0.45, QtGui.QColor(114, 93, 217, 208))
-        crystal_gradient.setColorAt(0.73, QtGui.QColor(104, 92, 219, 152))
-        crystal_gradient.setColorAt(1.0, QtGui.QColor(222, 231, 255, 92))
-        painter.setBrush(crystal_gradient)
-        painter.setPen(QtGui.QPen(QtGui.QColor(72, 53, 171, 235), max(1, int(size * 0.007))))
-        painter.drawPath(crystal_path)
+    highlight = QtGui.QRadialGradient(
+        QtCore.QPointF(size * 0.30, size * 0.20),
+        size * 0.62,
+    )
+    highlight.setColorAt(0.0, QtGui.QColor(136, 229, 255, 92))
+    highlight.setColorAt(0.55, QtGui.QColor(126, 177, 255, 14))
+    highlight.setColorAt(1.0, QtGui.QColor(40, 38, 86, 0))
+    painter.setBrush(highlight)
+    painter.drawRoundedRect(icon_rect, radius, radius)
 
-        painter.save()
-        painter.setClipPath(crystal_path)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtGui.QColor(255, 255, 255, 38))
-        painter.drawPath(_build_top_highlight_path(size))
-        painter.setBrush(QtGui.QColor(47, 33, 110, 68))
-        painter.drawPath(_build_right_shadow_path(size))
-        painter.setBrush(QtGui.QColor(248, 244, 255, 44))
-        painter.drawPath(_build_base_glow_path(size))
-        _draw_mountain_embedded(painter, size)
-        painter.restore()
-    painter.restore()
-
-    orbit_pen = max(2, int(size * 0.0085))
-    orbit_rect = QtCore.QRectF(size * 0.12, size * 0.29, size * 0.76, size * 0.30)
-    _draw_orbit(painter, orbit_rect, 18, QtGui.QColor(79, 31, 21, 224), orbit_pen, 0.20)
-    _draw_orbit(painter, orbit_rect.adjusted(size * 0.025, size * 0.03, -size * 0.018, -size * 0.004), -26, QtGui.QColor(92, 38, 24, 220), orbit_pen, 0.60)
-    _draw_orbit(painter, orbit_rect.adjusted(-size * 0.018, size * 0.016, size * 0.018, size * 0.012), 2, QtGui.QColor(108, 47, 27, 214), max(2, int(size * 0.0075)), 0.84)
-
-    _draw_title(painter, size)
-
+    draw_crystallographic_zircon(painter, size)
     painter.end()
     return image
 
 
-def _draw_orbit(
+def load_lab_icon_renderer() -> QtSvg.QSvgRenderer | None:
+    """Return the cached valid SVG renderer used by every icon size."""
+    global LAB_ICON_RENDERER
+    if LAB_ICON_RENDERER is None and LAB_ICON_SVG_PATH.exists():
+        candidate = QtSvg.QSvgRenderer(str(LAB_ICON_SVG_PATH))
+        if candidate.isValid():
+            LAB_ICON_RENDERER = candidate
+    return LAB_ICON_RENDERER
+
+
+def draw_crystallographic_zircon(
     painter: QtGui.QPainter,
-    rect: QtCore.QRectF,
-    angle: float,
-    color: QtGui.QColor,
-    width: int,
-    dot_position: float,
+    size: int,
 ) -> None:
+    """Draw the faceted tetragonal prism and dipyramidal terminations."""
+    points = {
+        "apex_top": QtCore.QPointF(size * 0.50, size * 0.135),
+        "top_left": QtCore.QPointF(size * 0.285, size * 0.325),
+        "top_mid": QtCore.QPointF(size * 0.50, size * 0.285),
+        "top_right": QtCore.QPointF(size * 0.715, size * 0.325),
+        "bottom_left": QtCore.QPointF(size * 0.285, size * 0.675),
+        "bottom_mid": QtCore.QPointF(size * 0.50, size * 0.715),
+        "bottom_right": QtCore.QPointF(size * 0.715, size * 0.675),
+        "apex_bottom": QtCore.QPointF(size * 0.50, size * 0.865),
+    }
+
+    silhouette = QtGui.QPainterPath()
+    silhouette.moveTo(points["apex_top"])
+    silhouette.lineTo(points["top_right"])
+    silhouette.lineTo(points["bottom_right"])
+    silhouette.lineTo(points["apex_bottom"])
+    silhouette.lineTo(points["bottom_left"])
+    silhouette.lineTo(points["top_left"])
+    silhouette.closeSubpath()
+
     painter.save()
-    center = rect.center()
-    painter.translate(center)
-    painter.rotate(angle)
-    painter.translate(-center)
-    pen = QtGui.QPen(color, width)
-    pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    painter.drawEllipse(rect)
-
-    theta = 2.0 * 3.141592653589793 * dot_position
-    dot_point = QtCore.QPointF(
-        rect.center().x() + rect.width() * 0.5 * math.cos(theta),
-        rect.center().y() + rect.height() * 0.5 * math.sin(theta),
-    )
     painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    painter.setBrush(QtGui.QColor("#26100d"))
-    painter.drawEllipse(dot_point, width * 0.95, width * 0.95)
-    painter.setBrush(QtGui.QColor(255, 237, 231, 130))
-    painter.drawEllipse(
-        QtCore.QPointF(dot_point.x() - width * 0.18, dot_point.y() - width * 0.18),
-        width * 0.28,
-        width * 0.28,
-    )
-    painter.restore()
-
-
-def _draw_svg_crystal(painter: QtGui.QPainter, rect: QtCore.QRectF, size: int) -> bool:
-    renderer = _load_zircon_renderer()
-    if renderer is None:
-        return False
-
-    render_rect = _scaled_svg_render_rect(rect)
-    painter.save()
-    glow = QtGui.QRadialGradient(
-        QtCore.QPointF(rect.center().x() - rect.width() * 0.06, rect.top() + rect.height() * 0.22),
-        rect.width() * 0.42,
-    )
-    glow.setColorAt(0.0, QtGui.QColor(244, 236, 255, 42))
-    glow.setColorAt(0.55, QtGui.QColor(176, 148, 246, 14))
-    glow.setColorAt(1.0, QtGui.QColor(176, 148, 246, 0))
-    painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    painter.setBrush(glow)
-    painter.drawEllipse(rect.adjusted(-size * 0.015, -size * 0.02, size * 0.015, size * 0.01))
-
-    shadow_rect = render_rect.translated(size * 0.008, size * 0.015)
-    painter.setOpacity(0.14)
-    renderer.render(painter, shadow_rect)
-    painter.setOpacity(1.0)
-    renderer.render(painter, render_rect)
-
-    sheen = QtGui.QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-    sheen.setColorAt(0.0, QtGui.QColor(255, 255, 255, 26))
-    sheen.setColorAt(0.28, QtGui.QColor(255, 255, 255, 0))
-    sheen.setColorAt(0.72, QtGui.QColor(44, 24, 96, 0))
-    sheen.setColorAt(1.0, QtGui.QColor(44, 24, 96, 18))
-    painter.setBrush(sheen)
-    painter.drawRoundedRect(rect.adjusted(rect.width() * 0.14, rect.height() * 0.08, -rect.width() * 0.18, -rect.height() * 0.14), size * 0.018, size * 0.018)
-    painter.restore()
-    return True
-
-
-def _load_zircon_renderer():
-    global _ZIRCON_RENDERER
-    if QtSvg is None or not ZIRCON_SVG_PATH.exists():
-        return None
-    if _ZIRCON_RENDERER is None:
-        renderer = QtSvg.QSvgRenderer(str(ZIRCON_SVG_PATH))
-        if not renderer.isValid():
-            return None
-        _ZIRCON_RENDERER = renderer
-    return _ZIRCON_RENDERER
-
-
-def _scaled_svg_render_rect(target_rect: QtCore.QRectF) -> QtCore.QRectF:
-    x_scale = target_rect.width() / _ZIRCON_SVG_CRYSTAL_BOUNDS.width()
-    y_scale = target_rect.height() / _ZIRCON_SVG_CRYSTAL_BOUNDS.height()
-    render_width = _ZIRCON_SVG_VIEWBOX.width() * x_scale
-    render_height = _ZIRCON_SVG_VIEWBOX.height() * y_scale
-    render_x = target_rect.left() - _ZIRCON_SVG_CRYSTAL_BOUNDS.left() * x_scale
-    render_y = target_rect.top() - _ZIRCON_SVG_CRYSTAL_BOUNDS.top() * y_scale
-    return QtCore.QRectF(render_x, render_y, render_width, render_height)
-
-
-def _build_zircon_path(size: int) -> QtGui.QPainterPath:
-    path = QtGui.QPainterPath()
-    path.moveTo(size * 0.48, size * 0.08)
-    path.lineTo(size * 0.57, size * 0.12)
-    path.lineTo(size * 0.64, size * 0.19)
-    path.lineTo(size * 0.67, size * 0.29)
-    path.lineTo(size * 0.67, size * 0.66)
-    path.lineTo(size * 0.64, size * 0.78)
-    path.lineTo(size * 0.58, size * 0.88)
-    path.lineTo(size * 0.49, size * 0.92)
-    path.lineTo(size * 0.40, size * 0.88)
-    path.lineTo(size * 0.33, size * 0.79)
-    path.lineTo(size * 0.30, size * 0.67)
-    path.lineTo(size * 0.30, size * 0.29)
-    path.lineTo(size * 0.34, size * 0.19)
-    path.lineTo(size * 0.41, size * 0.11)
-    path.closeSubpath()
-    return path
-
-
-def _build_top_highlight_path(size: int) -> QtGui.QPainterPath:
-    path = QtGui.QPainterPath()
-    path.moveTo(size * 0.44, size * 0.11)
-    path.lineTo(size * 0.56, size * 0.14)
-    path.lineTo(size * 0.62, size * 0.20)
-    path.lineTo(size * 0.55, size * 0.23)
-    path.lineTo(size * 0.42, size * 0.18)
-    path.closeSubpath()
-    return path
-
-
-def _build_right_shadow_path(size: int) -> QtGui.QPainterPath:
-    path = QtGui.QPainterPath()
-    path.moveTo(size * 0.55, size * 0.14)
-    path.lineTo(size * 0.64, size * 0.19)
-    path.lineTo(size * 0.67, size * 0.29)
-    path.lineTo(size * 0.67, size * 0.66)
-    path.lineTo(size * 0.64, size * 0.78)
-    path.lineTo(size * 0.58, size * 0.88)
-    path.lineTo(size * 0.57, size * 0.48)
-    path.closeSubpath()
-    return path
-
-
-def _build_base_glow_path(size: int) -> QtGui.QPainterPath:
-    path = QtGui.QPainterPath()
-    path.moveTo(size * 0.31, size * 0.60)
-    path.cubicTo(size * 0.39, size * 0.57, size * 0.56, size * 0.58, size * 0.67, size * 0.60)
-    path.lineTo(size * 0.63, size * 0.88)
-    path.lineTo(size * 0.36, size * 0.86)
-    path.closeSubpath()
-    return path
-
-
-def _draw_mountain_embedded(painter: QtGui.QPainter, size: int) -> None:
-    ridge_pen = QtGui.QPen(QtGui.QColor(203, 209, 240, 120), max(1, int(size * 0.0042)))
-    ridge_pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
-    ridge_pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(ridge_pen)
-
-    back_ridge = QtGui.QPainterPath()
-    back_ridge.moveTo(size * 0.33, size * 0.62)
-    back_ridge.lineTo(size * 0.39, size * 0.58)
-    back_ridge.lineTo(size * 0.45, size * 0.54)
-    back_ridge.lineTo(size * 0.52, size * 0.57)
-    back_ridge.lineTo(size * 0.58, size * 0.53)
-    back_ridge.lineTo(size * 0.66, size * 0.58)
-    painter.drawPath(back_ridge)
-
-    front_ridge = QtGui.QPainterPath()
-    front_ridge.moveTo(size * 0.33, size * 0.71)
-    front_ridge.lineTo(size * 0.40, size * 0.65)
-    front_ridge.lineTo(size * 0.47, size * 0.73)
-    front_ridge.lineTo(size * 0.54, size * 0.67)
-    front_ridge.lineTo(size * 0.60, size * 0.75)
-    front_ridge.lineTo(size * 0.66, size * 0.70)
-    painter.drawPath(front_ridge)
-
-    mist = QtGui.QPainterPath()
-    mist.moveTo(size * 0.32, size * 0.68)
-    mist.cubicTo(size * 0.40, size * 0.64, size * 0.52, size * 0.67, size * 0.68, size * 0.69)
-    mist.lineTo(size * 0.68, size * 0.82)
-    mist.lineTo(size * 0.32, size * 0.82)
-    mist.closeSubpath()
-    painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    painter.setBrush(QtGui.QColor(224, 231, 255, 54))
-    painter.drawPath(mist)
-
-
-def _draw_title(painter: QtGui.QPainter, size: int) -> None:
-    if size < 160:
-        return
-    title_font = _pick_title_font(size)
-    text = "UPbRPy"
-    text_path = QtGui.QPainterPath()
-    text_path.addText(QtCore.QPointF(0.0, 0.0), title_font, text)
-    bounds = text_path.boundingRect()
-    horizontal_offset = (size - bounds.width()) * 0.5 - bounds.left()
-    vertical_offset = size * 0.991 - bounds.bottom()
-    translation = QtGui.QTransform()
-    translation.translate(horizontal_offset, vertical_offset)
-    text_path = translation.map(text_path)
-
-    shadow_path = QtGui.QPainterPath(text_path)
+    painter.setBrush(QtGui.QColor(7, 11, 31, 55))
     shadow_transform = QtGui.QTransform()
-    shadow_transform.translate(size * 0.005, size * 0.006)
-    shadow_path = shadow_transform.map(shadow_path)
-    painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    painter.setBrush(QtGui.QColor(16, 10, 35, 110))
-    painter.drawPath(shadow_path)
+    shadow_transform.translate(size * 0.018, size * 0.025)
+    painter.drawPath(shadow_transform.map(silhouette))
 
-    painter.setPen(QtCore.Qt.PenStyle.NoPen)
-    text_gradient = QtGui.QLinearGradient(0, size * 0.90, 0, size * 0.995)
-    text_gradient.setColorAt(0.0, QtGui.QColor(16, 16, 16, 255))
-    text_gradient.setColorAt(0.58, QtGui.QColor(24, 24, 24, 255))
-    text_gradient.setColorAt(1.0, QtGui.QColor(8, 8, 8, 255))
-    painter.setBrush(QtGui.QBrush(text_gradient))
-    painter.drawPath(text_path)
+    facet_pen = QtGui.QPen(
+        QtGui.QColor(224, 244, 255, 165),
+        max(0.8, size * 0.004),
+    )
+    facet_pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+    facets = [
+        (
+            [
+                points["apex_top"],
+                points["top_left"],
+                points["top_mid"],
+            ],
+            "#c4f1ff",
+            "#668be0",
+        ),
+        (
+            [
+                points["apex_top"],
+                points["top_mid"],
+                points["top_right"],
+            ],
+            "#9ee5f4",
+            "#8059b6",
+        ),
+        (
+            [
+                points["top_left"],
+                points["bottom_left"],
+                points["bottom_mid"],
+                points["top_mid"],
+            ],
+            "#6ed5df",
+            "#426fc3",
+        ),
+        (
+            [
+                points["top_mid"],
+                points["bottom_mid"],
+                points["bottom_right"],
+                points["top_right"],
+            ],
+            "#527dc9",
+            "#7652a4",
+        ),
+        (
+            [
+                points["bottom_left"],
+                points["apex_bottom"],
+                points["bottom_mid"],
+            ],
+            "#52a8ce",
+            "#385caa",
+        ),
+        (
+            [
+                points["bottom_mid"],
+                points["apex_bottom"],
+                points["bottom_right"],
+            ],
+            "#5d70b5",
+            "#62418c",
+        ),
+    ]
+    for vertices, start_color, end_color in facets:
+        path = QtGui.QPainterPath()
+        path.moveTo(vertices[0])
+        for vertex in vertices[1:]:
+            path.lineTo(vertex)
+        path.closeSubpath()
+        gradient = QtGui.QLinearGradient(
+            path.boundingRect().topLeft(),
+            path.boundingRect().bottomRight(),
+        )
+        gradient.setColorAt(0.0, QtGui.QColor(start_color))
+        gradient.setColorAt(1.0, QtGui.QColor(end_color))
+        painter.setPen(facet_pen)
+        painter.setBrush(gradient)
+        painter.drawPath(path)
 
+    outline = QtGui.QPen(
+        QtGui.QColor(235, 250, 255, 220),
+        max(1.0, size * 0.006),
+    )
+    outline.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(outline)
+    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    painter.drawPath(silhouette)
 
-def _pick_title_font(size: int) -> QtGui.QFont:
-    database = QtGui.QFontDatabase()
-    for family in ["Didot", "Avenir Next", "Futura", "Optima", "Helvetica Neue"]:
-        if family in database.families():
-            font = QtGui.QFont(family)
-            break
-    else:
-        font = QtGui.QFont()
-    font.setBold(True)
-    font.setWeight(QtGui.QFont.Weight.Black)
-    font.setItalic(True)
-    font.setPointSizeF(size * 0.078)
-    font.setLetterSpacing(QtGui.QFont.SpacingType.PercentageSpacing, 104)
-    return font
+    if size >= 48:
+        # These subtle cross-lines read as facets at normal icon sizes while
+        # also suggesting the sweep-wise depth-profile focus of UPbRPy.
+        depth_pen = QtGui.QPen(
+            QtGui.QColor(236, 252, 255, 115),
+            max(0.7, size * 0.0028),
+        )
+        depth_pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        painter.setPen(depth_pen)
+        for fraction in (0.42, 0.50, 0.58):
+            painter.drawLine(
+                QtCore.QPointF(size * 0.31, size * fraction),
+                QtCore.QPointF(size * 0.69, size * fraction),
+            )
+    painter.restore()
 
 
 def render_icon_pixmap(size: int = 256) -> QtGui.QPixmap:
+    """Return the rendered icon as a Qt pixmap."""
     return QtGui.QPixmap.fromImage(render_icon_image(size))
 
 
 def export_icon_png_series(output_dir: Path) -> list[Path]:
+    """Write standard PNG icon sizes and return their paths."""
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for size in PNG_ICON_SIZES:
@@ -334,6 +261,7 @@ def export_icon_png_series(output_dir: Path) -> list[Path]:
 
 
 def export_iconset(output_dir: Path) -> list[Path]:
+    """Write the PNG filenames expected by an Apple iconset."""
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for size, file_name in ICONSET_EXPORT_SPECS:
@@ -344,6 +272,7 @@ def export_iconset(output_dir: Path) -> list[Path]:
 
 
 def build_app_icon() -> QtGui.QIcon:
+    """Build a multi-resolution Qt application icon."""
     icon = QtGui.QIcon()
     for size in [16, 24, 32, 48, 64, 96, 128, 256, 512]:
         icon.addPixmap(render_icon_pixmap(size))
@@ -351,4 +280,149 @@ def build_app_icon() -> QtGui.QIcon:
 
 
 def build_brand_pixmap(size: int = 56) -> QtGui.QPixmap:
+    """Return the in-app brand image at the requested pixel size."""
     return render_icon_pixmap(size)
+
+
+def build_workflow_stage_icon(
+    stage: str,
+    *,
+    state: str = "ready",
+    size: int = 28,
+    accent: str = "#2468d4",
+    muted: str = "#788da6",
+    success: str = "#159a76",
+) -> QtGui.QIcon:
+    """Build a semantic vector-style icon for one reduction stage.
+
+    The small glyphs are painted from primitives rather than loaded from
+    raster artwork, so they remain sharp on Retina and high-DPI displays.
+    ``state`` may be ``locked``, ``ready``, ``current``, or ``complete``.
+    """
+    canvas_size = max(16, int(size))
+    image = QtGui.QImage(
+        canvas_size * 2,
+        canvas_size * 2,
+        QtGui.QImage.Format.Format_ARGB32_Premultiplied,
+    )
+    image.setDevicePixelRatio(2.0)
+    image.fill(QtCore.Qt.GlobalColor.transparent)
+    painter = QtGui.QPainter(image)
+    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+
+    color = QtGui.QColor(
+        success if state == "complete" else muted if state == "locked" else accent
+    )
+    background = QtGui.QColor(color)
+    background.setAlpha(38 if state != "current" else 64)
+    rect = QtCore.QRectF(1.5, 1.5, canvas_size - 3.0, canvas_size - 3.0)
+    painter.setPen(QtCore.Qt.PenStyle.NoPen)
+    painter.setBrush(background)
+    painter.drawRoundedRect(rect, canvas_size * 0.28, canvas_size * 0.28)
+
+    pen = QtGui.QPen(color, max(1.25, canvas_size * 0.065))
+    pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+    left = canvas_size * 0.25
+    right = canvas_size * 0.75
+    top = canvas_size * 0.25
+    bottom = canvas_size * 0.75
+    center = QtCore.QPointF(canvas_size * 0.50, canvas_size * 0.50)
+    stage_name = str(stage)
+
+    if stage_name == "import":
+        painter.drawRoundedRect(
+            QtCore.QRectF(left, top + 2, right - left, bottom - top - 1),
+            2,
+            2,
+        )
+        painter.drawLine(center.x(), top, center.x(), bottom - 4)
+        painter.drawLine(center.x(), bottom - 4, center.x() - 3, bottom - 7)
+        painter.drawLine(center.x(), bottom - 4, center.x() + 3, bottom - 7)
+    elif stage_name == "selection":
+        painter.drawLine(left, top, left, top + 5)
+        painter.drawLine(left, top, left + 5, top)
+        painter.drawLine(right, top, right - 5, top)
+        painter.drawLine(right, top, right, top + 5)
+        painter.drawLine(left, bottom, left, bottom - 5)
+        painter.drawLine(left, bottom, left + 5, bottom)
+        painter.drawLine(right, bottom, right - 5, bottom)
+        painter.drawLine(right, bottom, right, bottom - 5)
+        painter.drawLine(left + 3, center.y(), right - 3, center.y())
+    elif stage_name == "baseline":
+        painter.drawLine(left, bottom, right, bottom)
+        painter.drawLine(left, bottom, left, top)
+        painter.drawLine(left + 2, bottom - 5, right - 2, bottom - 5)
+    elif stage_name == "normalization":
+        for y, knob in ((top + 2, 0.62), (center.y(), 0.40), (bottom - 2, 0.58)):
+            painter.drawLine(left, y, right, y)
+            x = canvas_size * knob
+            painter.setBrush(color)
+            painter.drawEllipse(QtCore.QPointF(x, y), 1.8, 1.8)
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    elif stage_name == "concentration":
+        path = QtGui.QPainterPath()
+        path.moveTo(center.x() - 3, top)
+        path.lineTo(center.x() - 3, center.y() - 2)
+        path.lineTo(left + 2, bottom)
+        path.lineTo(right - 2, bottom)
+        path.lineTo(center.x() + 3, center.y() - 2)
+        path.lineTo(center.x() + 3, top)
+        painter.drawPath(path)
+        painter.drawLine(left + 5, bottom - 5, right - 5, bottom - 5)
+    elif stage_name == "ratios":
+        painter.setBrush(color)
+        painter.drawEllipse(QtCore.QPointF(left + 3, top + 3), 2, 2)
+        painter.drawEllipse(QtCore.QPointF(right - 3, bottom - 3), 2, 2)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawLine(left + 3, bottom - 1, right - 3, top + 1)
+    elif stage_name == "downhole":
+        points = [
+            QtCore.QPointF(left, top + 2),
+            QtCore.QPointF(center.x() - 2, center.y() - 1),
+            QtCore.QPointF(right, bottom - 2),
+        ]
+        painter.drawPolyline(QtGui.QPolygonF(points))
+        painter.drawLine(right, bottom - 2, right - 1, bottom - 7)
+    elif stage_name == "session":
+        painter.drawEllipse(center, (right - left) / 2, (bottom - top) / 2)
+        painter.drawLine(center, QtCore.QPointF(center.x(), top + 4))
+        painter.drawLine(center, QtCore.QPointF(right - 4, center.y() + 2))
+    elif stage_name == "spot_means":
+        painter.drawEllipse(center, 7, 7)
+        painter.drawEllipse(center, 3, 3)
+        painter.setBrush(color)
+        painter.drawEllipse(center, 1.4, 1.4)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    elif stage_name == "depth_profile":
+        for offset in (0, 4, 8):
+            painter.drawLine(
+                left + 2,
+                top + 2 + offset,
+                right - 2,
+                top + 2 + offset,
+            )
+        painter.drawLine(center.x(), top, center.x(), bottom)
+        painter.drawLine(center.x(), bottom, center.x() - 3, bottom - 4)
+        painter.drawLine(center.x(), bottom, center.x() + 3, bottom - 4)
+    elif stage_name in {"finalize", "export"}:
+        painter.drawEllipse(center, 8, 8)
+        painter.drawLine(left + 5, center.y(), center.x() - 1, bottom - 5)
+        painter.drawLine(center.x() - 1, bottom - 5, right - 4, top + 5)
+    else:
+        painter.drawEllipse(center, 7, 7)
+
+    if state == "complete":
+        painter.setPen(
+            QtGui.QPen(QtGui.QColor(success), max(1.2, canvas_size * 0.06))
+        )
+        painter.drawEllipse(
+            QtCore.QPointF(canvas_size * 0.78, canvas_size * 0.22),
+            2.3,
+            2.3,
+        )
+    painter.end()
+    return QtGui.QIcon(QtGui.QPixmap.fromImage(image))
