@@ -177,9 +177,31 @@ set PYTHONPATH=%PYTHONPATH%;C:\path\to\UPbRPy
 ```
 
 ### Desktop GUI
-The active GUI implementation now lives in `GUI/` and uses `PySide6 + pyqtgraph`.
+UPbRPy Studio lives in `GUI/` and uses `PySide6 + pyqtgraph`. The native
+application and notebooks call the same `ReductionPipeline`; the GUI does not
+maintain a second implementation of the scientific calculations.
 
-The current UI includes notebook-derived mineral workflow presets for zircon, apatite, rutile, and titanite. Each preset exposes import defaults, an ordered processing sequence, and step-specific hints so the reduction flow matches the existing notebooks more closely.
+The zircon, apatite, rutile, and titanite presets expose an explicit processing
+sequence from import and window review through downhole/session calibration,
+depth profiles, common-Pb decisions, automatic flags, and final results.
+Long-running stages execute on background workers. The plot uses downsampling,
+and final tables use a virtual Qt data model so large sessions remain
+responsive.
+
+The periodic-table-style isotope selector distinguishes active, inactive, and
+selected channels using shape and borders as well as color. Signal start/end
+and baseline/plateau selections are editable in the trace view. Calibration
+materials, fit models, outlier filtering, common-Pb method, calibration
+uncertainty, and preferred-age transition are represented directly in the
+shared pipeline configuration.
+
+The interface shows a compact icon-and-label workflow rail, plots, and the
+spot/isotope inspector together on large displays. The complete ordered
+sequence fits without scrolling on normal screens, while the selected step's
+explanation and actions appear above the plot. Side panels collapse on smaller
+monitors and can be restored from the View menu. File, Workflow, Calibration,
+Results, View, and Help menus expose the same operations without depending on
+panel visibility.
 
 Run the desktop application from source with:
 
@@ -193,13 +215,12 @@ Or run the console script after installing with `pip install -e ".[gui]"`:
 upbrpy-gui
 ```
 
-The early styling prototype remains in `examples/gui_restart/pyside6_pyqtgraph_demo.py` as a design reference.
-
-With the conda environment activated, you can still launch the original preview with:
-
-```bash
-python examples/gui_restart/pyside6_pyqtgraph_demo.py
-```
+Use **File → Export Publication + Reproducibility Bundle** to write a formatted
+Excel workbook, companion CSV tables, selection windows, spot and depth-profile
+data, a reduction manifest, and a Jupyter notebook. The notebook embeds the
+reviewed GUI selections and recreates the same TOML-first reference-material
+library with legacy CSV fallback, so it can replay the complete GUI reduction
+with the shared Python core.
 
 ### Input file format
 This data reduction engine takes individual laser spot analysis file from a single experiment session exported from Qtegra software. Go to `Export data` -> Select exprter: `Laser Data Reduction Export` -> Select all available analytes -> Export.
