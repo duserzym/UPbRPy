@@ -7,7 +7,7 @@ import pandas as pd
 
 from .calibration import evaluate_correction_result
 from .constants import common_U238_U235
-from .isoplot import (
+from .age import (
     calc_68_date,
     calc_68_date_uncertainty,
     calc_82_date,

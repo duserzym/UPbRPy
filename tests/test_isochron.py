@@ -256,6 +256,62 @@ def test_depth_profile_initial_pb_uncertainty_level_is_explicit():
     )
 
 
+def test_vectorized_depth_profile_intercepts_match_scalar_solver():
+    ages = np.array([85.0, 180.0, 420.0, 950.0, 1700.0])
+    initial = np.array([0.79, 0.82, 0.85, 0.88, 0.91])
+    fractions = np.array([0.45, 0.58, 0.70, 0.82, 0.93])
+    x_concordia, y_concordia = tera_wasserburg_point(ages)
+    frame = {
+        "238U/206Pb_fractionation_corrected": x_concordia * fractions,
+        "207Pb/206Pb_fractionation_corrected": (
+            initial + (y_concordia - initial) * fractions
+        ),
+        "238U/206Pb_fractionation_corrected_2e": np.linspace(0.16, 0.30, 5),
+        "207Pb/206Pb_fractionation_corrected_2e": np.linspace(0.0015, 0.003, 5),
+        "rho": np.linspace(-0.4, 0.4, 5),
+        "initial": initial,
+        "initial_1s": np.linspace(0.0004, 0.0012, 5),
+    }
+
+    vectorized = tw_depth_profile_sweep_ages(
+        frame,
+        initial_pb207_pb206_col="initial",
+        sigma_initial_pb207_pb206_col="initial_1s",
+        rho_col="rho",
+    )
+    scalar = [
+        tw_single_sweep_intercept(
+            frame["238U/206Pb_fractionation_corrected"][index],
+            frame["207Pb/206Pb_fractionation_corrected"][index],
+            frame["238U/206Pb_fractionation_corrected_2e"][index] / 2.0,
+            frame["207Pb/206Pb_fractionation_corrected_2e"][index] / 2.0,
+            frame["rho"][index],
+            initial_pb207_pb206=initial[index],
+            sigma_initial_pb207_pb206=frame["initial_1s"][index],
+        )
+        for index in range(len(ages))
+    ]
+
+    np.testing.assert_allclose(
+        vectorized["tw_lower_intercept_age"],
+        [result.lower_intercept.age_ma for result in scalar],
+        rtol=0,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        vectorized["tw_lower_intercept_age_1s"],
+        [result.lower_intercept.sigma_ma for result in scalar],
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        vectorized["tw_line_slope"],
+        [result.line.slope for result in scalar],
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_fit_summary_and_mc_summary_frame_are_flat_and_exportable():
     lower_age = 100.0
     upper_age = 1100.0

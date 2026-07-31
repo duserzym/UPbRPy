@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 import inspect
 from functools import wraps
 from html import escape
+import json
 from pathlib import Path
 import re
 import tempfile
@@ -58,17 +59,88 @@ class StandaloneBokehPlot:
     __slots__ = ("object",)
 
     def __init__(self, plot):
-        """Retain the Bokeh model that will be serialized for notebook display."""
+        """Retain a plot with compact, display-precision data sources."""
+        compact_bokeh_display_sources(plot)
         self.object = plot
+
+    def _ipython_display_(self):
+        """Render through Bokeh's supported notebook MIME protocol.
+
+        IPython and VS Code call this hook before falling back to
+        :meth:`_repr_html_`. Bokeh's notebook renderer publishes the plot div
+        first and then an ``application/vnd.bokehjs_exec`` payload, which is
+        the ordering expected by VS Code's built-in Jupyter renderer. The HTML
+        representation remains available for non-IPython frontends and tests.
+        """
+        from bokeh.io import show
+
+        show(self.object, notebook_handle=False)
 
     def _repr_html_(self):
         """Return a standalone notebook HTML fragment for this plot."""
         script, div = components(self.object)
-        return f"{standalone_bokeh_resources()}\n{div}\n{script}"
+        return f"{div}\n{standalone_bokeh_resources(script)}"
 
 
-def standalone_bokeh_resources() -> str:
-    """Return only the absolute BokehJS resource needed by read-only plots.
+def compact_bokeh_display_value(value):
+    """Convert numeric glyph data to compact browser-display arrays.
+
+    Bokeh otherwise transports ordinary Python float lists and NumPy float64
+    arrays at full analytical precision. A browser plot cannot resolve that
+    precision, and serializing it repeatedly is expensive in plot-heavy
+    notebooks. This helper keeps strings and irregular structures unchanged,
+    represents floating-point coordinates as float32, and uses int32 whenever
+    an integer column fits safely. It affects only the Bokeh data source; the
+    DataFrame used for calculations and tabular export is not modified.
+    """
+    if isinstance(value, pd.Series):
+        value = value.to_numpy()
+    if isinstance(value, np.ndarray):
+        if value.dtype.kind == "f" and value.dtype.itemsize > 4:
+            return value.astype(np.float32)
+        if value.dtype.kind in "iu" and value.dtype.itemsize > 4:
+            if value.size == 0:
+                return value.astype(np.int32)
+            lower = np.nanmin(value)
+            upper = np.nanmax(value)
+            limits = np.iinfo(np.int32)
+            if lower >= limits.min and upper <= limits.max:
+                return value.astype(np.int32)
+        if value.dtype.kind == "O":
+            return [compact_bokeh_display_value(item) for item in value]
+        return value
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return value
+        try:
+            array = np.asarray(value)
+        except ValueError:
+            return [compact_bokeh_display_value(item) for item in value]
+        if array.ndim == 1 and array.dtype.kind in "fiu":
+            return compact_bokeh_display_value(array)
+        if array.dtype.kind == "O" or array.ndim > 1:
+            return [compact_bokeh_display_value(item) for item in value]
+    return value
+
+
+def compact_bokeh_display_sources(plot):
+    """Compact every numeric ``ColumnDataSource`` attached to a plot.
+
+    Standalone notebook plots are independent display artifacts, so reducing
+    their transport precision cannot affect the reduction pipeline. The
+    conversion substantially lowers VS Code webview message size while
+    preserving hover values and vector-export geometry to visual precision.
+    """
+    for source in plot.select({"type": ColumnDataSource}):
+        source.data = {
+            key: compact_bokeh_display_value(value)
+            for key, value in source.data.items()
+        }
+    return plot
+
+
+def standalone_bokeh_resources(component_script: str) -> str:
+    """Load BokehJS once per webview, then render one standalone component.
 
     Panel registers extension assets in Bokeh's global resource collection.
     Some of those assets use paths relative to a running Panel server, which
@@ -76,8 +148,16 @@ def standalone_bokeh_resources() -> str:
     notebook file. Standalone UPbRPy figures contain native Bokeh models only,
     so they need BokehJS core but none of Panel's server-relative resources.
 
-    Filtering the URLs also avoids loading the optional Bokeh GL, widgets,
-    tables, and MathJax bundles once for every read-only notebook figure.
+    Earlier versions emitted a new ``<script src="...bokeh...">`` element for
+    every plot. A plot-heavy notebook could consequently reload and replace
+    the global Bokeh object dozens of times while other documents were still
+    rendering. VS Code's notebook webview would eventually stop displaying
+    later figures until the project was reopened.
+
+    This loader reuses one versioned script element. Concurrent outputs attach
+    their render callbacks to that element, while outputs created after Bokeh
+    has loaded render immediately. Filtering the URLs also avoids optional
+    Bokeh GL, widgets, tables, and MathJax bundles.
     """
     core_urls = [
         url
@@ -90,10 +170,57 @@ def standalone_bokeh_resources() -> str:
             "Could not identify exactly one absolute BokehJS core resource."
         )
     source = escape(str(core_urls[0]), quote=True)
-    return (
-        f'<script src="{source}"></script>\n'
-        '<script>Bokeh.set_log_level("warn");</script>'
-    )
+    # ``components`` returns an outer script tag. Inject its body only after
+    # the shared BokehJS loader has completed, otherwise fast notebook
+    # execution can evaluate the component before the external script exists.
+    opening_end = component_script.find(">")
+    closing_start = component_script.rfind("</script>")
+    if opening_end < 0 or closing_start < opening_end:
+        raise ValueError("component_script must contain one outer script tag.")
+    script_body = component_script[opening_end + 1 : closing_start]
+    encoded_body = json.dumps(script_body).replace("</", "<\\/")
+    loader_key = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        "-",
+        str(core_urls[0]).rsplit("/", 1)[-1],
+    ).strip("-")
+    return f"""
+<script type="text/javascript">
+(function() {{
+  const host = document.currentScript.parentNode;
+  const renderSource = {encoded_body};
+  const render = function() {{
+    if (!window.Bokeh) return;
+    Bokeh.set_log_level("warn");
+    const component = document.createElement("script");
+    component.type = "text/javascript";
+    component.text = renderSource;
+    host.appendChild(component);
+  }};
+  if (window.Bokeh) {{
+    render();
+    return;
+  }}
+  const selector = 'script[data-upbrpy-bokeh="{loader_key}"]';
+  let loader = document.querySelector(selector);
+  if (loader == null) {{
+    loader = document.createElement("script");
+    loader.src = "{source}";
+    loader.async = true;
+    loader.dataset.upbrpyBokeh = "{loader_key}";
+    document.head.appendChild(loader);
+  }}
+  if (loader.dataset.upbrpyLoaded === "true") {{
+    render();
+  }} else {{
+    loader.addEventListener("load", function() {{
+      loader.dataset.upbrpyLoaded = "true";
+      render();
+    }}, {{once: true}});
+  }}
+}})();
+</script>
+"""
 
 
 def initialize_panel_extension(panel_module, comms: str | None = None) -> None:
@@ -299,8 +426,8 @@ def depth_profile_concordia_editor(
     initial_type="Wetherill",
     initial_view="ellipses",
     output_directory="vector_plots",
-    width=1100,
-    height=500,
+    width=1400,
+    height=560,
     comms: str | None = None,
 ):
     """Build a browser-responsive sweep-wise concordia/isochron explorer.
@@ -536,21 +663,6 @@ def depth_profile_concordia_editor(
             None,
             None,
         )
-        sample_values = (
-            selected["sample"].astype(str).tolist()
-            if "sample" in selected
-            else [""] * len(selected)
-        )
-        age_75 = (
-            pd.to_numeric(selected["207Pb/235U_age"], errors="coerce").tolist()
-            if "207Pb/235U_age" in selected
-            else [np.nan] * len(selected)
-        )
-        age_68 = (
-            pd.to_numeric(selected["206Pb/238U_age"], errors="coerce").tolist()
-            if "206Pb/238U_age" in selected
-            else [np.nan] * len(selected)
-        )
         return {
             "spot": spot_label,
             "diagram": diagram_type,
@@ -560,9 +672,6 @@ def depth_profile_concordia_editor(
             "sy": sy.tolist(),
             "rho": rho_values.tolist(),
             "time": numeric_values(selected, "signal_relative_time").tolist(),
-            "sample": sample_values,
-            "age_75": age_75,
-            "age_68": age_68,
             "x_start": float(xlim[0]),
             "x_end": float(xlim[1]),
             "y_start": float(ylim[0]),
@@ -572,29 +681,22 @@ def depth_profile_concordia_editor(
     records = []
     point_data = {
         "spot_index": [],
-        "wetherill_x": [],
-        "wetherill_y": [],
-        "wetherill_sx": [],
-        "wetherill_sy": [],
-        "wetherill_rho": [],
-        "tw_x": [],
-        "tw_y": [],
-        "tw_sx": [],
-        "tw_sy": [],
+        "r75": [],
+        "r68": [],
+        "s75": [],
+        "s68": [],
+        "rho": [],
+        "r76": [],
+        "s76": [],
         "time": [],
-        "age_75": [],
-        "age_68": [],
         "anchor_76": [],
         "anchor_76_1s": [],
-        "line_slope": [],
-        "line_intercept": [],
         "intercept_age": [],
-        "intercept_x": [],
-        "intercept_y": [],
     }
-    # Store every sweep once. The former browser source duplicated all points
-    # for Wetherill and Tera-Wasserburg views and repeated spot/diagram strings
-    # per row, accounting for several megabytes of notebook JSON.
+    # Store only independent measured quantities. The browser derives TW
+    # coordinates, inverse-ratio uncertainty, radiogenic dates, sweep-line
+    # parameters, and concordia-intercept coordinates. Retaining those derived
+    # arrays previously doubled the notebook payload for large sessions.
     for spot_index, spot_label in enumerate(spot_lookup):
         wetherill = profile_record(spot_label, "Wetherill")
         tera_wasserburg = profile_record(spot_label, "TW")
@@ -602,33 +704,23 @@ def depth_profile_concordia_editor(
         point_count = len(wetherill["x"])
         point_data["spot_index"].extend([spot_index] * point_count)
         for source_name, target_name in (
-            ("x", "wetherill_x"),
-            ("y", "wetherill_y"),
-            ("sx", "wetherill_sx"),
-            ("sy", "wetherill_sy"),
-            ("rho", "wetherill_rho"),
+            ("x", "r75"),
+            ("y", "r68"),
+            ("sx", "s75"),
+            ("sy", "s68"),
+            ("rho", "rho"),
         ):
             point_data[target_name].extend(wetherill[source_name])
-        for source_name, target_name in (
-            ("x", "tw_x"),
-            ("y", "tw_y"),
-            ("sx", "tw_sx"),
-            ("sy", "tw_sy"),
-        ):
-            point_data[target_name].extend(tera_wasserburg[source_name])
-        for field in ("time", "age_75", "age_68"):
-            point_data[field].extend(wetherill[field])
+        point_data["r76"].extend(tera_wasserburg["y"])
+        point_data["s76"].extend(tera_wasserburg["sy"])
+        point_data["time"].extend(wetherill["time"])
         selected = profile_data.loc[
             profile_data["spot_name"] == spot_lookup[spot_label]
         ]
         for source_name, target_name in (
             ("tw_initial_207Pb_206Pb", "anchor_76"),
             ("tw_initial_207Pb_206Pb_1s", "anchor_76_1s"),
-            ("tw_line_slope", "line_slope"),
-            ("tw_line_intercept", "line_intercept"),
             ("tw_lower_intercept_age", "intercept_age"),
-            ("tw_lower_intercept_238U_206Pb", "intercept_x"),
-            ("tw_lower_intercept_207Pb_206Pb", "intercept_y"),
         ):
             if source_name in selected:
                 point_data[target_name].extend(
@@ -636,8 +728,16 @@ def depth_profile_concordia_editor(
                 )
             else:
                 point_data[target_name].extend([np.nan] * point_count)
+    # These arrays are a display transport, not a calculation result. Float32
+    # retains substantially more precision than the plot can display (about
+    # seven significant digits) while halving the binary notebook payload.
+    # The input DataFrame and every exported scientific value remain float64.
+    point_data["spot_index"] = np.asarray(
+        point_data["spot_index"], dtype=np.int16
+    )
     for field in point_data:
-        point_data[field] = np.asarray(point_data[field])
+        if field != "spot_index":
+            point_data[field] = np.asarray(point_data[field], dtype=np.float32)
     profile_source = ColumnDataSource(
         point_data,
         name="depth_profile_switch_data",
@@ -965,11 +1065,6 @@ if (isIsochronView && type_selector.active !== 1) {
 const diagram = type_selector.active === 0 ? "Wetherill" : "TW";
 const selectedSpotIndex = spot_selector.options.indexOf(spot_selector.value);
 const spotIndices = profiles.data.spot_index;
-const xValues = diagram === "Wetherill" ? profiles.data.wetherill_x : profiles.data.tw_x;
-const yValues = diagram === "Wetherill" ? profiles.data.wetherill_y : profiles.data.tw_y;
-const sxValues = diagram === "Wetherill" ? profiles.data.wetherill_sx : profiles.data.tw_sx;
-const syValues = diagram === "Wetherill" ? profiles.data.wetherill_sy : profiles.data.tw_sy;
-const rhoValues = diagram === "Wetherill" ? profiles.data.wetherill_rho : null;
 const x = [];
 const y = [];
 const sx = [];
@@ -988,22 +1083,52 @@ const interceptX = [];
 const interceptY = [];
 for (let i = 0; i < spotIndices.length; i += 1) {
   if (spotIndices[i] === selectedSpotIndex) {
-    x.push(xValues[i]);
-    y.push(yValues[i]);
-    sx.push(sxValues[i]);
-    sy.push(syValues[i]);
-    rho.push(rhoValues == null ? 0 : rhoValues[i]);
+    const r75 = profiles.data.r75[i];
+    const r68 = profiles.data.r68[i];
+    const r76 = profiles.data.r76[i];
+    const s75 = profiles.data.s75[i];
+    const s68 = profiles.data.s68[i];
+    const s76 = profiles.data.s76[i];
+    const anchor = profiles.data.anchor_76[i];
+    const age = profiles.data.intercept_age[i];
+    const twX = Number.isFinite(r68) && r68 !== 0 ? 1 / r68 : NaN;
+    if (diagram === "Wetherill") {
+      x.push(r75);
+      y.push(r68);
+      sx.push(s75);
+      sy.push(s68);
+      rho.push(profiles.data.rho[i]);
+    } else {
+      x.push(twX);
+      y.push(r76);
+      sx.push(Number.isFinite(twX) ? s68 * twX * twX : NaN);
+      sy.push(s76);
+      rho.push(0);
+    }
     time.push(profiles.data.time[i]);
     sample.push(spot_selector.value);
-    age75.push(profiles.data.age_75[i]);
-    age68.push(profiles.data.age_68[i]);
-    anchor76.push(profiles.data.anchor_76[i]);
+    age75.push(Number.isFinite(r75) && r75 > -1
+      ? Math.log1p(r75) / lambda235 / 1e6 : NaN);
+    age68.push(Number.isFinite(r68) && r68 > -1
+      ? Math.log1p(r68) / lambda238 / 1e6 : NaN);
+    anchor76.push(anchor);
     anchor76_1s.push(profiles.data.anchor_76_1s[i]);
-    lineSlope.push(profiles.data.line_slope[i]);
-    lineIntercept.push(profiles.data.line_intercept[i]);
-    interceptAge.push(profiles.data.intercept_age[i]);
-    interceptX.push(profiles.data.intercept_x[i]);
-    interceptY.push(profiles.data.intercept_y[i]);
+    lineSlope.push(
+      [r76, anchor, twX].every(Number.isFinite) && twX !== 0
+        ? (r76 - anchor) / twX : NaN
+    );
+    lineIntercept.push(anchor);
+    interceptAge.push(age);
+    if (Number.isFinite(age) && age > 0) {
+      const years = age * 1e6;
+      const pb68 = Math.exp(lambda238 * years) - 1;
+      const pb75 = Math.exp(lambda235 * years) - 1;
+      interceptX.push(1 / pb68);
+      interceptY.push(pb75 / pb68 / uranium_ratio);
+    } else {
+      interceptX.push(NaN);
+      interceptY.push(NaN);
+    }
   }
 }
 if (x.length === 0) return;
@@ -1269,6 +1394,19 @@ slider.value = slider.value >= slider.end ? slider.start : slider.value + 1;
         ),
         styles={"color": "#555", "font-size": "12px"},
     )
+    # The complete per-spot coordinates already live in ``profile_source``.
+    # Do not serialize a second copy of the initial spot's ellipse polygons
+    # and centers. The DocumentReady callback reconstructs these sources in
+    # the browser before the plot is used, trimming hundreds of kilobytes from
+    # large depth-profile notebook outputs.
+    ellipse_source.data = {"xs": [], "ys": [], "value": []}
+    center_source.data = {
+        "x": [],
+        "y": [],
+        "sample": [],
+        "age_75": [],
+        "age_68": [],
+    }
     bokeh_controls = bokeh_row(
         previous_spot_button,
         spot_selector,
@@ -1491,10 +1629,12 @@ def initialize_notebook(
     """Enable efficient inline UPbRPy plots and live editors in a notebook.
 
     Read-only plots are serialized as standalone Bokeh HTML, so their browser
-    interactions do not require persistent kernel communication. Selection and
-    depth-profile editors remain Panel-backed because applying selections and
-    exporting a current view require Python callbacks. Call this function after
-    importing UPbRPy; wrapped functions retain their public call signatures and
+    interactions do not require persistent kernel communication. The selection
+    editor remains Panel-backed because applying a revised interval updates
+    Python data. The depth-profile concordia viewer uses browser-side
+    callbacks, so spot, diagram, and sweep navigation remain responsive after
+    the kernel is busy or disconnected. Call this function after importing
+    UPbRPy; wrapped functions retain their public call signatures and
     result-dictionary structure.
     """
     try:
@@ -3922,6 +4062,8 @@ __all__ = [
     'StandaloneBokehPlot',
     'add_tw_concordia_context',
     'add_time_series',
+    'compact_bokeh_display_sources',
+    'compact_bokeh_display_value',
     'depth_profile_concordia_editor',
     'create_vector_export_webdriver',
     'excel_plateau_inlier_mask',

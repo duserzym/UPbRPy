@@ -912,8 +912,8 @@ def apply_204pb_common_pb_correction(
             f"204Pb_corrected_{ratio_name}_2e_with_calibration"
         ]
 
-    # A local import avoids an isochron/isoplot import cycle at module load.
-    from .isoplot import (
+    # Keep numerical correction independent from concordia plotting backends.
+    from .age import (
         calc_68_date,
         calc_68_date_uncertainty,
         calc_75_date,
@@ -2259,6 +2259,204 @@ def single_sweep_mc_summary(
     }
 
 
+def solve_tw_lower_intercepts(
+    u238_pb206,
+    pb207_pb206,
+    sigma_u238_pb206,
+    sigma_pb207_pb206,
+    rho,
+    initial_pb207_pb206,
+    sigma_initial_pb207_pb206,
+    *,
+    maximum_age_ma=EARTH_AGE_MA,
+    bracket_count=1200,
+    bisection_iterations=48,
+    chunk_size=4096,
+):
+    """Vectorize anchored single-sweep Tera--Wasserburg intercepts.
+
+    A sweep and its common-Pb anchor define the line
+
+    ``y = initial_pb207_pb206 + slope * x``.
+
+    Substituting the Tera--Wasserburg concordia equations and multiplying by
+    ``exp(lambda_238 * t) - 1`` gives the numerically stable root equation
+
+    ``(exp(lambda_235*t)-1)/U238_U235
+      - initial_pb207_pb206*(exp(lambda_238*t)-1) - slope = 0``.
+
+    The first sign-changing Earth-age bracket is found for every row with
+    NumPy broadcasting, then all lower roots in that chunk are refined
+    together by bisection. This produces the same lower intercept selected by
+    :func:`find_intersection_ages` without performing a 1,200-point Python
+    loop for every sweep. First-order age uncertainties use the same
+    line-covariance and implicit-function propagation as
+    :func:`concordia_intercepts`.
+
+    Parameters are broadcast to a common one-dimensional shape. Invalid rows
+    are retained as NaN so output positions continue to match input rows.
+
+    Returns
+    -------
+    dict of numpy.ndarray
+        Line slope/intercept, lower-intercept age and uncertainty, concordia
+        coordinates, and a boolean validity mask.
+    """
+    arrays = np.broadcast_arrays(
+        np.asarray(u238_pb206, dtype=float),
+        np.asarray(pb207_pb206, dtype=float),
+        np.asarray(sigma_u238_pb206, dtype=float),
+        np.asarray(sigma_pb207_pb206, dtype=float),
+        np.asarray(rho, dtype=float),
+        np.asarray(initial_pb207_pb206, dtype=float),
+        np.asarray(sigma_initial_pb207_pb206, dtype=float),
+    )
+    x, y, sx, sy, correlation, initial, sigma_initial = [
+        values.reshape(-1) for values in arrays
+    ]
+    row_count = x.size
+    slope = np.full(row_count, np.nan)
+    intercept = np.full(row_count, np.nan)
+    age = np.full(row_count, np.nan)
+    age_sigma = np.full(row_count, np.nan)
+    intercept_x = np.full(row_count, np.nan)
+    intercept_y = np.full(row_count, np.nan)
+
+    valid = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & np.isfinite(sx)
+        & np.isfinite(sy)
+        & np.isfinite(correlation)
+        & np.isfinite(initial)
+        & np.isfinite(sigma_initial)
+        & (x > 0)
+        & (sx > 0)
+        & (sy > 0)
+        & (sigma_initial >= 0)
+        & (np.abs(correlation) < 1)
+    )
+    slope[valid] = (y[valid] - initial[valid]) / x[valid]
+    intercept[valid] = initial[valid]
+
+    bracket_count = int(bracket_count)
+    bisection_iterations = int(bisection_iterations)
+    chunk_size = int(chunk_size)
+    if bracket_count < 2:
+        raise ValueError("bracket_count must be at least 2.")
+    if bisection_iterations < 1:
+        raise ValueError("bisection_iterations must be positive.")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive.")
+
+    age_grid = np.linspace(0.001, float(maximum_age_ma), bracket_count)
+    time_grid = age_grid * 1e6
+    grid_r75_over_u = np.expm1(LAMBDA_235 * time_grid) / U238_U235
+    grid_r68 = np.expm1(LAMBDA_238 * time_grid)
+    valid_positions = np.flatnonzero(valid)
+
+    for chunk_start in range(0, valid_positions.size, chunk_size):
+        positions = valid_positions[chunk_start : chunk_start + chunk_size]
+        chunk_slope = slope[positions]
+        chunk_initial = initial[positions]
+        grid_residual = (
+            grid_r75_over_u[None, :]
+            - chunk_initial[:, None] * grid_r68[None, :]
+            - chunk_slope[:, None]
+        )
+        left_residuals = grid_residual[:, :-1]
+        right_residuals = grid_residual[:, 1:]
+        crossing = (
+            (left_residuals == 0)
+            | (left_residuals * right_residuals < 0)
+        )
+        has_crossing = crossing.any(axis=1)
+        if not np.any(has_crossing):
+            continue
+
+        root_positions = positions[has_crossing]
+        first_crossing = np.argmax(crossing[has_crossing], axis=1)
+        left = age_grid[first_crossing].copy()
+        right = age_grid[first_crossing + 1].copy()
+        left_value = left_residuals[has_crossing, first_crossing].copy()
+        exact_left = left_value == 0
+
+        active = ~exact_left
+        for _ in range(bisection_iterations):
+            if not np.any(active):
+                break
+            midpoint = (left[active] + right[active]) / 2.0
+            midpoint_years = midpoint * 1e6
+            midpoint_value = (
+                np.expm1(LAMBDA_235 * midpoint_years) / U238_U235
+                - chunk_initial[has_crossing][active]
+                * np.expm1(LAMBDA_238 * midpoint_years)
+                - chunk_slope[has_crossing][active]
+            )
+            same_side = left_value[active] * midpoint_value > 0
+            active_indices = np.flatnonzero(active)
+            left_indices = active_indices[same_side]
+            right_indices = active_indices[~same_side]
+            left[left_indices] = midpoint[same_side]
+            left_value[left_indices] = midpoint_value[same_side]
+            right[right_indices] = midpoint[~same_side]
+
+        roots = np.where(exact_left, left, (left + right) / 2.0)
+        age[root_positions] = roots
+
+    finite_root = valid & np.isfinite(age)
+    if np.any(finite_root):
+        positions = np.flatnonzero(finite_root)
+        root_years = age[positions] * 1e6
+        exp_235 = np.exp(LAMBDA_235 * root_years)
+        exp_238 = np.exp(LAMBDA_238 * root_years)
+        r75 = exp_235 - 1.0
+        r68 = exp_238 - 1.0
+        root_x = 1.0 / r68
+        root_y = r75 / r68 / U238_U235
+        intercept_x[positions] = root_x
+        intercept_y[positions] = root_y
+
+        covariance_xy = (
+            correlation[positions] * sx[positions] * sy[positions]
+        )
+        slope_variance = (
+            slope[positions] ** 2 * sx[positions] ** 2
+            + sy[positions] ** 2
+            + sigma_initial[positions] ** 2
+            - 2.0 * slope[positions] * covariance_xy
+        ) / x[positions] ** 2
+        intercept_variance = sigma_initial[positions] ** 2
+        intercept_slope_covariance = (
+            -sigma_initial[positions] ** 2 / x[positions]
+        )
+
+        dr75_dt = LAMBDA_235 * 1e6 * exp_235
+        dr68_dt = LAMBDA_238 * 1e6 * exp_238
+        dx_dt = -dr68_dt / r68**2
+        dy_dt = (
+            dr75_dt * r68 - r75 * dr68_dt
+        ) / (r68**2 * U238_U235)
+        residual_derivative = dy_dt - slope[positions] * dx_dt
+        age_variance = (
+            intercept_variance
+            + 2.0 * root_x * intercept_slope_covariance
+            + root_x**2 * slope_variance
+        ) / residual_derivative**2
+        age_sigma[positions] = np.sqrt(np.maximum(age_variance, 0.0))
+
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "age": age,
+        "age_sigma": age_sigma,
+        "intercept_x": intercept_x,
+        "intercept_y": intercept_y,
+        "input_valid": valid,
+        "valid": finite_root,
+    }
+
+
 def tw_depth_profile_sweep_ages(
     data,
     *,
@@ -2308,90 +2506,94 @@ def tw_depth_profile_sweep_ages(
 
     divisor = 2.0 if uncertainties_are_2sigma else 1.0
     initial_divisor = 2.0 if initial_uncertainties_are_2sigma else 1.0
-    rng = np.random.default_rng(random_state)
-
+    x = pd.to_numeric(frame[x_col], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(frame[y_col], errors="coerce").to_numpy(dtype=float)
+    sx = (
+        pd.to_numeric(frame[sx_col], errors="coerce").to_numpy(dtype=float)
+        / divisor
+    )
+    sy = (
+        pd.to_numeric(frame[sy_col], errors="coerce").to_numpy(dtype=float)
+        / divisor
+    )
+    rho = (
+        pd.to_numeric(frame[rho_col], errors="coerce").to_numpy(dtype=float)
+        if rho_col and rho_col in frame.columns
+        else np.zeros(len(frame), dtype=float)
+    )
+    initial = (
+        pd.to_numeric(
+            frame[initial_pb207_pb206_col],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        if initial_pb207_pb206_col is not None
+        else np.full(len(frame), float(initial_pb207_pb206), dtype=float)
+    )
+    sigma_initial = (
+        pd.to_numeric(
+            frame[sigma_initial_pb207_pb206_col],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        / initial_divisor
+        if sigma_initial_pb207_pb206_col is not None
+        else np.full(
+            len(frame),
+            float(sigma_initial_pb207_pb206) / initial_divisor,
+            dtype=float,
+        )
+    )
+    solved = solve_tw_lower_intercepts(
+        x,
+        y,
+        sx,
+        sy,
+        rho,
+        initial,
+        sigma_initial,
+    )
     result_columns = {
-        "tw_initial_207Pb_206Pb": [],
-        "tw_initial_207Pb_206Pb_1s": [],
-        "tw_line_slope": [],
-        "tw_line_intercept": [],
-        "tw_lower_intercept_age": [],
-        "tw_lower_intercept_age_1s": [],
-        "tw_lower_intercept_age_2s": [],
-        "tw_lower_intercept_238U_206Pb": [],
-        "tw_lower_intercept_207Pb_206Pb": [],
-        "tw_lower_intercept_mc_median": [],
-        "tw_lower_intercept_mc_minus": [],
-        "tw_lower_intercept_mc_plus": [],
-        "tw_lower_intercept_mc_n": [],
+        "tw_initial_207Pb_206Pb": initial,
+        "tw_initial_207Pb_206Pb_1s": sigma_initial,
+        "tw_line_slope": solved["slope"],
+        "tw_line_intercept": solved["intercept"],
+        "tw_lower_intercept_age": solved["age"],
+        "tw_lower_intercept_age_1s": solved["age_sigma"],
+        "tw_lower_intercept_age_2s": 2.0 * solved["age_sigma"],
+        "tw_lower_intercept_238U_206Pb": solved["intercept_x"],
+        "tw_lower_intercept_207Pb_206Pb": solved["intercept_y"],
+        "tw_lower_intercept_mc_median": np.full(len(frame), np.nan),
+        "tw_lower_intercept_mc_minus": np.full(len(frame), np.nan),
+        "tw_lower_intercept_mc_plus": np.full(len(frame), np.nan),
+        "tw_lower_intercept_mc_n": np.full(len(frame), np.nan),
     }
 
-    for _, row in frame.iterrows():
-        x = float(row[x_col])
-        y = float(row[y_col])
-        sx = float(row[sx_col]) / divisor
-        sy = float(row[sy_col]) / divisor
-        rho = float(row[rho_col]) if rho_col and rho_col in frame.columns else 0.0
-        initial = (
-            float(row[initial_pb207_pb206_col])
-            if initial_pb207_pb206_col is not None
-            else float(initial_pb207_pb206)
-        )
-        sigma_initial = (
-            float(row[sigma_initial_pb207_pb206_col]) / initial_divisor
-            if sigma_initial_pb207_pb206_col is not None
-            else float(sigma_initial_pb207_pb206) / initial_divisor
-        )
-
-        for key in result_columns:
-            result_columns[key].append(np.nan)
-        result_columns["tw_initial_207Pb_206Pb"][-1] = initial
-        result_columns["tw_initial_207Pb_206Pb_1s"][-1] = sigma_initial
-
-        if not np.all(np.isfinite([x, y, sx, sy, rho, initial, sigma_initial])):
-            continue
-        if x <= 0 or sx <= 0 or sy <= 0 or sigma_initial < 0 or abs(rho) >= 1:
-            continue
-        try:
-            sweep = tw_single_sweep_intercept(
-                x,
-                y,
-                sx,
-                sy,
-                rho,
-                initial_pb207_pb206=initial,
-                sigma_initial_pb207_pb206=sigma_initial,
-            )
-        except ValueError:
-            continue
-
-        result_columns["tw_line_slope"][-1] = sweep.line.slope
-        result_columns["tw_line_intercept"][-1] = sweep.line.intercept
-        if sweep.lower_intercept is not None:
-            age = sweep.lower_intercept
-            result_columns["tw_lower_intercept_age"][-1] = age.age_ma
-            result_columns["tw_lower_intercept_age_1s"][-1] = age.sigma_ma
-            result_columns["tw_lower_intercept_age_2s"][-1] = age.two_sigma_ma
-            result_columns["tw_lower_intercept_238U_206Pb"][-1] = age.x
-            result_columns["tw_lower_intercept_207Pb_206Pb"][-1] = age.y
-
-        if monte_carlo_n and monte_carlo_n > 0:
+    if monte_carlo_n and monte_carlo_n > 0:
+        rng = np.random.default_rng(random_state)
+        for row_index in np.flatnonzero(solved["input_valid"]):
             mc = single_sweep_mc_summary(
-                x,
-                y,
-                sx,
-                sy,
-                rho,
-                initial,
-                sigma_initial,
+                x[row_index],
+                y[row_index],
+                sx[row_index],
+                sy[row_index],
+                rho[row_index],
+                initial[row_index],
+                sigma_initial[row_index],
                 n=monte_carlo_n,
                 confidence=monte_carlo_confidence,
                 rng=rng,
             )
-            result_columns["tw_lower_intercept_mc_median"][-1] = mc["median"]
-            result_columns["tw_lower_intercept_mc_minus"][-1] = mc["minus"]
-            result_columns["tw_lower_intercept_mc_plus"][-1] = mc["plus"]
-            result_columns["tw_lower_intercept_mc_n"][-1] = mc["n_finite"]
+            result_columns["tw_lower_intercept_mc_median"][row_index] = mc[
+                "median"
+            ]
+            result_columns["tw_lower_intercept_mc_minus"][row_index] = mc[
+                "minus"
+            ]
+            result_columns["tw_lower_intercept_mc_plus"][row_index] = mc[
+                "plus"
+            ]
+            result_columns["tw_lower_intercept_mc_n"][row_index] = mc[
+                "n_finite"
+            ]
 
     for key, values in result_columns.items():
         frame[key] = values
@@ -2503,6 +2705,7 @@ __all__ = [
     "fit_discordia",
     "fit_discordia_from_frame",
     "tw_single_sweep_intercept",
+    "solve_tw_lower_intercepts",
     "tw_depth_profile_sweep_ages",
     "monte_carlo_discordia_intercepts",
     "as_arrays",

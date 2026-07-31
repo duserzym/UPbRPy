@@ -120,6 +120,44 @@ def test_standalone_plot_resources_ignore_panel_extension_assets():
     assert "bokeh-mathjax" not in html
 
 
+def test_standalone_plot_uses_bokeh_notebook_display_protocol(monkeypatch):
+    calls = []
+
+    def record_show(plot, *, notebook_handle):
+        calls.append((plot, notebook_handle))
+
+    monkeypatch.setattr("bokeh.io.show", record_show)
+    plot = figure(width=300, height=200)
+    standalone = visualization.StandaloneBokehPlot(plot)
+
+    standalone._ipython_display_()
+
+    assert calls == [(plot, False)]
+
+
+def test_standalone_plot_compacts_display_sources_without_changing_labels():
+    source = visualization.ColumnDataSource(
+        {
+            "x": np.array([0.123456789, 1.987654321], dtype=np.float64),
+            "index": np.array([1, 2], dtype=np.int64),
+            "label": ["first", "second"],
+            "polygons": [
+                np.array([0.1, 0.2], dtype=np.float64),
+                np.array([0.3, 0.4, 0.5], dtype=np.float64),
+            ],
+        }
+    )
+    plot = figure(width=300, height=200)
+    plot.scatter("x", "index", source=source)
+
+    visualization.StandaloneBokehPlot(plot)
+
+    assert source.data["x"].dtype == np.float32
+    assert source.data["index"].dtype == np.int32
+    assert source.data["label"] == ["first", "second"]
+    assert all(item.dtype == np.float32 for item in source.data["polygons"])
+
+
 def test_panel_extension_treats_legacy_vscode_comms_as_auto_detection():
     calls = []
 
@@ -854,8 +892,8 @@ def test_depth_profile_editor_buttons_refresh_spot_and_diagram():
         isochron_controls.children
     )
 
-    assert plot.width == 1100
-    assert plot.height == 500
+    assert plot.width == 1400
+    assert plot.height == 560
     assert plot.width_policy == "fixed"
     assert plot.height_policy == "fixed"
     assert plot.title.text.startswith("spot-a | Wetherill")
@@ -871,9 +909,14 @@ def test_depth_profile_editor_buttons_refresh_spot_and_diagram():
     assert sweep_slider.disabled
     assert previous_sweep.disabled
     assert next_sweep.disabled
-    assert len(
-        list(interactive_layout.select({"name": "depth_profile_switch_data"}))
-    ) == 1
+    profile_sources = list(
+        interactive_layout.select({"name": "depth_profile_switch_data"})
+    )
+    assert len(profile_sources) == 1
+    assert profile_sources[0].data["spot_index"].dtype == np.int16
+    assert profile_sources[0].data["r75"].dtype == np.float32
+    assert "wetherill_x" not in profile_sources[0].data
+    assert "tw_x" not in profile_sources[0].data
     assert "application/vnd.jupyter.widget-view+json" not in editor._repr_html_()
     assert visualization.find_single_bokeh_plot(editor) is plot
 

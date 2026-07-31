@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .constants import common_U238_U235, lambda_235, lambda_232, lambda_238
-from .isoplot import calc_76_date
+from .age import calc_76_date
 
 
 class CovarianceStore(dict):
