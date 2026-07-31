@@ -4,7 +4,7 @@ import pytest
 
 from GUI.services import autopick_selection_regions
 from GUI.state import ReductionSession
-from UPbRPy.io import auto_select_baseline_peak
+from UPbRPy.io import auto_select_baseline_peak, read_experiment_data
 from UPbRPy.selection import (
     SelectionError,
     available_selection_methods,
@@ -50,6 +50,23 @@ def test_threshold_method_preserves_legacy_tuple_api():
     assert select_baseline_peak(
         stepped_trace(), 10, 20, 0.2, 70, 2, 2
     ) == result.as_tuple()
+
+
+def test_threshold_method_does_not_treat_high_background_as_signal():
+    baseline = np.resize(np.array([90.0, 92.0, 88.0, 91.0]), 12)
+    values = np.r_[baseline, np.full(33, 200.0)]
+
+    result = select_signal_regions(
+        values,
+        method="threshold",
+        threshold=0.2,
+        filter_percentile=70,
+    )
+
+    assert result.detection_index == 12
+    assert result.diagnostics["threshold_value"] >= result.diagnostics[
+        "baseline_threshold"
+    ]
 
 
 def test_signal_start_recovers_a_subtle_leading_ramp_before_threshold_onset():
@@ -227,6 +244,26 @@ def test_signal_end_excludes_baseline_like_tail_before_stable_recovery():
     ]
 
 
+def test_signal_end_handles_gradual_return_without_detected_falling_edge():
+    values = pulsed_trace(signal_end=22, size=50)
+    values[23:36] = np.linspace(96.0, 12.0, 13)
+
+    selected = select_signal_regions(
+        values,
+        method="excel_expanding_sigma",
+        peak_sweep_n=20,
+        signal_end_sigma_threshold=100,
+    )
+
+    assert selected.diagnostics["signal_end_falling_edge_start"] == -1
+    assert selected.diagnostics["signal_end_stable_baseline_start"] >= 35
+    assert selected.signal_end < selected.diagnostics[
+        "signal_end_stable_baseline_start"
+    ]
+    assert selected.washout_start == selected.signal_end + 1
+    assert selected.signal_end >= selected.plateau_end
+
+
 def test_optional_signal_duration_limit_caps_free_pick_in_elapsed_seconds():
     values = pulsed_trace(signal_end=31)
     times = np.arange(values.size, dtype=float) * 0.4
@@ -306,6 +343,148 @@ def test_experiment_autopick_uses_each_spots_positional_index():
     assert selected["baseline_end_times"].tolist() == [10.0, 110.0]
     assert selected["signal_start_times"].tolist() == [12.0, 112.0]
     assert selected["signal_end_times"].tolist() == [44.0, 144.0]
+
+
+def test_experiment_autopick_falls_back_when_nist_has_no_silicon_channel():
+    trace = stepped_trace(size=45)
+    total_data = pd.DataFrame(
+        {
+            "Time": np.arange(45.0),
+            "spot_name": "NIST610_1",
+            "49Ti": trace,
+        }
+    )
+    experiment = pd.DataFrame({"spot_names": ["NIST610_1"]})
+
+    selected = auto_select_baseline_peak(
+        experiment,
+        total_data,
+        "49Ti",
+        selection_method="rolling_sigma",
+        selection_options={
+            "rolling_window": 5,
+            "sigma_threshold": 5,
+            "consecutive": 2,
+        },
+    )
+
+    assert selected.loc[0, "selection_channel"] == "49Ti"
+    assert selected.loc[0, "signal_start_times"] == 12.0
+
+
+def test_experiment_autopick_accepts_per_sample_selection_channels():
+    trace = stepped_trace(size=45)
+    total_data = pd.DataFrame(
+        {
+            "Time": np.arange(45.0),
+            "spot_name": "NIST610_1",
+            "49Ti": np.full(45, 10.0),
+            "238U": trace,
+        }
+    )
+    experiment = pd.DataFrame(
+        {"spot_names": ["NIST610_1"], "sample": ["NIST610"]}
+    )
+
+    selected = auto_select_baseline_peak(
+        experiment,
+        total_data,
+        "49Ti",
+        selection_channels={"nist610": "238U"},
+        selection_method="rolling_sigma",
+        selection_options={
+            "rolling_window": 5,
+            "sigma_threshold": 5,
+            "consecutive": 2,
+        },
+    )
+
+    assert selected.loc[0, "selection_channel"] == "238U"
+    assert selected.loc[0, "signal_start_times"] == 12.0
+
+
+def test_experiment_autopick_prefers_spot_channel_over_sample_channel():
+    trace = stepped_trace(size=45)
+    total_data = pd.DataFrame(
+        {
+            "Time": np.arange(45.0),
+            "spot_name": "A_1",
+            "29Si": np.full(45, 10.0),
+            "238U": trace,
+        }
+    )
+    experiment = pd.DataFrame(
+        {"spot_names": ["A_1"], "sample": ["A"]}
+    )
+
+    selected = auto_select_baseline_peak(
+        experiment,
+        total_data,
+        "29Si",
+        selection_channels={"A": "29Si", "A_1": "238U"},
+        selection_method="rolling_sigma",
+        selection_options={
+            "rolling_window": 5,
+            "sigma_threshold": 5,
+            "consecutive": 2,
+        },
+    )
+
+    assert selected.loc[0, "selection_channel"] == "238U"
+
+
+def test_experiment_autopick_records_successful_fallback_method():
+    trace = stepped_trace(size=45)
+    total_data = pd.DataFrame(
+        {"Time": np.arange(45.0), "spot_name": "A_1", "238U": trace}
+    )
+    experiment = pd.DataFrame(
+        {"spot_names": ["A_1"], "sample": ["A"]}
+    )
+
+    selected = auto_select_baseline_peak(
+        experiment,
+        total_data,
+        "238U",
+        selection_method="excel_expanding_sigma",
+        selection_fallback_methods=("threshold",),
+        selection_options={"sigma_threshold": 1_000},
+        threshold=0.2,
+    )
+
+    assert selected.loc[0, "selection_method"] == "threshold"
+    assert selected.loc[0, "signal_start_times"] == 12.0
+    assert pd.isna(selected.loc[0, "selection_error"])
+
+
+def test_experiment_import_applies_case_insensitive_sample_aliases(
+    tmp_path,
+    monkeypatch,
+):
+    csv_path = tmp_path / "spot.csv"
+    csv_path.write_text(
+        "MAD:01/01/2024 01:00:00 PM;\n"
+        + "\n" * 12
+        + "Time,44Ca,\n"
+        + "s,cps,\n"
+        + "0,10,\n"
+        + "1,10,\n"
+        + "2,100,\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "UPbRPy.io.auto_select_baseline_peak",
+        lambda experiment, *args, **kwargs: experiment,
+    )
+    experiment, _, total_data = read_experiment_data(
+        tmp_path,
+        primary_channel="44Ca",
+        sample_aliases={"mad": "MADUCSB"},
+    )
+
+    assert experiment.loc[0, "sample"] == "MADUCSB"
+    assert total_data["sample"].unique().tolist() == ["MADUCSB"]
 
 
 def test_gui_autopick_uses_shared_selection_method():

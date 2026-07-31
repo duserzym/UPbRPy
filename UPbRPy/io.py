@@ -409,6 +409,19 @@ def find_signal_end(
         # First sweep not retained as statistically elevated sample signal.
         # Stable baseline recovery may occur a few noisy sweeps later.
         washout_start = signal_end + 1
+    elif stable_baseline_start is not None:
+        # A gradual washout can return to the baseline band without satisfying
+        # the sharper rolling-trend falling-edge test. Retain the last sweep
+        # that is still elevated above the washout threshold, while never
+        # moving the signal end inside the selected plateau.
+        tail = values[search_start:stable_baseline_start]
+        elevated_tail = np.flatnonzero(tail > retention_threshold)
+        if elevated_tail.size:
+            signal_end = search_start + int(elevated_tail[-1])
+        else:
+            signal_end = stable_baseline_start - 1
+        signal_end = max(signal_end, plateau_end - 1)
+        washout_start = signal_end + 1
     else:
         washout_start = None
 
@@ -457,7 +470,14 @@ def threshold_onset(
     baseline_sweep_n: int = 0,
     **_: object,
 ) -> tuple[int, Mapping[str, float | int | str]]:
-    """Detect onset above a rolling mean plus a configurable sigma threshold."""
+    """Detect onset above both plateau-fraction and baseline-noise thresholds.
+
+    The historical selector used a fraction of a rough plateau mean. That
+    works when the pre-ablation background is near zero, but can place the
+    threshold below a high Si background in glass analyses. Requiring the
+    larger of that value and the robust baseline center plus three scales
+    prevents baseline sweeps from being mistaken for signal.
+    """
     percentile = float(filter_percentile)
     if not 0 <= percentile <= 100:
         raise ValueError("filter_percentile must be between 0 and 100.")
@@ -465,8 +485,19 @@ def threshold_onset(
     rough_plateau = values[values > percentile_value]
     if rough_plateau.size == 0:
         rough_plateau = values[np.argmax(values) : np.argmax(values) + 1]
-    threshold_value = float(np.mean(rough_plateau) * float(threshold))
     search_start = max(0, int(baseline_sweep_n))
+    baseline_reference = values[:search_start]
+    if baseline_reference.size >= 2:
+        baseline_center, baseline_scale = robust_center_scale(baseline_reference)
+        baseline_threshold = baseline_center + 3.0 * baseline_scale
+    else:
+        baseline_center = float(values[0])
+        baseline_scale = 0.0
+        baseline_threshold = baseline_center
+    plateau_fraction_threshold = float(
+        np.mean(rough_plateau) * float(threshold)
+    )
+    threshold_value = max(plateau_fraction_threshold, baseline_threshold)
     hits = np.flatnonzero(values[search_start:] > threshold_value) + search_start
     if hits.size == 0:
         raise SelectionError(
@@ -474,6 +505,10 @@ def threshold_onset(
         )
     return int(hits[0]), {
         "threshold_value": threshold_value,
+        "plateau_fraction_threshold": plateau_fraction_threshold,
+        "baseline_threshold": baseline_threshold,
+        "baseline_center": baseline_center,
+        "baseline_scale": baseline_scale,
         "filter_percentile": percentile,
         "rough_plateau_mean": float(np.mean(rough_plateau)),
     }
@@ -788,32 +823,66 @@ def read_experiment_data(
     baseline_offset=2,
     plateau_offset=2,
     sep='_',
+    sample_aliases: Mapping[str, str] | None = None,
+    selection_channels: Mapping[str, str] | None = None,
     selection_method='threshold',
+    selection_fallback_methods: tuple[str, ...] = (),
     selection_options=None,
     signal_duration_limit_seconds=None,
 ):
-    '''
-    function for extracting spot names from files exported from Thermo iCap
+    """Read a directory of per-spot Thermo iCAP CSV exports.
 
-    You may follow the instruction on Iolite website below for guidance on generating the proper files from iCap
-    https://iolite.xyz/docs/import_prep/exporting_data_from_instruments.html
+    Files are ordered by acquisition time, their relative sweep times are
+    aligned onto one session axis, and baseline, plateau, signal-start, and
+    signal-end windows are initialized for every analysis.
 
     Parameters
     ----------
-    directory : str
-        path to the folder containing the files
-        we assume that the files in the folders are in .csv format
+    directory : str or path-like
+        Folder containing one CSV export per analysis.
+    primary_channel : str
+        Default matrix-sensitive channel used to detect ablation signals.
+    baseline_sweep_n, peak_sweep_n : int
+        Requested baseline and plateau window lengths in measured sweeps.
+    threshold, filter_percentile : float
+        Parameters used by the threshold fallback detector.
+    baseline_offset, plateau_offset : int
+        Numbers of transition sweeps left between the detected onset and the
+        baseline or plateau window, respectively.
+    sep : str
+        Delimiter used to obtain the sample label from each spot name.
+    sample_aliases : mapping of str to str, optional
+        Exact, case-insensitive replacements applied after splitting each spot
+        name at ``sep``. This preserves legacy parsing while allowing session
+        labels such as ``MAD_UCSB`` or ``MAD`` to resolve to the reference
+        library name ``MADUCSB`` without editing the instrument exports.
+    selection_channels : mapping of str to str, optional
+        Per-spot or per-sample channels for automatic signal-window detection.
+        Exact spot names take precedence; otherwise sample keys are matched
+        case-insensitively after ``sample_aliases`` are applied. This is useful
+        when the preferred matrix channel is absent from a glass acquisition,
+        or when one anomalous analysis needs a better-resolved onset channel.
+    selection_fallback_methods : tuple of str, optional
+        Ordered detector methods tried only when ``selection_method`` raises a
+        :class:`SelectionError`. The successful method is recorded for each
+        analysis, making mixed-method recovery explicit and auditable.
+    selection_options : mapping, optional
+        Extra parameters forwarded to the registered signal-onset detectors.
     signal_duration_limit_seconds : float or None
         Optional maximum elapsed time from detected signal start to inclusive
         signal end. ``None`` preserves the unrestricted automatic endpoint.
 
     Returns
     -------
-    spot_names : list
-        list of spot names extracted from the files
-    spot_paths : list
-        list of paths to the files
-    '''
+    experiment : pandas.DataFrame
+        One row per analysis with file provenance and initialized selection
+        times and diagnostics.
+    element_channels : list of str
+        Signal channel names reported in the instrument exports.
+    total_data : pandas.DataFrame
+        All measured sweeps on one session time axis, with spot and sample
+        identifiers attached.
+    """
     spot_names = []
     spot_paths = []
     spot_starting_times = []
@@ -845,7 +914,16 @@ def read_experiment_data(
     # Create a pandas dataframe to store the experiment data.
     experiment = pd.DataFrame()
     experiment['spot_names'] = spot_names
-    experiment['sample'] = [spot_name.split(sep)[0] for spot_name in spot_names]
+    parsed_samples = [spot_name.split(sep)[0] for spot_name in spot_names]
+    if sample_aliases:
+        aliases = {
+            str(source).strip().casefold(): str(target).strip()
+            for source, target in sample_aliases.items()
+        }
+        parsed_samples = [
+            aliases.get(sample.casefold(), sample) for sample in parsed_samples
+        ]
+    experiment['sample'] = parsed_samples
     experiment['spot_paths'] = spot_paths
     experiment['spot_starting_times'] = spot_starting_times
 
@@ -896,7 +974,9 @@ def read_experiment_data(
         filter_percentile,
         baseline_offset,
         plateau_offset,
+        selection_channels=selection_channels,
         selection_method=selection_method,
+        selection_fallback_methods=selection_fallback_methods,
         selection_options=selection_options,
         signal_duration_limit_seconds=signal_duration_limit_seconds,
     )
@@ -914,8 +994,10 @@ def read_experiment_data(
         'baseline_offset': int(baseline_offset),
         'plateau_offset': int(plateau_offset),
         'selection_method': str(selection_method),
+        'selection_fallback_methods': tuple(selection_fallback_methods),
         'selection_options': dict(selection_options or {}),
         'signal_duration_limit_seconds': signal_duration_limit_seconds,
+        'selection_channels': dict(selection_channels or {}),
     }
 
     return experiment, element_channels, total_data
@@ -949,63 +1031,110 @@ def auto_select_baseline_peak(experiment,
                               filter_percentile=70,
                               baseline_offset=2,
                               plateau_offset=2,
+                              selection_channels: Mapping[str, str] | None = None,
                               selection_method='threshold',
+                              selection_fallback_methods: tuple[str, ...] = (),
                               selection_options: Mapping[str, object] | None = None,
                               signal_duration_limit_seconds: float | None = None):
-    '''
-    specific function for selecting the baseline and peak regions in the data given a parsed experiment dataframe
+    """Initialize signal windows for every analysis in an experiment.
 
     Parameters
     ----------
-    experiment: pandas.DataFrame
-        a pandas dataframe containing the experiment metadata
+    experiment : pandas.DataFrame
+        Per-analysis metadata containing ``spot_names`` and, normally,
+        canonical ``sample`` labels.
     total_data : pandas.DataFrame
-        a pandas dataframe containing the total data
-    baseline_z_threshold : float
-        the threshold for selecting the baseline region
-    plateau_z_threshold : float
-        the threshold for selecting the peak region
+        Session sweep table with ``spot_name``, ``Time``, and signal channels.
+    primary_channel : str
+        Default signal channel for non-overridden analyses.
+    selection_channels : mapping, optional
+        Case-insensitive spot- or sample-specific detection channels.
+    selection_method : str
+        Primary registered onset detector.
+    selection_fallback_methods : tuple of str, optional
+        Detectors attempted in order only after the primary method fails.
+    selection_options : mapping, optional
+        Extra detector parameters, such as ``sigma_threshold``.
+    signal_duration_limit_seconds : float, optional
+        Maximum retained elapsed time after the detected signal start.
 
     Returns
     -------
     experiment : pandas.DataFrame
-        a pandas dataframe containing the spot data with the baseline and peak regions selected
-    '''
+        The same table with selection times, method/channel provenance,
+        diagnostics, and any unresolved error message added.
+    """
     method_options = dict(selection_options or {})
     option_duration_limit = method_options.pop(
         'signal_duration_limit_seconds', None
     )
     if signal_duration_limit_seconds is None:
         signal_duration_limit_seconds = option_duration_limit
+    channels_by_sample = {
+        str(sample).strip().casefold(): str(channel).strip()
+        for sample, channel in (selection_channels or {}).items()
+    }
 
     # Group once so automatic selection does not rescan the complete session
     # table for every analysis.
     for spot_name, spot_data in total_data.groupby('spot_name', sort=False):
-        # always use 29Si for glass
-        if 'NIST' in spot_name:
-            values = spot_data['29Si'].tolist()
-        else:
-            values = spot_data[primary_channel].tolist()
         row_mask = experiment['spot_names'] == spot_name
-        try:
-            selection = select_signal_regions(
-                values,
-                time=spot_data['Time'].to_numpy(dtype=float),
-                method=selection_method,
-                baseline_sweep_n=baseline_sweep_n,
-                peak_sweep_n=peak_sweep_n,
-                threshold=threshold,
-                filter_percentile=filter_percentile,
-                baseline_offset=baseline_offset,
-                plateau_offset=plateau_offset,
-                signal_duration_limit_seconds=signal_duration_limit_seconds,
-                **method_options,
+        sample_name = (
+            str(experiment.loc[row_mask, 'sample'].iloc[0])
+            if 'sample' in experiment.columns
+            else str(spot_name).split('_')[0]
+        )
+        # Silicon is normally the cleanest primary signal for glass. Some
+        # acquisition methods omit Si, however, so use the mineral workflow's
+        # configured primary channel rather than failing the whole session.
+        use_glass_silicon = 'NIST' in spot_name and '29Si' in spot_data.columns
+        selection_channel = channels_by_sample.get(str(spot_name).casefold())
+        if selection_channel is None:
+            selection_channel = channels_by_sample.get(sample_name.casefold())
+        if selection_channel is None:
+            selection_channel = '29Si' if use_glass_silicon else primary_channel
+        if selection_channel not in spot_data.columns:
+            raise KeyError(
+                f"Selection channel {selection_channel!r} is not present for "
+                f"spot {spot_name!r}."
             )
-        except SelectionError as error:
-            experiment.loc[row_mask, 'selection_method'] = resolve_method(selection_method)
-            experiment.loc[row_mask, 'selection_channel'] = '29Si' if 'NIST' in spot_name else primary_channel
-            experiment.loc[row_mask, 'selection_error'] = str(error)
+        values = spot_data[selection_channel].tolist()
+        attempted_methods = [
+            selection_method,
+            *selection_fallback_methods,
+        ]
+        selection = None
+        selection_errors = []
+        for candidate_method in attempted_methods:
+            try:
+                selection = select_signal_regions(
+                    values,
+                    time=spot_data['Time'].to_numpy(dtype=float),
+                    method=candidate_method,
+                    baseline_sweep_n=baseline_sweep_n,
+                    peak_sweep_n=peak_sweep_n,
+                    threshold=threshold,
+                    filter_percentile=filter_percentile,
+                    baseline_offset=baseline_offset,
+                    plateau_offset=plateau_offset,
+                    signal_duration_limit_seconds=signal_duration_limit_seconds,
+                    **method_options,
+                )
+                break
+            except SelectionError as error:
+                selection_errors.append(
+                    f"{resolve_method(candidate_method)}: {error}"
+                )
+        if selection is None:
+            experiment.loc[row_mask, 'selection_method'] = resolve_method(
+                selection_method
+            )
+            experiment.loc[row_mask, 'selection_channel'] = selection_channel
+            experiment.loc[row_mask, 'selection_error'] = " | ".join(
+                selection_errors
+            )
             continue
+        experiment.loc[row_mask, 'selection_error'] = None
         experiment.loc[row_mask, 'plateau_start_times'] = spot_data.iloc[selection.plateau_start]['Time']
         experiment.loc[row_mask, 'plateau_end_times'] = spot_data.iloc[selection.plateau_end]['Time']
         experiment.loc[row_mask, 'baseline_start_times'] = spot_data.iloc[selection.baseline_start]['Time']
@@ -1013,7 +1142,7 @@ def auto_select_baseline_peak(experiment,
         experiment.loc[row_mask, 'signal_start_times'] = spot_data.iloc[selection.signal_start]['Time']
         experiment.loc[row_mask, 'signal_end_times'] = spot_data.iloc[selection.signal_end]['Time']
         experiment.loc[row_mask, 'selection_method'] = selection.method
-        experiment.loc[row_mask, 'selection_channel'] = '29Si' if 'NIST' in spot_name else primary_channel
+        experiment.loc[row_mask, 'selection_channel'] = selection_channel
         experiment.loc[row_mask, 'selection_detection_index'] = selection.detection_index
         experiment.loc[row_mask, 'selection_signal_end_index'] = selection.signal_end
         experiment.loc[row_mask, 'selection_unrestricted_signal_end_index'] = (
