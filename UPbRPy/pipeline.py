@@ -22,22 +22,6 @@ from typing import Any
 
 import pandas as pd
 
-from .concentration import (
-    calc_concentration,
-    calc_concentration_calibration_factor,
-    internal_normalization,
-)
-from .fractionation import (
-    apply_DH_correction,
-    apply_session_correction,
-    calc_DH_fractionations_rad,
-    calc_DH_fractionations_TW,
-    calc_session_fractionation_rad,
-    calc_session_fractionation_TW,
-)
-from .io import subtract_baseline
-from .ratios import calc_raw_ratios
-from .reduction import calc_depth_profile, calc_ratio_mean_and_uncertainty
 from .results import (
     AutomaticFlagSettings,
     FinalizedReduction,
@@ -429,8 +413,15 @@ class ReductionPipeline:
         source_directory: str | Path | None = None,
         reference_library_path: str | Path | None = None,
         input_files: tuple[str | Path, ...] = (),
+        build_diagnostic_plots: bool = True,
     ) -> None:
-        """Initialize a pipeline around imported data and immutable settings."""
+        """Initialize a pipeline around imported data and immutable settings.
+
+        ``build_diagnostic_plots`` is a frontend concern, not a scientific
+        reduction setting. Notebook callers retain Bokeh diagnostics by
+        default; native GUIs can disable them and render the returned numeric
+        metadata with their own lightweight plotting widgets.
+        """
         if not isinstance(experiment, pd.DataFrame):
             raise TypeError("experiment must be a pandas DataFrame")
         if not isinstance(total_data, pd.DataFrame):
@@ -451,6 +442,7 @@ class ReductionPipeline:
             else Path(reference_library_path)
         )
         self.input_files = tuple(Path(path) for path in input_files)
+        self.build_diagnostic_plots = bool(build_diagnostic_plots)
         self.cache = PipelineCache()
         self.cache.set(
             PipelineStage.IMPORT,
@@ -498,6 +490,8 @@ class ReductionPipeline:
 
     def run_baseline(self) -> pd.DataFrame:
         """Subtract each spot/channel baseline using the reviewed selections."""
+        from .io import subtract_baseline
+
         cached = self.cache.get(PipelineStage.BASELINE)
         if isinstance(cached, pd.DataFrame):
             return cached
@@ -510,6 +504,8 @@ class ReductionPipeline:
 
     def run_normalization(self) -> pd.DataFrame:
         """Apply the configured material's internal elemental normalization."""
+        from .concentration import internal_normalization
+
         cached = self.cache.get(PipelineStage.NORMALIZATION)
         if isinstance(cached, pd.DataFrame):
             return cached
@@ -524,6 +520,11 @@ class ReductionPipeline:
 
     def run_concentration(self) -> dict[str, object]:
         """Fit concentration factors and calculate non-calibrant concentrations."""
+        from .concentration import (
+            calc_concentration,
+            calc_concentration_calibration_factor,
+        )
+
         cached = self.cache.get(PipelineStage.CONCENTRATION)
         if isinstance(cached, dict):
             return cached
@@ -546,6 +547,7 @@ class ReductionPipeline:
             calibrants,
             list(self.channels),
             self.standard_archive,
+            build_plot=self.build_diagnostic_plots,
         )
         unknowns = normalized[
             ~normalized["sample"].isin(active_standards)
@@ -568,6 +570,8 @@ class ReductionPipeline:
 
     def run_ratios(self) -> dict[str, pd.DataFrame]:
         """Calculate filtered plateau and complete signal isotope ratios."""
+        from .ratios import calc_raw_ratios
+
         cached = self.cache.get(PipelineStage.RATIOS)
         if isinstance(cached, dict):
             return cached
@@ -598,6 +602,12 @@ class ReductionPipeline:
 
     def run_downhole(self) -> dict[str, object]:
         """Build shared downhole models and apply them to both data intervals."""
+        from .fractionation import (
+            apply_DH_correction,
+            calc_DH_fractionations_rad,
+            calc_DH_fractionations_TW,
+        )
+
         cached = self.cache.get(PipelineStage.DOWNHOLE)
         if isinstance(cached, dict):
             return cached
@@ -629,6 +639,7 @@ class ReductionPipeline:
                 model=config.downhole.method,
                 model_kwargs=model_options,
                 outlier_sigma=config.downhole.outlier_sigma,
+                build_plot=self.build_diagnostic_plots,
             )
         else:
             correction = calc_DH_fractionations_rad(
@@ -638,6 +649,7 @@ class ReductionPipeline:
                 model=config.downhole.method,
                 model_kwargs=model_options,
                 outlier_sigma=config.downhole.outlier_sigma,
+                build_plot=self.build_diagnostic_plots,
             )
         result = {
             "correction_results": correction,
@@ -653,6 +665,12 @@ class ReductionPipeline:
 
     def run_session(self) -> dict[str, object]:
         """Build shared session models and apply them to both data intervals."""
+        from .fractionation import (
+            apply_session_correction,
+            calc_session_fractionation_rad,
+            calc_session_fractionation_TW,
+        )
+
         cached = self.cache.get(PipelineStage.SESSION)
         if isinstance(cached, dict):
             return cached
@@ -685,6 +703,7 @@ class ReductionPipeline:
                 degree=degree,
                 model=config.session.method,
                 model_kwargs=options,
+                build_plot=self.build_diagnostic_plots,
             )
         else:
             correction = calc_session_fractionation_rad(
@@ -694,6 +713,7 @@ class ReductionPipeline:
                 degree=degree,
                 model=config.session.method,
                 model_kwargs=options,
+                build_plot=self.build_diagnostic_plots,
             )
         result = {
             "correction_results": correction,
@@ -712,6 +732,8 @@ class ReductionPipeline:
 
     def run_spot_means(self) -> pd.DataFrame:
         """Aggregate ratios and join matching calibrated concentrations."""
+        from .reduction import calc_ratio_mean_and_uncertainty
+
         cached = self.cache.get(PipelineStage.SPOT_MEANS)
         if isinstance(cached, pd.DataFrame):
             return cached
@@ -743,6 +765,8 @@ class ReductionPipeline:
 
     def run_depth_profile(self) -> pd.DataFrame:
         """Calculate corrected sweep-wise ratios, dates, and uncertainties."""
+        from .reduction import calc_depth_profile
+
         cached = self.cache.get(PipelineStage.DEPTH_PROFILE)
         if isinstance(cached, pd.DataFrame):
             return cached

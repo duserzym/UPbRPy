@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import re
 
-from bokeh.models import ColumnDataSource, HoverTool
-from bokeh.plotting import figure
 import numpy as np
 import pandas as pd
-from bokeh.palettes import Category20
 from scipy.stats import t
 
 
@@ -214,6 +211,7 @@ def calc_concentration_calibration_factor(
     standard_archive,
     *,
     internal_channel='29Si',
+    build_plot=True,
 ):
     """Calculate total-element calibration factors from glass standards.
 
@@ -226,6 +224,8 @@ def calc_concentration_calibration_factor(
 
     ``internal_channel`` identifies the element fixed by internal
     normalization and excludes it from external concentration calibration.
+    Set ``build_plot=False`` in a frontend that draws its own diagnostics to
+    avoid importing and constructing the optional Bokeh figure.
     """
     calibration_factors = pd.Series(dtype=float)
     sample_names = NIST_data['sample'].dropna().astype(str).unique().tolist()
@@ -281,15 +281,21 @@ def calc_concentration_calibration_factor(
     spot_means = grouped[effective_channels].mean()
     spot_samples = grouped['sample'].first().reindex(spot_means.index)
 
-    plot = figure(
-        width=800,
-        height=600,
-        title='Calibration factor for concentration measurements',
-        x_axis_label='True concentration (ppm)',
-        y_axis_label='Measured cps',
-        tools='pan,wheel_zoom,box_zoom,reset,save',
-        active_scroll='wheel_zoom',
-    )
+    plot = None
+    if build_plot:
+        from bokeh.models import ColumnDataSource, HoverTool
+        from bokeh.palettes import Category20
+        from bokeh.plotting import figure
+
+        plot = figure(
+            width=800,
+            height=600,
+            title='Calibration factor for concentration measurements',
+            x_axis_label='True concentration (ppm)',
+            y_axis_label='Measured cps',
+            tools='pan,wheel_zoom,box_zoom,reset,save',
+            active_scroll='wheel_zoom',
+        )
     for i, channel in enumerate(effective_channels):
         this_channel_measured_cps = spot_means[channel].to_numpy(dtype=float)
         sample_list = spot_samples.astype(str).tolist()
@@ -305,40 +311,45 @@ def calc_concentration_calibration_factor(
             ],
             dtype=float,
         )
-        this_channel_color = Category20[20][i % 20]
-
         # now calculate the calibration factor using the best-fit line anchored at the origin
         slope = np.dot(
             this_channel_measured_cps, this_channel_known_ppm
         ) / np.dot(this_channel_measured_cps, this_channel_measured_cps)
         calibration_factors[channel] = slope
-        # plot the data and the best-fit line
-        source = ColumnDataSource({
-            'sample': sample_list,
-            'spot_name': spot_list,
-            'cps': this_channel_measured_cps,
-            'ppm': this_channel_known_ppm,
-        })
-        scatter = plot.scatter(
-            x='ppm', y='cps', source=source, color=this_channel_color,
-            size=5, alpha=0.6, legend_label=channel,
-        )
-        plot.add_tools(HoverTool(
-            renderers=[scatter],
-            tooltips=[
-                ('channel', channel),
-                ('sample', '@sample'),
-                ('spot', '@spot_name'),
-                ('ppm', '@ppm'),
-                ('cps', '@cps'),
-            ],
-        ))
-        max_ppm = float(np.nanmax(this_channel_known_ppm)) if this_channel_known_ppm.size else 0.0
-        plot.line(
-            [0, max_ppm], [0, max_ppm / slope if slope else 0],
-            color=this_channel_color, line_width=2,
-        )
-    if plot.legend:
+        if plot is not None:
+            this_channel_color = Category20[20][i % 20]
+            source = ColumnDataSource({
+                'sample': sample_list,
+                'spot_name': spot_list,
+                'cps': this_channel_measured_cps,
+                'ppm': this_channel_known_ppm,
+            })
+            scatter = plot.scatter(
+                x='ppm', y='cps', source=source, color=this_channel_color,
+                size=5, alpha=0.6, legend_label=channel,
+            )
+            plot.add_tools(HoverTool(
+                renderers=[scatter],
+                tooltips=[
+                    ('channel', channel),
+                    ('sample', '@sample'),
+                    ('spot', '@spot_name'),
+                    ('ppm', '@ppm'),
+                    ('cps', '@cps'),
+                ],
+            ))
+            max_ppm = (
+                float(np.nanmax(this_channel_known_ppm))
+                if this_channel_known_ppm.size
+                else 0.0
+            )
+            plot.line(
+                [0, max_ppm],
+                [0, max_ppm / slope if slope else 0],
+                color=this_channel_color,
+                line_width=2,
+            )
+    if plot is not None and plot.legend:
         legend = plot.legend[0]
         legend.location = 'top_left'
         legend.orientation = 'horizontal'

@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from scipy.interpolate import UnivariateSpline, interp1d
-from scipy.optimize import curve_fit
 
 
 ArrayFunction = Callable[[np.ndarray], np.ndarray]
@@ -139,6 +137,12 @@ def fit_calibration_model(
         Initial parameters and bounds for exponential or custom parametric
         functions.
     """
+    # Calibration fitting is not needed to construct the desktop shell.
+    # Delay SciPy's compiled interpolation/optimization modules until the
+    # first correction model is actually fitted in a worker.
+    from scipy.interpolate import UnivariateSpline, interp1d
+    from scipy.optimize import curve_fit
+
     x, y, weights = _prepare_xy(x, y, weights)
     settings = {
         "degree": int(degree),

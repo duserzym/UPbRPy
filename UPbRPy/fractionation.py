@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from bokeh.models import ColumnDataSource, HoverTool
-from bokeh.plotting import figure
 import numpy as np
 import pandas as pd
-from bokeh.palettes import Category20
 
 from .calibration import evaluate_correction_result, fit_calibration_model
 from .ratios import project_tw_206pb_238u
@@ -175,6 +172,8 @@ def add_downhole_outlier_markers(plot, metadata, y_bounds):
     marker just inside the corresponding plot boundary. Hovering either marker
     reports the true factor and whether it was initially off scale.
     """
+    from bokeh.models import ColumnDataSource, HoverTool
+
     excluded = metadata["excluded_aligned_points"].copy()
     if excluded.empty:
         return []
@@ -239,6 +238,7 @@ def calc_DH_nominal_fractionation(
     correction_model='mean',
     model_kwargs=None,
     outlier_sigma=5.0,
+    build_plot=True,
 ):
     """Calculate nominal downhole fractionation against one known ratio.
 
@@ -253,13 +253,17 @@ def calc_DH_nominal_fractionation(
     all_ratios = [] # the fractionation of the measured ratio from the known standard ratio
     spot_names = []
 
-    plot = figure(
-        width=800, height=400,
-        title=ratio_name + ' fractionation factor for primary standard ' + primary_standard,
-        x_axis_label='Time (s)',
-        y_axis_label=ratio_name + ' fractionation factor',
-        tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
-    )
+    plot = None
+    if build_plot:
+        from bokeh.plotting import figure
+
+        plot = figure(
+            width=800, height=400,
+            title=ratio_name + ' fractionation factor for primary standard ' + primary_standard,
+            x_axis_label='Time (s)',
+            y_axis_label=ratio_name + ' fractionation factor',
+            tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
+        )
     for i, (_, this_spot) in enumerate(
         primary_standard_ratios.groupby('spot_name', sort=False)
     ):
@@ -337,36 +341,39 @@ def calc_DH_nominal_fractionation(
         **outlier_metadata,
     }
 
-    for i, trace in enumerate(filtered_fractionations):
-        plot.line(
-            unified_time,
-            trace,
-            color=Category20[20][i % 20],
-            line_width=1,
-            alpha=0.6,
-        )
+    if plot is not None:
+        from bokeh.palettes import Category20
 
-    plot.varea(
-        unified_time, fitted_fractionation_factor - std_fractionation_factor,
-        fitted_fractionation_factor + std_fractionation_factor,
-        fill_color='grey', fill_alpha=0.12,
-    )
-    plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
-    plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
-    plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
-    initial_y_bounds = downhole_plot_y_bounds(
-        fitted_fractionation_factor,
-        std_fractionation_factor,
-    )
-    plot.y_range.start, plot.y_range.end = initial_y_bounds
-    add_downhole_outlier_markers(plot, downhole_metadata, initial_y_bounds)
-    plot.legend.location = 'top_right'
-    plot.legend.click_policy = 'hide'
-    if downhole_metadata['excluded_count']:
-        plot.title.text += (
-            f" | {downhole_metadata['excluded_count']} excluded "
-            f"(>{float(outlier_sigma):g} robust sigma)"
+        for i, trace in enumerate(filtered_fractionations):
+            plot.line(
+                unified_time,
+                trace,
+                color=Category20[20][i % 20],
+                line_width=1,
+                alpha=0.6,
+            )
+
+        plot.varea(
+            unified_time, fitted_fractionation_factor - std_fractionation_factor,
+            fitted_fractionation_factor + std_fractionation_factor,
+            fill_color='grey', fill_alpha=0.12,
         )
+        plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
+        plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
+        plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
+        initial_y_bounds = downhole_plot_y_bounds(
+            fitted_fractionation_factor,
+            std_fractionation_factor,
+        )
+        plot.y_range.start, plot.y_range.end = initial_y_bounds
+        add_downhole_outlier_markers(plot, downhole_metadata, initial_y_bounds)
+        plot.legend.location = 'top_right'
+        plot.legend.click_policy = 'hide'
+        if downhole_metadata['excluded_count']:
+            plot.title.text += (
+                f" | {downhole_metadata['excluded_count']} excluded "
+                f"(>{float(outlier_sigma):g} robust sigma)"
+            )
 
     if return_metadata:
         return plot, downhole_fractionation, downhole_metadata
@@ -379,7 +386,8 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
                                 *,
                                 model='mean',
                                 model_kwargs=None,
-                                outlier_sigma=5.0):
+                                outlier_sigma=5.0,
+                                build_plot=True):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
         interpolating the ratio as a function of relative time within each spot analysis
@@ -432,6 +440,7 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
             correction_model=model,
             model_kwargs=model_kwargs,
             outlier_sigma=outlier_sigma,
+            build_plot=build_plot,
         )
         # append the results to the dictionary
         DH_correction_results.update({ratio_name: {
@@ -453,7 +462,8 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
                                 primary_76_standard_ratios, 
                                 primary_82_standard_ratios, 
                                 standard_archive, fit=None, *, model='mean',
-                                model_kwargs=None, outlier_sigma=5.0):
+                                model_kwargs=None, outlier_sigma=5.0,
+                                build_plot=True):
     """Build downhole corrections for a common-Pb-bearing primary standard.
 
     The Pb/Pb standard first defines the sweep-wise ``207Pb/206Pb``
@@ -505,6 +515,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        build_plot=build_plot,
     )
     DH_correction_results.update({'207Pb/206Pb': {
         'plot': plot_76,
@@ -544,6 +555,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        build_plot=build_plot,
     )
     DH_correction_results.update({'206Pb/238U': {
         'plot': plot_68,
@@ -569,6 +581,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        build_plot=build_plot,
     )
     DH_correction_results.update({'208Pb/232Th': {
         'plot': plot_82,
@@ -593,6 +606,7 @@ def calc_DH_dynamic_fractionation(
     correction_model='mean',
     model_kwargs=None,
     outlier_sigma=5.0,
+    build_plot=True,
 ):
     """Calculate a downhole model from sweep-specific projected targets.
 
@@ -606,13 +620,17 @@ def calc_DH_dynamic_fractionation(
     all_fractionations = [] # the fractionation of the measured ratio from the known standard ratio
     spot_names = []
 
-    plot = figure(
-        width=800, height=400,
-        title=measured_ratio_name + ' fractionation factor for primary standard ' + primary_standard,
-        x_axis_label='Time (s)',
-        y_axis_label=measured_ratio_name + ' fractionation factor',
-        tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
-    )
+    plot = None
+    if build_plot:
+        from bokeh.plotting import figure
+
+        plot = figure(
+            width=800, height=400,
+            title=measured_ratio_name + ' fractionation factor for primary standard ' + primary_standard,
+            x_axis_label='Time (s)',
+            y_axis_label=measured_ratio_name + ' fractionation factor',
+            tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
+        )
     for i, (_, this_spot) in enumerate(
         primary_standard_ratios.groupby('spot_name', sort=False)
     ):
@@ -686,36 +704,39 @@ def calc_DH_dynamic_fractionation(
         **outlier_metadata,
     }
 
-    for i, trace in enumerate(filtered_fractionations):
-        plot.line(
-            unified_time,
-            trace,
-            color=Category20[20][i % 20],
-            line_width=1,
-            alpha=0.6,
-        )
+    if plot is not None:
+        from bokeh.palettes import Category20
 
-    plot.varea(
-        unified_time, fitted_fractionation_factor - std_fractionation_factor,
-        fitted_fractionation_factor + std_fractionation_factor,
-        fill_color='grey', fill_alpha=0.12,
-    )
-    plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
-    plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
-    plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
-    initial_y_bounds = downhole_plot_y_bounds(
-        fitted_fractionation_factor,
-        std_fractionation_factor,
-    )
-    plot.y_range.start, plot.y_range.end = initial_y_bounds
-    add_downhole_outlier_markers(plot, downhole_metadata, initial_y_bounds)
-    plot.legend.location = 'top_right'
-    plot.legend.click_policy = 'hide'
-    if downhole_metadata['excluded_count']:
-        plot.title.text += (
-            f" | {downhole_metadata['excluded_count']} excluded "
-            f"(>{float(outlier_sigma):g} robust sigma)"
+        for i, trace in enumerate(filtered_fractionations):
+            plot.line(
+                unified_time,
+                trace,
+                color=Category20[20][i % 20],
+                line_width=1,
+                alpha=0.6,
+            )
+
+        plot.varea(
+            unified_time, fitted_fractionation_factor - std_fractionation_factor,
+            fitted_fractionation_factor + std_fractionation_factor,
+            fill_color='grey', fill_alpha=0.12,
         )
+        plot.line(unified_time, fitted_fractionation_factor, color='black', line_width=2, line_dash='dashed', legend_label=f'{downhole_metadata["model"]} correction model')
+        plot.line(unified_time, fitted_fractionation_factor + std_fractionation_factor, color='grey', line_dash='dashed', line_width=1, legend_label='residual 1 sigma')
+        plot.line(unified_time, fitted_fractionation_factor - std_fractionation_factor, color='grey', line_dash='dashed', line_width=1)
+        initial_y_bounds = downhole_plot_y_bounds(
+            fitted_fractionation_factor,
+            std_fractionation_factor,
+        )
+        plot.y_range.start, plot.y_range.end = initial_y_bounds
+        add_downhole_outlier_markers(plot, downhole_metadata, initial_y_bounds)
+        plot.legend.location = 'top_right'
+        plot.legend.click_policy = 'hide'
+        if downhole_metadata['excluded_count']:
+            plot.title.text += (
+                f" | {downhole_metadata['excluded_count']} excluded "
+                f"(>{float(outlier_sigma):g} robust sigma)"
+            )
 
     if return_metadata:
         return plot, downhole_fractionation, downhole_metadata
@@ -773,6 +794,7 @@ def calc_session_nominal_fractionation(
     degree=2,
     model='polynomial',
     model_kwargs=None,
+    build_plot=True,
 ):
     '''
     function for calculating nominal fractionation factor through a given session by comparing a given known ratio with the measured ratio
@@ -823,16 +845,20 @@ def calc_session_nominal_fractionation(
     fit_x = np.linspace(np.nanmin(spot_mean_times), np.nanmax(spot_mean_times), 100)
     fitted_values = fitted_model(fit_x)
 
-    plot = figure(
-        width=800, height=400,
-        title=ratio_name + ' fractionation correction factor for primary standard ' + primary_standard,
-        x_axis_label='Time (s)', y_axis_label=ratio_name + ' fractionation factor',
-        tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
-    )
-    plot.scatter(spot_mean_times, spot_mean_fractionation, color='black', size=6, legend_label='mean fractionation factor')
-    plot.line(fit_x, fitted_values, color='red', line_width=2, legend_label=f'{fitted_model.method} session model')
-    plot.varea(fit_x, fitted_values - p_std, fitted_values + p_std, fill_color='grey', fill_alpha=0.12)
-    plot.legend.location = 'top_right'
+    plot = None
+    if build_plot:
+        from bokeh.plotting import figure
+
+        plot = figure(
+            width=800, height=400,
+            title=ratio_name + ' fractionation correction factor for primary standard ' + primary_standard,
+            x_axis_label='Time (s)', y_axis_label=ratio_name + ' fractionation factor',
+            tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
+        )
+        plot.scatter(spot_mean_times, spot_mean_fractionation, color='black', size=6, legend_label='mean fractionation factor')
+        plot.line(fit_x, fitted_values, color='red', line_width=2, legend_label=f'{fitted_model.method} session model')
+        plot.varea(fit_x, fitted_values - p_std, fitted_values + p_std, fill_color='grey', fill_alpha=0.12)
+        plot.legend.location = 'top_right'
     
     fit_metadata = {
         "model": fitted_model.method,
@@ -856,7 +882,8 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
                                     ratio_names=['206Pb/238U', '207Pb/206Pb', '208Pb/232Th'], 
                                     degree=2,
                                     model='polynomial',
-                                    model_kwargs=None):
+                                    model_kwargs=None,
+                                    build_plot=True):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
         after applying a given downhole correction based on the primary standards
@@ -899,6 +926,7 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
             degree,
             model=model,
             model_kwargs=model_kwargs,
+            build_plot=build_plot,
         )
         # append the results to the dictionary
         session_correction_results.update({ratio_name: {
@@ -930,6 +958,7 @@ def calc_session_fractionation_TW(
     degree=2,
     model='polynomial',
     model_kwargs=None,
+    build_plot=True,
 ):
     """Build session corrections for a common-Pb-bearing primary standard.
 
@@ -979,6 +1008,7 @@ def calc_session_fractionation_TW(
         degree,
         model=model,
         model_kwargs=model_kwargs,
+        build_plot=build_plot,
     )
 
     session_correction_results.update({'207Pb/206Pb': {
@@ -1058,16 +1088,20 @@ def calc_session_fractionation_TW(
     # Calculate a fitted curve across the observed session interval.
     fit_x_68 = np.linspace(np.nanmin(spot_mean_times), np.nanmax(spot_mean_times), 100)
     fitted_values_68 = fitted_model_68(fit_x_68)
-    plot_68 = figure(
-        width=800, height=400,
-        title='206Pb/238U fractionation correction factor for primary standard ' + primary_68_standard,
-        x_axis_label='Time (s)', y_axis_label='206Pb/238U fractionation factor',
-        tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
-    )
-    plot_68.scatter(spot_mean_times, spot_mean_68_fractionation, color='black', size=6, legend_label='mean fractionation factor')
-    plot_68.line(fit_x_68, fitted_values_68, color='red', line_width=2, legend_label=f'{fitted_model_68.method} session model')
-    plot_68.varea(fit_x_68, fitted_values_68 - p_std_68, fitted_values_68 + p_std_68, fill_color='grey', fill_alpha=0.12)
-    plot_68.legend.location = 'top_right'
+    plot_68 = None
+    if build_plot:
+        from bokeh.plotting import figure
+
+        plot_68 = figure(
+            width=800, height=400,
+            title='206Pb/238U fractionation correction factor for primary standard ' + primary_68_standard,
+            x_axis_label='Time (s)', y_axis_label='206Pb/238U fractionation factor',
+            tools='pan,wheel_zoom,box_zoom,reset,save', active_scroll='wheel_zoom',
+        )
+        plot_68.scatter(spot_mean_times, spot_mean_68_fractionation, color='black', size=6, legend_label='mean fractionation factor')
+        plot_68.line(fit_x_68, fitted_values_68, color='red', line_width=2, legend_label=f'{fitted_model_68.method} session model')
+        plot_68.varea(fit_x_68, fitted_values_68 - p_std_68, fitted_values_68 + p_std_68, fill_color='grey', fill_alpha=0.12)
+        plot_68.legend.location = 'top_right'
     
     session_correction_results.update({'206Pb/238U': {
         'plot': plot_68,
@@ -1097,6 +1131,7 @@ def calc_session_fractionation_TW(
         degree,
         model=model,
         model_kwargs=model_kwargs,
+        build_plot=build_plot,
     )
     session_correction_results.update({'208Pb/232Th': {
         'plot': plot_82,

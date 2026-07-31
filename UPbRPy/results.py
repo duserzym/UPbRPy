@@ -12,9 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2
 
-from .isochron import apply_common_pb_corrections
 
 
 @dataclass(frozen=True)
@@ -562,6 +560,11 @@ def weighted_mean_and_mswd(values, two_sigma_uncertainties):
         mswd = np.nan
         probability = np.nan
     else:
+        # Load SciPy only when an MSWD probability is actually requested.
+        # This keeps the desktop shell independent of compiled statistics
+        # extensions until a reduction reaches its final summary.
+        from scipy.stats import chi2
+
         degrees_of_freedom = values.size - 1
         chi_square = float(np.sum(weights * (values - mean) ** 2))
         mswd = chi_square / degrees_of_freedom
@@ -694,6 +697,8 @@ def finalize_reduction_results(
         Complete audit table, concise selected table, QC metrics, and
         secondary-standard summary.
     """
+    from .isochron import apply_common_pb_corrections
+
     decision = decision or ReductionDecision()
     expected_columns = {
         "207Pb_corrected_age",
@@ -891,8 +896,9 @@ def export_publication_tables(tables, output_path):
         import xlsxwriter  # noqa: F401
     except ImportError as error:
         raise ImportError(
-            "Formatted publication export requires the optional "
-            "'xlsxwriter' package."
+            "Formatted publication export requires 'xlsxwriter', which is a "
+            "core UPbRPy dependency. Reinstall or update UPbRPy in the active "
+            "notebook environment."
         ) from error
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
