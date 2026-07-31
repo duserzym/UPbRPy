@@ -215,12 +215,42 @@ Or run the console script after installing with `pip install -e ".[gui]"`:
 upbrpy-gui
 ```
 
+Use **File → Save Project** at any point after import to write a lightweight
+`.upbr` project. The human-readable project stores source and reference-library
+paths, all reduction settings, reviewed selection windows, completed stage
+identifiers, and compact workspace choices; it does not duplicate raw sweeps
+or calculated tables. **File → Open Project** resolves portable relative paths
+first, re-imports the raw files, restores the saved parameters and selections,
+and recalculates the stages that were complete when the project was saved.
+
 Use **File → Export Publication + Reproducibility Bundle** to write a formatted
 Excel workbook, companion CSV tables, selection windows, spot and depth-profile
 data, a reduction manifest, and a Jupyter notebook. The notebook embeds the
 reviewed GUI selections and recreates the same TOML-first reference-material
 library with legacy CSV fallback, so it can replay the complete GUI reduction
 with the shared Python core.
+
+#### Building the desktop application
+
+The checked-in PyInstaller recipe produces a native on-directory application,
+bundles the TOML reference-material library and vector/raster icons, and then
+launches the frozen GUI offscreen to verify that it renders a real window.
+Install the build dependencies into the same environment used for the
+scientific stack and run:
+
+```bash
+python -m pip install -e ".[gui,build]"
+python scripts/build_desktop.py --archive
+```
+
+On macOS the directly testable application is
+`dist/UPbRPy Studio.app`; the platform-labelled ZIP preserves the application
+bundle for transport. Windows builds produce an on-directory
+`dist/UPbRPy Studio/UPbRPy Studio.exe`. The GitHub Actions desktop workflow
+performs the source tests, frozen-app screenshot smoke test, and ZIP upload for
+macOS arm64 and Windows x86-64 on version tags or manual dispatch. Release
+signing and Apple notarization are intentionally separate because they require
+maintainer certificates and repository secrets.
 
 ### Input file format
 This data reduction engine takes individual laser spot analysis file from a single experiment session exported from Qtegra software. Go to `Export data` -> Select exprter: `Laser Data Reduction Export` -> Select all available analytes -> Export.
