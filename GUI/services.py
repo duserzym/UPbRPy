@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
@@ -16,21 +17,29 @@ from GUI.workflows import (
     get_workflow_preset,
     infer_workflow_preset,
 )
-from UPbRPy import (
+from UPbRPy.calibration import evaluate_correction_result
+from UPbRPy.constants import standard_archive_legacy
+from UPbRPy.io import read_experiment_data, select_signal_regions
+from UPbRPy.pipeline import (
     FitSettings,
     PipelineConfig,
     PipelineStage,
-    ReductionDecision,
     ReductionPipeline,
-    build_standard_archive,
-    evaluate_correction_result,
-    inverse_standard_deviation_weights,
-    load_standard_measurements,
-    read_experiment_data,
-    select_signal_regions,
-    standard_archive,
-    standard_archive_legacy,
+    pipeline_config_from_dict,
 )
+from UPbRPy.project import (
+    completed_project_stages,
+    read_reduction_project,
+    resolve_project_path,
+    restore_project_selections,
+)
+from UPbRPy.results import ReductionDecision
+from UPbRPy.standards import (
+    build_standard_archive,
+    load_standard_measurements,
+    standard_archive,
+)
+from UPbRPy.uncertainty import inverse_standard_deviation_weights
 
 
 DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "reference_materials")
@@ -71,6 +80,19 @@ SESSION_FIT_METHODS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class RestoredProject:
+    """A fully recalculated GUI session and its saved workspace context."""
+
+    session: ReductionSession
+    preset: WorkflowPreset
+    project_path: Path
+    reference_library_path: Path | None
+    resume_stage: PipelineStage
+    completed_stages: tuple[PipelineStage, ...]
+    workspace: dict[str, object]
+
+
 def fit_method_label(method: str) -> str:
     return FIT_METHOD_LABELS.get(method, method.replace("_", " ").title())
 
@@ -102,6 +124,14 @@ def core_fit_method(method: str) -> str:
     }.get(method, method)
 
 
+def gui_fit_method(method: object) -> str:
+    """Translate a saved core method name back to its GUI control value."""
+    return {
+        "interpolate": "interpolated",
+        "spline": "cubic_spline",
+    }.get(str(method), str(method))
+
+
 def core_fit_options(
     options: Mapping[str, float | int | str],
 ) -> dict[str, object]:
@@ -120,11 +150,41 @@ def core_fit_options(
     return translated
 
 
+def gui_fit_options(
+    options: Mapping[str, object],
+    *,
+    exponential_default: float,
+) -> dict[str, float | int | str]:
+    """Translate saved core model options back to editable GUI fields."""
+    return {
+        "running_mean_window": int(
+            options.get("running_mean_window", 5)
+        ),
+        "polynomial_degree": int(options.get("degree", 2)),
+        "exponential_initial_decay": float(
+            options.get(
+                "exponential_initial_decay",
+                exponential_default,
+            )
+        ),
+    }
+
+
 def pipeline_config_from_session(
     session: ReductionSession,
     preset: WorkflowPreset,
 ) -> PipelineConfig:
     """Build the shared scientific configuration represented by GUI controls."""
+    retained_config = (
+        session.pipeline.config
+        if session.pipeline is not None
+        else PipelineConfig()
+    )
+    selection_options = dict(session.import_settings)
+    # These values have dedicated PipelineConfig fields and must not be
+    # duplicated inside method-specific keyword arguments.
+    selection_options.pop("primary_channel", None)
+    selection_options.pop("selection_method", None)
     return PipelineConfig(
         workflow_key=preset.key,
         material=preset.internal_material,
@@ -135,7 +195,7 @@ def pipeline_config_from_session(
                 preset.read_kwargs.get("selection_method", "threshold"),
             )
         ),
-        selection_options=dict(session.import_settings),
+        selection_options=selection_options,
         concentration_standards=(
             session.concentration_standards
             or preset.concentration_standards
@@ -157,6 +217,7 @@ def pipeline_config_from_session(
         secondary_standards=(
             session.secondary_standards or preset.secondary_standards
         ),
+        ratio_names=retained_config.ratio_names,
         common_pb_calibration=preset.common_pb_calibration,
         downhole=FitSettings(
             method=core_fit_method(session.downhole_fit_method),
@@ -174,6 +235,8 @@ def pipeline_config_from_session(
             ),
             age_transition_ma=session.age_transition_ma,
         ),
+        automatic_flags=retained_config.automatic_flags,
+        common_pb_options=dict(retained_config.common_pb_options),
     )
 
 
@@ -230,6 +293,7 @@ def ensure_shared_pipeline(
             source_directory=session.directory or None,
             reference_library_path=current_standard_archive_path(),
             input_files=input_files,
+            build_diagnostic_plots=False,
         )
     else:
         pipeline = session.pipeline
@@ -463,10 +527,14 @@ def load_session(
     primary_channel: str | None = None,
     preset: WorkflowPreset | None = None,
     selection_method: str | None = None,
+    import_settings: Mapping[str, object] | None = None,
 ) -> ReductionSession:
+    """Import one raw experiment with preset or explicitly restored settings."""
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
     read_kwargs = dict(workflow_preset.read_kwargs)
+    read_kwargs.update(dict(import_settings or {}))
+    read_kwargs.pop("primary_channel", None)
     if selection_method is not None:
         read_kwargs["selection_method"] = selection_method
     experiment, channels, total_data = read_experiment_data(
@@ -505,6 +573,155 @@ def load_session(
     )
     ensure_shared_pipeline(session, workflow_preset)
     return session
+
+
+def populate_recalculated_cache(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+    completed_stages: Iterable[PipelineStage],
+) -> None:
+    """Populate GUI compatibility keys from recalculated shared-core stages."""
+    completed = set(completed_stages)
+    for stage in PipelineStage:
+        if stage not in completed:
+            continue
+        if stage == PipelineStage.BASELINE:
+            ensure_baseline_subtracted(session)
+        elif stage == PipelineStage.NORMALIZATION:
+            ensure_normalized_plateau(session, preset)
+        elif stage == PipelineStage.CONCENTRATION:
+            ensure_concentration_results(session, preset)
+        elif stage == PipelineStage.RATIOS:
+            ensure_raw_ratios(session)
+            ensure_signal_raw_ratios(session)
+        elif stage == PipelineStage.DOWNHOLE:
+            ensure_downhole_results(session, preset)
+        elif stage == PipelineStage.SESSION:
+            ensure_session_corrected(session, preset)
+        elif stage == PipelineStage.SPOT_MEANS:
+            ensure_spot_means(session, preset)
+        elif stage == PipelineStage.DEPTH_PROFILE:
+            ensure_depth_profile(session, preset)
+        elif stage in {PipelineStage.FINALIZE, PipelineStage.EXPORT}:
+            ensure_finalized_results(session, preset)
+
+
+def restore_session_from_project(project_file: str | Path) -> RestoredProject:
+    """Re-import raw data and recalculate a saved lightweight GUI project."""
+    project_path = Path(project_file).expanduser().resolve(strict=False)
+    document = read_reduction_project(project_path)
+    paths = dict(document["paths"])
+    pipeline_values = dict(document["pipeline"])
+    workspace = dict(document.get("workspace", {}))
+    config = pipeline_config_from_dict(
+        dict(pipeline_values["config"])
+    )
+    preset = get_workflow_preset(config.workflow_key)
+
+    source_directory = resolve_project_path(
+        project_path,
+        paths.get("source_directory"),
+        label="the raw experiment directory",
+    )
+    reference_path = resolve_project_path(
+        project_path,
+        paths.get("reference_library"),
+        label="the reference material library",
+        required=False,
+    )
+    load_standard_archive_from_path(
+        None if reference_path is None else str(reference_path)
+    )
+
+    restored_import_settings = dict(config.selection_options)
+    restored_import_settings.pop("primary_channel", None)
+    restored_import_settings.pop("selection_method", None)
+    session = load_session(
+        str(source_directory),
+        primary_channel=config.primary_channel,
+        preset=preset,
+        selection_method=config.selection_method,
+        import_settings=restored_import_settings,
+    )
+    session.experiment = restore_project_selections(
+        session.experiment,
+        document["selections"],
+        strict_spot_names=True,
+    )
+    session.import_settings = {
+        "primary_channel": config.primary_channel,
+        **restored_import_settings,
+        "selection_method": config.selection_method,
+    }
+    session.workflow_key = preset.key
+    session.workflow_title = preset.title
+    session.primary_channel = config.primary_channel
+    session.concentration_standards = config.concentration_standards
+    session.primary_68_standard = config.primary_68_standard
+    session.primary_76_standard = config.primary_76_standard
+    session.primary_82_standard = config.primary_82_standard
+    session.secondary_standards = config.secondary_standards
+    session.downhole_fit_method = gui_fit_method(config.downhole.method)
+    session.downhole_fit_options = gui_fit_options(
+        config.downhole.options,
+        exponential_default=0.1,
+    )
+    session.downhole_outlier_sigma = config.downhole.outlier_sigma
+    session.session_fit_method = gui_fit_method(config.session.method)
+    session.session_fit_options = gui_fit_options(
+        config.session.options,
+        exponential_default=0.001,
+    )
+    session.common_pb_method = config.decision.common_pb_method
+    session.include_calibration_uncertainty = (
+        config.decision.include_calibration_uncertainty
+    )
+    session.age_transition_ma = config.decision.age_transition_ma
+
+    visible_channels = workspace.get("visible_channels", ())
+    if isinstance(visible_channels, (list, tuple)):
+        session.visible_channels = [
+            str(channel)
+            for channel in visible_channels
+            if str(channel) in session.channels
+        ]
+    selected_spot = str(workspace.get("selected_spot", "") or "")
+    if selected_spot in session.spot_names:
+        session.selected_spot = selected_spot
+    session.plot_mode = str(workspace.get("plot_mode", "raw"))
+
+    input_files = tuple(
+        path
+        for path in source_directory.iterdir()
+        if path.is_file()
+    )
+    session.pipeline = ReductionPipeline(
+        session.experiment,
+        session.total_data,
+        session.channels,
+        current_standard_archive(),
+        config,
+        source_directory=source_directory,
+        reference_library_path=reference_path,
+        input_files=input_files,
+        build_diagnostic_plots=False,
+    )
+    completed = completed_project_stages(
+        pipeline_values.get("completed_stages", ())
+    )
+    populate_recalculated_cache(session, preset, completed)
+    resume_stage = PipelineStage(
+        pipeline_values.get("resume_stage", PipelineStage.IMPORT.value)
+    )
+    return RestoredProject(
+        session=session,
+        preset=preset,
+        project_path=project_path,
+        reference_library_path=reference_path,
+        resume_stage=resume_stage,
+        completed_stages=completed,
+        workspace=workspace,
+    )
 
 
 def clear_reduction_cache(session: ReductionSession) -> None:

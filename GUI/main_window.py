@@ -15,6 +15,7 @@ from GUI.icon import (
 from GUI.services import (
     DOWNHOLE_FIT_METHODS,
     SESSION_FIT_METHODS,
+    RestoredProject,
     autopick_selection_regions,
     build_channel_colors,
     build_notes,
@@ -42,6 +43,7 @@ from GUI.services import (
     load_session,
     project_summary,
     reference_material_summary,
+    restore_session_from_project,
     selection_quality,
     spot_base_name,
     update_selection_region,
@@ -62,12 +64,11 @@ from GUI.widgets import (
 )
 from GUI.workers import FunctionWorker
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
-from UPbRPy import (
-    PIPELINE_STAGE_BY_ID,
-    PipelineStage,
-    SELECTION_METHODS,
+from UPbRPy.io import SELECTION_METHODS, selection_method_label
+from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
+from UPbRPy.project import write_reduction_project
+from UPbRPy.reproducibility import (
     export_reduction_bundle,
-    selection_method_label,
     write_reproducibility_notebook,
 )
 
@@ -137,10 +138,21 @@ WORKFLOW_STAGE_LABELS = {
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    """One independent reduction session presented in a native window."""
+
+    new_window_requested = QtCore.Signal()
+    next_window_requested = QtCore.Signal()
+    open_project_in_new_window_requested = QtCore.Signal(str)
+    open_experiment_in_new_window_requested = QtCore.Signal(str)
+
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None) -> None:
         super().__init__()
+        # Closed sessions may contain large sweep tables. Delete the window
+        # promptly so those frames and pipeline caches can be reclaimed.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.settings = QtCore.QSettings("UPbRPy", "Studio")
         self.session = ReductionSession()
+        self.project_path: Path | None = None
         self.channel_colors: dict[str, str] = {}
         self._is_populating = False
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
@@ -176,9 +188,49 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        open_action = file_menu.addAction("Open Experiment Folder…")
-        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.choose_experiment_directory)
+        new_window_action = file_menu.addAction("New Reduction Window")
+        new_window_action.setShortcut(QtGui.QKeySequence.StandardKey.New)
+        new_window_action.triggered.connect(self.new_window_requested.emit)
+
+        file_menu.addSeparator()
+        open_project_action = file_menu.addAction("Open Project…")
+        open_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        open_project_action.triggered.connect(self.choose_project_file)
+        open_project_new_window_action = file_menu.addAction(
+            "Open Project in New Window…"
+        )
+        open_project_new_window_action.triggered.connect(
+            self.choose_project_file_in_new_window
+        )
+
+        save_project_action = file_menu.addAction("Save Project")
+        save_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
+        save_project_action.triggered.connect(
+            lambda _checked=False: self.save_project()
+        )
+
+        save_project_as_action = file_menu.addAction("Save Project As…")
+        save_project_as_action.setShortcut(
+            QtGui.QKeySequence.StandardKey.SaveAs
+        )
+        save_project_as_action.triggered.connect(
+            self.choose_project_save_path
+        )
+
+        file_menu.addSeparator()
+        open_experiment_action = file_menu.addAction(
+            "Open Experiment Folder…"
+        )
+        open_experiment_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+O"))
+        open_experiment_action.triggered.connect(
+            self.choose_experiment_directory
+        )
+        open_experiment_new_window_action = file_menu.addAction(
+            "Open Experiment Folder in New Window…"
+        )
+        open_experiment_new_window_action.triggered.connect(
+            self.choose_experiment_directory_in_new_window
+        )
 
         reload_action = file_menu.addAction("Reload Current Folder")
         reload_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
@@ -203,7 +255,9 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Quit")
         exit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
-        exit_action.triggered.connect(self.close)
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            exit_action.triggered.connect(application.quit)
 
         workflow_menu = self.menuBar().addMenu("Workflow")
         mineral_menu = workflow_menu.addMenu("Mineral Preset")
@@ -325,6 +379,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 visible,
             )
         )
+
+        window_menu = self.menuBar().addMenu("Window")
+        window_new_action = window_menu.addAction("New Reduction Window")
+        window_new_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+N"))
+        window_new_action.triggered.connect(self.new_window_requested.emit)
+        next_window_action = window_menu.addAction("Next Reduction Window")
+        next_window_action.setShortcut(QtGui.QKeySequence("Ctrl+Tab"))
+        next_window_action.triggered.connect(self.next_window_requested.emit)
+        window_menu.addSeparator()
+        close_window_action = window_menu.addAction("Close Window")
+        close_window_action.setShortcut(
+            QtGui.QKeySequence.StandardKey.Close
+        )
+        close_window_action.triggered.connect(self.close)
 
         help_menu = self.menuBar().addMenu("Help")
         guide_action = help_menu.addAction("Reduction Workflow Guide")
@@ -1592,6 +1660,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self._sync_fit_controls()
             return
+        if values == self.session.concentration_standards:
+            return
         self.session.concentration_standards = values
         for key in (
             "concentration_results",
@@ -1607,11 +1677,14 @@ class MainWindow(QtWidgets.QMainWindow):
         """Parse materials used for weighted-mean and MSWD summaries."""
         if self._is_populating:
             return
-        self.session.secondary_standards = tuple(
+        values = tuple(
             value.strip()
             for value in self.secondary_standards_edit.text().split(",")
             if value.strip()
         )
+        if values == self.session.secondary_standards:
+            return
+        self.session.secondary_standards = values
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
@@ -1787,13 +1860,341 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_view()
 
     def choose_experiment_directory(self) -> None:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
+        directory = self.select_experiment_directory()
+        if directory:
+            self.load_experiment_directory(directory)
+
+    def choose_experiment_directory_in_new_window(self) -> None:
+        """Select raw data and request loading it in an independent window."""
+        directory = self.select_experiment_directory()
+        if directory:
+            self.open_experiment_in_new_window_requested.emit(directory)
+
+    def select_experiment_directory(self) -> str:
+        """Return a user-selected experiment directory or an empty string."""
+        return QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select experiment directory",
             self.session.directory or str(Path.home()),
         )
-        if directory:
-            self.load_experiment_directory(directory)
+
+    def project_workspace_state(self) -> dict[str, object]:
+        """Return compact display context worth restoring with a reduction."""
+        return {
+            "selected_spot": self.current_spot_name(),
+            "visible_channels": self.checked_channels(),
+            "selected_stats_channel": self.selected_stats_channel,
+            "plot_mode": self.session.plot_mode,
+            "ratio_name": self.current_ratio_name(),
+            "workflow_stage": (
+                None
+                if self.current_workflow_stage() is None
+                else self.current_workflow_stage().value
+            ),
+            "sigma_level": self.sigma_level,
+            "channel_colors": dict(self.channel_colors),
+            "selection_colors": dict(self.selection_colors),
+            "spot_folder_overrides": dict(self._spot_folder_overrides),
+        }
+
+    def apply_pending_project_edits(self) -> None:
+        """Commit visible controls and dragged windows before saving."""
+        concentration_values = tuple(
+            value.strip()
+            for value in self.concentration_standards_edit.text().split(",")
+            if value.strip()
+        )
+        if (
+            concentration_values
+            and concentration_values
+            != self.session.concentration_standards
+        ):
+            self.on_concentration_standards_changed()
+        secondary_values = tuple(
+            value.strip()
+            for value in self.secondary_standards_edit.text().split(",")
+            if value.strip()
+        )
+        if secondary_values != self.session.secondary_standards:
+            self.on_secondary_standards_changed()
+        if not self.pending_region_updates:
+            return
+        spot_name = self.current_spot_name()
+        regions = self.trace_plot.current_regions()
+        if not spot_name or not regions:
+            raise ValueError(
+                "The edited selection windows cannot be read from the "
+                "current plot. Apply or discard them before saving."
+            )
+        update_selection_region(
+            self.session,
+            spot_name,
+            baseline=regions.get("baseline"),
+            plateau=regions.get("plateau"),
+            signal=regions.get("signal"),
+        )
+        self.pending_region_updates.clear()
+        self.append_log(
+            f"Applied pending selection edits for {spot_name} before save."
+        )
+
+    def choose_project_file(self) -> None:
+        """Choose a lightweight project and recalculate its saved stages."""
+        if self._active_worker is not None:
+            self.statusBar().showMessage(
+                f"Please wait for {self._busy_label.lower()} to finish."
+            )
+            return
+        project_file = self.select_project_file()
+        if not project_file:
+            return
+        self.load_project_file(project_file)
+
+    def choose_project_file_in_new_window(self) -> None:
+        """Select a project and request recalculation in another window."""
+        project_file = self.select_project_file()
+        if project_file:
+            self.open_project_in_new_window_requested.emit(project_file)
+
+    def select_project_file(self) -> str:
+        """Return a user-selected UPbRPy project path or an empty string."""
+        start_directory = (
+            str(self.project_path.parent)
+            if self.project_path is not None
+            else self.session.directory or str(Path.home())
+        )
+        project_file, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open UPbRPy project",
+            start_directory,
+            "UPbRPy Project (*.upbr)",
+        )
+        return project_file
+
+    def load_project_file(
+        self,
+        project_file: str | Path,
+        *,
+        background: bool = True,
+    ) -> None:
+        """Recalculate a saved project in this window."""
+        project_file = str(project_file)
+        if background:
+            self.run_background(
+                "Opening project and recalculating saved stages",
+                lambda: restore_session_from_project(project_file),
+                self.install_restored_project,
+            )
+            return
+        try:
+            restored = restore_session_from_project(project_file)
+        except Exception as exc:
+            self._handle_action_error("Failed to open project", exc)
+            return
+        self.install_restored_project(restored)
+
+    def choose_project_save_path(self) -> None:
+        """Choose a destination for the current lightweight project."""
+        if not self._require_loaded():
+            return
+        if self.project_path is not None:
+            suggested = self.project_path
+        else:
+            source = Path(self.session.directory)
+            suggested = source.parent / f"{source.name}.upbr"
+        project_file, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save UPbRPy project",
+            str(suggested),
+            "UPbRPy Project (*.upbr)",
+        )
+        if project_file:
+            self.save_project(project_file)
+
+    def save_project(self, project_file: str | Path | None = None) -> None:
+        """Save paths and parameters without embedding raw or reduced data."""
+        if not self._require_loaded():
+            return
+        if self._active_worker is not None:
+            self.statusBar().showMessage(
+                f"Please wait for {self._busy_label.lower()} to finish."
+            )
+            return
+        if project_file is None and self.project_path is None:
+            self.choose_project_save_path()
+            return
+        target = (
+            Path(project_file)
+            if project_file is not None
+            else self.project_path
+        )
+        if target is None:
+            return
+        try:
+            self.apply_pending_project_edits()
+            pipeline = ensure_shared_pipeline(
+                self.session,
+                self.workflow_preset,
+            )
+            written = write_reduction_project(
+                pipeline,
+                target,
+                resume_stage=(
+                    self.current_workflow_stage()
+                    or PipelineStage.IMPORT
+                ),
+                workspace=self.project_workspace_state(),
+            )
+        except Exception as exc:
+            self._handle_action_error("Project save failed", exc)
+            return
+        self.project_path = written
+        self.update_project_window_title()
+        self.append_log(f"Saved lightweight project: {written}")
+        self.statusBar().showMessage(f"Project saved to {written}")
+
+    def install_restored_project(self, result: object) -> None:
+        """Install a recalculated project and restore its compact UI context."""
+        restored = result
+        if not isinstance(restored, RestoredProject):
+            raise TypeError("Project loader returned an unexpected result.")
+        self.workflow_preset = restored.preset
+        self.selection_method = str(
+            restored.session.import_settings.get(
+                "selection_method",
+                restored.preset.read_kwargs.get(
+                    "selection_method",
+                    "threshold",
+                ),
+            )
+        )
+        self.reference_library_path = str(
+            restored.reference_library_path
+            or default_reference_material_library_path()
+        )
+        self.settings.setValue(
+            "reference_library_path",
+            self.reference_library_path,
+        )
+        self._populate_workflow_ui()
+
+        workspace = restored.workspace
+        folder_overrides = workspace.get("spot_folder_overrides", {})
+        self._spot_folder_overrides = (
+            {
+                str(spot): str(folder)
+                for spot, folder in folder_overrides.items()
+            }
+            if isinstance(folder_overrides, dict)
+            else {}
+        )
+        saved_channel_colors = workspace.get("channel_colors", {})
+        if isinstance(saved_channel_colors, dict):
+            self.channel_colors = {
+                str(channel): str(color)
+                for channel, color in saved_channel_colors.items()
+            }
+        saved_selection_colors = workspace.get("selection_colors", {})
+        if isinstance(saved_selection_colors, dict):
+            self.selection_colors.update(
+                {
+                    str(region): str(color)
+                    for region, color in saved_selection_colors.items()
+                    if str(region) in DEFAULT_REGION_COLORS
+                }
+            )
+        self.project_path = restored.project_path
+        self.install_loaded_session(
+            restored.session,
+            restored.session.directory,
+            project_path=restored.project_path,
+        )
+
+        # install_loaded_session supplies defaults; now overlay saved display
+        # choices and repopulate once so isotope chips and spot folders agree.
+        if isinstance(saved_channel_colors, dict):
+            self.channel_colors.update(
+                {
+                    str(channel): str(color)
+                    for channel, color in saved_channel_colors.items()
+                    if str(channel) in self.session.channels
+                }
+            )
+        stats_channel = str(
+            workspace.get("selected_stats_channel", "") or ""
+        )
+        self.selected_stats_channel = (
+            stats_channel
+            if stats_channel in self.session.channels
+            else self.session.primary_channel
+        )
+        sigma_level = int(workspace.get("sigma_level", 2) or 2)
+        self.sigma_level = 1 if sigma_level == 1 else 2
+        self.sigma_toggle_button.setChecked(self.sigma_level == 2)
+        self._update_sigma_button_text()
+        self.trace_plot.set_sigma_level(self.sigma_level)
+        self._populate_selectors()
+
+        ratio_name = str(workspace.get("ratio_name", "") or "")
+        ratio_index = self.ratio_combo.findData(ratio_name)
+        if ratio_index >= 0:
+            self.ratio_combo.setCurrentIndex(ratio_index)
+
+        stage_value = workspace.get(
+            "workflow_stage",
+            restored.resume_stage.value,
+        )
+        try:
+            stage = PipelineStage(stage_value)
+        except ValueError:
+            stage = restored.resume_stage
+        for index, candidate in enumerate(
+            self.workflow_preset.stage_sequence
+        ):
+            if candidate == stage:
+                self.workflow_step_list.setCurrentRow(index)
+                break
+
+        plot_mode = str(workspace.get("plot_mode", "raw"))
+        cache_key = _STAGE_CACHE_KEYS.get(plot_mode)
+        if (
+            plot_mode == "raw"
+            or (
+                cache_key is not None
+                and cache_key in self.session.reduction_cache
+            )
+        ):
+            self.set_plot_mode(plot_mode, refresh=False)
+        self.update_project_window_title()
+        self._update_reference_library_labels()
+        self.refresh_view()
+        stage_count = len(
+            [
+                stage
+                for stage in restored.completed_stages
+                if stage
+                not in {PipelineStage.IMPORT, PipelineStage.SELECTION}
+            ]
+        )
+        self.append_log(
+            f"Opened {restored.project_path.name}; recalculated "
+            f"{stage_count} saved reduction stages from raw data."
+        )
+        self.statusBar().showMessage(
+            f"Project opened and recalculated: "
+            f"{restored.project_path.name}"
+        )
+
+    def update_project_window_title(self) -> None:
+        """Show the active project name without exposing a long path."""
+        if self.project_path is not None:
+            label = self.project_path.name
+        elif self.session.directory:
+            label = Path(self.session.directory).name
+        else:
+            label = ""
+        suffix = "" if not label else f" — {label}"
+        self.setWindowTitle(f"UPbRPy Studio{suffix}")
 
     def choose_notebook_export(self) -> None:
         """Save the current GUI settings and reviewed windows as a notebook."""
@@ -1915,9 +2316,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         loaded_session: ReductionSession,
         directory: str,
+        *,
+        project_path: str | Path | None = None,
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
         self.session = loaded_session
+        self.project_path = (
+            None
+            if project_path is None
+            else Path(project_path).resolve(strict=False)
+        )
+        self.update_project_window_title()
         self.pending_region_updates.clear()
         self._focused_spot_name = None
         self.channel_colors = self._resolve_channel_colors(self.session.channels)

@@ -24,6 +24,8 @@ SELECTION_EXPORT_COLUMNS = (
     "signal_end_times",
     "selection_method",
     "selection_channel",
+    "plateau_filter_method",
+    "plateau_filter_channel",
 )
 
 
@@ -128,6 +130,7 @@ def build_reproducibility_notebook(
             f"config = pipeline_config_from_dict(json.loads(r'''{config_json}'''))\n"
             "read_options = dict(config.selection_options)\n"
             "read_options.pop('primary_channel', None)\n"
+            "read_options.setdefault('selection_method', config.selection_method)\n"
             "experiment, channels, total_data = read_experiment_data(\n"
             "    source_directory,\n"
             "    primary_channel=config.primary_channel,\n"

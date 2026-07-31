@@ -20,6 +20,7 @@ from .thermometry import *  # noqa: F401,F403
 from .results import *  # noqa: F401,F403
 from .pipeline import *  # noqa: F401,F403
 from .reproducibility import *  # noqa: F401,F403
+from .project import *  # noqa: F401,F403
 
 from .constants import __all__ as _constants_all
 from .standards import __all__ as _standards_all
@@ -37,6 +38,7 @@ from .thermometry import __all__ as _thermometry_all
 from .results import __all__ as _results_all
 from .pipeline import __all__ as _pipeline_all
 from .reproducibility import __all__ as _reproducibility_all
+from .project import __all__ as _project_all
 
 __all__ = [
     *_constants_all,
@@ -55,4 +57,5 @@ __all__ = [
     *_results_all,
     *_pipeline_all,
     *_reproducibility_all,
+    *_project_all,
 ]

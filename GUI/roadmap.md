@@ -26,6 +26,8 @@ improving the numerical pipeline.
   read-only result tables.
 - `UPbRPy.reproducibility` exports the reviewed settings, publication tables,
   audit tables, complete sweep data, provenance, and a replayable notebook.
+- `UPbRPy.project` owns the versioned `.upbr` parameter/path document used to
+  pause and resume GUI work without caching raw or calculated DataFrames.
 
 The source directory is therefore the single source of truth. A correction
 selected in the app and the same correction selected in a notebook execute
@@ -81,6 +83,15 @@ Horizontal scrolling is limited to controls that cannot be meaningfully
 compressed, such as the complete sequence of diagnostic plot modes.
 
 ## Reproducibility and export
+
+The GUI's working-session format is a human-readable `.upbr` JSON document.
+It stores relative and absolute fallbacks for the experiment and reference
+library, the shared pipeline configuration, reviewed per-spot windows, saved
+stage identifiers, and compact workspace state. Opening it verifies that the
+spot list is unchanged, overlays the reviewed windows on a fresh raw-data
+import, and recalculates the previously completed stages. This keeps project
+files small and prevents stale calculated products from becoming an
+undocumented alternate source of truth.
 
 The publication and reproducibility bundle includes:
 
