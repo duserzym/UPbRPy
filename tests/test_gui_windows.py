@@ -77,9 +77,28 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
         window.inspector_tabs.tabText(index)
         for index in range(window.inspector_tabs.count())
     ] == ["Browse", "Calibration", "Results"]
-    assert window.inspector_panel.minimumWidth() >= 350
+    assert window.inspector_panel.minimumWidth() >= 260
     assert not window.workspace_splitter.childrenCollapsible()
     assert window.workspace_splitter.handleWidth() >= 8
+    assert window.workspace_splitter.opaqueResize()
+    assert not window.inspector_tabs.tabBar().drawBase()
+
+    window.workspace_splitter.moveSplitter(340, 1)
+    application.processEvents()
+    wider_left = window.workspace_splitter.sizes()
+    assert wider_left[0] >= 330
+    assert all(size > 0 for size in wider_left)
+
+    window.workspace_splitter.moveSplitter(1280, 2)
+    application.processEvents()
+    wider_right = window.workspace_splitter.sizes()
+    assert wider_right[2] >= 450
+    assert all(size > 0 for size in wider_right)
+
+    window.resize(1250, 900)
+    application.processEvents()
+    assert window.sidebar_panel.isVisible()
+    assert window.inspector_panel.isVisible()
     assert window.spot_channel_splitter.count() == 2
     assert min(window.spot_channel_splitter.sizes()) >= 180
     assert window.header_card.height() <= 96
@@ -91,6 +110,8 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
     assert not window.export_results_button.isEnabled()
     assert not window.repick_all_spots_button.isEnabled()
     assert window.repick_all_spots_button.text() == "Re-pick all spots"
+    assert window.plateau_duration_spin.specialValueText() == "Workflow auto"
+    assert window.plateau_duration_spin.value() == 0.0
     assert window.selection_method_combo.itemText(2) == (
         "Excel expanding mean + σ threshold"
     )

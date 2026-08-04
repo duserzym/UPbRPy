@@ -597,13 +597,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.workspace_splitter.setChildrenCollapsible(False)
         self.workspace_splitter.setHandleWidth(10)
-        self.workspace_splitter.setOpaqueResize(False)
+        # Resize continuously under the pointer. A rubber-band resize felt
+        # like snapping and allowed the old responsive hide/show logic to win
+        # when the mouse was released.
+        self.workspace_splitter.setOpaqueResize(True)
         self.sidebar_panel = self._build_workflow_rail()
         self.main_panel = self._build_main_column()
         self.inspector_panel = self._build_inspector()
         self.workspace_splitter.addWidget(self.sidebar_panel)
         self.workspace_splitter.addWidget(self.main_panel)
         self.workspace_splitter.addWidget(self.inspector_panel)
+        for panel_index in range(3):
+            self.workspace_splitter.setCollapsible(panel_index, False)
         self.workspace_splitter.setStretchFactor(0, 0)
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setStretchFactor(2, 0)
@@ -612,7 +617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # changes when the application window is resized.
         self.workspace_splitter.setSizes([260, 1050, 430])
         saved_splitter_state = self.settings.value(
-            "workspace_splitter_state_v2"
+            "workspace_splitter_state_v4"
         )
         if isinstance(saved_splitter_state, QtCore.QByteArray):
             self.workspace_splitter.restoreState(saved_splitter_state)
@@ -638,7 +643,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Remember a valid user-adjusted three-panel layout."""
         self.settings.setValue(
-            "workspace_splitter_state_v2",
+            "workspace_splitter_state_v4",
             self.workspace_splitter.saveState(),
         )
 
@@ -660,20 +665,13 @@ class MainWindow(QtWidgets.QMainWindow):
         action.blockSignals(False)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        """Simplify side panels automatically on compact displays."""
+        """Adapt vertical density without overriding user panel widths."""
         super().resizeEvent(event)
         if not hasattr(self, "workspace_splitter"):
             return
-        width = event.size().width()
-        if width < 1100:
-            self.set_workspace_panel_visible("sidebar", False)
-            self.set_workspace_panel_visible("inspector", False)
-        elif width < 1500:
-            self.set_workspace_panel_visible("sidebar", True)
-            self.set_workspace_panel_visible("inspector", False)
-        else:
-            self.set_workspace_panel_visible("sidebar", True)
-            self.set_workspace_panel_visible("inspector", True)
+        # Side-panel visibility is an explicit View-menu choice. Automatically
+        # hiding a panel while the window or a splitter was being adjusted
+        # made the handles appear to jump and collapse whole columns.
         if hasattr(self, "lower_container"):
             self.lower_container.setVisible(event.size().height() >= 780)
         if hasattr(self, "workflow_step_list"):
@@ -685,6 +683,7 @@ class MainWindow(QtWidgets.QMainWindow):
         very_compact = height < 700
         self.selection_method_combo.setVisible(not compact)
         self.selection_parameter_stack.setVisible(not compact)
+        self.plateau_width_control.setVisible(not compact)
         self.plateau_filter_combo.setVisible(not compact)
         self.reference_library_button.setVisible(not compact)
         self.workflow_combo.setVisible(not very_compact)
@@ -708,10 +707,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Build the always-readable icon rail for ordered reduction stages."""
         frame = QtWidgets.QFrame()
         frame.setObjectName("WorkflowRail")
-        frame.setMinimumWidth(210)
-        frame.setMaximumWidth(360)
+        frame.setMinimumWidth(170)
         frame.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         layout = QtWidgets.QVBoxLayout(frame)
@@ -819,6 +817,36 @@ class MainWindow(QtWidgets.QMainWindow):
         sigma_layout.addRow("Onset threshold", self.selection_sigma_spin)
         self.selection_parameter_stack.addWidget(sigma_page)
         layout.addWidget(self.selection_parameter_stack)
+
+        self.plateau_width_control = QtWidgets.QWidget()
+        plateau_width_layout = QtWidgets.QFormLayout(
+            self.plateau_width_control
+        )
+        plateau_width_layout.setContentsMargins(0, 0, 0, 0)
+        plateau_width_layout.setSpacing(4)
+        plateau_width_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        self.plateau_duration_spin = QtWidgets.QDoubleSpinBox()
+        self.plateau_duration_spin.setRange(0.0, 600.0)
+        self.plateau_duration_spin.setDecimals(1)
+        self.plateau_duration_spin.setSingleStep(5.0)
+        self.plateau_duration_spin.setSuffix(" s")
+        self.plateau_duration_spin.setSpecialValueText("Workflow auto")
+        self.plateau_duration_spin.setToolTip(
+            "Workflow auto uses the mineral preset: signal-aware width for "
+            "apatite depth profiles and preset sweep counts where retained. "
+            "Enter a duration to impose the same plateau width on every spot "
+            "the next time Re-pick all spots is used."
+        )
+        self.plateau_duration_spin.valueChanged.connect(
+            self.on_plateau_duration_changed
+        )
+        plateau_width_layout.addRow(
+            "Plateau width",
+            self.plateau_duration_spin,
+        )
+        layout.addWidget(self.plateau_width_control)
 
         self.plateau_filter_combo = StyledComboBox()
         self.plateau_filter_combo.addItem("Plateau: no filter", "none")
@@ -941,10 +969,20 @@ class MainWindow(QtWidgets.QMainWindow):
         copy_layout.setSpacing(2)
         self.workflow_hint_title = QtWidgets.QLabel()
         self.workflow_hint_title.setObjectName("WorkflowContextTitle")
+        self.workflow_hint_title.setMinimumWidth(0)
+        self.workflow_hint_title.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.workflow_hint_body = QtWidgets.QLabel()
         self.workflow_hint_body.setObjectName("PanelBody")
         self.workflow_hint_body.setWordWrap(False)
         self.workflow_hint_body.setMaximumHeight(18)
+        self.workflow_hint_body.setMinimumWidth(0)
+        self.workflow_hint_body.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         copy_layout.addWidget(self.workflow_hint_title)
         copy_layout.addWidget(self.workflow_hint_body)
         card_layout.addLayout(copy_layout, 1)
@@ -965,6 +1003,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.workflow_status_label.setMinimumWidth(0)
         self.workflow_status_label.setMaximumWidth(240)
+        self.workflow_status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         card_layout.addWidget(self.workflow_status_label)
         return card
 
@@ -1326,8 +1368,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         panel = QtWidgets.QFrame()
         panel.setObjectName("InspectorPanel")
-        panel.setMinimumWidth(350)
-        panel.setMaximumWidth(720)
+        panel.setMinimumWidth(260)
         panel.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -1339,6 +1380,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.inspector_tabs = QtWidgets.QTabWidget()
         self.inspector_tabs.setObjectName("InspectorTabs")
         self.inspector_tabs.setDocumentMode(True)
+        # Fusion/macOS styles otherwise draw a separate tab-bar base above
+        # the tabs, which looks like a stray horizontal rule in this card.
+        self.inspector_tabs.tabBar().setDrawBase(False)
         layout.addWidget(self.inspector_tabs, 1)
 
         browse_page = QtWidgets.QWidget()
@@ -2801,6 +2845,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.selection_sigma_spin.setValue(
                 float(method_options.get("sigma_threshold", sigma_default))
             )
+            plateau_mode = str(
+                method_options.get("plateau_width_mode", "sweeps")
+            )
+            plateau_duration = (
+                float(
+                    method_options.get("plateau_duration_seconds", 0.0)
+                )
+                if plateau_mode == "duration"
+                else 0.0
+            )
+            self.plateau_duration_spin.setValue(plateau_duration)
         finally:
             self._is_populating = False
 
@@ -3012,6 +3067,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Onset sigma updated; use Re-pick all spots to apply it."
         )
+
+    def on_plateau_duration_changed(self, value: float) -> None:
+        """Set a session-wide plateau duration or restore workflow auto."""
+        if self._is_populating or not self.session.loaded:
+            return
+        selection_options = self.session.import_settings.setdefault(
+            "selection_options", {}
+        )
+        if not isinstance(selection_options, dict):
+            selection_options = {}
+            self.session.import_settings["selection_options"] = (
+                selection_options
+            )
+        if value > 0.0:
+            selection_options["plateau_width_mode"] = "duration"
+            selection_options["plateau_duration_seconds"] = float(value)
+            message = (
+                f"Plateau width set to {value:g} s for the next session-wide "
+                "re-pick."
+            )
+        else:
+            preset_options = self.workflow_preset.read_kwargs.get(
+                "selection_options", {}
+            )
+            if not isinstance(preset_options, dict):
+                preset_options = {}
+            selection_options["plateau_width_mode"] = str(
+                preset_options.get("plateau_width_mode", "sweeps")
+            )
+            selection_options.pop("plateau_duration_seconds", None)
+            message = (
+                "Plateau width restored to the workflow auto rule for the "
+                "next session-wide re-pick."
+            )
+        clear_reduction_cache(self.session)
+        self.statusBar().showMessage(message)
+        self.append_log(message)
 
     def on_plateau_filter_method_changed(self, index: int) -> None:
         """Set the current spot's plateau outlier rule and display channel."""

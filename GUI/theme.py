@@ -529,11 +529,30 @@ def _stylesheet(theme: ThemeSpec) -> str:
         background: {scroll_handle_hover};
     }}
     QSplitter::handle {{
-        background: {theme.input_border};
-        border-radius: 2px;
+        background: transparent;
+        border: none;
     }}
-    QSplitter::handle:hover {{
-        background: {theme.accent};
+    QSplitter::handle:horizontal:hover {{
+        background: qlineargradient(
+            x1:0, y1:0, x2:1, y2:0,
+            stop:0 transparent,
+            stop:0.40 transparent,
+            stop:0.41 {theme.accent},
+            stop:0.59 {theme.accent},
+            stop:0.60 transparent,
+            stop:1 transparent
+        );
+    }}
+    QSplitter::handle:vertical:hover {{
+        background: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 transparent,
+            stop:0.40 transparent,
+            stop:0.41 {theme.accent},
+            stop:0.59 {theme.accent},
+            stop:0.60 transparent,
+            stop:1 transparent
+        );
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
