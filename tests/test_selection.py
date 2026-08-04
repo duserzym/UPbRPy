@@ -307,6 +307,56 @@ def test_signal_duration_limit_defaults_to_none_and_requires_timestamps():
         )
 
 
+def test_signal_aware_plateau_expands_across_long_depth_profile():
+    values = pulsed_trace(signal_end=80, size=100)
+    times = np.arange(values.size, dtype=float) * 0.2
+
+    fixed = select_signal_regions(
+        values,
+        time=times,
+        method="excel_expanding_sigma",
+        peak_sweep_n=20,
+    )
+    signal_aware = select_signal_regions(
+        values,
+        time=times,
+        method="excel_expanding_sigma",
+        peak_sweep_n=20,
+        plateau_width_mode="signal",
+    )
+
+    assert fixed.plateau_end - fixed.plateau_start == 20
+    assert signal_aware.plateau_end == signal_aware.signal_end
+    assert signal_aware.plateau_end - signal_aware.plateau_start > 60
+    assert signal_aware.diagnostics["plateau_width_mode"] == "signal"
+
+
+def test_duration_plateau_is_capped_before_detected_washout():
+    values = pulsed_trace(signal_end=80, size=100)
+    times = np.arange(values.size, dtype=float) * 0.2
+    selected = select_signal_regions(
+        values,
+        time=times,
+        method="excel_expanding_sigma",
+        peak_sweep_n=20,
+        plateau_width_mode="duration",
+        plateau_duration_seconds=5.0,
+    )
+
+    expected_end = int(
+        np.argmin(
+            np.abs(
+                times
+                - (times[selected.plateau_start] + 5.0)
+            )
+        )
+    )
+    assert selected.plateau_end == expected_end
+    assert selected.plateau_end <= selected.signal_end
+    assert selected.diagnostics["plateau_width_mode"] == "duration"
+    assert selected.diagnostics["plateau_width_seconds"] == pytest.approx(5.0)
+
+
 def test_custom_detector_can_be_registered_without_changing_io_code():
     def fixed_detector(values, **options):
         del values, options

@@ -142,6 +142,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             "baseline_offset": 4,
             "plateau_offset": 2,
             "sep": " ",
+            "selection_options": {
+                "plateau_width_mode": "signal",
+            },
         },
         internal_material="apatite",
         supports_depth_profiles=True,

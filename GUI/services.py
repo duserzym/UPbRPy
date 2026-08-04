@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
@@ -532,8 +533,11 @@ def load_session(
     """Import one raw experiment with preset or explicitly restored settings."""
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
-    read_kwargs = dict(workflow_preset.read_kwargs)
-    read_kwargs.update(dict(import_settings or {}))
+    # Presets contain nested selection-options dictionaries. A shallow copy
+    # would let an interactive session edit the global mineral defaults when
+    # the user changes plateau duration or sigma settings.
+    read_kwargs = deepcopy(dict(workflow_preset.read_kwargs))
+    read_kwargs.update(deepcopy(dict(import_settings or {})))
     read_kwargs.pop("primary_channel", None)
     if selection_method is not None:
         read_kwargs["selection_method"] = selection_method

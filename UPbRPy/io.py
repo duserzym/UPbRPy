@@ -646,6 +646,8 @@ def select_signal_regions(
     signal_start_sigma_threshold: float = 3.0,
     signal_start_relative_increase: float = 0.05,
     signal_minimum_relative_increase: float = 0.1,
+    plateau_width_mode: str = "sweeps",
+    plateau_duration_seconds: float | None = None,
     **method_options,
 ) -> SelectionResult:
     """Select baseline and plateau windows using a registered onset detector.
@@ -658,8 +660,24 @@ def select_signal_regions(
     ``signal_duration_limit_seconds`` is supplied, the freely selected signal
     end is capped at the measured sweep nearest that many seconds after the
     detected signal start. The default ``None`` leaves the end unconstrained.
+    ``plateau_width_mode='signal'`` expands the plateau to the last complete
+    pre-washout sweep, which is useful for long depth-profile ablations.
+    ``'duration'`` instead uses ``plateau_duration_seconds`` while still
+    capping the plateau before washout. The default ``'sweeps'`` preserves the
+    traditional fixed ``peak_sweep_n`` behavior.
     """
     values = coerce_trace(data)
+    times: np.ndarray | None = None
+    if time is not None:
+        times = np.asarray(time, dtype=float)
+        if times.ndim != 1 or times.size != values.size:
+            raise ValueError(
+                "time must be one-dimensional and match the signal data."
+            )
+        if not np.all(np.isfinite(times)):
+            raise ValueError("time must contain only finite values.")
+        if np.any(np.diff(times) <= 0):
+            raise ValueError("time must be strictly increasing within a spot.")
     common = validate_common_options(
         values.size,
         baseline_sweep_n,
@@ -732,17 +750,10 @@ def select_signal_regions(
         duration_limit = float(signal_duration_limit_seconds)
         if not np.isfinite(duration_limit) or duration_limit <= 0:
             raise ValueError("signal_duration_limit_seconds must be positive or None.")
-        if time is None:
+        if times is None:
             raise ValueError(
                 "time values are required when signal_duration_limit_seconds is set."
             )
-        times = np.asarray(time, dtype=float)
-        if times.ndim != 1 or times.size != values.size:
-            raise ValueError("time must be one-dimensional and match the signal data.")
-        if not np.all(np.isfinite(times)):
-            raise ValueError("time must contain only finite values.")
-        if np.any(np.diff(times) <= 0):
-            raise ValueError("time must be strictly increasing within a spot.")
         target_time = float(times[signal_start] + duration_limit)
         duration_limit_index = int(np.argmin(np.abs(times - target_time)))
         duration_limit_index = max(int(signal_start), duration_limit_index)
@@ -776,14 +787,75 @@ def select_signal_regions(
         plateau_offset=plateau_offset,
         signal_end=signal_end,
     )
+    plateau_start, plateau_end, baseline_start, baseline_end = windows
+    width_mode = str(plateau_width_mode).strip().lower().replace("-", "_")
+    width_mode = {
+        "auto": "signal",
+        "full_signal": "signal",
+        "fixed_duration": "duration",
+        "fixed_sweeps": "sweeps",
+    }.get(width_mode, width_mode)
+    if width_mode not in {"sweeps", "signal", "duration"}:
+        raise ValueError(
+            "plateau_width_mode must be 'sweeps', 'signal', or 'duration'."
+        )
+    if width_mode == "signal":
+        # ``signal_end`` identifies an inclusive measured sweep, whereas the
+        # plateau end is an exclusive boundary. Ending at that index retains
+        # the complete stable ablation profile without including the final
+        # edge point or any washout-baseline sweeps.
+        plateau_end = max(plateau_start + 1, int(signal_end))
+    elif width_mode == "duration":
+        if plateau_duration_seconds is None:
+            raise ValueError(
+                "plateau_duration_seconds is required for duration mode."
+            )
+        duration = float(plateau_duration_seconds)
+        if not np.isfinite(duration) or duration <= 0:
+            raise ValueError("plateau_duration_seconds must be positive.")
+        if times is None:
+            raise ValueError(
+                "time values are required for a duration-based plateau."
+            )
+        target_time = float(times[plateau_start] + duration)
+        duration_end = int(np.argmin(np.abs(times - target_time)))
+        plateau_end = min(
+            int(signal_end),
+            max(plateau_start + 1, duration_end),
+        )
+    plateau_end = min(int(signal_end), int(plateau_end))
+    if plateau_end <= plateau_start:
+        raise SelectionError(
+            "The requested plateau width leaves no usable pre-washout sweeps."
+        )
+    plateau_diagnostics: dict[str, float | int | str] = {
+        "plateau_width_mode": width_mode,
+        "plateau_width_sweeps": int(plateau_end - plateau_start),
+    }
+    if times is not None:
+        plateau_diagnostics["plateau_width_seconds"] = float(
+            times[plateau_end] - times[plateau_start]
+        )
+    if plateau_duration_seconds is not None:
+        plateau_diagnostics["plateau_duration_seconds_requested"] = float(
+            plateau_duration_seconds
+        )
     return SelectionResult(
-        *windows,
+        plateau_start,
+        plateau_end,
+        baseline_start,
+        baseline_end,
         detection_index=detection_index,
         method=canonical,
         signal_end=signal_end,
         washout_start=washout_start,
         signal_start_index=signal_start,
-        diagnostics={**diagnostics, **start_diagnostics, **end_diagnostics},
+        diagnostics={
+            **diagnostics,
+            **start_diagnostics,
+            **end_diagnostics,
+            **plateau_diagnostics,
+        },
     )
 
 
