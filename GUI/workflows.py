@@ -33,6 +33,7 @@ class WorkflowPreset:
     secondary_standards: tuple[str, ...] = ()
     session_polynomial_degree: int = 2
     default_ratio: str = "206Pb/238U"
+    plateau_filter_method: str = "none"
 
 
 COMMON_RATIO_STEP = WorkflowStep(
@@ -65,6 +66,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         th_ratio_standard="PL",
         secondary_standards=("FC1", "91500", "Seiland"),
         default_ratio="206Pb/238U",
+        plateau_filter_method="excel_2sigma",
         steps=(
             WorkflowStep(
                 title="Import and auto-pick windows",

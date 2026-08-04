@@ -523,5 +523,50 @@ def test_gui_autopick_uses_shared_selection_method():
 
     regions = autopick_selection_regions(session, "A_1")
 
-    assert regions == {"baseline": (0.0, 10.0), "plateau": (14.0, 34.0)}
+    assert regions == {
+        "baseline": (0.0, 10.0),
+        "plateau": (14.0, 34.0),
+        "signal": (12.0, 44.0),
+    }
     assert session.experiment.loc[0, "selection_method"] == "rolling_sigma"
+
+
+def test_gui_autopick_replaces_old_signal_and_plateau_atomically():
+    """A valid re-pick must not be rejected against obsolete signal limits."""
+    trace = stepped_trace(onset=20, size=55)
+    total_data = pd.DataFrame(
+        {"Time": np.arange(55.0), "spot_name": "A_1", "238U": trace}
+    )
+    experiment = pd.DataFrame(
+        {
+            "spot_names": ["A_1"],
+            "baseline_start_times": [0.0],
+            "baseline_end_times": [5.0],
+            "plateau_start_times": [7.0],
+            "plateau_end_times": [12.0],
+            "signal_start_times": [6.0],
+            "signal_end_times": [13.0],
+        }
+    )
+    session = ReductionSession(
+        experiment=experiment,
+        total_data=total_data,
+        channels=["238U"],
+        primary_channel="238U",
+        import_settings={
+            "primary_channel": "238U",
+            "selection_method": "threshold",
+            "baseline_sweep_n": 10,
+            "peak_sweep_n": 20,
+            "threshold": 0.5,
+            "filter_percentile": 70,
+            "baseline_offset": 2,
+            "plateau_offset": 2,
+        },
+    )
+
+    regions = autopick_selection_regions(session, "A_1")
+
+    assert regions["plateau"][0] > 13.0
+    assert regions["signal"][0] <= regions["plateau"][0]
+    assert regions["signal"][1] >= regions["plateau"][1]

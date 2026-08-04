@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from GUI.icon import (
@@ -16,6 +17,7 @@ from GUI.services import (
     DOWNHOLE_FIT_METHODS,
     SESSION_FIT_METHODS,
     RestoredProject,
+    autopick_all_selection_regions,
     autopick_selection_regions,
     build_channel_colors,
     build_notes,
@@ -69,6 +71,7 @@ from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
 from UPbRPy.project import write_reduction_project
 from UPbRPy.reproducibility import (
     export_reduction_bundle,
+    selection_export_frame,
     write_reproducibility_notebook,
 )
 
@@ -117,8 +120,8 @@ RATIO_COLORS = {
 }
 
 DEFAULT_REGION_COLORS = {
-    "baseline": "#8a4c34",
-    "plateau": "#2c5e87",
+    "baseline": "#c83e3e",
+    "plateau": "#2c7fb8",
 }
 
 WORKFLOW_STAGE_LABELS = {
@@ -153,6 +156,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = QtCore.QSettings("UPbRPy", "Studio")
         self.session = ReductionSession()
         self.project_path: Path | None = None
+        self._saved_project_fingerprint: str | None = None
         self.channel_colors: dict[str, str] = {}
         self._is_populating = False
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
@@ -303,6 +307,8 @@ class MainWindow(QtWidgets.QMainWindow):
         workflow_menu.addSeparator()
         auto_pick_action = workflow_menu.addAction("Auto-pick Current Spot")
         auto_pick_action.triggered.connect(self.run_autopick_current_spot)
+        auto_pick_all_action = workflow_menu.addAction("Auto-pick All Spots")
+        auto_pick_all_action.triggered.connect(self.run_autopick_all_spots)
         apply_windows_action = workflow_menu.addAction(
             "Apply Current Selection Windows"
         )
@@ -480,6 +486,106 @@ class MainWindow(QtWidgets.QMainWindow):
             "open Python calculation pipeline.",
         )
 
+    def scientific_project_fingerprint(self) -> str:
+        """Serialize user decisions that materially define a reduction."""
+        if not self.session.loaded:
+            return ""
+        payload = {
+            "workflow_key": self.workflow_preset.key,
+            "primary_channel": self.session.primary_channel,
+            "import_settings": self.session.import_settings,
+            "concentration_standards": self.session.concentration_standards,
+            "primary_standards": (
+                self.session.primary_68_standard,
+                self.session.primary_76_standard,
+                self.session.primary_82_standard,
+            ),
+            "secondary_standards": self.session.secondary_standards,
+            "downhole_fit": (
+                self.session.downhole_fit_method,
+                self.session.downhole_fit_options,
+                self.session.downhole_outlier_sigma,
+            ),
+            "session_fit": (
+                self.session.session_fit_method,
+                self.session.session_fit_options,
+            ),
+            "decision": (
+                self.session.common_pb_method,
+                self.session.include_calibration_uncertainty,
+                self.session.age_transition_ma,
+            ),
+            "display_choices": {
+                "visible_channels": self.checked_channels(),
+                "selected_stats_channel": self.selected_stats_channel,
+                "sigma_level": self.sigma_level,
+                "channel_colors": self.channel_colors,
+                "selection_colors": self.selection_colors,
+                "spot_folder_overrides": self._spot_folder_overrides,
+            },
+            "selections": selection_export_frame(
+                self.session.experiment
+            ).to_dict(orient="records"),
+        }
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+
+    def has_unsaved_changes(self) -> bool:
+        """Return whether scientific settings differ from the last project save."""
+        if not self.session.loaded:
+            return False
+        if self.pending_region_updates:
+            return True
+        if self._saved_project_fingerprint is None:
+            return True
+        return (
+            self.scientific_project_fingerprint()
+            != self._saved_project_fingerprint
+        )
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        """Prevent accidental loss of an imported or edited reduction."""
+        if self._active_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Reduction still running",
+                f"Please wait for {self._busy_label.lower()} to finish before "
+                "closing this reduction window.",
+            )
+            event.ignore()
+            return
+        if not self.has_unsaved_changes():
+            event.accept()
+            return
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Save reduction project?")
+        dialog.setText("This reduction has changes that are not saved in a .upbr project.")
+        dialog.setInformativeText(
+            "Save the lightweight project before closing, discard these changes, "
+            "or cancel and continue working."
+        )
+        dialog.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Save
+            | QtWidgets.QMessageBox.StandardButton.Discard
+            | QtWidgets.QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Save)
+        choice = dialog.exec()
+        if choice == QtWidgets.QMessageBox.StandardButton.Discard:
+            event.accept()
+            return
+        if choice == QtWidgets.QMessageBox.StandardButton.Save:
+            self.save_project()
+            if not self.has_unsaved_changes():
+                event.accept()
+                return
+        event.ignore()
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         outer = QtWidgets.QHBoxLayout(central)
@@ -489,8 +595,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace_splitter = QtWidgets.QSplitter(
             QtCore.Qt.Orientation.Horizontal
         )
-        self.workspace_splitter.setChildrenCollapsible(True)
-        self.workspace_splitter.setHandleWidth(6)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.setHandleWidth(10)
+        self.workspace_splitter.setOpaqueResize(False)
         self.sidebar_panel = self._build_workflow_rail()
         self.main_panel = self._build_main_column()
         self.inspector_panel = self._build_inspector()
@@ -500,7 +607,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace_splitter.setStretchFactor(0, 0)
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setStretchFactor(2, 0)
-        self.workspace_splitter.setSizes([210, 1180, 310])
+        # Give the inspector enough width for a useful isotope grid.  The
+        # centre plot remains the stretchable pane and therefore absorbs
+        # changes when the application window is resized.
+        self.workspace_splitter.setSizes([260, 1050, 430])
+        saved_splitter_state = self.settings.value(
+            "workspace_splitter_state_v2"
+        )
+        if isinstance(saved_splitter_state, QtCore.QByteArray):
+            self.workspace_splitter.restoreState(saved_splitter_state)
+        self.workspace_splitter.splitterMoved.connect(
+            self.persist_workspace_splitter_state
+        )
         outer.addWidget(self.workspace_splitter, 1)
 
         self.setCentralWidget(central)
@@ -512,6 +630,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
         self._sync_fit_controls()
+
+    def persist_workspace_splitter_state(
+        self,
+        _position: int,
+        _index: int,
+    ) -> None:
+        """Remember a valid user-adjusted three-panel layout."""
+        self.settings.setValue(
+            "workspace_splitter_state_v2",
+            self.workspace_splitter.saveState(),
+        )
 
     def set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
         """Expose responsive side panels through the View menu."""
@@ -539,7 +668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if width < 1100:
             self.set_workspace_panel_visible("sidebar", False)
             self.set_workspace_panel_visible("inspector", False)
-        elif width < 1420:
+        elif width < 1500:
             self.set_workspace_panel_visible("sidebar", True)
             self.set_workspace_panel_visible("inspector", False)
         else:
@@ -555,6 +684,8 @@ class MainWindow(QtWidgets.QMainWindow):
         compact = height < 850
         very_compact = height < 700
         self.selection_method_combo.setVisible(not compact)
+        self.selection_parameter_stack.setVisible(not compact)
+        self.plateau_filter_combo.setVisible(not compact)
         self.reference_library_button.setVisible(not compact)
         self.workflow_combo.setVisible(not very_compact)
         item_height = 37 if compact else 45
@@ -577,8 +708,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Build the always-readable icon rail for ordered reduction stages."""
         frame = QtWidgets.QFrame()
         frame.setObjectName("WorkflowRail")
-        frame.setMinimumWidth(184)
-        frame.setMaximumWidth(224)
+        frame.setMinimumWidth(210)
+        frame.setMaximumWidth(360)
         frame.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -621,6 +752,101 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.selection_method_combo)
 
+        self.selection_parameter_stack = QtWidgets.QStackedWidget()
+        self.selection_parameter_stack.setObjectName(
+            "SelectionParameterStack"
+        )
+
+        threshold_page = QtWidgets.QWidget()
+        threshold_layout = QtWidgets.QFormLayout(threshold_page)
+        threshold_layout.setContentsMargins(0, 0, 0, 0)
+        threshold_layout.setSpacing(4)
+        threshold_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        self.selection_threshold_percent_spin = QtWidgets.QDoubleSpinBox()
+        self.selection_threshold_percent_spin.setRange(0.1, 200.0)
+        self.selection_threshold_percent_spin.setDecimals(1)
+        self.selection_threshold_percent_spin.setSingleStep(5.0)
+        self.selection_threshold_percent_spin.setSuffix(" %")
+        self.selection_threshold_percent_spin.setToolTip(
+            "Required signal level as a percentage of the high-signal "
+            "reference mean."
+        )
+        self.selection_threshold_percent_spin.valueChanged.connect(
+            self.on_selection_threshold_percent_changed
+        )
+        threshold_layout.addRow(
+            "Signal level",
+            self.selection_threshold_percent_spin,
+        )
+        self.selection_reference_percentile_spin = QtWidgets.QDoubleSpinBox()
+        self.selection_reference_percentile_spin.setRange(0.0, 100.0)
+        self.selection_reference_percentile_spin.setDecimals(1)
+        self.selection_reference_percentile_spin.setSingleStep(1.0)
+        self.selection_reference_percentile_spin.setSuffix(" %ile")
+        self.selection_reference_percentile_spin.setToolTip(
+            "Percentile used to identify the high-signal reference "
+            "population before thresholding."
+        )
+        self.selection_reference_percentile_spin.valueChanged.connect(
+            self.on_selection_reference_percentile_changed
+        )
+        threshold_layout.addRow(
+            "Reference",
+            self.selection_reference_percentile_spin,
+        )
+        self.selection_parameter_stack.addWidget(threshold_page)
+
+        sigma_page = QtWidgets.QWidget()
+        sigma_layout = QtWidgets.QFormLayout(sigma_page)
+        sigma_layout.setContentsMargins(0, 0, 0, 0)
+        sigma_layout.setSpacing(4)
+        sigma_layout.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        self.selection_sigma_spin = QtWidgets.QDoubleSpinBox()
+        self.selection_sigma_spin.setRange(0.1, 50.0)
+        self.selection_sigma_spin.setDecimals(1)
+        self.selection_sigma_spin.setSingleStep(0.5)
+        self.selection_sigma_spin.setSuffix(" σ")
+        self.selection_sigma_spin.setToolTip(
+            "Number of baseline standard deviations required for signal onset."
+        )
+        self.selection_sigma_spin.valueChanged.connect(
+            self.on_selection_sigma_changed
+        )
+        sigma_layout.addRow("Onset threshold", self.selection_sigma_spin)
+        self.selection_parameter_stack.addWidget(sigma_page)
+        layout.addWidget(self.selection_parameter_stack)
+
+        self.plateau_filter_combo = StyledComboBox()
+        self.plateau_filter_combo.addItem("Plateau: no filter", "none")
+        self.plateau_filter_combo.addItem("Plateau: 2σ trend", "excel_2sigma")
+        self.plateau_filter_combo.setToolTip(
+            "Spot-mean plateau filter for the current spot. Excluded sweeps "
+            "remain visible and remain available to full-signal depth processing."
+        )
+        self.plateau_filter_combo.currentIndexChanged.connect(
+            self.on_plateau_filter_method_changed
+        )
+        layout.addWidget(self.plateau_filter_combo)
+
+        self.repick_all_spots_button = QtWidgets.QPushButton(
+            "Re-pick all spots"
+        )
+        self.repick_all_spots_button.setProperty("accent", True)
+        self.repick_all_spots_button.setEnabled(False)
+        self.repick_all_spots_button.setToolTip(
+            "Apply the displayed selection method and threshold settings to "
+            "every spot, replacing their baseline, plateau, signal-start, "
+            "and signal-end auto-picks."
+        )
+        self.repick_all_spots_button.clicked.connect(
+            self.run_autopick_all_spots
+        )
+        layout.addWidget(self.repick_all_spots_button)
+
         section_label = QtWidgets.QLabel("Reduction workflow")
         section_label.setObjectName("SectionTitle")
         layout.addWidget(section_label)
@@ -644,8 +870,28 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.workflow_step_list, 1)
 
+        self.save_project_button = QtWidgets.QPushButton("Save project")
+        self.save_project_button.setToolTip(
+            "Save a lightweight .upbr file containing source paths, reviewed "
+            "selections, workflow settings, and display choices."
+        )
+        self.save_project_button.clicked.connect(
+            lambda _checked=False: self.save_project()
+        )
+        layout.addWidget(self.save_project_button)
+
+        self.export_results_button = QtWidgets.QPushButton("Export results…")
+        self.export_results_button.setProperty("accent", True)
+        self.export_results_button.setToolTip(
+            "Export publication-ready spot and depth-profile tables, audit "
+            "CSVs, provenance, and a reproducible Jupyter notebook."
+        )
+        self.export_results_button.clicked.connect(
+            self.choose_reduction_bundle_export
+        )
+        layout.addWidget(self.export_results_button)
+
         self.import_button = QtWidgets.QPushButton("Open experiment…")
-        self.import_button.setProperty("accent", True)
         self.import_button.clicked.connect(self.choose_experiment_directory)
         layout.addWidget(self.import_button)
 
@@ -677,12 +923,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """Show the selected stage explanation and actions beside the plot."""
         card = QtWidgets.QFrame()
         card.setObjectName("WorkflowContextBar")
+        self.workflow_context_bar = card
+        card.setMinimumHeight(56)
+        card.setMaximumHeight(66)
         card_layout = QtWidgets.QHBoxLayout(card)
-        card_layout.setContentsMargins(14, 10, 14, 10)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(12, 6, 12, 6)
+        card_layout.setSpacing(10)
 
         self.workflow_context_icon = QtWidgets.QLabel()
-        self.workflow_context_icon.setFixedSize(38, 38)
+        self.workflow_context_icon.setFixedSize(32, 32)
         self.workflow_context_icon.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
@@ -694,8 +943,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_hint_title.setObjectName("WorkflowContextTitle")
         self.workflow_hint_body = QtWidgets.QLabel()
         self.workflow_hint_body.setObjectName("PanelBody")
-        self.workflow_hint_body.setWordWrap(True)
-        self.workflow_hint_body.setMaximumHeight(38)
+        self.workflow_hint_body.setWordWrap(False)
+        self.workflow_hint_body.setMaximumHeight(18)
         copy_layout.addWidget(self.workflow_hint_title)
         copy_layout.addWidget(self.workflow_hint_body)
         card_layout.addLayout(copy_layout, 1)
@@ -723,14 +972,18 @@ class MainWindow(QtWidgets.QMainWindow):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        layout.setSpacing(10)
 
         header = QtWidgets.QFrame()
         header.setObjectName("HeaderCard")
+        header.setMinimumHeight(84)
+        header.setMaximumHeight(96)
         self.header_card = header
         header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(24, 20, 24, 20)
+        header_layout.setContentsMargins(20, 10, 20, 10)
+        header_layout.setSpacing(18)
         title_box = QtWidgets.QVBoxLayout()
+        title_box.setSpacing(2)
         title = QtWidgets.QLabel("U-Pb reduction workspace")
         title.setObjectName("HeroTitle")
         title.setWordWrap(True)
@@ -750,34 +1003,39 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        header_layout.addLayout(title_box, 2)
+        header_layout.addLayout(title_box, 3)
 
         summary_box = QtWidgets.QVBoxLayout()
-        summary_box.setSpacing(4)
+        summary_box.setSpacing(3)
+        workspace_row = QtWidgets.QHBoxLayout()
+        workspace_row.setSpacing(8)
+        workspace_row.addStretch(1)
         workspace_label = QtWidgets.QLabel("Workspace")
         workspace_label.setObjectName("SectionTitle")
         self.project_name_label = QtWidgets.QLabel("No experiment loaded")
-        self.project_name_label.setWordWrap(True)
+        self.project_name_label.setWordWrap(False)
         self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_name_label.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.project_name_label.setStyleSheet("font-size: 16px; font-weight: 700;")
+        workspace_row.addWidget(workspace_label)
+        workspace_row.addWidget(self.project_name_label)
+
+        metadata_row = QtWidgets.QHBoxLayout()
+        metadata_row.setSpacing(8)
+        metadata_row.addStretch(1)
         self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
         self.project_spots_label.setObjectName("SecondaryText")
-        self.project_spots_label.setWordWrap(True)
+        self.project_spots_label.setWordWrap(False)
         self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
         self.project_engine_label.setObjectName("SecondaryText")
-        self.project_engine_label.setWordWrap(True)
+        self.project_engine_label.setWordWrap(False)
         self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        summary_box.addWidget(workspace_label, 0, QtCore.Qt.AlignmentFlag.AlignRight)
-        summary_box.addWidget(self.project_name_label)
-        summary_box.addWidget(self.project_spots_label)
-        summary_box.addWidget(self.project_engine_label)
-        header_right = QtWidgets.QVBoxLayout()
-        header_right.setSpacing(10)
-        header_right.addLayout(summary_box)
-        theme_row = QtWidgets.QHBoxLayout()
-        theme_row.setSpacing(4)
-        theme_row.addStretch(1)
+        metadata_row.addWidget(self.project_spots_label)
+        metadata_separator = QtWidgets.QLabel("·")
+        metadata_separator.setObjectName("SecondaryText")
+        metadata_row.addWidget(metadata_separator)
+        metadata_row.addWidget(self.project_engine_label)
+
         self.theme_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.theme_mode_group = QtWidgets.QButtonGroup(self)
         self.theme_mode_group.setExclusive(True)
@@ -791,13 +1049,15 @@ class MainWindow(QtWidgets.QMainWindow):
             tbtn.setToolTip(tooltip)
             tbtn.setCheckable(True)
             tbtn.setProperty("modeToggle", True)
-            tbtn.setMinimumWidth(42)
+            tbtn.setProperty("compactToggle", True)
+            tbtn.setFixedSize(36, 30)
             tbtn.clicked.connect(lambda _checked=False, selected_tmode=tmode: self.apply_theme_mode(selected_tmode, persist=True))
             self.theme_mode_group.addButton(tbtn)
             self.theme_mode_buttons[tmode] = tbtn
-            theme_row.addWidget(tbtn)
-        header_right.addLayout(theme_row)
-        header_layout.addLayout(header_right, 1)
+            metadata_row.addWidget(tbtn)
+        summary_box.addLayout(workspace_row)
+        summary_box.addLayout(metadata_row)
+        header_layout.addLayout(summary_box, 2)
         layout.addWidget(header)
         layout.addWidget(self._build_workflow_context_bar())
 
@@ -866,6 +1126,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
         self.trace_plot.xWindowChanged.connect(self.on_trace_x_window_changed)
+        self._overview_y_fit_timer = QtCore.QTimer(self)
+        self._overview_y_fit_timer.setSingleShot(True)
+        self._overview_y_fit_timer.setInterval(45)
+        self._overview_y_fit_timer.timeout.connect(
+            self.trace_plot.fit_y_to_visible_data
+        )
         plots_vbox.addWidget(self.trace_plot)
         self.session_overview_plot = SessionOverviewWidget()
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
@@ -875,7 +1141,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_slopes_plot = CalibrationSlopesWidget()
         self.downhole_frac_plot = DownholeFractionationWidget()
         self.session_frac_plot = SessionFractionationWidget()
+        self.downhole_frac_plot.set_sigma_level(self.sigma_level)
+        self.session_frac_plot.set_sigma_level(self.sigma_level)
         self.results_table = ResultsTableWidget()
+        self.results_table.tabs.currentChanged.connect(
+            self.on_results_review_tab_changed
+        )
 
         self.plots_stack = QtWidgets.QStackedWidget()
         self.plots_stack.addWidget(plots_page0)               # index 0
@@ -963,6 +1234,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_toggle_button.setProperty("modeToggle", True)
         self.sigma_toggle_button.setCheckable(True)
         self.sigma_toggle_button.setChecked(True)
+        self.sigma_toggle_button.setToolTip(
+            "Toggle displayed baseline, plateau, downhole-fit, and "
+            "session-fit uncertainty envelopes between 1σ and 2σ."
+        )
         self.sigma_toggle_button.clicked.connect(self.on_sigma_toggle_clicked)
         self._update_sigma_button_text()
         cb_layout.addWidget(self.sigma_toggle_button)
@@ -1041,53 +1316,67 @@ class MainWindow(QtWidgets.QMainWindow):
         return widget
 
     def _build_inspector(self) -> QtWidgets.QWidget:
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setMinimumWidth(0)
-        scroll.setMaximumWidth(360)
-        scroll.setSizeAdjustPolicy(
-            QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
-        )
-        scroll.setSizePolicy(
+        """Build a tabbed inspector that prioritizes frequently used controls.
+
+        Spot navigation and isotope visibility are used continuously during
+        selection review, whereas calibration models and final-result choices
+        are changed only occasionally.  Keeping those groups on separate tabs
+        prevents the spot tree and periodic-table grid from competing with a
+        long column of session settings for the same vertical space.
+        """
+        panel = QtWidgets.QFrame()
+        panel.setObjectName("InspectorPanel")
+        panel.setMinimumWidth(350)
+        panel.setMaximumWidth(720)
+        panel.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
-
-        frame = QtWidgets.QFrame()
-        frame.setObjectName("InspectorPanel")
-        frame.setMinimumWidth(0)
-        frame.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        layout = QtWidgets.QVBoxLayout(frame)
+        layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        selector_card = QtWidgets.QFrame()
-        selector_card.setObjectName("SelectorCard")
-        selector_card.setMinimumWidth(0)
-        selector_layout = QtWidgets.QVBoxLayout(selector_card)
-        selector_layout.setContentsMargins(16, 16, 16, 16)
-        selector_layout.setSpacing(10)
+        self.inspector_tabs = QtWidgets.QTabWidget()
+        self.inspector_tabs.setObjectName("InspectorTabs")
+        self.inspector_tabs.setDocumentMode(True)
+        layout.addWidget(self.inspector_tabs, 1)
+
+        browse_page = QtWidgets.QWidget()
+        browse_layout = QtWidgets.QVBoxLayout(browse_page)
+        browse_layout.setContentsMargins(6, 8, 6, 6)
+        browse_layout.setSpacing(8)
 
         primary_label = QtWidgets.QLabel("Primary channel")
         primary_label.setObjectName("SectionTitle")
         self.primary_channel_combo = StyledComboBox()
         self.primary_channel_combo.currentTextChanged.connect(self.on_primary_channel_changed)
-        selector_layout.addWidget(primary_label)
-        selector_layout.addWidget(self.primary_channel_combo)
+        browse_layout.addWidget(primary_label)
+        browse_layout.addWidget(self.primary_channel_combo)
+
+        # A user-adjustable vertical splitter makes it possible to favor a
+        # long spot list or a large isotope grid without hiding either one.
+        self.spot_channel_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Orientation.Vertical
+        )
+        self.spot_channel_splitter.setObjectName("SpotChannelSplitter")
+        self.spot_channel_splitter.setChildrenCollapsible(False)
+        self.spot_channel_splitter.setHandleWidth(7)
+
+        spots_card = QtWidgets.QFrame()
+        spots_card.setObjectName("InspectorSubsection")
+        spots_layout = QtWidgets.QVBoxLayout(spots_card)
+        spots_layout.setContentsMargins(10, 10, 10, 10)
+        spots_layout.setSpacing(6)
 
         spots_label = QtWidgets.QLabel("Spots")
         spots_label.setObjectName("SectionTitle")
 
-        # Toolbar row: right-aligned "+ Folder" button
+        # Keep folder management beside the section heading so it does not
+        # consume a separate row of the high-value browsing area.
         spots_toolbar = QtWidgets.QHBoxLayout()
         spots_toolbar.setContentsMargins(0, 0, 0, 0)
         spots_toolbar.setSpacing(4)
+        spots_toolbar.addWidget(spots_label)
         spots_toolbar.addStretch(1)
         _add_folder_btn = QtWidgets.QPushButton("+ Folder")
         _add_folder_btn.setFixedHeight(28)
@@ -1106,51 +1395,92 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.currentItemChanged.connect(self._on_spot_tree_item_changed)
         self.spot_list.deleteRequested.connect(self._on_spot_tree_delete)
         self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
-        selector_layout.addWidget(spots_label)
-        selector_layout.addLayout(spots_toolbar)
-        selector_layout.addWidget(self.spot_list, 1)
+        spots_layout.addLayout(spots_toolbar)
+        spots_layout.addWidget(self.spot_list, 1)
+        spots_card.setMinimumHeight(180)
+        self.spot_channel_splitter.addWidget(spots_card)
 
+        channels_card = QtWidgets.QFrame()
+        channels_card.setObjectName("InspectorSubsection")
+        channels_card_layout = QtWidgets.QVBoxLayout(channels_card)
+        channels_card_layout.setContentsMargins(10, 10, 10, 10)
+        channels_card_layout.setSpacing(6)
+
+        channels_heading = QtWidgets.QHBoxLayout()
+        channels_heading.setContentsMargins(0, 0, 0, 0)
         channels_label = QtWidgets.QLabel("Channels")
         channels_label.setObjectName("SectionTitle")
+        channels_help = QtWidgets.QLabel("click: select  ·  double-click: show/hide")
+        channels_help.setObjectName("InspectorHint")
+        channels_heading.addWidget(channels_label)
+        channels_heading.addStretch(1)
+        channels_heading.addWidget(channels_help)
+        channels_card_layout.addLayout(channels_heading)
+
         self.channel_list = QtWidgets.QListWidget()
         self.channel_list.itemChanged.connect(self.on_channel_toggled)
         self.channel_list.currentItemChanged.connect(self.on_channel_selection_changed)
         self.channel_list.itemDoubleClicked.connect(self.choose_channel_color)
 
-        # Wrap the isotope grid scroll area in a rounded card
-        channels_card = QtWidgets.QFrame()
-        channels_card.setObjectName("ChannelsCard")
-        channels_card_layout = QtWidgets.QVBoxLayout(channels_card)
-        channels_card_layout.setContentsMargins(8, 8, 8, 8)
-        channels_card_layout.setSpacing(0)
         channels_scroll = QtWidgets.QScrollArea()
+        channels_scroll.setObjectName("ChannelsCard")
         channels_scroll.setWidgetResizable(True)
         channels_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         channels_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        channels_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.isotope_grid = IsotopeGridWidget()
         self.isotope_grid.channelToggled.connect(self._on_isotope_chip_toggled)
         self.isotope_grid.channelSelected.connect(self._on_isotope_channel_selected)
         self.isotope_grid.colorChangeRequested.connect(self._on_isotope_color_change)
         channels_scroll.setWidget(self.isotope_grid)
-        channels_card_layout.addWidget(channels_scroll)
+        channels_card_layout.addWidget(channels_scroll, 1)
+        channels_card.setMinimumHeight(260)
+        self.spot_channel_splitter.addWidget(channels_card)
+        self.spot_channel_splitter.setStretchFactor(0, 2)
+        self.spot_channel_splitter.setStretchFactor(1, 3)
+        self.spot_channel_splitter.setSizes([300, 500])
+        browse_layout.addWidget(self.spot_channel_splitter, 1)
 
-        selector_layout.addWidget(channels_label)
-        selector_layout.addWidget(channels_card, 1)
-        selector_layout.addWidget(self.channel_list, 0)
+        # The legacy list mirrors grid state for compatibility but does not
+        # participate in layout or consume visual space.
+        browse_layout.addWidget(self.channel_list, 0)
         self.channel_list.setVisible(False)  # hidden; isotope_grid is the primary UI
-        self.channel_color_button = QtWidgets.QPushButton("Set selected channel color")
+
+        color_controls = QtWidgets.QHBoxLayout()
+        color_controls.setContentsMargins(0, 0, 0, 0)
+        color_controls.setSpacing(6)
+        self.channel_color_button = QtWidgets.QPushButton("Channel color")
+        self.channel_color_button.setToolTip("Change the selected channel trace color")
         self.channel_color_button.clicked.connect(self.choose_channel_color)
-        selector_layout.addWidget(self.channel_color_button)
-        selection_colors_row = QtWidgets.QVBoxLayout()
-        selection_colors_row.setSpacing(8)
-        self.baseline_color_button = QtWidgets.QPushButton("Baseline color")
+        self.baseline_color_button = QtWidgets.QPushButton("Baseline")
+        self.baseline_color_button.setToolTip("Change the baseline selection color")
         self.baseline_color_button.clicked.connect(lambda: self.choose_region_color("baseline"))
-        self.plateau_color_button = QtWidgets.QPushButton("Plateau color")
+        self.plateau_color_button = QtWidgets.QPushButton("Plateau")
+        self.plateau_color_button.setToolTip("Change the plateau selection color")
         self.plateau_color_button.clicked.connect(lambda: self.choose_region_color("plateau"))
-        selection_colors_row.addWidget(self.baseline_color_button)
-        selection_colors_row.addWidget(self.plateau_color_button)
-        selector_layout.addLayout(selection_colors_row)
-        layout.addWidget(selector_card, 1)
+        for button in (
+            self.channel_color_button,
+            self.baseline_color_button,
+            self.plateau_color_button,
+        ):
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            color_controls.addWidget(button, 1)
+        browse_layout.addLayout(color_controls)
+        self.inspector_tabs.addTab(browse_page, "Browse")
+
+        calibration_scroll = QtWidgets.QScrollArea()
+        calibration_scroll.setWidgetResizable(True)
+        calibration_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        calibration_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        calibration_frame = QtWidgets.QWidget()
+        calibration_layout = QtWidgets.QVBoxLayout(calibration_frame)
+        calibration_layout.setContentsMargins(6, 8, 6, 8)
+        calibration_layout.setSpacing(10)
 
         standards_card = QtWidgets.QFrame()
         standards_card.setObjectName("SessionCard")
@@ -1203,7 +1533,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_secondary_standards_changed
         )
         standards_layout.addRow("Secondary", self.secondary_standards_edit)
-        layout.addWidget(standards_card, 0)
+        calibration_layout.addWidget(standards_card, 0)
 
         fit_card = QtWidgets.QFrame()
         fit_card.setObjectName("SessionCard")
@@ -1282,7 +1612,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_settings_note_label.setObjectName("PanelBody")
         self.fit_settings_note_label.setWordWrap(True)
         fit_layout.addWidget(self.fit_settings_note_label)
-        layout.addWidget(fit_card, 0)
+        calibration_layout.addWidget(fit_card, 0)
+        calibration_layout.addStretch(1)
+        calibration_scroll.setWidget(calibration_frame)
+        self.inspector_tabs.addTab(calibration_scroll, "Calibration")
+
+        results_page = QtWidgets.QWidget()
+        results_layout = QtWidgets.QVBoxLayout(results_page)
+        results_layout.setContentsMargins(6, 8, 6, 8)
+        results_layout.setSpacing(10)
 
         decision_card = QtWidgets.QFrame()
         decision_card.setObjectName("SessionCard")
@@ -1334,9 +1672,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_age_transition_changed
         )
         decision_layout.addRow("Age transition", self.age_transition_spin)
-        layout.addWidget(decision_card, 0)
-        scroll.setWidget(frame)
-        return scroll
+        results_layout.addWidget(decision_card, 0)
+        results_layout.addStretch(1)
+        self.inspector_tabs.addTab(results_page, "Results")
+        return panel
 
     def _populate_fit_method_combo(self, combo: StyledComboBox, methods: tuple[str, ...]) -> None:
         for method in methods:
@@ -1799,6 +2138,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
     def _show_placeholder_state(self) -> None:
+        self.save_project_button.setEnabled(False)
+        self.export_results_button.setEnabled(False)
         self._apply_project_summary(project_summary(self.session))
         self._update_reference_library_labels()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
@@ -2049,6 +2390,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_action_error("Project save failed", exc)
             return
         self.project_path = written
+        self._saved_project_fingerprint = self.scientific_project_fingerprint()
         self.update_project_window_title()
         self.append_log(f"Saved lightweight project: {written}")
         self.statusBar().showMessage(f"Project saved to {written}")
@@ -2133,6 +2475,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_toggle_button.setChecked(self.sigma_level == 2)
         self._update_sigma_button_text()
         self.trace_plot.set_sigma_level(self.sigma_level)
+        self.downhole_frac_plot.set_sigma_level(self.sigma_level)
+        self.session_frac_plot.set_sigma_level(self.sigma_level)
         self._populate_selectors()
 
         ratio_name = str(workspace.get("ratio_name", "") or "")
@@ -2168,6 +2512,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_project_window_title()
         self._update_reference_library_labels()
         self.refresh_view()
+        self._saved_project_fingerprint = self.scientific_project_fingerprint()
         stage_count = len(
             [
                 stage
@@ -2332,14 +2677,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_colors = self._resolve_channel_colors(self.session.channels)
         self._populate_selectors()
         self._sync_fit_controls()
+        self._sync_selection_parameter_controls()
+        self._sync_plateau_filter_control()
         self._set_default_ratio_for_preset()
         self._rebuild_workflow_actions()
+        self.save_project_button.setEnabled(True)
+        self.export_results_button.setEnabled(True)
+        self.repick_all_spots_button.setEnabled(True)
         self.set_plot_mode("raw", refresh=False)
         self.refresh_view()
         self.append_log(f"Loaded experiment directory: {directory}")
         materials = reference_material_summary(self.session, self.workflow_preset)
         if materials:
             self.append_log(f"Detected reference materials: {materials}")
+        self._saved_project_fingerprint = (
+            self.scientific_project_fingerprint()
+            if project_path is not None
+            else None
+        )
         self.statusBar().showMessage(f"Loaded {len(self.session.spot_names)} spots from {Path(directory).name}")
 
     def apply_theme_mode(self, theme_mode: str, *, persist: bool) -> None:
@@ -2358,6 +2713,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_slopes_plot.apply_theme(active_theme(app))
         self.downhole_frac_plot.apply_theme(active_theme(app))
         self.session_frac_plot.apply_theme(active_theme(app))
+        self.results_table.apply_theme(active_theme(app))
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         # Rebuild channel colours for new background when a session is loaded
         if self.session.loaded:
@@ -2415,6 +2771,52 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    def _sync_selection_parameter_controls(self) -> None:
+        """Show and populate the controls relevant to the onset method."""
+        if not hasattr(self, "selection_parameter_stack"):
+            return
+        settings = (
+            self.session.import_settings
+            if self.session.loaded
+            else self.workflow_preset.read_kwargs
+        )
+        method = str(
+            settings.get("selection_method", self.selection_method)
+        )
+        self.selection_parameter_stack.setCurrentIndex(
+            0 if method == "threshold" else 1
+        )
+        method_options = settings.get("selection_options", {})
+        if not isinstance(method_options, dict):
+            method_options = {}
+        sigma_default = 8.0 if method == "excel_expanding_sigma" else 5.0
+        self._is_populating = True
+        try:
+            self.selection_threshold_percent_spin.setValue(
+                float(settings.get("threshold", 0.1)) * 100.0
+            )
+            self.selection_reference_percentile_spin.setValue(
+                float(settings.get("filter_percentile", 70.0))
+            )
+            self.selection_sigma_spin.setValue(
+                float(method_options.get("sigma_threshold", sigma_default))
+            )
+        finally:
+            self._is_populating = False
+
+    def _sync_plateau_filter_control(self) -> None:
+        """Reflect the active spot's saved spot-mean filtering decision."""
+        if not hasattr(self, "plateau_filter_combo"):
+            return
+        self.plateau_filter_combo.setEnabled(self.session.loaded)
+        method = self.current_plateau_filter_method()
+        index = self.plateau_filter_combo.findData(method)
+        self._is_populating = True
+        try:
+            self.plateau_filter_combo.setCurrentIndex(max(index, 0))
+        finally:
+            self._is_populating = False
+
     def _populate_workflow_ui(self) -> None:
         desc = self.workflow_preset.description
         defaults_text = format_import_defaults(self.workflow_preset)
@@ -2426,6 +2828,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._workflow_info_btn.setToolTip(tooltip_html)
         self._sync_workflow_combo()
         self._sync_selection_method_combo()
+        self._sync_selection_parameter_controls()
+        self._sync_plateau_filter_control()
         self._set_default_ratio_for_preset()
         self._is_populating = True
         try:
@@ -2501,6 +2905,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{row + 1}. {step.title}"
         )
         self.workflow_hint_body.setText(step.hint)
+        self.workflow_hint_body.setToolTip(step.hint)
         theme = active_theme(QtWidgets.QApplication.instance())
         self.workflow_context_icon.setPixmap(
             build_workflow_stage_icon(
@@ -2556,10 +2961,82 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_method = str(self.selection_method_combo.itemData(index) or "threshold")
         if self.session.loaded:
             self.session.import_settings["selection_method"] = self.selection_method
+            selection_options = self.session.import_settings.setdefault(
+                "selection_options", {}
+            )
+            if isinstance(selection_options, dict) and self.selection_method != "threshold":
+                selection_options.setdefault(
+                    "sigma_threshold",
+                    8.0
+                    if self.selection_method == "excel_expanding_sigma"
+                    else 5.0,
+                )
             clear_reduction_cache(self.session)
+        self._sync_selection_parameter_controls()
         label = selection_method_label(self.selection_method)
         self.statusBar().showMessage(f"Baseline / peak auto-pick set to {label}.")
         self.append_log(f"Auto-pick method set to {label}; re-pick spots to apply it.")
+
+    def on_selection_threshold_percent_changed(self, value: float) -> None:
+        """Update the fractional signal threshold used by threshold picking."""
+        if self._is_populating or not self.session.loaded:
+            return
+        self.session.import_settings["threshold"] = float(value) / 100.0
+        clear_reduction_cache(self.session)
+        self.statusBar().showMessage(
+            "Signal threshold updated; use Re-pick all spots to apply it."
+        )
+
+    def on_selection_reference_percentile_changed(self, value: float) -> None:
+        """Update the percentile used to form the high-signal reference."""
+        if self._is_populating or not self.session.loaded:
+            return
+        self.session.import_settings["filter_percentile"] = float(value)
+        clear_reduction_cache(self.session)
+        self.statusBar().showMessage(
+            "Signal reference percentile updated; use Re-pick all spots to apply it."
+        )
+
+    def on_selection_sigma_changed(self, value: float) -> None:
+        """Update the onset sigma for either sigma-based picker."""
+        if self._is_populating or not self.session.loaded:
+            return
+        selection_options = self.session.import_settings.setdefault(
+            "selection_options", {}
+        )
+        if not isinstance(selection_options, dict):
+            selection_options = {}
+            self.session.import_settings["selection_options"] = selection_options
+        selection_options["sigma_threshold"] = float(value)
+        clear_reduction_cache(self.session)
+        self.statusBar().showMessage(
+            "Onset sigma updated; use Re-pick all spots to apply it."
+        )
+
+    def on_plateau_filter_method_changed(self, index: int) -> None:
+        """Set the current spot's plateau outlier rule and display channel."""
+        if self._is_populating or index < 0 or not self.session.loaded:
+            return
+        spot_name = self.current_spot_name()
+        if not spot_name:
+            return
+        method = str(self.plateau_filter_combo.itemData(index) or "none")
+        row_mask = self.session.experiment["spot_names"].astype(str).eq(
+            spot_name
+        )
+        self.session.experiment.loc[row_mask, "plateau_filter_method"] = method
+        self.session.experiment.loc[row_mask, "plateau_filter_channel"] = (
+            self.current_stats_channel()
+        )
+        clear_reduction_cache(self.session)
+        if self.session.pipeline is not None:
+            self.session.pipeline.update_experiment(self.session.experiment)
+        self.append_log(
+            f"Plateau spot-mean filter for {spot_name}: "
+            f"{'2σ trend' if method == 'excel_2sigma' else 'none'} "
+            f"on {self.current_stats_channel()}."
+        )
+        self.refresh_view()
 
     def on_workflow_step_changed(self, row: int) -> None:
         if self._is_populating:
@@ -2931,6 +3408,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pending_region_updates.clear()
             self.append_log("Discarded unapplied window edits while switching spots.")
         self.session.selected_spot = spot_name or None
+        self._sync_plateau_filter_control()
         self.refresh_view()
 
     def on_channel_toggled(self, _item: QtWidgets.QListWidgetItem) -> None:
@@ -2976,6 +3454,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_level = 2 if self.sigma_toggle_button.isChecked() else 1
         self._update_sigma_button_text()
         self.trace_plot.set_sigma_level(self.sigma_level)
+        self.downhole_frac_plot.set_sigma_level(self.sigma_level)
+        self.session_frac_plot.set_sigma_level(self.sigma_level)
         self.refresh_view()
 
     def _update_sigma_button_text(self) -> None:
@@ -3070,6 +3550,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.selected_stats_channel
         return self.session.primary_channel
 
+    def current_plateau_filter_method(
+        self,
+        spot_name: str | None = None,
+    ) -> str:
+        """Return the saved spot-mean plateau filter for the active spot."""
+        target = spot_name or self.current_spot_name()
+        if not target or self.session.experiment.empty:
+            return "none"
+        row = self.session.experiment[
+            self.session.experiment["spot_names"].astype(str).eq(target)
+        ]
+        if row.empty or "plateau_filter_method" not in row.columns:
+            return "none"
+        value = row["plateau_filter_method"].iloc[0]
+        return "none" if value is None or pd.isna(value) else str(value)
+
     def _resolve_channel_colors(self, channels: list[str]) -> dict[str, str]:
         theme_name = active_theme(QtWidgets.QApplication.instance()).name
         colors = build_channel_colors(channels, theme_name=theme_name)
@@ -3130,7 +3626,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.downhole_frac_plot
         if mode == "session_ratios":
             return self.session_frac_plot
+        if mode in {"depth_profile", "final_results"}:
+            return self.results_table
         return self.trace_plot
+
+    def on_results_review_tab_changed(self, _index: int) -> None:
+        """Apply the shared pan/zoom toolbar when a concordia tab opens."""
+        if self.session.plot_mode not in {"depth_profile", "final_results"}:
+            return
+        self._apply_interaction_controls_to_current_plot()
+        self.plot_control_bar.setEnabled(
+            self.results_table.active_concordia() is not None
+        )
 
     def _selected_interaction_mode(self) -> str:
         for key, button in self.interact_mode_buttons.items():
@@ -3176,6 +3683,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.trace_plot.show_preview(self.selection_colors)
             self.session_overview_plot.show_preview()
             return
+        target = self._current_plot_interaction_target()
+        if hasattr(target, "restore_default_view"):
+            target.restore_default_view()
+            return
         self._focus_selected_spot(self.current_spot_name())
 
     def _sync_plot_mode_buttons(self) -> None:
@@ -3195,10 +3706,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.plot_mode
             in {"raw_ratios", "downhole_ratios", "session_ratios"}
         )
-        self.plot_control_bar.setEnabled(
-            self.session.plot_mode
-            not in {"depth_profile", "final_results"}
-        )
+        if self.session.plot_mode in {"depth_profile", "final_results"}:
+            controls_enabled = (
+                self.results_table.active_concordia() is not None
+            )
+        else:
+            controls_enabled = True
+        self.plot_control_bar.setEnabled(controls_enabled)
 
     def show_raw_traces(self) -> None:
         self.set_plot_mode("raw", refresh=True)
@@ -3252,6 +3766,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 editable_regions=editable_regions,
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
+                plateau_filter_method=self.current_plateau_filter_method(
+                    selected_spot
+                ),
             )
         if should_focus_spot:
             self._focus_selected_spot(selected_spot)
@@ -3282,9 +3799,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_overview_plot.set_window(bounds)
 
     def on_overview_window_changed(self, bounds: tuple[float, float]) -> None:
+        """Navigate the complete session without rebuilding trace items."""
         self.trace_plot.set_x_window(bounds)
         if self.trace_plot.zoom_mode() == "xy":
-            self.trace_plot.fit_y_to_visible_data()
+            # X navigation remains immediate. Coalescing the more expensive
+            # visible-data y fit prevents dozens of full-array scans during a
+            # single overview drag while still following it interactively.
+            self._overview_y_fit_timer.start()
 
     def _focus_selected_spot(self, spot_name: str | None) -> None:
         if not spot_name:
@@ -3348,6 +3869,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.results_table.show_depth_profile(
                     depth_profile,
                     selected_spot,
+                    include_calibration_uncertainty=(
+                        self.session.include_calibration_uncertainty
+                    ),
                 )
             return
 
@@ -3361,6 +3885,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
                 spot_name=selected_spot,
+                plateau_filter_method=self.current_plateau_filter_method(
+                    selected_spot
+                ),
+                selection_frame=spot_data,
             )
             return
 
@@ -3377,6 +3905,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
                 spot_name=selected_spot,
+                plateau_filter_method=self.current_plateau_filter_method(
+                    selected_spot
+                ),
             )
             return
 
@@ -3400,6 +3931,9 @@ class MainWindow(QtWidgets.QMainWindow):
             stats_channel=self.current_stats_channel(),
             region_colors=self.selection_colors,
             spot_name=selected_spot,
+            plateau_filter_method=self.current_plateau_filter_method(
+                selected_spot
+            ),
         )
 
     def _apply_channel_checks(self, channels: list[str]) -> None:
@@ -3427,7 +3961,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for index, (label, handler, accent) in enumerate(self._workflow_action_specs()):
             button = QtWidgets.QPushButton(label)
-            button.setMinimumHeight(42)
+            button.setMinimumHeight(36)
             if accent:
                 button.setProperty("accent", True)
             button.clicked.connect(handler)
@@ -3659,6 +4193,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.primary_channel_combo.setEnabled(False)
         self.workflow_combo.setEnabled(False)
         self.selection_method_combo.setEnabled(False)
+        self.repick_all_spots_button.setEnabled(False)
+        self.save_project_button.setEnabled(False)
+        self.export_results_button.setEnabled(False)
         self.statusBar().showMessage(f"{label}…")
 
         def report_success(result: object) -> None:
@@ -3684,6 +4221,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.primary_channel_combo.setEnabled(True)
             self.workflow_combo.setEnabled(True)
             self.selection_method_combo.setEnabled(True)
+            self.repick_all_spots_button.setEnabled(self.session.loaded)
+            self.save_project_button.setEnabled(self.session.loaded)
+            self.export_results_button.setEnabled(self.session.loaded)
 
         worker.signals.succeeded.connect(report_success)
         worker.signals.failed.connect(report_failure)
@@ -3712,6 +4252,40 @@ class MainWindow(QtWidgets.QMainWindow):
         method = str(self.session.import_settings.get("selection_method", "threshold"))
         self.append_log(f"Re-applied {selection_method_label(method)} auto-pick for {spot_name}.")
         self.refresh_view()
+
+    def run_autopick_all_spots(self) -> None:
+        """Apply the current selection settings to every imported spot."""
+        if not self._require_loaded():
+            return
+        method = str(
+            self.session.import_settings.get(
+                "selection_method", "threshold"
+            )
+        )
+
+        def finish_repick(result: object) -> None:
+            summary = result if isinstance(result, dict) else {}
+            selected_count = int(summary.get("selected_count", 0))
+            failures = summary.get("failures", {})
+            failure_count = len(failures) if isinstance(failures, dict) else 0
+            self.pending_region_updates.clear()
+            self.set_plot_mode("raw", refresh=False)
+            message = (
+                f"Re-picked {selected_count} spots with "
+                f"{selection_method_label(method)}"
+            )
+            if failure_count:
+                message += f"; {failure_count} spots need review"
+            message += "."
+            self.append_log(message)
+            self.statusBar().showMessage(message)
+            self.refresh_view()
+
+        self.run_background(
+            "Re-picking all spots",
+            lambda: autopick_all_selection_regions(self.session),
+            finish_repick,
+        )
 
     def apply_current_windows(self) -> None:
         if not self._require_loaded():

@@ -257,6 +257,9 @@ def export_reduction_bundle(
     warnings: list[str] = []
 
     finalized = pipeline.run_finalize()
+    depth_profile = (
+        pipeline.run_depth_profile() if include_depth_profile else None
+    )
     tables = build_publication_tables(
         finalized,
         metadata={
@@ -265,6 +268,7 @@ def export_reduction_bundle(
                 pipeline.reference_library_path or ""
             ),
         },
+        depth_profile=depth_profile,
     )
     workbook = root / "UPbRPy_publication_results.xlsx"
     try:
@@ -290,7 +294,7 @@ def export_reduction_bundle(
 
     if include_depth_profile:
         depth_path = root / "depth_profile_results.csv"
-        pipeline.run_depth_profile().to_csv(depth_path, index=False)
+        depth_profile.to_csv(depth_path, index=False)
         files.append(depth_path)
 
     manifest_path = root / "reduction_manifest.json"

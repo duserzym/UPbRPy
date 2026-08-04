@@ -7,10 +7,12 @@ from UPbRPy.isochron import (
 )
 from UPbRPy.results import (
     AutomaticFlagSettings,
+    FinalizedReduction,
     ReductionDecision,
     apply_automatic_flags,
     assign_preferred_age,
     calculate_spot_quality_metrics,
+    build_publication_tables,
     export_publication_tables,
     summarize_secondary_standards,
     weighted_mean_and_mswd,
@@ -194,3 +196,48 @@ def test_publication_export_writes_styled_workbook_and_csv(tmp_path):
     assert (
         tmp_path / "publication_tables" / "methods.csv"
     ).exists()
+
+
+def test_publication_tables_include_depth_results_and_explanatory_notes():
+    """The final workbook contract documents and includes sweep-wise output."""
+    spot_results = pd.DataFrame(
+        {
+            "sample": ["unknown"],
+            "spot_name": ["spot_1"],
+            "preferred_age": [100.0],
+            "preferred_age_2e": [2.0],
+        }
+    )
+    finalized = FinalizedReduction(
+        parallel_results=spot_results.copy(),
+        selected_results=spot_results.copy(),
+        quality_metrics=pd.DataFrame(),
+        secondary_standard_summary=pd.DataFrame(),
+        decision=ReductionDecision(),
+    )
+    depth_profile = pd.DataFrame(
+        {
+            "sample": ["unknown"],
+            "spot_name": ["spot_1"],
+            "signal_relative_time": [0.0],
+            "206Pb/238U_fractionation_corrected": [0.02],
+            "206Pb/238U_fractionation_corrected_2e_no_calibration": [0.001],
+            "206Pb/238U_fractionation_corrected_2e_with_calibration": [0.002],
+            "206Pb/238U_age": [127.7],
+            "raw_detector_column": [12345.0],
+        }
+    )
+
+    tables = build_publication_tables(
+        finalized,
+        depth_profile=depth_profile,
+    )
+
+    assert "Depth profiles" in tables
+    assert "Table notes" in tables
+    assert "raw_detector_column" not in tables["Depth profiles"]
+    depth_notes = tables["Table notes"].query(
+        "worksheet == 'Depth profiles'"
+    )["note"].str.cat(sep=" ")
+    assert "signal_relative_time" in depth_notes
+    assert "Plateau outlier rejection" in depth_notes

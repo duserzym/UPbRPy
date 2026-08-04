@@ -185,7 +185,7 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QMenu::item:selected {{
         background: {theme.accent_soft};
     }}
-    #SidebarPanel, #WorkflowRail, #InspectorPanel, #HeaderCard, #PlotCard, #MetricCard, #NotesCard, #SessionCard, #WorkflowCard, #SelectorCard, #WorkflowHintCard, #WorkflowActionsCard, #WorkflowContextBar {{
+    #SidebarPanel, #WorkflowRail, #InspectorPanel, #HeaderCard, #PlotCard, #MetricCard, #NotesCard, #SessionCard, #WorkflowCard, #SelectorCard, #WorkflowHintCard, #WorkflowActionsCard, #WorkflowContextBar, #InspectorSubsection {{
         background: {theme.surface};
         border: 1px solid {theme.input_border};
         border-radius: 20px;
@@ -231,6 +231,39 @@ def _stylesheet(theme: ThemeSpec) -> str:
         border: 1px solid {theme.input_border};
         border-radius: 14px;
     }}
+    #InspectorSubsection {{
+        background: {theme.surface_soft};
+        border-radius: 14px;
+    }}
+    #InspectorHint {{
+        color: {theme.muted};
+        font-size: 9px;
+    }}
+    QTabWidget#InspectorTabs::pane {{
+        background: transparent;
+        border: none;
+        top: -1px;
+    }}
+    QTabWidget#InspectorTabs QTabBar::tab {{
+        background: {theme.surface_soft};
+        color: {theme.muted};
+        border: 1px solid {theme.input_border};
+        border-bottom: none;
+        padding: 9px 13px;
+        min-width: 72px;
+    }}
+    QTabWidget#InspectorTabs QTabBar::tab:first {{
+        border-top-left-radius: 10px;
+    }}
+    QTabWidget#InspectorTabs QTabBar::tab:last {{
+        border-top-right-radius: 10px;
+    }}
+    QTabWidget#InspectorTabs QTabBar::tab:selected {{
+        background: {theme.accent_soft};
+        color: {theme.accent_strong};
+        border-color: {theme.accent};
+        font-weight: 700;
+    }}
     #PlotControlBar {{
         background: {theme.surface_soft};
         border: 1px solid {theme.input_border};
@@ -257,7 +290,7 @@ def _stylesheet(theme: ThemeSpec) -> str:
         letter-spacing: 0.02em;
     }}
     #HeroTitle {{
-        font-size: 28px;
+        font-size: 24px;
         font-weight: 700;
     }}
     #SectionTitle, #MetricLabel, #DetailLabel {{
@@ -320,6 +353,12 @@ def _stylesheet(theme: ThemeSpec) -> str:
         background: {theme.accent};
         color: #ffffff;
         border-color: {theme.accent_strong};
+    }}
+    QToolButton[compactToggle="true"] {{
+        min-width: 30px;
+        min-height: 24px;
+        padding: 1px;
+        border-radius: 9px;
     }}
     QPushButton:disabled, QToolButton[modeToggle="true"]:disabled {{
         background: transparent;
@@ -488,6 +527,13 @@ def _stylesheet(theme: ThemeSpec) -> str:
     }}
     QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
         background: {scroll_handle_hover};
+    }}
+    QSplitter::handle {{
+        background: {theme.input_border};
+        border-radius: 2px;
+    }}
+    QSplitter::handle:hover {{
+        background: {theme.accent};
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{

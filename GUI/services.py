@@ -542,6 +542,12 @@ def load_session(
         primary_channel=effective_primary,
         **read_kwargs,
     )
+    if "plateau_filter_method" not in experiment.columns:
+        experiment["plateau_filter_method"] = (
+            workflow_preset.plateau_filter_method
+        )
+    if "plateau_filter_channel" not in experiment.columns:
+        experiment["plateau_filter_channel"] = effective_primary
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
@@ -738,6 +744,7 @@ def update_selection_region(
     baseline: tuple[float, float] | None = None,
     plateau: tuple[float, float] | None = None,
     signal: tuple[float, float] | None = None,
+    refresh_pipeline: bool = True,
 ) -> None:
     """Save reviewed windows while requiring signal bounds to contain plateau."""
     if not session.loaded:
@@ -796,15 +803,24 @@ def update_selection_region(
         session.experiment.loc[row_mask, "signal_end_times"] = (
             effective_signal[1]
         )
-    clear_reduction_cache(session)
-    if session.pipeline is not None:
-        session.pipeline.update_experiment(session.experiment)
+    if refresh_pipeline:
+        clear_reduction_cache(session)
+        if session.pipeline is not None:
+            session.pipeline.update_experiment(session.experiment)
 
 
-def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dict[str, tuple[float, float] | None]:
+def autopick_selection_regions(
+    session: ReductionSession,
+    spot_name: str,
+    *,
+    spot_data: pd.DataFrame | None = None,
+    refresh_pipeline: bool = True,
+) -> dict[str, tuple[float, float] | None]:
+    """Re-pick one spot with the session's current selection parameters."""
     if not session.loaded:
         return {"baseline": None, "plateau": None}
-    spot_data = get_spot_data(session, spot_name)
+    if spot_data is None:
+        spot_data = get_spot_data(session, spot_name)
     if spot_data.empty:
         return {"baseline": None, "plateau": None}
 
@@ -847,7 +863,21 @@ def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dic
         float(spot_data.iloc[min(selection.plateau_start, max_index)]["Time"]),
         float(spot_data.iloc[min(selection.plateau_end, max_index)]["Time"]),
     )
-    update_selection_region(session, spot_name, baseline=baseline, plateau=plateau)
+    signal = (
+        float(spot_data.iloc[min(selection.signal_start, max_index)]["Time"]),
+        float(spot_data.iloc[min(selection.signal_end, max_index)]["Time"]),
+    )
+    # Install the complete proposed selection atomically. Updating the
+    # plateau first can reject an otherwise valid re-pick when the old signal
+    # interval does not contain the newly detected plateau.
+    update_selection_region(
+        session,
+        spot_name,
+        baseline=baseline,
+        plateau=plateau,
+        signal=signal,
+        refresh_pipeline=False,
+    )
     row_mask = session.experiment["spot_names"] == spot_name
     session.experiment.loc[row_mask, "selection_method"] = selection.method
     session.experiment.loc[row_mask, "selection_channel"] = selection_channel
@@ -873,17 +903,58 @@ def autopick_selection_regions(session: ReductionSession, spot_name: str) -> dic
     session.experiment.loc[row_mask, "selection_post_baseline_start_index"] = (
         selection.washout_start
     )
-    session.experiment.loc[row_mask, "signal_start_times"] = float(
-        spot_data.iloc[min(selection.signal_start, max_index)]["Time"]
-    )
-    session.experiment.loc[row_mask, "signal_end_times"] = float(
-        spot_data.iloc[min(selection.signal_end, max_index)]["Time"]
-    )
-    if session.pipeline is not None:
+    if refresh_pipeline:
+        clear_reduction_cache(session)
+    if refresh_pipeline and session.pipeline is not None:
         # Signal limits are written after the baseline/plateau update above.
         # Refresh once more so the pipeline sees the complete reviewed pick.
         session.pipeline.update_experiment(session.experiment)
-    return {"baseline": baseline, "plateau": plateau}
+    return {"baseline": baseline, "plateau": plateau, "signal": signal}
+
+
+def autopick_all_selection_regions(
+    session: ReductionSession,
+) -> dict[str, object]:
+    """Re-pick every spot and refresh the shared pipeline only once.
+
+    Grouping the sweep table before selection avoids repeatedly scanning the
+    complete session.  Individual failures are retained in the experiment
+    table and returned to the GUI, while valid spots remain usable.
+    """
+    if not session.loaded:
+        return {"selected_count": 0, "failures": {}}
+
+    spot_frames = {
+        str(spot_name): frame.reset_index(drop=True)
+        for spot_name, frame in session.total_data.groupby(
+            "spot_name", sort=False
+        )
+    }
+    spot_names = session.experiment["spot_names"].astype(str).tolist()
+    failures: dict[str, str] = {}
+    selected_count = 0
+    for spot_name in spot_names:
+        try:
+            result = autopick_selection_regions(
+                session,
+                spot_name,
+                spot_data=spot_frames.get(spot_name),
+                refresh_pipeline=False,
+            )
+            if result.get("baseline") and result.get("plateau"):
+                selected_count += 1
+        except Exception as exc:
+            message = str(exc)
+            failures[spot_name] = message
+            row_mask = session.experiment["spot_names"].astype(str).eq(
+                spot_name
+            )
+            session.experiment.loc[row_mask, "selection_error"] = message
+
+    clear_reduction_cache(session)
+    if session.pipeline is not None:
+        session.pipeline.update_experiment(session.experiment)
+    return {"selected_count": selected_count, "failures": failures}
 
 
 def get_spot_data(session: ReductionSession, spot_name: str | None) -> pd.DataFrame:
@@ -1409,7 +1480,9 @@ def get_session_plot_data(
                 fit_method_label(session.session_fit_method),
             )
         ),
-        "show_uncertainty": False,
+        # ``fit_std`` is the residual standard deviation of the calibrated
+        # standard-spot factors.  The GUI chooses whether to show ±1σ or ±2σ.
+        "show_uncertainty": True,
     }
 
 

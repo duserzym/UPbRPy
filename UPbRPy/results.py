@@ -775,7 +775,138 @@ def finalize_reduction_results(
     )
 
 
-def build_publication_tables(finalized, *, metadata=None):
+def publication_depth_profile_table(depth_profile):
+    """Return publication-relevant sweep columns in a readable order.
+
+    Raw detector channels and transient intermediate columns remain available
+    in the audit CSV.  The workbook keeps identifiers, signal/depth position,
+    corrected ratios, both uncertainty branches, ages, correlations, and
+    common-Pb/intercept decisions.
+    """
+    if depth_profile is None:
+        return pd.DataFrame()
+    if not isinstance(depth_profile, pd.DataFrame):
+        raise TypeError("depth_profile must be a pandas DataFrame")
+    leading = [
+        column
+        for column in (
+            "sample",
+            "spot_name",
+            "Time",
+            "signal_relative_time",
+            "depth_um",
+            "sweep_index",
+        )
+        if column in depth_profile.columns
+    ]
+    scientific = [
+        column
+        for column in depth_profile.columns
+        if column not in leading
+        and (
+            "fractionation_corrected" in str(column)
+            or "age" in str(column).casefold()
+            or "common_pb" in str(column).casefold()
+            or "intercept" in str(column).casefold()
+            or "preferred" in str(column).casefold()
+            or "automatic_flag" in str(column).casefold()
+            or str(column) == "err_corr"
+        )
+    ]
+    return depth_profile.loc[:, leading + scientific].copy()
+
+
+def publication_table_notes(tables):
+    """Build geology-facing footnotes for each exported result table."""
+    shared = [
+        "Ratios are dimensionless; ages and age uncertainties are reported in Ma.",
+        (
+            "Columns ending in _2e are absolute two-standard-error (2SE) "
+            "uncertainties, approximately 95% under a normal model."
+        ),
+        (
+            "_2e_no_calibration contains counting and within-spot analytical "
+            "uncertainty; _2e_with_calibration additionally includes session "
+            "calibration residual scatter."
+        ),
+        (
+            "Downhole and session fitted coefficients are treated as systematic; "
+            "coefficient covariance and cross-ratio session covariance are not "
+            "propagated."
+        ),
+        (
+            "err_corr is the propagated correlation coefficient for the "
+            "207Pb/235U--206Pb/238U Wetherill coordinates."
+        ),
+    ]
+    notes = {
+        "Results": shared
+        + [
+            (
+                "preferred_age and preferred_age_method record the selected "
+                "common-Pb and age-transition decision; parallel alternatives "
+                "are retained in Parallel audit."
+            ),
+            (
+                "automatic_flags are screening diagnostics, not silently applied "
+                "deletions; preferred_age_pass records the resulting decision."
+            ),
+        ],
+        "Secondary standards": [
+            (
+                "Weighted means use inverse-variance weights from accepted spot "
+                "uncertainties; MSWD describes dispersion relative to those errors."
+            )
+        ],
+        "Depth profiles": shared
+        + [
+            (
+                "signal_relative_time is zero at the reviewed beginning of the "
+                "sample signal; depth_um is present only when a drilling-rate "
+                "calibration has been supplied."
+            ),
+            (
+                "Depth rows retain the reviewed full signal interval. Plateau "
+                "outlier rejection affects the spot mean but does not silently "
+                "remove full-signal sweeps from depth-profile reduction."
+            ),
+            (
+                "Downhole correction is indexed by signal-relative time and is "
+                "derived from pooled primary-standard full-signal profiles; "
+                "session correction is derived from primary-standard plateau means."
+            ),
+        ],
+        "QC metrics": [
+            (
+                "Quality metrics preserve the measured data and support automatic "
+                "flags; they are not additional hidden filtering rules."
+            )
+        ],
+        "Methods": [
+            (
+                "This sheet records the user-visible reduction decision, automatic "
+                "flag thresholds, common-Pb settings, and reference-library provenance."
+            )
+        ],
+        "Parallel audit": shared
+        + [
+            (
+                "This audit table retains uncorrected and 204Pb-, 207-, and "
+                "208-method alternatives where available, before the preferred "
+                "result decision is applied."
+            )
+        ],
+    }
+    rows = []
+    for sheet_name in tables:
+        for number, note in enumerate(notes.get(sheet_name, shared), start=1):
+            rows.append(
+                {"worksheet": sheet_name, "footnote": number, "note": note}
+            )
+    return pd.DataFrame(rows)
+
+
+def build_publication_tables(finalized, *, metadata=None, depth_profile=None):
     """Build the logical tables written to a publication workbook.
 
     Parameters
@@ -784,6 +915,10 @@ def build_publication_tables(finalized, *, metadata=None):
         Output from :func:`finalize_reduction_results`.
     metadata
         Additional session or manuscript metadata recorded in ``Methods``.
+    depth_profile
+        Optional full-signal result table. Publication-relevant corrected
+        ratios, uncertainties, ages, and common-Pb outputs are added as a
+        ``Depth profiles`` worksheet.
 
     Returns
     -------
@@ -843,13 +978,18 @@ def build_publication_tables(finalized, *, metadata=None):
             },
         ]
     )
-    return {
+    tables = {
         "Results": finalized.selected_results.copy(),
         "Secondary standards": finalized.secondary_standard_summary.copy(),
         "QC metrics": finalized.quality_metrics.copy(),
         "Methods": pd.DataFrame(decision_rows),
         "Parallel audit": finalized.parallel_results.copy(),
     }
+    depth_table = publication_depth_profile_table(depth_profile)
+    if not depth_table.empty:
+        tables["Depth profiles"] = depth_table
+    tables["Table notes"] = publication_table_notes(tables)
+    return tables
 
 
 def publication_column_width(values, heading, minimum=10, maximum=34):
@@ -919,6 +1059,23 @@ def export_publication_tables(tables, output_path):
         failed_format = workbook.add_format(
             {"bg_color": "#F4CCCC", "font_color": "#9C0006"}
         )
+        footnote_heading_format = workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "#1F4E78",
+                "top": 1,
+                "top_color": "#A6A6A6",
+            }
+        )
+        footnote_format = workbook.add_format(
+            {
+                "font_color": "#4F4F4F",
+                "italic": True,
+                "text_wrap": True,
+                "valign": "top",
+            }
+        )
+        notes_frame = tables.get("Table notes", pd.DataFrame())
         for sheet_name, table in tables.items():
             safe_name = str(sheet_name)[:31]
             table.to_excel(writer, sheet_name=safe_name, index=False)
@@ -938,6 +1095,32 @@ def export_publication_tables(tables, output_path):
                     else None
                 )
                 worksheet.set_column(index, index, width, column_format)
+                column_text = str(column)
+                comment = None
+                if column_text.endswith("_2e_no_calibration"):
+                    comment = (
+                        "Absolute 2SE analytical uncertainty without session "
+                        "calibration residual scatter."
+                    )
+                elif column_text.endswith("_2e_with_calibration"):
+                    comment = (
+                        "Absolute 2SE uncertainty including session calibration "
+                        "residual scatter."
+                    )
+                elif column_text.endswith("_2e"):
+                    comment = "Absolute two-standard-error (2SE) uncertainty."
+                elif column_text == "err_corr":
+                    comment = (
+                        "Error correlation for 207Pb/235U and 206Pb/238U in "
+                        "Wetherill space."
+                    )
+                elif column_text == "signal_relative_time":
+                    comment = (
+                        "Elapsed seconds from the reviewed beginning of sample "
+                        "signal (time zero)."
+                    )
+                if comment:
+                    worksheet.write_comment(0, index, comment)
             if (
                 "preferred_age_pass" in table.columns
                 and len(table) > 0
@@ -955,6 +1138,47 @@ def export_publication_tables(tables, output_path):
                         "format": failed_format,
                     },
                 )
+
+            if sheet_name != "Table notes" and not notes_frame.empty:
+                sheet_notes = notes_frame[
+                    notes_frame["worksheet"].eq(sheet_name)
+                ]
+                if not sheet_notes.empty:
+                    first_note_row = len(table) + 3
+                    last_column = max(len(table.columns) - 1, 0)
+                    if last_column:
+                        worksheet.merge_range(
+                            first_note_row,
+                            0,
+                            first_note_row,
+                            last_column,
+                            "Table notes",
+                            footnote_heading_format,
+                        )
+                    else:
+                        worksheet.write(
+                            first_note_row,
+                            0,
+                            "Table notes",
+                            footnote_heading_format,
+                        )
+                    for offset, note in enumerate(
+                        sheet_notes["note"].astype(str), start=1
+                    ):
+                        text = f"{offset}. {note}"
+                        row = first_note_row + offset
+                        if last_column:
+                            worksheet.merge_range(
+                                row,
+                                0,
+                                row,
+                                last_column,
+                                text,
+                                footnote_format,
+                            )
+                        else:
+                            worksheet.write(row, 0, text, footnote_format)
+                        worksheet.set_row(row, 32)
 
     csv_directory = output_path.with_suffix("")
     csv_directory.mkdir(parents=True, exist_ok=True)
@@ -977,6 +1201,8 @@ __all__ = [
     "summarize_secondary_standards",
     "finalize_reduction_results",
     "build_publication_tables",
+    "publication_depth_profile_table",
+    "publication_table_notes",
     "publication_column_width",
     "export_publication_tables",
 ]
