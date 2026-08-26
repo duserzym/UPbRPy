@@ -40,7 +40,7 @@ from UPbRPy.standards import (
     load_standard_measurements,
     standard_archive,
 )
-from UPbRPy.uncertainty import inverse_standard_deviation_weights
+from UPbRPy.uncertainty import UncertaintySettings, inverse_standard_deviation_weights
 
 
 DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "reference_materials")
@@ -186,6 +186,13 @@ def pipeline_config_from_session(
     # duplicated inside method-specific keyword arguments.
     selection_options.pop("primary_channel", None)
     selection_options.pop("selection_method", None)
+    common_pb_options = dict(retained_config.common_pb_options)
+    if session.common_pb_uncertainty_preset_name == "none":
+        common_pb_options.pop("common_pb_uncertainty_preset_name", None)
+    else:
+        common_pb_options["common_pb_uncertainty_preset_name"] = (
+            session.common_pb_uncertainty_preset_name
+        )
     return PipelineConfig(
         workflow_key=preset.key,
         material=preset.internal_material,
@@ -238,7 +245,18 @@ def pipeline_config_from_session(
             age_transition_ma=session.age_transition_ma,
         ),
         automatic_flags=retained_config.automatic_flags,
-        common_pb_options=dict(retained_config.common_pb_options),
+        common_pb_options=common_pb_options,
+        uncertainty=UncertaintySettings(
+            propagate_baseline=True,
+            propagate_decay_constants=session.propagate_decay_constants,
+            propagate_u238_u235=session.propagate_u238_u235,
+            long_term_reproducibility_mode=(
+                session.long_term_reproducibility_mode
+            ),
+            long_term_reproducibility_relative_1s=(
+                session.long_term_reproducibility_relative_1s
+            ),
+        ),
     )
 
 
@@ -265,6 +283,10 @@ def config_invalidation_stage(
     ):
         return PipelineStage.DOWNHOLE
     if previous.session != current.session:
+        return PipelineStage.SESSION
+    if previous.uncertainty != current.uncertainty:
+        # Both the spot decision branch and the independently cached depth
+        # product carry these reporting components.
         return PipelineStage.SESSION
     if (
         previous.decision != current.decision
@@ -686,8 +708,24 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         exponential_default=0.001,
     )
     session.common_pb_method = config.decision.common_pb_method
+    session.common_pb_uncertainty_preset_name = str(
+        config.common_pb_options.get(
+            "common_pb_uncertainty_preset_name",
+            "none",
+        )
+    )
     session.include_calibration_uncertainty = (
         config.decision.include_calibration_uncertainty
+    )
+    session.propagate_decay_constants = (
+        config.uncertainty.propagate_decay_constants
+    )
+    session.propagate_u238_u235 = config.uncertainty.propagate_u238_u235
+    session.long_term_reproducibility_mode = (
+        config.uncertainty.long_term_reproducibility_mode
+    )
+    session.long_term_reproducibility_relative_1s = (
+        config.uncertainty.long_term_reproducibility_relative_1s
     )
     session.age_transition_ma = config.decision.age_transition_ma
 

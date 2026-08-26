@@ -32,8 +32,10 @@ from .results import (
     ReductionDecision,
     finalize_reduction_results,
 )
+from .uncertainty import UncertaintySettings
+from .standards import canonicalize_reference_material_samples
 
-PIPELINE_FORMAT_VERSION = 1
+PIPELINE_FORMAT_VERSION = 2
 
 
 class PipelineStage(str, Enum):
@@ -258,6 +260,7 @@ class PipelineConfig:
         default_factory=AutomaticFlagSettings
     )
     common_pb_options: dict[str, object] = field(default_factory=dict)
+    uncertainty: UncertaintySettings = field(default_factory=UncertaintySettings)
     depth_calibration: LinearDepthCalibration | None = None
 
     def __post_init__(self) -> None:
@@ -292,6 +295,14 @@ class PipelineConfig:
                 "depth_calibration must be LinearDepthCalibration, a saved "
                 "mapping, or None."
             )
+        if isinstance(self.uncertainty, Mapping):
+            object.__setattr__(
+                self,
+                "uncertainty",
+                UncertaintySettings(**dict(self.uncertainty)),
+            )
+        elif not isinstance(self.uncertainty, UncertaintySettings):
+            raise TypeError("uncertainty must be UncertaintySettings or a mapping")
 
     @property
     def primary_standard(self) -> str:
@@ -319,6 +330,7 @@ class PipelineConfig:
             "decision": asdict(self.decision),
             "automatic_flags": asdict(self.automatic_flags),
             "common_pb_options": dict(self.common_pb_options),
+            "uncertainty": self.uncertainty.to_dict(),
             "depth_calibration": (
                 None
                 if self.depth_calibration is None
@@ -350,6 +362,9 @@ def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
     data["decision"] = ReductionDecision(**dict(data.get("decision", {})))
     data["automatic_flags"] = AutomaticFlagSettings(
         **dict(data.get("automatic_flags", {}))
+    )
+    data["uncertainty"] = UncertaintySettings(
+        **dict(data.get("uncertainty", {}))
     )
     depth_calibration = data.get("depth_calibration")
     if isinstance(depth_calibration, Mapping):
@@ -465,8 +480,14 @@ class ReductionPipeline:
             raise TypeError("total_data must be a pandas DataFrame")
         if not isinstance(standard_archive, pd.DataFrame):
             raise TypeError("standard_archive must be a pandas DataFrame")
-        self.experiment = experiment
-        self.total_data = total_data
+        self.experiment = canonicalize_reference_material_samples(
+            experiment,
+            standard_archive,
+        )
+        self.total_data = canonicalize_reference_material_samples(
+            total_data,
+            standard_archive,
+        )
         self.channels = tuple(str(channel) for channel in channels)
         self.standard_archive = standard_archive
         self.config = config
@@ -495,7 +516,10 @@ class ReductionPipeline:
         """Replace selection metadata and invalidate every calculated stage."""
         if not isinstance(experiment, pd.DataFrame):
             raise TypeError("experiment must be a pandas DataFrame")
-        self.experiment = experiment
+        self.experiment = canonicalize_reference_material_samples(
+            experiment,
+            self.standard_archive,
+        )
         self.cache.invalidate(PipelineStage.SELECTION)
         self.cache.set(PipelineStage.SELECTION, self.experiment)
 
@@ -823,6 +847,7 @@ class ReductionPipeline:
         )
         from .isoplot import construct_final_depthpro_df
         from .reduction import calc_depth_profile
+        from .uncertainty import append_systematic_date_uncertainties
 
         cached = self.cache.get(PipelineStage.DEPTH_PROFILE)
         if isinstance(cached, pd.DataFrame):
@@ -865,6 +890,24 @@ class ReductionPipeline:
                 result,
                 self.config.depth_calibration,
             )
+        settings = self.config.uncertainty
+        long_term_relative_1s = None
+        if settings.long_term_reproducibility_mode == "secondary":
+            finalized = self.run_finalize()
+            long_term_relative_1s = finalized.parallel_results.attrs.get(
+                "long_term_reproducibility_relative_1s_used",
+                0.0,
+            )
+        if (
+            settings.propagate_decay_constants
+            or settings.propagate_u238_u235
+            or settings.long_term_reproducibility_mode != "none"
+        ):
+            result = append_systematic_date_uncertainties(
+                result,
+                settings,
+                long_term_relative_1s=long_term_relative_1s,
+            )
         return self.cache.set(PipelineStage.DEPTH_PROFILE, result)
 
     def run_finalize(self) -> FinalizedReduction:
@@ -873,6 +916,13 @@ class ReductionPipeline:
         if isinstance(cached, FinalizedReduction):
             return cached
         session = self.run_session()
+        accepted_secondary_ages = {
+            name: float(self.standard_archive.loc[name, "concordia_age"])
+            for name in self.config.secondary_standards
+            if name in self.standard_archive.index
+            and "concordia_age" in self.standard_archive.columns
+            and pd.notna(self.standard_archive.loc[name, "concordia_age"])
+        }
         result = finalize_reduction_results(
             self.run_spot_means(),
             sweep_data=session["plateau_corrected"],
@@ -882,6 +932,8 @@ class ReductionPipeline:
             primary_signal_column=self.config.primary_channel,
             quality_signal_data=self.total_data,
             secondary_standard_names=self.config.secondary_standards,
+            accepted_secondary_ages=accepted_secondary_ages,
+            uncertainty_settings=self.config.uncertainty,
         )
         return self.cache.set(PipelineStage.FINALIZE, result)
 

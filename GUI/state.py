@@ -46,7 +46,14 @@ class ReductionSession:
         }
     )
     common_pb_method: str = "none"
+    common_pb_uncertainty_preset_name: str = "none"
     include_calibration_uncertainty: bool = True
+    propagate_decay_constants: bool = False
+    propagate_u238_u235: bool = False
+    long_term_reproducibility_mode: str = "none"
+    long_term_reproducibility_relative_1s: float = 0.0
+    include_export_concentrations: bool = True
+    include_export_depth_concentrations: bool = True
     age_transition_ma: float = 1000.0
     reduction_cache: dict[str, object] = field(default_factory=dict)
     pipeline: Optional["ReductionPipeline"] = None

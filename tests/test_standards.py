@@ -14,12 +14,28 @@ from UPbRPy.constants import common_U238_U235, lambda_235, lambda_238
 from UPbRPy.standards import (
     REQUIRED_COLUMNS,
     build_standard_archive,
+    canonicalize_reference_material_samples,
     load_standard_measurements,
     standard_archive,
     standard_archive_v2,
     standard_measurements,
     standard_sources,
 )
+
+
+def test_reference_material_matching_ignores_case_and_punctuation():
+    archive = pd.DataFrame(index=["TR1", "NIST610"])
+    data = pd.DataFrame(
+        {"sample": ["TR-1", "nist_610", "Unknown-1"], "value": [1, 2, 3]}
+    )
+
+    canonical = canonicalize_reference_material_samples(data, archive)
+
+    assert canonical["sample"].tolist() == ["TR1", "NIST610", "Unknown-1"]
+    assert canonical.attrs["reference_material_sample_aliases"] == {
+        "TR-1": "TR1",
+        "nist_610": "NIST610",
+    }
 
 
 def test_normalized_archive_has_unique_documented_values_and_provenance():

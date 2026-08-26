@@ -72,6 +72,8 @@ def build_reproducibility_notebook(
     pipeline: ReductionPipeline,
     *,
     title: str = "UPbRPy reproducible reduction",
+    include_concentrations: bool = True,
+    include_depth_concentrations: bool = True,
 ) -> dict[str, Any]:
     """Create a complete notebook representation of GUI reduction choices.
 
@@ -111,9 +113,11 @@ def build_reproducibility_notebook(
             "from IPython.display import display\n"
             "from UPbRPy import (\n"
             "    ReductionPipeline,\n"
+            "    build_publication_tables,\n"
             "    build_standard_archive,\n"
             "    load_standard_measurements,\n"
             "    pipeline_config_from_dict,\n"
+            "    export_publication_tables,\n"
             "    read_experiment_data,\n"
             "    standard_archive,\n"
             "    standard_archive_legacy,\n"
@@ -200,9 +204,35 @@ def build_reproducibility_notebook(
             "display(finalized.selected_results)\n"
             "display(finalized.secondary_standard_summary)\n"
         ),
-        notebook_markdown_cell("## Saved provenance"),
+        notebook_markdown_cell(
+            "## Horstwood-style publication export\n\n"
+            "This writes the concise result, Horstwood Table 4-style, depth, "
+            "QC, methods, and full audit worksheets. Set either concentration "
+            "option to `False` when dates should be exported alone."
+        ),
         notebook_code_cell(
             "manifest = pipeline.manifest(hash_inputs=False)\n"
+            "publication_tables = build_publication_tables(\n"
+            "    finalized,\n"
+            "    metadata={\n"
+            "        'workflow_key': config.workflow_key,\n"
+            "        'package_version': manifest['package_version'],\n"
+            "        'pipeline_format_version': manifest['format_version'],\n"
+            "        'source_directory': str(source_directory),\n"
+            "        'reference_library_path': str(reference_library_path or ''),\n"
+            "    },\n"
+            "    depth_profile=depth_profile,\n"
+            f"    include_concentrations={bool(include_concentrations)!r},\n"
+            f"    include_depth_concentrations={bool(include_depth_concentrations)!r},\n"
+            ")\n"
+            "publication_workbook = export_publication_tables(\n"
+            "    publication_tables,\n"
+            "    source_directory.parent / f'{source_directory.name}_Table4.xlsx',\n"
+            ")\n"
+            "publication_workbook\n"
+        ),
+        notebook_markdown_cell("## Saved provenance"),
+        notebook_code_cell(
             "display(pd.json_normalize(manifest, sep='.').T)\n"
         ),
     ]
@@ -229,13 +259,20 @@ def build_reproducibility_notebook(
 def write_reproducibility_notebook(
     pipeline: ReductionPipeline,
     output_path: str | Path,
+    *,
+    include_concentrations: bool = True,
+    include_depth_concentrations: bool = True,
 ) -> Path:
     """Write a standards-compliant, unexecuted Jupyter notebook."""
     target = Path(output_path)
     if target.suffix.lower() != ".ipynb":
         target = target.with_suffix(".ipynb")
     target.parent.mkdir(parents=True, exist_ok=True)
-    notebook = build_reproducibility_notebook(pipeline)
+    notebook = build_reproducibility_notebook(
+        pipeline,
+        include_concentrations=include_concentrations,
+        include_depth_concentrations=include_depth_concentrations,
+    )
     target.write_text(
         json.dumps(notebook, indent=1, ensure_ascii=False),
         encoding="utf-8",
@@ -249,6 +286,8 @@ def export_reduction_bundle(
     *,
     include_depth_profile: bool = True,
     hash_inputs: bool = False,
+    include_concentrations: bool = True,
+    include_depth_concentrations: bool = True,
 ) -> ExportBundle:
     """Export publication tables, audit data, provenance, and a notebook."""
     root = Path(output_directory)
@@ -260,15 +299,21 @@ def export_reduction_bundle(
     depth_profile = (
         pipeline.run_depth_profile() if include_depth_profile else None
     )
+    manifest = pipeline.manifest(hash_inputs=hash_inputs)
     tables = build_publication_tables(
         finalized,
         metadata={
             "workflow_key": pipeline.config.workflow_key,
+            "package_version": manifest["package_version"],
+            "pipeline_format_version": manifest["format_version"],
+            "source_directory": str(pipeline.source_directory or ""),
             "reference_library_path": str(
                 pipeline.reference_library_path or ""
             ),
         },
         depth_profile=depth_profile,
+        include_concentrations=include_concentrations,
+        include_depth_concentrations=include_depth_concentrations,
     )
     workbook = root / "UPbRPy_publication_results.xlsx"
     try:
@@ -300,7 +345,7 @@ def export_reduction_bundle(
     manifest_path = root / "reduction_manifest.json"
     manifest_path.write_text(
         json.dumps(
-            pipeline.manifest(hash_inputs=hash_inputs),
+            manifest,
             indent=2,
             ensure_ascii=False,
             default=str,
@@ -312,6 +357,8 @@ def export_reduction_bundle(
     notebook_path = write_reproducibility_notebook(
         pipeline,
         root / "UPbRPy_reproducible_workflow.ipynb",
+        include_concentrations=include_concentrations,
+        include_depth_concentrations=include_depth_concentrations,
     )
     files.append(notebook_path)
     return ExportBundle(root, tuple(files), tuple(warnings))

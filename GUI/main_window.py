@@ -518,8 +518,19 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             "decision": (
                 self.session.common_pb_method,
+                self.session.common_pb_uncertainty_preset_name,
                 self.session.include_calibration_uncertainty,
                 self.session.age_transition_ma,
+            ),
+            "uncertainty": (
+                self.session.propagate_decay_constants,
+                self.session.propagate_u238_u235,
+                self.session.long_term_reproducibility_mode,
+                self.session.long_term_reproducibility_relative_1s,
+            ),
+            "export": (
+                self.session.include_export_concentrations,
+                self.session.include_export_depth_concentrations,
             ),
             "display_choices": {
                 "visible_channels": self.checked_channels(),
@@ -1718,6 +1729,27 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         decision_layout.addRow("Preferred branch", self.common_pb_method_combo)
 
+        self.common_pb_uncertainty_combo = StyledComboBox()
+        for label, preset_name in (
+            ("No model uncertainty", "none"),
+            ("Boise working convention", "boise_working"),
+            ("Horstwood (2016) example", "horstwood2016"),
+            ("ET_Redux default", "et_redux"),
+        ):
+            self.common_pb_uncertainty_combo.addItem(label, preset_name)
+        self.common_pb_uncertainty_combo.currentIndexChanged.connect(
+            self.on_common_pb_uncertainty_changed
+        )
+        self.common_pb_uncertainty_combo.setToolTip(
+            "Stacey–Kramers defines a model composition, not a universal model "
+            "uncertainty. Choose an explicit published/software convention, or "
+            "leave model uncertainty off. The workbook records the choice."
+        )
+        decision_layout.addRow(
+            "Initial-Pb uncertainty",
+            self.common_pb_uncertainty_combo,
+        )
+
         self.calibration_uncertainty_check = QtWidgets.QCheckBox(
             "Include calibration uncertainty"
         )
@@ -1728,6 +1760,71 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_calibration_uncertainty_toggled
         )
         decision_layout.addRow(self.calibration_uncertainty_check)
+
+        self.decay_uncertainty_check = QtWidgets.QCheckBox(
+            "Propagate decay-constant uncertainty"
+        )
+        self.decay_uncertainty_check.toggled.connect(
+            self.on_systematic_uncertainty_changed
+        )
+        decision_layout.addRow(self.decay_uncertainty_check)
+
+        self.u_ratio_uncertainty_check = QtWidgets.QCheckBox(
+            "Propagate 238U/235U uncertainty"
+        )
+        self.u_ratio_uncertainty_check.toggled.connect(
+            self.on_systematic_uncertainty_changed
+        )
+        decision_layout.addRow(self.u_ratio_uncertainty_check)
+
+        self.long_term_mode_combo = StyledComboBox()
+        for label, mode in (
+            ("Do not add", "none"),
+            ("From secondary-standard mean offset", "secondary"),
+            ("User-supplied relative 1σ", "user"),
+        ):
+            self.long_term_mode_combo.addItem(label, mode)
+        self.long_term_mode_combo.currentIndexChanged.connect(
+            self.on_systematic_uncertainty_changed
+        )
+        self.long_term_mode_combo.setToolTip(
+            "The secondary-standard option uses the largest weighted-mean offset "
+            "from its accepted date as a conservative session proxy. A true "
+            "long-term reproducibility estimate should come from many sessions."
+        )
+        decision_layout.addRow("Long-term reproducibility", self.long_term_mode_combo)
+
+        self.long_term_uncertainty_spin = QtWidgets.QDoubleSpinBox()
+        self.long_term_uncertainty_spin.setRange(0.0, 100.0)
+        self.long_term_uncertainty_spin.setDecimals(3)
+        self.long_term_uncertainty_spin.setSingleStep(0.1)
+        self.long_term_uncertainty_spin.setSuffix(" % 1σ")
+        self.long_term_uncertainty_spin.valueChanged.connect(
+            self.on_systematic_uncertainty_changed
+        )
+        decision_layout.addRow("User reproducibility", self.long_term_uncertainty_spin)
+
+        self.export_concentrations_check = QtWidgets.QCheckBox(
+            "Include spot concentrations in publication export"
+        )
+        self.export_concentrations_check.setChecked(True)
+        self.export_concentrations_check.toggled.connect(
+            lambda checked: setattr(
+                self.session, "include_export_concentrations", bool(checked)
+            )
+        )
+        decision_layout.addRow(self.export_concentrations_check)
+
+        self.export_depth_concentrations_check = QtWidgets.QCheckBox(
+            "Include sweep concentrations in depth export"
+        )
+        self.export_depth_concentrations_check.setChecked(True)
+        self.export_depth_concentrations_check.toggled.connect(
+            lambda checked: setattr(
+                self.session, "include_export_depth_concentrations", bool(checked)
+            )
+        )
+        decision_layout.addRow(self.export_depth_concentrations_check)
 
         self.age_transition_spin = QtWidgets.QDoubleSpinBox()
         self.age_transition_spin.setRange(0.0, 4600.0)
@@ -1919,8 +2016,38 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if decision_index >= 0:
                 self.common_pb_method_combo.setCurrentIndex(decision_index)
+            common_uncertainty_index = self.common_pb_uncertainty_combo.findData(
+                self.session.common_pb_uncertainty_preset_name
+            )
+            if common_uncertainty_index >= 0:
+                self.common_pb_uncertainty_combo.setCurrentIndex(
+                    common_uncertainty_index
+                )
             self.calibration_uncertainty_check.setChecked(
                 self.session.include_calibration_uncertainty
+            )
+            self.decay_uncertainty_check.setChecked(
+                self.session.propagate_decay_constants
+            )
+            self.u_ratio_uncertainty_check.setChecked(
+                self.session.propagate_u238_u235
+            )
+            long_term_index = self.long_term_mode_combo.findData(
+                self.session.long_term_reproducibility_mode
+            )
+            if long_term_index >= 0:
+                self.long_term_mode_combo.setCurrentIndex(long_term_index)
+            self.long_term_uncertainty_spin.setValue(
+                100.0 * self.session.long_term_reproducibility_relative_1s
+            )
+            self.long_term_uncertainty_spin.setEnabled(
+                self.session.long_term_reproducibility_mode == "user"
+            )
+            self.export_concentrations_check.setChecked(
+                self.session.include_export_concentrations
+            )
+            self.export_depth_concentrations_check.setChecked(
+                self.session.include_export_depth_concentrations
             )
             self.age_transition_spin.setValue(
                 float(self.session.age_transition_ma)
@@ -2063,6 +2190,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.pipeline is not None:
             self.session.pipeline.cache.invalidate(PipelineStage.FINALIZE)
 
+    def invalidate_uncertainty_products(self) -> None:
+        """Discard spot and depth outputs affected by uncertainty choices."""
+        self.session.reduction_cache.pop("finalized_results", None)
+        self.session.reduction_cache.pop("depth_profile_results", None)
+        if self.session.pipeline is not None:
+            self.session.pipeline.cache.invalidate(PipelineStage.DEPTH_PROFILE)
+            self.session.pipeline.cache.invalidate(PipelineStage.FINALIZE)
+
     def on_primary_68_standard_changed(self, value: str) -> None:
         """Set the Pb/U reference material used by both correction stages."""
         if self._is_populating or not value:
@@ -2140,12 +2275,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
+    def on_common_pb_uncertainty_changed(self, index: int) -> None:
+        """Choose an explicit initial-Pb uncertainty convention."""
+        if self._is_populating or index < 0:
+            return
+        self.session.common_pb_uncertainty_preset_name = str(
+            self.common_pb_uncertainty_combo.itemData(index) or "none"
+        )
+        self.invalidate_uncertainty_products()
+        self._refresh_workflow_status()
+
     def on_calibration_uncertainty_toggled(self, checked: bool) -> None:
         """Choose the calibrated or analytical-only uncertainty branch."""
         if self._is_populating:
             return
         self.session.include_calibration_uncertainty = bool(checked)
         self.invalidate_final_decisions()
+        self._refresh_workflow_status()
+
+    def on_systematic_uncertainty_changed(self, *_args) -> None:
+        """Synchronize decay, U-isotope, and reproducibility choices."""
+        if self._is_populating:
+            return
+        self.session.propagate_decay_constants = (
+            self.decay_uncertainty_check.isChecked()
+        )
+        self.session.propagate_u238_u235 = (
+            self.u_ratio_uncertainty_check.isChecked()
+        )
+        self.session.long_term_reproducibility_mode = str(
+            self.long_term_mode_combo.currentData() or "none"
+        )
+        self.session.long_term_reproducibility_relative_1s = (
+            self.long_term_uncertainty_spin.value() / 100.0
+        )
+        self.long_term_uncertainty_spin.setEnabled(
+            self.session.long_term_reproducibility_mode == "user"
+        )
+        self.invalidate_uncertainty_products()
         self._refresh_workflow_status()
 
     def on_age_transition_changed(self, value: float) -> None:
@@ -2339,6 +2506,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "channel_colors": dict(self.channel_colors),
             "selection_colors": dict(self.selection_colors),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
+            "include_export_concentrations": (
+                self.session.include_export_concentrations
+            ),
+            "include_export_depth_concentrations": (
+                self.session.include_export_depth_concentrations
+            ),
         }
 
     def apply_pending_project_edits(self) -> None:
@@ -2554,6 +2727,12 @@ class MainWindow(QtWidgets.QMainWindow):
             restored.session.directory,
             project_path=restored.project_path,
         )
+        self.session.include_export_concentrations = bool(
+            workspace.get("include_export_concentrations", True)
+        )
+        self.session.include_export_depth_concentrations = bool(
+            workspace.get("include_export_depth_concentrations", True)
+        )
 
         # install_loaded_session supplies defaults; now overlay saved display
         # choices and repopulate once so isotope chips and spot folders agree.
@@ -2712,6 +2891,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.workflow_preset.supports_depth_profiles
                 ),
                 hash_inputs=False,
+                include_concentrations=(
+                    self.session.include_export_concentrations
+                ),
+                include_depth_concentrations=(
+                    self.session.include_export_depth_concentrations
+                ),
             ),
             show_result,
         )

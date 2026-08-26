@@ -1324,7 +1324,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 )
                 if uncertainty_column:
                     review_columns.append(uncertainty_column)
-        self.depth_model.set_frame(selected.loc[:, review_columns])
+        review_frame = selected.loc[:, review_columns].copy()
+        review_frame = review_frame.rename(
+            columns={
+                column: str(column).replace("_age", "_date")
+                for column in review_frame.columns
+                if "_age" in str(column)
+            }
+        )
+        self.depth_model.set_frame(review_frame)
         self._depth_frame = depth_profile.copy()
         existing_spot = self.depth_spot_combo.currentText()
         spot_names = (

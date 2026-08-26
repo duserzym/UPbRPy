@@ -734,6 +734,55 @@ standard_archive = build_standard_archive(standard_measurements)
 standard_archive_v2 = standard_archive
 
 
+def canonicalize_reference_material_samples(data, archive):
+    """Return a copy whose known sample labels match reference-library case.
+
+    Instrument files and reference libraries commonly differ only by case,
+    spaces, underscores, or hyphens (for example ``TR-1`` versus ``TR1``).
+    Matching on an alphanumeric case-folded key keeps calibration lookup
+    independent of filename typography while leaving unknown sample labels
+    untouched. Ambiguous library keys are deliberately not substituted.
+    """
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("data must be a pandas DataFrame")
+    if not isinstance(archive, pd.DataFrame):
+        raise TypeError("archive must be a pandas DataFrame")
+    if "sample" not in data.columns:
+        return data.copy()
+
+    def key(value):
+        """Normalize one display label for unambiguous library matching."""
+        return "".join(
+            character
+            for character in str(value).casefold()
+            if character.isalnum()
+        )
+
+    candidates = {}
+    ambiguous = set()
+    for name in archive.index.astype(str):
+        normalized = key(name)
+        if normalized in candidates and candidates[normalized] != name:
+            ambiguous.add(normalized)
+        else:
+            candidates[normalized] = name
+    for normalized in ambiguous:
+        candidates.pop(normalized, None)
+
+    result = data.copy()
+    original = result["sample"].astype(str)
+    replacement = original.map(lambda value: candidates.get(key(value), value))
+    result["sample"] = replacement
+    changed = {
+        before: after
+        for before, after in zip(original, replacement)
+        if before != after
+    }
+    result.attrs = dict(data.attrs)
+    result.attrs["reference_material_sample_aliases"] = changed
+    return result
+
+
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
     "LAMBDA_232",
@@ -745,6 +794,7 @@ __all__ = [
     "VALID_STATUSES",
     "VALID_UNCERTAINTY_TYPES",
     "build_standard_archive",
+    "canonicalize_reference_material_samples",
     "load_standard_measurements",
     "standard_archive",
     "standard_archive_v2",

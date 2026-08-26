@@ -145,7 +145,7 @@ def test_pipeline_manifest_is_lightweight_and_records_completed_stages(tmp_path)
 
     manifest = pipeline.manifest(hash_inputs=True, metadata={"operator": "test"})
 
-    assert manifest["format_version"] == 1
+    assert manifest["format_version"] == 2
     assert manifest["completed_stages"] == ["import", "selection"]
     assert manifest["input_files"][0]["sha256"]
     assert manifest["metadata"]["operator"] == "test"
@@ -224,7 +224,11 @@ def test_reproducibility_notebook_embeds_reviewed_selection():
         PipelineConfig(),
     )
 
-    notebook = build_reproducibility_notebook(pipeline)
+    notebook = build_reproducibility_notebook(
+        pipeline,
+        include_concentrations=False,
+        include_depth_concentrations=False,
+    )
     source = "".join(
         "".join(cell["source"])
         for cell in notebook["cells"]
@@ -235,3 +239,5 @@ def test_reproducibility_notebook_embeds_reviewed_selection():
     assert "pipeline.run_depth_profile()" in source
     assert "standard_archive_legacy" in source
     assert ".combine_first(standard_archive_legacy)" in source
+    assert "include_concentrations=False" in source
+    assert "include_depth_concentrations=False" in source
