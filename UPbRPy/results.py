@@ -1241,8 +1241,8 @@ def publication_table_notes(tables):
                 "constants are lambda-238 = 1.55125e-10 yr-1 ± 0.11% (2SD) "
                 "and lambda-235 = 9.8485e-10 yr-1 ± 0.14% (2SD; Jaffey et "
                 "al., 1971, https://doi.org/10.1103/PhysRevC.4.1889), and "
-                "lambda-232 = 4.9475e-11 yr-1 ± 0.042e-11 yr-1 (2SD; Holden, "
-                "1990, https://doi.org/10.1351/pac199062050941). These systematic "
+                "lambda-232 = 4.9475e-11 yr-1 ± 0.042e-11 yr-1 (2SD; Le Roux "
+                "and Glendenin, 1963). These systematic "
                 "uncertainties enter a reported date only when their corresponding "
                 "Methods-sheet option is enabled."
             ),
@@ -1402,7 +1402,7 @@ def build_publication_tables(
             {"setting": "constant.lambda_232_1SD_yr-1", "value": sigma_232},
             {
                 "setting": "constant.thorium_decay_reference",
-                "value": "Holden (1990); https://doi.org/10.1351/pac199062050941",
+                "value": "Le Roux and Glendenin (1963)",
             },
             {
                 "setting": "uncertainty.no_calibration",

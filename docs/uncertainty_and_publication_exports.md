@@ -32,8 +32,8 @@ https://doi.org/10.1126/science.1215507). The uranium decay constants are
 lambda-238 = 1.55125e-10 yr-1 ± 0.11% (2SD) and lambda-235 = 9.8485e-10
 yr-1 ± 0.14% (2SD; Jaffey et al., 1971,
 https://doi.org/10.1103/PhysRevC.4.1889). The thorium decay constant is
-lambda-232 = 4.9475e-11 yr-1 ± 0.042e-11 yr-1 (2SD; Holden, 1990,
-https://doi.org/10.1351/pac199062050941). The publication workbook records
+lambda-232 = 4.9475e-11 yr-1 ± 0.042e-11 yr-1 (2SD; Le Roux and Glendenin,
+1963). The publication workbook records
 the central values, one-sigma uncertainties, and references in its Methods
 worksheet even when the corresponding systematic uncertainty is not selected.
 

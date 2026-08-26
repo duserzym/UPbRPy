@@ -134,3 +134,7 @@ def test_publication_methods_and_notes_record_constants_and_references():
     assert "9.8485e-10" in notes
     assert "4.9475e-11" in notes
     assert "10.1126/science.1215507" in notes
+    assert "Le Roux and Glendenin, 1963" in notes
+    assert methods["constant.thorium_decay_reference"] == (
+        "Le Roux and Glendenin (1963)"
+    )

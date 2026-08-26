@@ -18,7 +18,8 @@ sigma_238 = lambda_238 * 0.11 / 100 / 2
 # common-Pb correction routines. The direct spreadsheet Th-Pb date formula
 # carries two additional insignificant digits (4.94752e-11).
 lambda_232 = 4.9475e-11
-# Holden (1990) reports 4.947 +/- 0.042e-11 at two sigma.
+# Relative two-sigma uncertainty used when thorium decay-constant uncertainty
+# is explicitly enabled in an age calculation.
 sigma_232 = 0.042e-11 / 2
 
 # Retain the historical CSV archive as an explicit compatibility option. The
