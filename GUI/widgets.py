@@ -771,11 +771,31 @@ class ConcordiaReviewWidget(pg.GraphicsLayoutWidget):
         else:
             x_errors = np.full(len(frame), np.nan)
             y_errors = np.full(len(frame), np.nan)
+        uncertainty_branch = (
+            "with_calibration"
+            if self._include_calibration_uncertainty
+            else "no_calibration"
+        )
+        correlation_stem = (
+            "err_corr" if self._diagram == "wetherill" else "tw_rho"
+        )
+        correlation_column = next(
+            (
+                candidate
+                for candidate in (
+                    f"{correlation_stem}_{uncertainty_branch}",
+                    correlation_stem,
+                )
+                if candidate in frame.columns
+            ),
+            None,
+        )
         rho_values = (
-            pd.to_numeric(frame["err_corr"], errors="coerce")
+            pd.to_numeric(frame[correlation_column], errors="coerce")
             .fillna(0.0)
+            .clip(-1.0, 1.0)
             .to_numpy()
-            if self._diagram == "wetherill" and "err_corr" in frame.columns
+            if correlation_column is not None
             else np.zeros(len(frame), dtype=float)
         )
         finite = np.isfinite(x_values) & np.isfinite(y_values)

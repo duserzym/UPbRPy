@@ -27,6 +27,7 @@ class ReductionSession:
     visible_channels: list[str] = field(default_factory=list)
     import_settings: dict[str, object] = field(default_factory=dict)
     plot_mode: str = "raw"
+    ratio_aggregation: str = "arithmetic"
     downhole_fit_method: str = "mean"
     downhole_fit_options: dict[str, float | int | str] = field(
         default_factory=lambda: {

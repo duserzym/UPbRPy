@@ -219,6 +219,7 @@ def pipeline_config_from_session(
             session.secondary_standards or preset.secondary_standards
         ),
         ratio_names=retained_config.ratio_names,
+        ratio_aggregation=session.ratio_aggregation,
         common_pb_calibration=preset.common_pb_calibration,
         downhole=FitSettings(
             method=core_fit_method(session.downhole_fit_method),
@@ -258,6 +259,7 @@ def config_invalidation_stage(
         or previous.primary_76_standard != current.primary_76_standard
         or previous.primary_82_standard != current.primary_82_standard
         or previous.ratio_names != current.ratio_names
+        or previous.ratio_aggregation != current.ratio_aggregation
         or previous.common_pb_calibration != current.common_pb_calibration
         or previous.downhole != current.downhole
     ):
@@ -671,6 +673,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
     session.primary_76_standard = config.primary_76_standard
     session.primary_82_standard = config.primary_82_standard
     session.secondary_standards = config.secondary_standards
+    session.ratio_aggregation = config.ratio_aggregation
     session.downhole_fit_method = gui_fit_method(config.downhole.method)
     session.downhole_fit_options = gui_fit_options(
         config.downhole.options,

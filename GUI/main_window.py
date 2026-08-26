@@ -119,6 +119,11 @@ RATIO_COLORS = {
     "208Pb/232Th": "#19a188",
 }
 
+RATIO_AGGREGATION_OPTIONS = (
+    ("Arithmetic mean (compatibility default)", "arithmetic"),
+    ("Log-ratio / geometric mean", "logratio"),
+)
+
 DEFAULT_REGION_COLORS = {
     "baseline": "#c83e3e",
     "plateau": "#2c7fb8",
@@ -501,6 +506,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session.primary_82_standard,
             ),
             "secondary_standards": self.session.secondary_standards,
+            "ratio_aggregation": self.session.ratio_aggregation,
             "downhole_fit": (
                 self.session.downhole_fit_method,
                 self.session.downhole_fit_options,
@@ -1590,6 +1596,23 @@ class MainWindow(QtWidgets.QMainWindow):
         fit_label.setObjectName("SectionTitle")
         fit_layout.addWidget(fit_label)
 
+        ratio_aggregation_label = QtWidgets.QLabel("Ratio estimator")
+        ratio_aggregation_label.setObjectName("WorkflowLabel")
+        self.ratio_aggregation_combo = StyledComboBox()
+        for label, method in RATIO_AGGREGATION_OPTIONS:
+            self.ratio_aggregation_combo.addItem(label, method)
+        self.ratio_aggregation_combo.setToolTip(
+            "Choose how positive sweep ratios and multiplicative correction "
+            "factors are summarized. Log-ratio mode uses geometric means and "
+            "log-space calibration following McLean et al. (2016). Reported "
+            "spot 206Pb/204Pb is always calculated as a ratio of means."
+        )
+        self.ratio_aggregation_combo.currentIndexChanged.connect(
+            self.on_ratio_aggregation_changed
+        )
+        fit_layout.addWidget(ratio_aggregation_label)
+        fit_layout.addWidget(self.ratio_aggregation_combo)
+
         downhole_label = QtWidgets.QLabel("Downhole fit")
         downhole_label.setObjectName("WorkflowLabel")
         self.downhole_fit_combo = StyledComboBox()
@@ -1858,6 +1881,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_populating = True
         try:
             self.populate_standard_controls()
+            aggregation_index = self.ratio_aggregation_combo.findData(
+                self.session.ratio_aggregation
+            )
+            if aggregation_index >= 0:
+                self.ratio_aggregation_combo.setCurrentIndex(
+                    aggregation_index
+                )
             for combo, method, methods in [
                 (self.downhole_fit_combo, self.session.downhole_fit_method, DOWNHOLE_FIT_METHODS),
                 (self.session_fit_combo, self.session.session_fit_method, SESSION_FIT_METHODS),
@@ -1954,6 +1984,12 @@ class MainWindow(QtWidgets.QMainWindow):
         downhole_label = fit_method_label(self.session.downhole_fit_method)
         session_label = fit_method_label(self.session.session_fit_method)
         parts = [
+            (
+                "Estimator: arithmetic mean"
+                if self.session.ratio_aggregation == "arithmetic"
+                else "Estimator: log-ratio / geometric mean"
+            ),
+            "spot 206Pb/204Pb: ratio of means",
             f"Downhole: {downhole_label}",
             f"Session: {session_label}",
             (
@@ -1973,6 +2009,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if "lowess" in {self.session.downhole_fit_method, self.session.session_fit_method}:
             parts.append("LOWESS is displayed as a planned method; it is not active in this build.")
         self.fit_settings_note_label.setText(" | ".join(parts))
+
+    def on_ratio_aggregation_changed(self, index: int) -> None:
+        """Set the ratio estimator and invalidate every dependent result."""
+        if self._is_populating or index < 0:
+            return
+        aggregation = str(
+            self.ratio_aggregation_combo.itemData(index) or "arithmetic"
+        )
+        if aggregation == self.session.ratio_aggregation:
+            return
+        self.session.ratio_aggregation = aggregation
+        self._invalidate_downhole_fit_cache()
+        self._update_fit_settings_note()
+        label = (
+            "Arithmetic mean"
+            if aggregation == "arithmetic"
+            else "Log-ratio / geometric mean"
+        )
+        self.statusBar().showMessage(
+            f"Ratio estimator set to {label}; rerun downhole and later stages."
+        )
+        if self.session.loaded:
+            self.refresh_view()
 
     def on_downhole_fit_method_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
