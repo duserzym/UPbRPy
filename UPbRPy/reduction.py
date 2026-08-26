@@ -704,8 +704,20 @@ def calc_ratio_mean_and_uncertainty(
                 ratio_value, ratio_1e = ratio_of_means_206pb_204pb(
                     spot_data["206Pb"],
                     spot_data["204Pb"],
-                    spot_data.get("204Pb_2e"),
+                    spot_data.get(
+                        "204Pb_counting_2e",
+                        spot_data.get("204Pb_2e"),
+                    ),
                 )
+                baseline_column = auxiliary_ratio + "_baseline_2e"
+                if baseline_column in spot_data.columns:
+                    shared_baseline_1e = pd.to_numeric(
+                        spot_data[baseline_column], errors="coerce"
+                    ).mean() / 2
+                    if np.isfinite(shared_baseline_1e):
+                        ratio_1e = np.sqrt(
+                            ratio_1e**2 + shared_baseline_1e**2
+                        )
                 record[auxiliary_ratio] = ratio_value
                 record[auxiliary_ratio + "_2e"] = 2 * ratio_1e
                 record[auxiliary_ratio + "_aggregation"] = "ratio_of_means"
@@ -739,6 +751,14 @@ def calc_ratio_mean_and_uncertainty(
                     if uncertainty_column in spot_data.columns
                     else np.nan
                 )
+            baseline_column = auxiliary_ratio + "_baseline_2e"
+            if baseline_column in spot_data.columns:
+                baseline_1sigma = pd.to_numeric(
+                    spot_data.loc[valid_values.index, baseline_column],
+                    errors="coerce",
+                ).mean() / 2
+                if np.isfinite(baseline_1sigma):
+                    auxiliary_sem = np.sqrt(auxiliary_sem**2 + baseline_1sigma**2)
             record[auxiliary_ratio + "_2e"] = 2 * auxiliary_sem
 
         for isotope_ratio, session_result in session_correction_results.items():
@@ -766,13 +786,33 @@ def calc_ratio_mean_and_uncertainty(
                 spot_data[isotope_ratio + '_fractionation_corrected'],
                 aggregation,
             )
-            no_calibration_1sigma = np.abs(
-                corrected_mean * measured_sem / measured_mean
+            baseline_column = isotope_ratio + '_baseline_2e'
+            baseline_corrected_1sigma = 0.0
+            if baseline_column in spot_data.columns:
+                baseline_raw_1sigma = pd.to_numeric(
+                    spot_data[baseline_column], errors='coerce'
+                ).mean() / 2
+                if (
+                    np.isfinite(baseline_raw_1sigma)
+                    and np.isfinite(measured_mean)
+                    and measured_mean != 0
+                ):
+                    baseline_corrected_1sigma = abs(
+                        corrected_mean * baseline_raw_1sigma / measured_mean
+                    )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                no_calibration_1sigma = np.abs(
+                    corrected_mean * measured_sem / measured_mean
+                )
+            no_calibration_1sigma = np.sqrt(
+                no_calibration_1sigma**2 + baseline_corrected_1sigma**2
             )
-            with_calibration_1sigma = corrected_mean * np.sqrt(
-                (measured_sem / measured_mean) ** 2
-                + (session_scatter / session_factor) ** 2
-            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                with_calibration_1sigma = np.sqrt(
+                    (corrected_mean * measured_sem / measured_mean) ** 2
+                    + baseline_corrected_1sigma**2
+                    + (corrected_mean * session_scatter / session_factor) ** 2
+                )
             fit_times = np.asarray(
                 session_result.get('fit_observations', {}).get('time', []),
                 dtype=float,

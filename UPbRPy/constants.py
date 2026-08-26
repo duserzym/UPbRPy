@@ -6,6 +6,7 @@ import pandas as pd
 
 # Uranium isotope ratios
 common_U238_U235 = 137.818
+sigma_common_U238_U235 = 0.045 / 2
 old_common_U238_U235 = 137.88
 
 # Decay constants (year^-1) and their one-sigma uncertainties
@@ -17,6 +18,8 @@ sigma_238 = lambda_238 * 0.11 / 100 / 2
 # common-Pb correction routines. The direct spreadsheet Th-Pb date formula
 # carries two additional insignificant digits (4.94752e-11).
 lambda_232 = 4.9475e-11
+# Holden (1990) reports 4.947 +/- 0.042e-11 at two sigma.
+sigma_232 = 0.042e-11 / 2
 
 # Retain the historical CSV archive as an explicit compatibility option. The
 # primary ``standard_archive`` is constructed from the TOML library in
@@ -29,12 +32,14 @@ standard_archive_csv = standard_archive_legacy
 
 __all__ = [
     "common_U238_U235",
+    "sigma_common_U238_U235",
     "old_common_U238_U235",
     "lambda_235",
     "sigma_235",
     "lambda_238",
     "sigma_238",
     "lambda_232",
+    "sigma_232",
     "standard_archive_csv",
     "standard_archive_legacy",
 ]

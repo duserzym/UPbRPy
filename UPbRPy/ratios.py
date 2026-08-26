@@ -105,9 +105,9 @@ def ratio_of_means_206pb_204pb(
         Equal-length sweep-wise integrated counts over the accepted plateau.
     corrected_pb204_2e
         Optional absolute two-sigma uncertainty of corrected 204Pb for every
-        sweep.  When supplied, independent Poisson counting terms are summed
-        before propagating the ratio uncertainty.  The baseline-derived Hg
-        scale is treated as fixed, consistent with the mass-204 correction.
+        sweep. When supplied, these must contain only independent sweep-level
+        counting terms; their variances are summed before the ratio is formed.
+        The shared baseline component is added once by the spot-mean reducer.
 
     Returns
     -------
@@ -363,6 +363,56 @@ def propagate_raw_ratio_uncertaintiess(nom, denom):
 
     return 2 * eR
 
+
+def baseline_mean_variance(values) -> float:
+    """Return the empirical variance of a spot baseline mean.
+
+    A measured baseline is not an exact subtraction constant.  With two or
+    more finite sweeps its uncertainty is the sample variance divided by the
+    number of sweeps.  A single sweep falls back to its Poisson variance.
+    """
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return float("nan")
+    if array.size == 1:
+        return float(max(array[0], 0.0))
+    return float(np.var(array, ddof=1) / array.size)
+
+
+def ratio_uncertainty_components(
+    numerator,
+    denominator,
+    numerator_raw,
+    denominator_raw_variance,
+    numerator_baseline_variance,
+    denominator_baseline_variance,
+):
+    """Return total and baseline-only absolute one-sigma ratio uncertainty.
+
+    The raw numerator supplies its Poisson variance. ``denominator_raw_variance``
+    is normally the raw denominator count, but may be an already-propagated
+    counting variance for Hg-corrected mass 204.
+    """
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d_numerator = 1.0 / denominator
+        d_denominator = -numerator / denominator**2
+        counting_variance = (
+            d_numerator**2 * np.clip(np.asarray(numerator_raw, dtype=float), 0, None)
+            + d_denominator**2
+            * np.clip(np.asarray(denominator_raw_variance, dtype=float), 0, None)
+        )
+        baseline_variance = (
+            d_numerator**2 * numerator_baseline_variance
+            + d_denominator**2 * denominator_baseline_variance
+        )
+    total = np.sqrt(np.clip(counting_variance + baseline_variance, 0, None))
+    baseline = np.sqrt(np.clip(baseline_variance, 0, None))
+    invalid = ~np.isfinite(numerator) | ~np.isfinite(denominator) | (denominator == 0)
+    return np.where(invalid, np.nan, total), np.where(invalid, np.nan, baseline)
+
 def calc_raw_ratios(
     experiment,
     total_data,
@@ -430,6 +480,8 @@ def calc_raw_ratios(
         "206Pb",
         "204Pb",
         "204Pb_2e",
+        "204Pb_counting_2e",
+        "204Pb_baseline_2e",
         "206Pb/204Pb",
         "206Pb/204Pb_2e",
         "206Pb/208Pb",
@@ -442,6 +494,16 @@ def calc_raw_ratios(
         "207Pb/206Pb_2e",
         "208Pb/232Th_2e",
     ]
+    output_columns.extend(
+        f"{ratio_name}_baseline_2e"
+        for ratio_name in (
+            "206Pb/204Pb",
+            "206Pb/208Pb",
+            "206Pb/238U",
+            "207Pb/206Pb",
+            "208Pb/232Th",
+        )
+    )
     ratio_frames = []
     skipped_spots = []
     excluded_plateau_records = []
@@ -560,72 +622,102 @@ def calc_raw_ratios(
             (spot_total["Time"] >= baseline_start)
             & (spot_total["Time"] < baseline_end)
         ]
+        raw_selected = (
+            spot_total.set_index("Time", drop=False)
+            .reindex(pd.to_numeric(selected["Time"], errors="coerce"))
+            .reset_index(drop=True)
+        )
+        raw_selected.index = selected.index
+        baseline_variances = {
+            channel: baseline_mean_variance(baseline_total[channel])
+            for channel in (
+                "202Hg", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U"
+            )
+        }
         baseline_202hg = baseline_total["202Hg"].mean()
         baseline_204 = baseline_total["204Hg"].mean()
 
         with np.errstate(divide="ignore", invalid="ignore"):
             hg_204_scale = baseline_204 / baseline_202hg
             pb_204 = selected["204Hg"] - selected["202Hg"] * hg_204_scale
-            # CPS values are integrated counts in the input format. Treat the
-            # two independent mass measurements as Poisson variables. The
-            # uncertainty of the baseline-derived 204Hg/202Hg scale is not
-            # included because the legacy Excel routine likewise treats that
-            # scale as fixed.
+            raw_202 = pd.to_numeric(raw_selected["202Hg"], errors="coerce")
+            raw_204 = pd.to_numeric(raw_selected["204Hg"], errors="coerce")
+            pb_204_counting_variance = (
+                np.clip(raw_204, 0, None)
+                + hg_204_scale**2 * np.clip(raw_202, 0, None)
+            )
+            # Since corrected mass 204 equals raw204 - k*raw202, propagate
+            # uncertainty in both baseline means used to estimate k.
+            d_pb204_d_baseline204 = -raw_202 / baseline_202hg
+            d_pb204_d_baseline202 = baseline_204 * raw_202 / baseline_202hg**2
+            pb_204_baseline_variance = (
+                d_pb204_d_baseline204**2 * baseline_variances["204Hg"]
+                + d_pb204_d_baseline202**2 * baseline_variances["202Hg"]
+            )
             pb_204_1s = np.sqrt(
-                np.clip(selected["204Hg"], 0, None)
-                + hg_204_scale**2 * np.clip(selected["202Hg"], 0, None)
+                np.clip(pb_204_counting_variance + pb_204_baseline_variance, 0, None)
             )
             ratio_64 = selected["206Pb"] / pb_204
-            ratio_64_2e = 2 * np.abs(ratio_64) * np.sqrt(
-                1 / np.clip(selected["206Pb"], np.finfo(float).tiny, None)
-                + (pb_204_1s / pb_204) ** 2
+            ratio_64_1e, ratio_64_baseline_1e = ratio_uncertainty_components(
+                selected["206Pb"], pb_204, raw_selected["206Pb"],
+                pb_204_counting_variance, baseline_variances["206Pb"],
+                pb_204_baseline_variance,
             )
             ratio_68pb = selected["206Pb"] / selected["208Pb"]
-            ratio_68pb_2e = (
-                propagate_raw_ratio_uncertaintiess(
-                    selected["206Pb"], selected["208Pb"]
-                )
-                * ratio_68pb
+            ratio_68pb_1e, ratio_68pb_baseline_1e = ratio_uncertainty_components(
+                selected["206Pb"], selected["208Pb"], raw_selected["206Pb"],
+                raw_selected["208Pb"], baseline_variances["206Pb"],
+                baseline_variances["208Pb"],
             )
             ratio_82 = selected["208Pb"] / selected["232Th"]
             ratio_68 = selected["206Pb"] / selected["238U"]
             ratio_76 = selected["207Pb"] / selected["206Pb"]
-            ratio_82_2e = (
-                propagate_raw_ratio_uncertaintiess(
-                    selected["208Pb"], selected["232Th"]
-                )
-                * ratio_82
+            ratio_82_1e, ratio_82_baseline_1e = ratio_uncertainty_components(
+                selected["208Pb"], selected["232Th"], raw_selected["208Pb"],
+                raw_selected["232Th"], baseline_variances["208Pb"],
+                baseline_variances["232Th"],
             )
-            ratio_68_2e = (
-                propagate_raw_ratio_uncertaintiess(
-                    selected["206Pb"], selected["238U"]
-                )
-                * ratio_68
+            ratio_68_1e, ratio_68_baseline_1e = ratio_uncertainty_components(
+                selected["206Pb"], selected["238U"], raw_selected["206Pb"],
+                raw_selected["238U"], baseline_variances["206Pb"],
+                baseline_variances["238U"],
             )
-            ratio_76_2e = (
-                propagate_raw_ratio_uncertaintiess(
-                    selected["207Pb"], selected["206Pb"]
-                )
-                * ratio_76
+            ratio_76_1e, ratio_76_baseline_1e = ratio_uncertainty_components(
+                selected["207Pb"], selected["206Pb"], raw_selected["207Pb"],
+                raw_selected["206Pb"], baseline_variances["207Pb"],
+                baseline_variances["206Pb"],
             )
         selected["204Pb"] = pb_204.where(np.isfinite(pb_204), np.nan)
         selected["204Pb_2e"] = (2 * pb_204_1s).where(
             np.isfinite(pb_204_1s), np.nan
         )
+        selected["204Pb_counting_2e"] = 2 * np.sqrt(
+            np.clip(pb_204_counting_variance, 0, None)
+        )
+        selected["204Pb_baseline_2e"] = 2 * np.sqrt(
+            np.clip(pb_204_baseline_variance, 0, None)
+        )
         selected["206Pb/204Pb"] = ratio_64.where(
             np.isfinite(ratio_64) & (ratio_64 >= 0), 0
         )
-        selected["206Pb/204Pb_2e"] = ratio_64_2e.where(
-            np.isfinite(ratio_64_2e) & (ratio_64 > 0), np.nan
+        selected["206Pb/204Pb_2e"] = pd.Series(
+            2 * ratio_64_1e, index=selected.index
+        ).where(
+            np.isfinite(ratio_64_1e) & (ratio_64 > 0), np.nan
         )
         selected["206Pb/208Pb"] = ratio_68pb
-        selected["206Pb/208Pb_2e"] = ratio_68pb_2e
+        selected["206Pb/208Pb_2e"] = 2 * ratio_68pb_1e
         selected["206Pb/238U"] = ratio_68
-        selected["206Pb/238U_2e"] = ratio_68_2e
+        selected["206Pb/238U_2e"] = 2 * ratio_68_1e
         selected["207Pb/206Pb"] = ratio_76
-        selected["207Pb/206Pb_2e"] = ratio_76_2e
+        selected["207Pb/206Pb_2e"] = 2 * ratio_76_1e
         selected["208Pb/232Th"] = ratio_82
-        selected["208Pb/232Th_2e"] = ratio_82_2e
+        selected["208Pb/232Th_2e"] = 2 * ratio_82_1e
+        selected["206Pb/204Pb_baseline_2e"] = 2 * ratio_64_baseline_1e
+        selected["206Pb/208Pb_baseline_2e"] = 2 * ratio_68pb_baseline_1e
+        selected["206Pb/238U_baseline_2e"] = 2 * ratio_68_baseline_1e
+        selected["207Pb/206Pb_baseline_2e"] = 2 * ratio_76_baseline_1e
+        selected["208Pb/232Th_baseline_2e"] = 2 * ratio_82_baseline_1e
         ratio_frames.append(selected.loc[:, output_columns])
 
     if skipped_spots:
@@ -659,5 +751,7 @@ __all__ = [
     'project_tw_238u_206pb',
     'project_tw_206pb_238u',
     'propagate_raw_ratio_uncertaintiess',
+    'baseline_mean_variance',
+    'ratio_uncertainty_components',
     'calc_raw_ratios',
 ]

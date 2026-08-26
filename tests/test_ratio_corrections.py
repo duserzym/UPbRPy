@@ -257,6 +257,52 @@ def test_raw_ratio_regions_share_signal_start_relative_time():
     assert plateau["signal_relative_time"].tolist() == [2.0, 3.0]
 
 
+def test_raw_ratio_uncertainty_includes_shared_baseline_mean_component():
+    """A noisy baseline must increase each sweep's reported ratio error."""
+    experiment = pd.DataFrame(
+        {
+            "spot_names": ["RM_1"],
+            "baseline_start_times": [0.0],
+            "baseline_end_times": [4.0],
+            "signal_start_times": [4.0],
+            "signal_end_times": [7.0],
+            "plateau_start_times": [4.0],
+            "plateau_end_times": [7.0],
+        }
+    )
+    times = np.arange(8.0)
+    raw = pd.DataFrame(
+        {
+            "sample": ["RM"] * 8,
+            "spot_name": ["RM_1"] * 8,
+            "Time": times,
+            "202Hg": [9, 11, 8, 12, 110, 110, 110, 110],
+            "204Hg": [18, 22, 16, 24, 220, 220, 220, 220],
+            "206Pb": [8, 12, 9, 11, 1010, 1010, 1010, 1010],
+            "207Pb": [4, 6, 4, 6, 105, 105, 105, 105],
+            "208Pb": [7, 13, 8, 12, 810, 810, 810, 810],
+            "232Th": [18, 22, 19, 21, 410, 410, 410, 410],
+            "238U": [17, 23, 18, 22, 2010, 2010, 2010, 2010],
+        }
+    )
+    baseline_means = raw.loc[raw["Time"] < 4].drop(
+        columns=["sample", "spot_name", "Time"]
+    ).mean()
+    corrected = raw.copy()
+    for channel, mean in baseline_means.items():
+        corrected[channel] = corrected[channel] - mean
+
+    ratios = calc_raw_ratios(experiment, raw, corrected, region="signal")
+
+    assert (ratios["206Pb/238U_baseline_2e"] > 0).all()
+    assert (
+        ratios["206Pb/238U_2e"]
+        > ratios["206Pb/238U_baseline_2e"]
+    ).all()
+    assert "204Pb_counting_2e" in ratios
+    assert "204Pb_baseline_2e" in ratios
+
+
 def test_saved_plateau_filter_excludes_spot_mean_sweep_but_not_signal_profile():
     times = np.arange(25.0)
     primary_signal = 100.0 - 2.0 * times + 0.1 * (times % 2)

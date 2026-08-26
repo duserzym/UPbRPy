@@ -15,7 +15,8 @@ from .constants import common_U238_U235, lambda_235, lambda_232, lambda_238
 
 def calc_75_date(ratio):
     """Convert radiogenic ``207Pb/235U`` to an apparent age in Ma."""
-    return np.log(np.asarray(ratio, dtype=float) + 1) / lambda_235 / 1e6
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.log1p(np.asarray(ratio, dtype=float)) / lambda_235 / 1e6
 
 
 def calc_75_date_uncertainty(ratio, ratio_uncertainty):
@@ -27,7 +28,8 @@ def calc_75_date_uncertainty(ratio, ratio_uncertainty):
 
 def calc_68_date(ratio):
     """Convert radiogenic ``206Pb/238U`` to an apparent age in Ma."""
-    return np.log(np.asarray(ratio, dtype=float) + 1) / lambda_238 / 1e6
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.log1p(np.asarray(ratio, dtype=float)) / lambda_238 / 1e6
 
 
 def calc_68_date_uncertainty(ratio, ratio_uncertainty):
@@ -57,28 +59,39 @@ def calc_82_date_uncertainty(
         return np.abs(ratio_uncertainty) / (lambda232 * (1 + ratio)) / 1e6
 
 
+def radiogenic_76_ratio_with_constants(
+    age_years,
+    *,
+    lambda235=lambda_235,
+    lambda238=lambda_238,
+    u238_u235=common_U238_U235,
+):
+    """Evaluate radiogenic 207Pb/206Pb using explicit physical constants."""
+    age_years = np.asarray(age_years, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        numerator = np.expm1(lambda235 * age_years)
+        denominator = np.expm1(lambda238 * age_years)
+        ratio = numerator / denominator / u238_u235
+    limiting_ratio = lambda235 / lambda238 / u238_u235
+    return np.where(np.abs(age_years) < 1.0, limiting_ratio, ratio)
+
+
 def radiogenic_76_ratio(age_years):
     """Evaluate radiogenic 207Pb/206Pb at one or more ages in years."""
-    age_years = np.asarray(age_years, dtype=float)
-    numerator = np.expm1(lambda_235 * age_years)
-    denominator = np.expm1(lambda_238 * age_years)
-    limiting_ratio = lambda_235 / lambda_238 / common_U238_U235
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        ratio = numerator / denominator / common_U238_U235
-    return np.where(np.abs(age_years) < 1.0, limiting_ratio, ratio)
+    return radiogenic_76_ratio_with_constants(age_years)
 
 
 def radiogenic_76_derivative(age_years):
     """Return d(207Pb/206Pb)/dt for ages expressed in years."""
     age_years = np.asarray(age_years, dtype=float)
-    exp_235 = np.exp(lambda_235 * age_years)
-    exp_238 = np.exp(lambda_238 * age_years)
-    denominator = common_U238_U235 * (exp_238 - 1) ** 2
-    numerator = (
-        lambda_235 * exp_235 * (exp_238 - 1)
-        - lambda_238 * exp_238 * (exp_235 - 1)
-    )
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        exp_235 = np.exp(lambda_235 * age_years)
+        exp_238 = np.exp(lambda_238 * age_years)
+        denominator = common_U238_U235 * (exp_238 - 1) ** 2
+        numerator = (
+            lambda_235 * exp_235 * (exp_238 - 1)
+            - lambda_238 * exp_238 * (exp_235 - 1)
+        )
         derivative = numerator / denominator
 
     # Use a stable centered derivative for the analytic limit at zero.
@@ -158,6 +171,7 @@ __all__ = [
     "calc_82_date",
     "calc_82_date_uncertainty",
     "radiogenic_76_ratio",
+    "radiogenic_76_ratio_with_constants",
     "radiogenic_76_derivative",
     "calc_76_date",
     "calc_76_date_uncertainty",

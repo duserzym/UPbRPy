@@ -2,10 +2,145 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+
 import numpy as np
 
-from .constants import common_U238_U235, lambda_235, lambda_232, lambda_238
-from .age import calc_76_date
+from .constants import (
+    common_U238_U235,
+    lambda_235,
+    lambda_232,
+    lambda_238,
+    sigma_235,
+    sigma_232,
+    sigma_238,
+    sigma_common_U238_U235,
+)
+from .age import calc_76_date, radiogenic_76_derivative
+
+
+@dataclass(frozen=True)
+class UncertaintySettings:
+    """User-selectable systematic uncertainty components.
+
+    Baseline uncertainty is propagated by the raw-ratio calculation and is on
+    by default. Decay constants, the natural ``238U/235U`` ratio, and external
+    reproducibility remain explicit opt-in reporting components so analytical
+    and systematic branches are never silently mixed.
+    """
+
+    propagate_baseline: bool = True
+    propagate_decay_constants: bool = False
+    propagate_u238_u235: bool = False
+    long_term_reproducibility_mode: str = "none"
+    long_term_reproducibility_relative_1s: float = 0.0
+    u238_u235: float = common_U238_U235
+    u238_u235_1s: float = sigma_common_U238_U235
+    lambda_235_1s: float = sigma_235
+    lambda_238_1s: float = sigma_238
+    lambda_232_1s: float = sigma_232
+
+    def __post_init__(self):
+        """Validate modes and non-negative one-sigma inputs."""
+        mode = str(self.long_term_reproducibility_mode).strip().lower()
+        if mode not in {"none", "secondary", "user"}:
+            raise ValueError(
+                "long_term_reproducibility_mode must be 'none', 'secondary', or 'user'"
+            )
+        for name in (
+            "long_term_reproducibility_relative_1s",
+            "u238_u235_1s",
+            "lambda_235_1s",
+            "lambda_238_1s",
+            "lambda_232_1s",
+        ):
+            value = float(getattr(self, name))
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite non-negative number")
+        if not np.isfinite(self.u238_u235) or self.u238_u235 <= 0:
+            raise ValueError("u238_u235 must be a finite positive number")
+        object.__setattr__(self, "long_term_reproducibility_mode", mode)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return serialization-friendly settings for projects and notebooks."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CommonPbUncertaintySettings:
+    """One-sigma uncertainty and correlation assigned to initial Pb ratios.
+
+    The values supplied by Schmitz's working reduction document are retained
+    as an explicit ``boise_working`` preset, not presented as a universal
+    Stacey--Kramers model uncertainty. Published software and studies use
+    materially different assumptions.
+    """
+
+    relative_1s_206_204: float = 0.0061
+    relative_1s_207_204: float = 0.0052
+    relative_1s_208_204: float = 0.0063
+    rho_206_207: float = 0.98
+    rho_206_208: float = 0.98
+    rho_207_208: float = 0.98
+    source: str = "boise_working"
+
+    def covariance(self, ratios) -> np.ndarray:
+        """Return the absolute covariance matrix for 206/204, 207/204, 208/204."""
+        ratios = np.asarray(ratios, dtype=float)
+        if ratios.shape != (3,):
+            raise ValueError("ratios must contain 206/204, 207/204, and 208/204")
+        sigmas = ratios * np.array(
+            [
+                self.relative_1s_206_204,
+                self.relative_1s_207_204,
+                self.relative_1s_208_204,
+            ]
+        )
+        correlation = np.array(
+            [
+                [1.0, self.rho_206_207, self.rho_206_208],
+                [self.rho_206_207, 1.0, self.rho_207_208],
+                [self.rho_206_208, self.rho_207_208, 1.0],
+            ]
+        )
+        return np.outer(sigmas, sigmas) * correlation
+
+
+def common_pb_uncertainty_preset(name="boise_working") -> CommonPbUncertaintySettings:
+    """Return a named, provenance-explicit initial-Pb uncertainty convention.
+
+    These are reporting assumptions, not uncertainties supplied by the
+    Stacey--Kramers (1975) evolution equation itself. ``horstwood2016`` uses
+    the relative one-sigma assumptions printed in that paper's example table;
+    ``et_redux`` mirrors its generic 1% and rho=0.5 defaults.
+    """
+    key = str(name).strip().lower().replace("-", "_")
+    if key in {"boise", "boise_working", "schmitz_working"}:
+        return CommonPbUncertaintySettings()
+    if key in {"horstwood", "horstwood2016"}:
+        return CommonPbUncertaintySettings(
+            relative_1s_206_204=0.0080,
+            relative_1s_207_204=0.0032,
+            relative_1s_208_204=0.0074,
+            rho_206_207=0.0,
+            rho_206_208=0.0,
+            rho_207_208=0.0,
+            source="horstwood2016_example",
+        )
+    if key in {"et_redux", "etredux"}:
+        return CommonPbUncertaintySettings(
+            relative_1s_206_204=0.01,
+            relative_1s_207_204=0.01,
+            relative_1s_208_204=0.01,
+            rho_206_207=0.5,
+            rho_206_208=0.5,
+            rho_207_208=0.5,
+            source="et_redux_default",
+        )
+    raise ValueError(
+        "Unknown common-Pb uncertainty preset; use boise_working, "
+        "horstwood2016, or et_redux."
+    )
 
 
 class CovarianceStore(dict):
@@ -580,7 +715,300 @@ def fit_weighted_polynomial_with_covariance(x_values, y_values, standard_deviati
         "standard_deviations": standard_deviations,
     }
 
+
+def systematic_date_components(age_ma, system, settings: UncertaintySettings):
+    """Return one-sigma decay-constant and U-isotope date components.
+
+    Direct daughter/parent dates scale inversely with their decay constant.
+    The 207Pb/206Pb date depends on both U decay constants and 238U/235U;
+    centered numerical derivatives keep that implicit relation readable and
+    consistent with :func:`UPbRPy.age.calc_76_date`.
+    """
+    age = np.asarray(age_ma, dtype=float)
+    system = str(system)
+    decay = np.zeros_like(age)
+    uranium = np.zeros_like(age)
+    if system == "206Pb/238U":
+        decay = np.abs(age * settings.lambda_238_1s / lambda_238)
+    elif system == "207Pb/235U":
+        decay = np.abs(age * settings.lambda_235_1s / lambda_235)
+        ratio = np.expm1(lambda_235 * age * 1e6)
+        uranium = np.abs(
+            ratio
+            / (lambda_235 * (1 + ratio))
+            / 1e6
+            * settings.u238_u235_1s
+            / settings.u238_u235
+        )
+    elif system == "208Pb/232Th":
+        decay = np.abs(age * settings.lambda_232_1s / lambda_232)
+    elif system == "207Pb/206Pb":
+        age_years = age * 1e6
+        from .age import radiogenic_76_ratio_with_constants
+
+        base_ratio = radiogenic_76_ratio_with_constants(
+            age_years,
+            lambda235=lambda_235,
+            lambda238=lambda_238,
+            u238_u235=settings.u238_u235,
+        )
+        ratio_slope = np.asarray(radiogenic_76_derivative(age_years), dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d_ratio_l235 = (
+                radiogenic_76_ratio_with_constants(
+                    age_years,
+                    lambda235=lambda_235 + settings.lambda_235_1s,
+                    lambda238=lambda_238,
+                    u238_u235=settings.u238_u235,
+                )
+                - base_ratio
+            )
+            d_ratio_l238 = (
+                radiogenic_76_ratio_with_constants(
+                    age_years,
+                    lambda235=lambda_235,
+                    lambda238=lambda_238 + settings.lambda_238_1s,
+                    u238_u235=settings.u238_u235,
+                )
+                - base_ratio
+            )
+            decay = np.sqrt(d_ratio_l235**2 + d_ratio_l238**2) / np.abs(ratio_slope) / 1e6
+            d_ratio_u = (
+                radiogenic_76_ratio_with_constants(
+                    age_years,
+                    lambda235=lambda_235,
+                    lambda238=lambda_238,
+                    u238_u235=settings.u238_u235 + settings.u238_u235_1s,
+                )
+                - base_ratio
+            )
+            uranium = np.abs(d_ratio_u / ratio_slope) / 1e6
+    return {"decay_1s": decay, "u_ratio_1s": uranium}
+
+
+def relative_ratio_date_component(age_ma, system, relative_ratio_1s):
+    """Map a relative one-sigma ratio uncertainty into date units.
+
+    Long-term reproducibility is observed in calibrated isotope-ratio space.
+    It must therefore be propagated through the local ratio--date derivative,
+    rather than multiplied directly by the numerical date.  The latter is a
+    tempting shortcut but is not equivalent for the exponential U--Pb and
+    Th--Pb growth equations.
+    """
+    age = np.asarray(age_ma, dtype=float)
+    relative = float(relative_ratio_1s)
+    if relative == 0:
+        return np.zeros_like(age)
+    age_years = age * 1e6
+    if system == "206Pb/238U":
+        ratio = np.expm1(lambda_238 * age_years)
+        slope = lambda_238 * np.exp(lambda_238 * age_years)
+    elif system == "207Pb/235U":
+        ratio = np.expm1(lambda_235 * age_years)
+        slope = lambda_235 * np.exp(lambda_235 * age_years)
+    elif system == "208Pb/232Th":
+        ratio = np.expm1(lambda_232 * age_years)
+        slope = lambda_232 * np.exp(lambda_232 * age_years)
+    elif system == "207Pb/206Pb":
+        from .age import radiogenic_76_ratio_with_constants
+
+        ratio = radiogenic_76_ratio_with_constants(
+            age_years,
+            lambda235=lambda_235,
+            lambda238=lambda_238,
+            u238_u235=common_U238_U235,
+        )
+        slope = np.asarray(radiogenic_76_derivative(age_years), dtype=float)
+    else:
+        raise ValueError(f"Unsupported isotope system {system!r}")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.abs(ratio * relative / slope) / 1e6
+
+
+def common_corrected_systematic_components(frame, age_column, settings):
+    """Return physical-constant date components for 207/208 corrections.
+
+    Conventional common-Pb equations couple more than one decay system.
+    Centered perturbations through the same implicit age solvers preserve that
+    coupling and avoid assigning a 207- or 208-corrected date to a fictitious
+    single daughter/parent system.
+    """
+    import pandas as pd
+
+    count = len(frame)
+
+    def values(candidates):
+        """Return the first available numeric result column."""
+        for candidate in candidates:
+            if candidate in frame:
+                return pd.to_numeric(frame[candidate], errors="coerce").to_numpy(
+                    dtype=float
+                )
+        return np.full(count, np.nan)
+
+    ratio_68 = values(("206Pb/238U_fractionation_corrected", "206Pb/238U"))
+    ages = pd.to_numeric(frame[age_column], errors="coerce").to_numpy(dtype=float)
+    age_years = ages * 1e6
+    if age_column == "207Pb_corrected_age":
+        ratio_other = values(
+            ("207Pb/206Pb_fractionation_corrected", "207Pb/206Pb")
+        )
+        common = values(("207Pb_correction_common_207Pb/206Pb",))
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            exp238 = np.exp(lambda_238 * age_years)
+            exp235 = np.exp(lambda_235 * age_years)
+            radiogenic_68 = exp238 - 1
+            d_residual_d_age_ma = (
+                lambda_235 * 1e6 * exp235
+                - settings.u238_u235
+                * common
+                * lambda_238
+                * 1e6
+                * exp238
+            )
+            d_residual_d_lambda238 = (
+                -settings.u238_u235 * common * age_years * exp238
+            )
+            d_residual_d_lambda235 = age_years * exp235
+            d_residual_d_uranium = (
+                common * (ratio_68 - radiogenic_68)
+                - ratio_other * ratio_68
+            )
+            l238_effect = np.abs(
+                d_residual_d_lambda238
+                * settings.lambda_238_1s
+                / d_residual_d_age_ma
+            )
+            l235_effect = np.abs(
+                d_residual_d_lambda235
+                * settings.lambda_235_1s
+                / d_residual_d_age_ma
+            )
+            decay = np.hypot(l238_effect, l235_effect)
+            uranium = np.abs(
+                d_residual_d_uranium
+                * settings.u238_u235_1s
+                / d_residual_d_age_ma
+            )
+    else:
+        ratio_other = values(
+            ("208Pb/232Th_fractionation_corrected", "208Pb/232Th")
+        )
+        common = values(("208Pb_correction_common_206Pb/208Pb",))
+        th_u = values(("Th/U",))
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            exp238 = np.exp(lambda_238 * age_years)
+            exp232 = np.exp(lambda_232 * age_years)
+            d_residual_d_age_ma = (
+                th_u * common * lambda_232 * 1e6 * exp232
+                - lambda_238 * 1e6 * exp238
+            )
+            d_residual_d_lambda238 = -age_years * exp238
+            d_residual_d_lambda232 = th_u * common * age_years * exp232
+            l238_effect = np.abs(
+                d_residual_d_lambda238
+                * settings.lambda_238_1s
+                / d_residual_d_age_ma
+            )
+            l232_effect = np.abs(
+                d_residual_d_lambda232
+                * settings.lambda_232_1s
+                / d_residual_d_age_ma
+            )
+            decay = np.hypot(l238_effect, l232_effect)
+        uranium = np.zeros(count)
+    return {"decay_1s": decay, "u_ratio_1s": uranium}
+
+
+def append_systematic_date_uncertainties(
+    frame,
+    settings: UncertaintySettings,
+    *,
+    long_term_relative_1s: float | None = None,
+):
+    """Append separate and combined systematic two-sigma date branches.
+
+    Existing ``*_2e_no_calibration`` and ``*_2e_with_calibration`` columns are
+    retained. New suffixes identify exactly which systematic terms were added.
+    The long-term term is applied as relative uncertainty in the calibrated
+    isotope ratio and mapped to date units with the local age derivative.
+    """
+    import pandas as pd
+
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    result = frame.copy()
+    long_term = (
+        settings.long_term_reproducibility_relative_1s
+        if long_term_relative_1s is None
+        else float(long_term_relative_1s)
+    )
+    systems = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "208Pb/232Th")
+    for age_column in [column for column in result if str(column).endswith("_age")]:
+        system = next((name for name in systems if name in str(age_column)), None)
+        if system is None and str(age_column) in {
+            "207Pb_corrected_age",
+            "208Pb_corrected_age",
+        }:
+            # Both model dates ultimately solve for a radiogenic 206Pb/238U
+            # date; the 207 method additionally depends on 238U/235U.
+            system = "206Pb/238U"
+        if system is None:
+            continue
+        base_columns = {
+            mode: age_column + f"_2e_{mode}"
+            for mode in ("no_calibration", "with_calibration")
+            if age_column + f"_2e_{mode}" in result
+        }
+        if not base_columns and age_column + "_2e" in result:
+            base_columns["with_calibration"] = age_column + "_2e"
+        if not base_columns:
+            continue
+        age = pd.to_numeric(result[age_column], errors="coerce").to_numpy(dtype=float)
+        components = systematic_date_components(age, system, settings)
+        if str(age_column) in {"207Pb_corrected_age", "208Pb_corrected_age"}:
+            components = common_corrected_systematic_components(
+                result,
+                str(age_column),
+                settings,
+            )
+        decay_1s = components["decay_1s"] if settings.propagate_decay_constants else 0.0
+        uranium_1s = components["u_ratio_1s"] if settings.propagate_u238_u235 else 0.0
+        reproducibility_1s = relative_ratio_date_component(
+            age,
+            system,
+            long_term,
+        )
+        result[age_column + "_2e_decay_constants"] = 2 * np.asarray(components["decay_1s"])
+        result[age_column + "_2e_u238_u235"] = 2 * np.asarray(components["u_ratio_1s"])
+        result[age_column + "_2e_decay_and_u238_u235"] = 2 * np.sqrt(
+            np.asarray(components["decay_1s"]) ** 2
+            + np.asarray(components["u_ratio_1s"]) ** 2
+        )
+        result[age_column + "_2e_long_term_reproducibility"] = 2 * reproducibility_1s
+        for mode, base_2e in base_columns.items():
+            analytical_1s = (
+                pd.to_numeric(result[base_2e], errors="coerce").to_numpy(dtype=float)
+                / 2
+            )
+            combined = 2 * np.sqrt(
+                analytical_1s**2
+                + np.asarray(decay_1s) ** 2
+                + np.asarray(uranium_1s) ** 2
+                + reproducibility_1s**2
+            )
+            result[age_column + f"_2e_{mode}_selected_systematic"] = combined
+            if mode == "with_calibration":
+                result[age_column + "_2e_selected_systematic"] = combined
+    result.attrs = dict(frame.attrs)
+    result.attrs["uncertainty_settings"] = settings.to_dict()
+    result.attrs["long_term_reproducibility_relative_1s_used"] = long_term
+    return result
+
 __all__ = [
+    'UncertaintySettings',
+    'CommonPbUncertaintySettings',
+    'common_pb_uncertainty_preset',
     'CovarianceStore',
     'inverse_standard_deviation_weights',
     'polynomial_prediction_covariance',
@@ -598,4 +1026,8 @@ __all__ = [
     'propagate_date_covariance',
     'propagate_discordance_covariance',
     'fit_weighted_polynomial_with_covariance',
+    'systematic_date_components',
+    'relative_ratio_date_component',
+    'common_corrected_systematic_components',
+    'append_systematic_date_uncertainties',
 ]

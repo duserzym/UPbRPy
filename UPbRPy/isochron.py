@@ -7,7 +7,7 @@ absolute uncertainties, and line equations use ``y = intercept + slope * x``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.optimize import brentq, minimize_scalar
@@ -194,6 +194,8 @@ def age_207_corrected(
     tolerance_ma: float = 1e-7,
     max_iterations: int = 100,
     return_solver_info: bool = False,
+    lambda238: float = LAMBDA_238,
+    lambda235: float = LAMBDA_235,
 ):
     """Calculate a concordance-assuming 207Pb-corrected age in Ma.
 
@@ -205,8 +207,8 @@ def age_207_corrected(
     ratio_68 = float(total_pb206_u238)
     ratio_76 = float(total_pb207_pb206)
     common_76 = float(common_pb207_pb206)
-    l238_ma = LAMBDA_238 * 1e6
-    l235_ma = LAMBDA_235 * 1e6
+    l238_ma = float(lambda238) * 1e6
+    l235_ma = float(lambda235) * 1e6
 
     if not all(np.isfinite([ratio_68, ratio_76, common_76])):
         result = (np.nan, 0, False)
@@ -321,6 +323,8 @@ def age_208_corrected(
     tolerance_ma: float = 1e-7,
     max_iterations: int = 100,
     return_solver_info: bool = False,
+    lambda238: float = LAMBDA_238,
+    lambda232: float = LAMBDA_232,
 ):
     """Calculate a concordance-assuming 208Pb-corrected age in Ma.
 
@@ -333,8 +337,8 @@ def age_208_corrected(
     ratio_82 = float(total_pb208_th232)
     th_u = float(th232_u238)
     common_68 = float(common_pb206_pb208)
-    l238_ma = LAMBDA_238 * 1e6
-    l232_ma = LAMBDA_232 * 1e6
+    l238_ma = float(lambda238) * 1e6
+    l232_ma = float(lambda232) * 1e6
 
     if not all(np.isfinite([ratio_68, ratio_82, th_u, common_68])):
         result = (np.nan, 0, False)
@@ -601,6 +605,8 @@ def apply_204pb_common_pb_correction(
     common_pb206_pb204_1s: float = 0.0,
     common_pb207_pb204_1s: float = 0.0,
     common_pb208_pb204_1s: float = 0.0,
+    common_pb_relative_1s: tuple[float, float, float] | None = None,
+    common_pb_correlations: tuple[float, float, float] = (0.0, 0.0, 0.0),
     initial_age_ma: float = 1000.0,
     max_iterations: int = 20,
     tolerance_ma: float = 1e-5,
@@ -617,11 +623,10 @@ def apply_204pb_common_pb_correction(
 
     A fixed composition can be supplied as scalars or column names. Otherwise
     Stacey-Kramers compositions are iterated against the corrected 206Pb/238U
-    age. Uncertainty propagation follows the independent-input derivatives in
-    the legacy workbook and intentionally contains no covariance terms.
-    Common-Pb-composition uncertainties default to zero because they must be
-    supplied by the chosen geological model or independent measurement rather
-    than invented by the reduction software.
+    age. Common-Pb-composition uncertainties default to zero because they must
+    be supplied by the chosen geological model or independent measurement.
+    Optional relative uncertainties and correlations propagate the shared
+    initial-Pb composition without treating a geological model as exact.
     """
     import pandas as pd
 
@@ -811,6 +816,18 @@ def apply_204pb_common_pb_correction(
         iterations[index] = used_iterations
         converged[index] = row_converged
 
+    if common_pb_relative_1s is not None:
+        relative = np.asarray(common_pb_relative_1s, dtype=float)
+        if relative.shape != (3,) or np.any(relative < 0):
+            raise ValueError("common_pb_relative_1s must contain three non-negative values")
+        common_sigmas = {
+            key: np.abs(common_values[key]) * relative[position]
+            for position, key in enumerate(("64", "74", "84"))
+        }
+    correlations = np.asarray(common_pb_correlations, dtype=float)
+    if correlations.shape != (3,) or np.any(np.abs(correlations) > 1):
+        raise ValueError("common_pb_correlations must contain rho64-74, rho64-84, rho74-84")
+
     frame["204Pb_corrected_206Pb/238U"] = corrected["68"]
     frame["204Pb_corrected_207Pb/206Pb"] = corrected["76"]
     frame["204Pb_corrected_208Pb/232Th"] = corrected["82"]
@@ -819,6 +836,9 @@ def apply_204pb_common_pb_correction(
     frame["204Pb_correction_common_208Pb/204Pb"] = common_values["84"]
     frame["204Pb_correction_f206_radiogenic"] = (
         1 - common_values["64"] / ratio_values["64"]
+    )
+    frame["204Pb_common_fraction_206"] = (
+        common_values["64"] / ratio_values["64"]
     )
     frame["204Pb_correction_iterations"] = iterations
     frame["204Pb_correction_converged"] = converged
@@ -876,6 +896,12 @@ def apply_204pb_common_pb_correction(
                 + (derivative_76 * sigmas["76"]) ** 2
                 + (derivative_74 * common_sigmas["74"]) ** 2
                 + (derivative_common64 * common_sigmas["64"]) ** 2
+                + 2
+                * derivative_74
+                * derivative_common64
+                * correlations[0]
+                * common_sigmas["74"]
+                * common_sigmas["64"]
             )
 
             # Convert measured 206/208 and 206/204 to total 208/204 before
@@ -1015,6 +1041,8 @@ def apply_204pb_common_pb_correction(
         "common_pb206_pb204_1s": common_pb206_pb204_1s,
         "common_pb207_pb204_1s": common_pb207_pb204_1s,
         "common_pb208_pb204_1s": common_pb208_pb204_1s,
+        "common_pb_relative_1s": common_pb_relative_1s,
+        "common_pb_correlations": tuple(common_pb_correlations),
         "stacey_kramers_u238_u235": stacey_kramers_u238_u235,
     }
     return frame
@@ -1050,6 +1078,9 @@ def apply_common_pb_corrections(
     common_pb206_pb204_1s: float = 0.0,
     common_pb207_pb204_1s: float = 0.0,
     common_pb208_pb204_1s: float = 0.0,
+    common_pb_relative_1s: tuple[float, float, float] | None = None,
+    common_pb_correlations: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    common_pb_uncertainty_preset_name: str | None = None,
 ):
     """Append conventional 204-, 207-, and 208-method common-Pb outputs.
 
@@ -1079,6 +1110,22 @@ def apply_common_pb_corrections(
         )
 
     frame = data.copy()
+    if common_pb_uncertainty_preset_name is not None:
+        from .uncertainty import common_pb_uncertainty_preset
+
+        preset = common_pb_uncertainty_preset(
+            common_pb_uncertainty_preset_name
+        )
+        common_pb_relative_1s = (
+            preset.relative_1s_206_204,
+            preset.relative_1s_207_204,
+            preset.relative_1s_208_204,
+        )
+        common_pb_correlations = (
+            preset.rho_206_207,
+            preset.rho_206_208,
+            preset.rho_207_208,
+        )
     if include_204_method and {
         "206Pb/204Pb",
         "206Pb/208Pb",
@@ -1092,6 +1139,8 @@ def apply_common_pb_corrections(
             common_pb206_pb204_1s=common_pb206_pb204_1s,
             common_pb207_pb204_1s=common_pb207_pb204_1s,
             common_pb208_pb204_1s=common_pb208_pb204_1s,
+            common_pb_relative_1s=common_pb_relative_1s,
+            common_pb_correlations=common_pb_correlations,
             initial_age_ma=initial_age_ma,
             max_iterations=max_iterations,
             tolerance_ma=tolerance_ma,
@@ -1188,6 +1237,28 @@ def apply_common_pb_corrections(
     use_model_207 = common_pb_model == "stacey_kramers" and common_pb207_pb206 is None
     use_model_208 = common_pb_model == "stacey_kramers" and common_pb206_pb208 is None
 
+    def derived_common_ratio_sigmas(common_76, common_68):
+        """Return uncertainties of common 207/206 and 206/208 ratios.
+
+        The configured initial-Pb uncertainties describe 206/204, 207/204,
+        and 208/204.  Ratio calculus carries their covariance into the two
+        derived compositions used by the conventional 207- and 208-methods.
+        """
+        if common_pb_relative_1s is None:
+            return (
+                np.full(len(frame), float(common_pb207_pb206_1s)),
+                np.full(len(frame), float(common_pb206_pb208_1s)),
+            )
+        rel_64, rel_74, rel_84 = map(float, common_pb_relative_1s)
+        rho_64_74, rho_64_84, _ = map(float, common_pb_correlations)
+        rel_76 = np.sqrt(
+            max(rel_74**2 + rel_64**2 - 2 * rho_64_74 * rel_74 * rel_64, 0.0)
+        )
+        rel_68 = np.sqrt(
+            max(rel_64**2 + rel_84**2 - 2 * rho_64_84 * rel_64 * rel_84, 0.0)
+        )
+        return np.abs(common_76) * rel_76, np.abs(common_68) * rel_68
+
     results_207 = []
     results_208 = []
     for index in range(len(frame)):
@@ -1231,6 +1302,47 @@ def apply_common_pb_corrections(
             )
         )
 
+    common_76_sigmas, common_68_sigmas = derived_common_ratio_sigmas(
+        np.asarray([result.common_ratio for result in results_207], dtype=float),
+        np.asarray([result.common_ratio for result in results_208], dtype=float),
+    )
+    # The solvers first establish the model composition and converged date.
+    # Re-evaluate only their uncertainty with the covariance-derived common-Pb
+    # ratio uncertainty; the central values are unchanged.
+    results_207 = [
+        replace(
+            result,
+            sigma_ma=age_207_corrected_uncertainty(
+                result.age_ma,
+                ratio_68_values[index],
+                ratio_68_1s[index],
+                ratio_76_values[index],
+                ratio_76_1s[index],
+                result.common_ratio,
+                common_76_sigmas[index],
+                u238_u235=u238_u235,
+            ),
+        )
+        for index, result in enumerate(results_207)
+    ]
+    results_208 = [
+        replace(
+            result,
+            sigma_ma=age_208_corrected_uncertainty(
+                result.age_ma,
+                ratio_68_values[index],
+                ratio_68_1s[index],
+                ratio_82_values[index],
+                ratio_82_1s[index],
+                th_u_values[index],
+                th_u_1s[index],
+                result.common_ratio,
+                common_68_sigmas[index],
+            ),
+        )
+        for index, result in enumerate(results_208)
+    ]
+
     def choose_optional_uncertainty_column(ratio_column):
         """Find the analytical uncertainty branch for one calibrated ratio."""
         for candidate in (
@@ -1270,7 +1382,7 @@ def apply_common_pb_corrections(
                     ratio_76_values[index],
                     no_calibration_sigmas["76"][index],
                     result.common_ratio,
-                    common_pb207_pb206_1s,
+                    common_76_sigmas[index],
                     u238_u235=u238_u235,
                 )
                 for index, result in enumerate(results_207)
@@ -1288,7 +1400,7 @@ def apply_common_pb_corrections(
                     th_u_values[index],
                     th_u_1s[index],
                     result.common_ratio,
-                    common_pb206_pb208_1s,
+                    common_68_sigmas[index],
                 )
                 for index, result in enumerate(results_208)
             ],
@@ -1319,6 +1431,9 @@ def apply_common_pb_corrections(
                 f"{method}Pb_corrected_age_2e_no_calibration%"
             ] = 200.0 * no_calibration_age_sigmas[method] / ages
         frame[f"{method}Pb_correction_f206"] = [
+            result.f206 for result in results
+        ]
+        frame[f"{method}Pb_common_fraction_206"] = [
             result.f206 for result in results
         ]
         frame[f"{method}Pb_correction_common_{common_label}"] = [
@@ -1369,6 +1484,9 @@ def apply_common_pb_corrections(
         "model": common_pb_model or "fixed",
         "common_pb207_pb206_1s": common_pb207_pb206_1s,
         "common_pb206_pb208_1s": common_pb206_pb208_1s,
+        "common_pb_relative_1s": common_pb_relative_1s,
+        "common_pb_correlations": tuple(common_pb_correlations),
+        "common_pb_uncertainty_preset": common_pb_uncertainty_preset_name,
         "th_u_relative_1s": th_u_relative_1s,
         "max_208_th_u": max_208_th_u,
         "u238_u235": u238_u235,

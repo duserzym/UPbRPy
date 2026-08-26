@@ -20,6 +20,10 @@ from UPbRPy.isochron import (
     stacey_kramers_common_pb,
 )
 from UPbRPy.isoplot import construct_final_depthpro_df, construct_final_df
+from UPbRPy.uncertainty import (
+    UncertaintySettings,
+    common_corrected_systematic_components,
+)
 
 
 def _synthetic_common_pb_measurement(
@@ -149,6 +153,119 @@ def test_dataframe_correction_retains_values_and_flags_high_th_u():
     assert corrected.loc[0, "207Pb_correction_valid"]
     assert not corrected.loc[0, "208Pb_correction_valid"]
     assert "Th/U exceeds 5" in corrected.loc[0, "208Pb_correction_warning"]
+
+
+def test_initial_pb_covariance_propagates_into_207_and_208_methods():
+    ratio_68, ratio_76, ratio_82, th_u, common_76, common_68 = (
+        _synthetic_common_pb_measurement()
+    )
+    data = pd.DataFrame(
+        {
+            "206Pb/238U": [ratio_68],
+            "206Pb/238U_2e": [0.002],
+            "207Pb/206Pb": [ratio_76],
+            "207Pb/206Pb_2e": [0.004],
+            "208Pb/232Th": [ratio_82],
+            "208Pb/232Th_2e": [0.003],
+            "Th/U": [th_u],
+        }
+    )
+    shared = dict(
+        common_pb_model=None,
+        common_pb207_pb206=common_76,
+        common_pb206_pb208=common_68,
+        common_pb_relative_1s=(0.0061, 0.0052, 0.0063),
+        u238_u235=old_common_U238_U235,
+    )
+    uncorrelated = apply_common_pb_corrections(
+        data,
+        common_pb_correlations=(0.0, 0.0, 0.0),
+        **shared,
+    )
+    correlated = apply_common_pb_corrections(
+        data,
+        common_pb_correlations=(0.98, 0.98, 0.98),
+        **shared,
+    )
+
+    assert np.isclose(
+        correlated.loc[0, "207Pb_corrected_age"],
+        uncorrelated.loc[0, "207Pb_corrected_age"],
+    )
+    assert (
+        correlated.loc[0, "207Pb_corrected_age_2e"]
+        < uncorrelated.loc[0, "207Pb_corrected_age_2e"]
+    )
+    assert (
+        correlated.loc[0, "208Pb_corrected_age_2e"]
+        < uncorrelated.loc[0, "208Pb_corrected_age_2e"]
+    )
+
+
+def test_common_corrected_constant_sensitivities_match_direct_perturbations():
+    ratio_68, ratio_76, ratio_82, th_u, common_76, common_68 = (
+        _synthetic_common_pb_measurement()
+    )
+    frame = apply_common_pb_corrections(
+        pd.DataFrame(
+            {
+                "206Pb/238U": [ratio_68],
+                "206Pb/238U_2e": [0.002],
+                "207Pb/206Pb": [ratio_76],
+                "207Pb/206Pb_2e": [0.004],
+                "208Pb/232Th": [ratio_82],
+                "208Pb/232Th_2e": [0.003],
+                "Th/U": [th_u],
+            }
+        ),
+        common_pb_model=None,
+        common_pb207_pb206=common_76,
+        common_pb206_pb208=common_68,
+    )
+    settings = UncertaintySettings()
+    component_207 = common_corrected_systematic_components(
+        frame,
+        "207Pb_corrected_age",
+        settings,
+    )
+    direct_u = 0.5 * abs(
+        age_207_corrected(
+            ratio_68,
+            ratio_76,
+            common_76,
+            u238_u235=settings.u238_u235 + settings.u238_u235_1s,
+        )
+        - age_207_corrected(
+            ratio_68,
+            ratio_76,
+            common_76,
+            u238_u235=settings.u238_u235 - settings.u238_u235_1s,
+        )
+    )
+    assert np.isclose(component_207["u_ratio_1s"][0], direct_u, rtol=1e-6)
+
+    component_208 = common_corrected_systematic_components(
+        frame,
+        "208Pb_corrected_age",
+        settings,
+    )
+    direct_232 = 0.5 * abs(
+        age_208_corrected(
+            ratio_68,
+            ratio_82,
+            th_u,
+            common_68,
+            lambda232=LAMBDA_232 + settings.lambda_232_1s,
+        )
+        - age_208_corrected(
+            ratio_68,
+            ratio_82,
+            th_u,
+            common_68,
+            lambda232=LAMBDA_232 - settings.lambda_232_1s,
+        )
+    )
+    assert component_208["decay_1s"][0] >= direct_232
 
 
 def test_common_pb_rich_material_enables_default_corrections():
