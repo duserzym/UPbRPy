@@ -60,6 +60,7 @@ def test_pipeline_config_serializes_models_and_decisions():
         workflow_key="apatite",
         material="apatite",
         primary_channel="44Ca",
+        ratio_aggregation="logratio",
         concentration_standards=("NIST610", "NIST612"),
         primary_68_standard="MAD",
         primary_76_standard="NIST610",
@@ -75,6 +76,7 @@ def test_pipeline_config_serializes_models_and_decisions():
     serialized = config.to_dict()
 
     assert serialized["common_pb_calibration"] == "tera_wasserburg"
+    assert serialized["ratio_aggregation"] == "logratio"
     assert serialized["primary_68_standard"] == "MAD"
     assert serialized["downhole"]["method"] == "mean"
     assert serialized["downhole"]["outlier_sigma"] == 5

@@ -6,7 +6,7 @@ import re
 
 import numpy as np
 import pandas as pd
-from scipy.stats import t
+from scipy.stats import norm, t
 
 
 _ISOTOPE_CHANNEL_PATTERN = re.compile(r"^(?:\d+)?([A-Z][a-z]?)$")
@@ -95,12 +95,25 @@ def internal_normalization(
     material='zircon',
     *,
     internal_channel=None,
+    region='plateau',
 ):
-    """Select plateau rows and apply sweep-wise internal normalization.
+    """Select reviewed rows and apply sweep-wise internal normalization.
 
     Each spot is grouped once, normalized as a vector across all requested
     channels, and appended to a list for a single final concatenation.
+
+    Parameters
+    ----------
+    region : {"plateau", "signal"}
+        ``"plateau"`` retains the half-open on-peak interval used for spot
+        concentrations. ``"signal"`` retains the inclusive signal-start to
+        signal-end interval used for sweep-wise depth profiles. Keeping this
+        distinction explicit prevents concentration data from shortening a
+        full-signal isotope depth profile during the final merge.
     """
+    region = str(region).strip().casefold()
+    if region not in {'plateau', 'signal'}:
+        raise ValueError("region must be 'plateau' or 'signal'.")
     if material == 'zircon':
         preferred_internal_channel = '29Si'
         unknown_concentration = 151443
@@ -127,9 +140,22 @@ def internal_normalization(
     this_standard_archive = standard_archive[
         standard_archive['material'].isin([material, 'glass'])
     ]
+    if region == 'plateau':
+        start_column = 'plateau_start_times'
+        end_column = 'plateau_end_times'
+    else:
+        start_column = 'signal_start_times'
+        end_column = 'signal_end_times'
+    required_columns = {'spot_names', start_column, end_column}
+    missing = required_columns.difference(experiment.columns)
+    if missing:
+        raise KeyError(
+            'experiment is missing normalization-selection columns: '
+            + ', '.join(sorted(missing))
+        )
     selection_by_spot = (
         experiment.drop_duplicates('spot_names', keep='first')
-        .set_index('spot_names')[['plateau_start_times', 'plateau_end_times']]
+        .set_index('spot_names')[[start_column, end_column]]
     )
     normalized_frames = []
     channel_names = list(channels)
@@ -146,24 +172,35 @@ def internal_normalization(
         else:
             internal_analyte_concentration = unknown_concentration
 
-        plateau_start, plateau_end = selection_by_spot.loc[spot_name]
-        plateau_mask = (
-            (spot_frame['Time'] >= plateau_start)
-            & (spot_frame['Time'] < plateau_end)
+        region_start, region_end = selection_by_spot.loc[spot_name]
+        if region == 'plateau':
+            region_mask = (
+                (spot_frame['Time'] >= region_start)
+                & (spot_frame['Time'] < region_end)
+            )
+        else:
+            region_mask = (
+                (spot_frame['Time'] >= region_start)
+                & (spot_frame['Time'] <= region_end)
+            )
+        selected = spot_frame.loc[region_mask].copy()
+        selected['internal_normalization_factor'] = (
+            internal_analyte_concentration / selected[internal_analyte]
         )
-        plateau = spot_frame.loc[plateau_mask].copy()
-        plateau['internal_normalization_factor'] = (
-            internal_analyte_concentration / plateau[internal_analyte]
+        selected.loc[:, channel_names] = selected[channel_names].mul(
+            selected['internal_normalization_factor'], axis='index'
         )
-        plateau.loc[:, channel_names] = plateau[channel_names].mul(
-            plateau['internal_normalization_factor'], axis='index'
-        )
-        normalized_frames.append(plateau)
+        normalized_frames.append(selected)
 
     if not normalized_frames:
         return baseline_subtracted_total_data.iloc[0:0].copy()
     normalized = pd.concat(normalized_frames, ignore_index=True)
-    return normalized.sort_values(by='Time', ignore_index=True)
+    normalized = normalized.sort_values(by='Time', ignore_index=True)
+    # Preserve the channel needed to reconstruct the original integrated
+    # counts when sweep-wise concentration uncertainties are calculated.
+    normalized.attrs['internal_channel'] = internal_analyte
+    normalized.attrs['selection_region'] = region
+    return normalized
 
 
 def filter_concentration_outliers(NIST_data, primary_channel, n=5):
@@ -407,8 +444,11 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
                 & (this_spot_data[channel] <= upper_bound)
             ]
             filtered_cps_mean = this_spot_data_filtered[channel].mean()
-            filtered_cps_95CI = this_spot_data_filtered[channel].std() * t.ppf(
-                0.975, this_spot_data_filtered.shape[0] - 1
+            retained_count = this_spot_data_filtered.shape[0]
+            filtered_cps_95CI = (
+                this_spot_data_filtered[channel].std()
+                / np.sqrt(retained_count)
+                * t.ppf(0.975, retained_count - 1)
             )
             calibration_factor = concentration_calibration[channel]
             record[element] = filtered_cps_mean * calibration_factor
@@ -423,31 +463,105 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
     result.index.name = None
     return result
 
-def calc_concentration_depth_profile(unknown_standard_data, concentration_calibration, sep='_'):
-    '''
-    function for calculating the elemental concentrations in the unknown and standard samples
-        after the construction of the calibration factors stored in the concentration calibration pandas series
-        while we do 95% confidence interval filtering when calculating the spot mean concentrations, we do not do this when exporting the sweep-wise depth profile data
-        for each sweep the concentration uncertainties are propagated using Poisson statistics on the raw counting data and the calibration factors uncertainties are ignored
-    '''
-    depthpro_concentration_df = pd.DataFrame()
-    # get all the calibrated element channels
-    element_channels = concentration_calibration.index
-    
-    # strip the isotope mass number from the channel name as we already aligned the isotope signals to the total elemental concentration 
-    elements = [re.sub(r'\d+', '', channel) for channel in element_channels]
+def calc_concentration_depth_profile(
+    unknown_standard_data,
+    concentration_calibration,
+    sep='_',
+    *,
+    internal_channel=None,
+    confidence=0.95,
+):
+    """Calculate sweep-wise concentrations and counting uncertainties.
 
-    depthpro_concentration_df['Time'] = unknown_standard_data['Time']
-    depthpro_concentration_df['sample'] = unknown_standard_data['sample']
-    depthpro_concentration_df['spot_name'] = unknown_standard_data['spot_name']
+    The input is the internally normalized signal table produced by
+    :func:`internal_normalization`.  That table retains the sweep-wise
+    normalization factor, allowing the original analyte and internal-standard
+    integrated counts to be reconstructed.  For
 
-    for channel, element in zip(element_channels, elements):
+    ``C = K * I_J * c_I / I_I``, independent Poisson counting gives
 
-        depthpro_concentration_df[element] = unknown_standard_data[channel] * concentration_calibration[channel]
-        # replace negative values with NaN
-        depthpro_concentration_df[element]  = depthpro_concentration_df[element].mask(depthpro_concentration_df[element]  < 0, np.nan)
-        depthpro_concentration_df[element + '_95CI'] = np.sqrt(depthpro_concentration_df[element]) # propagate uncertainty using Poisson statistics, ignore calibration uncertainty
+    ``sigma_C / C = sqrt(1 / I_J + 1 / I_I)``.
 
+    Calibration-factor and adopted internal-standard concentration
+    uncertainties are intentionally not included.  The output reports one-
+    sigma and two-sigma absolute uncertainties explicitly.  ``*_95CI`` is
+    retained for compatibility and contains the two-sided normal-approximation
+    confidence half-width requested by ``confidence``.
+
+    Parameters
+    ----------
+    unknown_standard_data : pandas.DataFrame
+        Internally normalized sweep data with
+        ``internal_normalization_factor``.
+    concentration_calibration : pandas.Series
+        Multipliers from normalized signal to total-element concentration.
+    sep : str
+        Sample/spot separator retained for API compatibility.
+    internal_channel : str, optional
+        Measured internal-standard channel.  By default it is read from the
+        input table or calibration metadata.
+    confidence : float
+        Two-sided normal confidence level used for the compatibility interval.
+    """
+    del sep  # Kept in the public signature for backward compatibility.
+    if not 0 < float(confidence) < 1:
+        raise ValueError("confidence must be between 0 and 1.")
+    if 'internal_normalization_factor' not in unknown_standard_data:
+        raise KeyError(
+            "unknown_standard_data must contain "
+            "'internal_normalization_factor' from internal_normalization()."
+        )
+    if internal_channel is None:
+        internal_channel = unknown_standard_data.attrs.get(
+            'internal_channel',
+            concentration_calibration.attrs.get('internal_channel'),
+        )
+    if internal_channel is None or internal_channel not in unknown_standard_data:
+        raise KeyError(
+            "The measured internal-standard channel is required for "
+            "count-space uncertainty propagation."
+        )
+
+    depthpro_concentration_df = unknown_standard_data[
+        ['Time', 'sample', 'spot_name']
+    ].copy()
+    normalization_factor = pd.to_numeric(
+        unknown_standard_data['internal_normalization_factor'],
+        errors='coerce',
+    )
+    raw_internal_counts = (
+        pd.to_numeric(unknown_standard_data[internal_channel], errors='coerce')
+        / normalization_factor
+    )
+    confidence_multiplier = float(norm.ppf((1 + float(confidence)) / 2))
+
+    for channel in concentration_calibration.index:
+        element = re.sub(r'\d+', '', channel)
+        normalized_signal = pd.to_numeric(
+            unknown_standard_data[channel], errors='coerce'
+        )
+        concentration = normalized_signal * concentration_calibration[channel]
+        concentration = concentration.mask(concentration < 0, np.nan)
+        raw_analyte_counts = normalized_signal / normalization_factor
+        with np.errstate(divide='ignore', invalid='ignore'):
+            relative_1s = np.sqrt(
+                1 / raw_analyte_counts + 1 / raw_internal_counts
+            )
+        valid_counts = (raw_analyte_counts > 0) & (raw_internal_counts > 0)
+        uncertainty_1s = (concentration * relative_1s).where(valid_counts)
+
+        depthpro_concentration_df[element] = concentration
+        depthpro_concentration_df[element + '_1s'] = uncertainty_1s
+        depthpro_concentration_df[element + '_2s'] = 2 * uncertainty_1s
+        depthpro_concentration_df[element + '_95CI'] = (
+            confidence_multiplier * uncertainty_1s
+        )
+
+    depthpro_concentration_df.attrs['uncertainty_scope'] = (
+        'Poisson analyte and internal-standard counting statistics only; '
+        'calibration and reference-concentration uncertainties excluded.'
+    )
+    depthpro_concentration_df.attrs['confidence'] = float(confidence)
     return depthpro_concentration_df
 
 __all__ = [

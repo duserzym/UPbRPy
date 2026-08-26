@@ -8,6 +8,151 @@ from scipy.stats import t as student_t
 import warnings
 
 
+def normalize_ratio_aggregation_method(method) -> str:
+    """Return the canonical spot and calibration ratio estimator name.
+
+    ``"arithmetic"`` preserves the historical mean-of-ratios workflow.
+    ``"logratio"`` implements the additive log-ratio location estimator of
+    McLean et al. (2016): positive ratios are averaged in natural-log space
+    and exponentiated, yielding their geometric mean.  The latter is invariant
+    to exchanging numerator and denominator.
+    """
+    normalized = str(method).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "arithmetic": "arithmetic",
+        "mean": "arithmetic",
+        "mean_of_ratios": "arithmetic",
+        "linear": "arithmetic",
+        "log": "logratio",
+        "log_ratio": "logratio",
+        "logratio": "logratio",
+        "geometric": "logratio",
+        "geometric_mean": "logratio",
+        "alr": "logratio",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as error:
+        raise ValueError(
+            "ratio aggregation method must be 'arithmetic' or 'logratio'."
+        ) from error
+
+
+def aggregate_ratio(values, method="arithmetic", axis=None):
+    """Aggregate finite isotope ratios with an arithmetic or log-ratio mean.
+
+    Nonpositive values cannot represent a finite log-ratio and are treated as
+    missing in ``logratio`` mode.  A scalar is returned for scalar reductions;
+    reductions along an axis retain the corresponding NumPy array shape.
+    """
+    canonical = normalize_ratio_aggregation_method(method)
+    array = np.asarray(values, dtype=float)
+    if canonical == "arithmetic":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            result = np.nanmean(array, axis=axis)
+    else:
+        positive = np.where(np.isfinite(array) & (array > 0), array, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            result = np.exp(np.nanmean(np.log(positive), axis=axis))
+    result = np.asarray(result, dtype=float)
+    return float(result) if result.ndim == 0 else result
+
+
+def ratio_standard_error(values, method="arithmetic") -> float:
+    """Return the one-sigma standard error of a ratio location estimate.
+
+    For log-ratios, the standard error is calculated in log space and mapped
+    to ratio units with the first-order derivative of ``exp``.  This provides
+    the symmetric local uncertainty required by existing UPbRPy output fields;
+    the underlying log-space uncertainty remains the preferred quantity for
+    asymmetric intervals or covariance-aware downstream calculations.
+    """
+    canonical = normalize_ratio_aggregation_method(method)
+    array = np.asarray(values, dtype=float)
+    valid = np.isfinite(array)
+    if canonical == "logratio":
+        valid &= array > 0
+    selected = array[valid]
+    if selected.size < 2:
+        return float("nan")
+    if canonical == "arithmetic":
+        return float(np.std(selected, ddof=1) / np.sqrt(selected.size))
+    log_values = np.log(selected)
+    log_sem = float(np.std(log_values, ddof=1) / np.sqrt(selected.size))
+    return float(np.exp(np.mean(log_values)) * log_sem)
+
+
+def ratio_of_means_206pb_204pb(
+    pb206_counts,
+    corrected_pb204_counts,
+    corrected_pb204_2e=None,
+):
+    """Return a spot 206Pb/204Pb ratio from integrated plateau signals.
+
+    The mass-204 denominator is assumed to have already been corrected for
+    204Hg.  Unlike the other isotope ratios, which are summarized from
+    sweep-wise ratios, 206Pb/204Pb is calculated by dividing the mean 206Pb
+    signal by the mean corrected 204Pb signal.  Equivalently, for equal-length
+    sweeps this divides their summed counts.  Integrating before division is
+    important when corrected mass-204 counts are small and individual sweep
+    ratios are consequently unstable.
+
+    Parameters
+    ----------
+    pb206_counts, corrected_pb204_counts
+        Equal-length sweep-wise integrated counts over the accepted plateau.
+    corrected_pb204_2e
+        Optional absolute two-sigma uncertainty of corrected 204Pb for every
+        sweep.  When supplied, independent Poisson counting terms are summed
+        before propagating the ratio uncertainty.  The baseline-derived Hg
+        scale is treated as fixed, consistent with the mass-204 correction.
+
+    Returns
+    -------
+    tuple of float
+        Ratio of means and its absolute one-sigma counting uncertainty.  The
+        uncertainty is NaN when ``corrected_pb204_2e`` is unavailable.
+    """
+    numerator = np.asarray(pb206_counts, dtype=float)
+    denominator = np.asarray(corrected_pb204_counts, dtype=float)
+    if numerator.shape != denominator.shape:
+        raise ValueError("206Pb and corrected 204Pb arrays must have equal shape.")
+
+    valid = np.isfinite(numerator) & np.isfinite(denominator)
+    if corrected_pb204_2e is not None:
+        denominator_2e = np.asarray(corrected_pb204_2e, dtype=float)
+        if denominator_2e.shape != numerator.shape:
+            raise ValueError("Corrected 204Pb uncertainty must match the count arrays.")
+    else:
+        denominator_2e = None
+
+    numerator = numerator[valid]
+    denominator = denominator[valid]
+    if denominator_2e is not None:
+        denominator_2e = denominator_2e[valid]
+    if numerator.size == 0:
+        return float("nan"), float("nan")
+
+    numerator_total = float(np.sum(numerator))
+    denominator_total = float(np.sum(denominator))
+    if numerator_total <= 0 or denominator_total <= 0:
+        return float("nan"), float("nan")
+    ratio = numerator_total / denominator_total
+
+    if denominator_2e is None or not np.all(np.isfinite(denominator_2e)):
+        return ratio, float("nan")
+    denominator_1e = denominator_2e / 2.0
+    numerator_variance = float(np.sum(np.clip(numerator, 0, None)))
+    denominator_variance = float(np.sum(denominator_1e**2))
+    ratio_1e = abs(ratio) * np.sqrt(
+        numerator_variance / numerator_total**2
+        + denominator_variance / denominator_total**2
+    )
+    return ratio, float(ratio_1e)
+
+
 def normalize_plateau_filter_method(method) -> str:
     """Return the canonical name for a saved plateau-filter method.
 
@@ -282,6 +427,7 @@ def calc_raw_ratios(
         "spot_name",
         "Time",
         "signal_relative_time",
+        "206Pb",
         "204Pb",
         "204Pb_2e",
         "206Pb/204Pb",
@@ -503,6 +649,10 @@ def calc_raw_ratios(
     return result
 
 __all__ = [
+    'normalize_ratio_aggregation_method',
+    'aggregate_ratio',
+    'ratio_standard_error',
+    'ratio_of_means_206pb_204pb',
     'normalize_plateau_filter_method',
     'excel_plateau_inlier_mask',
     'plateau_inlier_mask',

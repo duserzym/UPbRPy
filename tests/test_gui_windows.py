@@ -115,10 +115,46 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
     assert window.selection_method_combo.itemText(2) == (
         "Excel expanding mean + σ threshold"
     )
+    assert window.ratio_aggregation_combo.count() == 2
+    assert window.ratio_aggregation_combo.currentData() == "arithmetic"
+    assert "Log-ratio" in window.ratio_aggregation_combo.itemText(1)
 
     channels_view = window.findChild(QtWidgets.QScrollArea, "ChannelsCard")
     assert channels_view is not None
     assert channels_view.height() >= 250
+
+    window.close()
+    application.sendPostedEvents()
+    application.processEvents()
+
+
+def test_ratio_estimator_selector_invalidates_fractionation_results():
+    """The dedicated estimator control updates state from downhole onward."""
+    application = build_application([], theme_mode="light")
+    controller = StudioWindowController(
+        theme_mode="light",
+        app_icon=build_app_icon(),
+    )
+    window = controller.create_window(show=False)
+    retained = object()
+    window.session.reduction_cache = {
+        "baseline_subtracted_total_data": retained,
+        "downhole_results": object(),
+        "session_correction_results": object(),
+        "spot_mean_results": object(),
+        "depth_profile_results": object(),
+        "finalized_results": object(),
+    }
+
+    logratio_index = window.ratio_aggregation_combo.findData("logratio")
+    assert logratio_index >= 0
+    window.ratio_aggregation_combo.setCurrentIndex(logratio_index)
+
+    assert window.session.ratio_aggregation == "logratio"
+    assert window.session.reduction_cache == {
+        "baseline_subtracted_total_data": retained,
+    }
+    assert "log-ratio" in window.fit_settings_note_label.text().lower()
 
     window.close()
     application.sendPostedEvents()

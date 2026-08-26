@@ -5,8 +5,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .calibration import evaluate_correction_result, fit_calibration_model
-from .ratios import project_tw_206pb_238u
+from .calibration import (
+    evaluate_correction_result,
+    fit_calibration_model,
+    fit_multiplicative_calibration_model,
+)
+from .ratios import (
+    aggregate_ratio,
+    normalize_ratio_aggregation_method,
+    project_tw_206pb_238u,
+)
 from .uncertainty import (
     inverse_standard_deviation_weights,
     relative_time_by_spot,
@@ -238,6 +246,7 @@ def calc_DH_nominal_fractionation(
     correction_model='mean',
     model_kwargs=None,
     outlier_sigma=5.0,
+    ratio_aggregation="arithmetic",
     build_plot=True,
 ):
     """Calculate nominal downhole fractionation against one known ratio.
@@ -246,6 +255,8 @@ def calc_DH_nominal_fractionation(
     aligned signal-relative time before constructing the mean correction.
     The default 5-sigma cutoff is deliberately conservative; pass another
     positive value to tune it or ``None`` to disable filtering.
+    ``ratio_aggregation='logratio'`` uses the geometric mean across aligned
+    standard ratios and fits the multiplicative correction in log space.
     """
     primary_standard = primary_standard_ratios['sample'].unique()[0]
     # initialize a time variable and a ratio fractionation variable to store the interpolated time and fractionation for all primary standard spots
@@ -299,9 +310,11 @@ def calc_DH_nominal_fractionation(
         interpolated_fractionations,
         np.nan,
     )
-    # Preserve the nominal-ratio convention: average measured ratios first,
-    # then calculate the target-over-mean fractionation factor.
-    mean_ratio = np.nanmean(filtered_ratios, axis=0)
+    aggregation = normalize_ratio_aggregation_method(ratio_aggregation)
+    # Aggregate measured ratios before taking target/measurement. For the
+    # log-ratio estimator this is equivalent to geometrically averaging each
+    # positive target-over-measurement correction factor.
+    mean_ratio = aggregate_ratio(filtered_ratios, aggregation, axis=0)
     mean_fractionation_factor = known_ratio / mean_ratio
     model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
     model_method = (
@@ -311,10 +324,11 @@ def calc_DH_nominal_fractionation(
         in {'mean', 'pointwise_mean'}
         else correction_model
     )
-    fitted_model = fit_calibration_model(
+    fitted_model = fit_multiplicative_calibration_model(
         unified_time,
         mean_fractionation_factor,
         method=model_method,
+        fit_space=aggregation,
         **model_kwargs,
     )
     downhole_fractionation = fitted_model
@@ -338,6 +352,7 @@ def calc_DH_nominal_fractionation(
         'model_settings': fitted_model.settings,
         'residuals': residuals,
         'residual_standard_deviation': std_fractionation_factor,
+        'ratio_aggregation': aggregation,
         **outlier_metadata,
     }
 
@@ -387,6 +402,7 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
                                 model='mean',
                                 model_kwargs=None,
                                 outlier_sigma=5.0,
+                                ratio_aggregation="arithmetic",
                                 build_plot=True):
     '''
     function for stacking the downhole primary standard isotope ratios through the session,
@@ -440,6 +456,7 @@ def calc_DH_fractionations_rad(primary_standard_ratios,
             correction_model=model,
             model_kwargs=model_kwargs,
             outlier_sigma=outlier_sigma,
+            ratio_aggregation=ratio_aggregation,
             build_plot=build_plot,
         )
         # append the results to the dictionary
@@ -463,6 +480,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
                                 primary_82_standard_ratios, 
                                 standard_archive, fit=None, *, model='mean',
                                 model_kwargs=None, outlier_sigma=5.0,
+                                ratio_aggregation="arithmetic",
                                 build_plot=True):
     """Build downhole corrections for a common-Pb-bearing primary standard.
 
@@ -515,6 +533,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        ratio_aggregation=ratio_aggregation,
         build_plot=build_plot,
     )
     DH_correction_results.update({'207Pb/206Pb': {
@@ -555,6 +574,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        ratio_aggregation=ratio_aggregation,
         build_plot=build_plot,
     )
     DH_correction_results.update({'206Pb/238U': {
@@ -581,6 +601,7 @@ def calc_DH_fractionations_TW(primary_68_standard_ratios,
         correction_model=model,
         model_kwargs=model_kwargs,
         outlier_sigma=outlier_sigma,
+        ratio_aggregation=ratio_aggregation,
         build_plot=build_plot,
     )
     DH_correction_results.update({'208Pb/232Th': {
@@ -606,6 +627,7 @@ def calc_DH_dynamic_fractionation(
     correction_model='mean',
     model_kwargs=None,
     outlier_sigma=5.0,
+    ratio_aggregation="arithmetic",
     build_plot=True,
 ):
     """Calculate a downhole model from sweep-specific projected targets.
@@ -665,8 +687,14 @@ def calc_DH_dynamic_fractionation(
         interpolated_fractionations,
         np.nan,
     )
-    # calculate the stacked mean sweep-wise fractionation vs. relative time
-    mean_fractionation_factor = np.nanmean(filtered_fractionations, axis=0)
+    aggregation = normalize_ratio_aggregation_method(ratio_aggregation)
+    # Calculate the stacked correction at each relative time. The log-ratio
+    # path uses the geometric center of sweep-specific projected targets.
+    mean_fractionation_factor = aggregate_ratio(
+        filtered_fractionations,
+        aggregation,
+        axis=0,
+    )
     model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
     model_method = (
         'interpolate'
@@ -675,10 +703,11 @@ def calc_DH_dynamic_fractionation(
         in {'mean', 'pointwise_mean'}
         else correction_model
     )
-    fitted_model = fit_calibration_model(
+    fitted_model = fit_multiplicative_calibration_model(
         unified_time,
         mean_fractionation_factor,
         method=model_method,
+        fit_space=aggregation,
         **model_kwargs,
     )
     downhole_fractionation = fitted_model
@@ -701,6 +730,7 @@ def calc_DH_dynamic_fractionation(
         'model_settings': fitted_model.settings,
         'residuals': residuals,
         'residual_standard_deviation': std_fractionation_factor,
+        'ratio_aggregation': aggregation,
         **outlier_metadata,
     }
 
@@ -794,6 +824,7 @@ def calc_session_nominal_fractionation(
     degree=2,
     model='polynomial',
     model_kwargs=None,
+    ratio_aggregation="arithmetic",
     build_plot=True,
 ):
     '''
@@ -802,6 +833,7 @@ def calc_session_nominal_fractionation(
         we use this function for radiogenic ratios
     '''
     primary_standard = primary_standard_ratios['sample'].unique()[0]
+    aggregation = normalize_ratio_aggregation_method(ratio_aggregation)
     spot_mean_times = [] # spot mean time
     spot_mean_fractionation = [] # spot mean fractionation
     spot_mean_fractionation_std = [] # spot mean fractionation std
@@ -812,9 +844,25 @@ def calc_session_nominal_fractionation(
         # this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
         # this_spot_mean_ratio_std = this_spot[ratio_name+'_DH_corrected'].std()
         this_spot_mean_fractionations = known_ratio / this_spot[ratio_name+'_DH_corrected']
-        this_spot_mean_ratio = this_spot[ratio_name+'_DH_corrected'].mean()
+        this_spot_mean_ratio = aggregate_ratio(
+            this_spot[ratio_name + '_DH_corrected'],
+            aggregation,
+        )
         this_spot_mean_fractionation = known_ratio / this_spot_mean_ratio
-        this_spot_mean_fractionation_std = np.std(this_spot_mean_fractionations)
+        if aggregation == "logratio":
+            positive = this_spot_mean_fractionations[
+                np.isfinite(this_spot_mean_fractionations)
+                & (this_spot_mean_fractionations > 0)
+            ]
+            this_spot_mean_fractionation_std = (
+                this_spot_mean_fractionation * np.std(np.log(positive))
+                if positive.size
+                else np.nan
+            )
+        else:
+            this_spot_mean_fractionation_std = np.std(
+                this_spot_mean_fractionations
+            )
         # this_spot_mean_fractionation_std = known_ratio / this_spot_mean_ratio_std
 
         # store the calculated mean time and fractionation factors
@@ -831,10 +879,11 @@ def calc_session_nominal_fractionation(
     )
     model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
     model_kwargs.setdefault('degree', degree)
-    fitted_model = fit_calibration_model(
+    fitted_model = fit_multiplicative_calibration_model(
         spot_mean_times,
         spot_mean_fractionation,
         method=model,
+        fit_space=aggregation,
         weights=spot_mean_fractionation_weights,
         **model_kwargs,
     )
@@ -873,6 +922,7 @@ def calc_session_nominal_fractionation(
         "spot_mean_fractionation": spot_mean_fractionation,
         "spot_mean_fractionation_std": spot_mean_fractionation_std,
         "weights": spot_mean_fractionation_weights,
+        "ratio_aggregation": aggregation,
     }
 
     return plot, p, p_std, fit_metadata
@@ -883,6 +933,7 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
                                     degree=2,
                                     model='polynomial',
                                     model_kwargs=None,
+                                    ratio_aggregation="arithmetic",
                                     build_plot=True):
     '''
     function for plotting and calculating the session-wide fractionation correction, 
@@ -926,6 +977,7 @@ def calc_session_fractionation_rad(primary_standard_DH_corrected_ratios,
             degree,
             model=model,
             model_kwargs=model_kwargs,
+            ratio_aggregation=ratio_aggregation,
             build_plot=build_plot,
         )
         # append the results to the dictionary
@@ -958,6 +1010,7 @@ def calc_session_fractionation_TW(
     degree=2,
     model='polynomial',
     model_kwargs=None,
+    ratio_aggregation="arithmetic",
     build_plot=True,
 ):
     """Build session corrections for a common-Pb-bearing primary standard.
@@ -1008,6 +1061,7 @@ def calc_session_fractionation_TW(
         degree,
         model=model,
         model_kwargs=model_kwargs,
+        ratio_aggregation=ratio_aggregation,
         build_plot=build_plot,
     )
 
@@ -1041,6 +1095,7 @@ def calc_session_fractionation_TW(
     PR_76_i = standard_archive.loc[primary_68_standard, '207Pb/206Pb_i'] # for the initial 76 ratio
     PR_76_rad = standard_archive.loc[primary_68_standard, '207Pb/206Pb*'] # for the radiogenic 76 ratio
 
+    aggregation = normalize_ratio_aggregation_method(ratio_aggregation)
     spot_mean_times = [] # spot mean time
     spot_mean_68_fractionation = [] # spot mean fractionation
     spot_mean_68_fractionation_std = [] # spot mean fractionation std
@@ -1048,7 +1103,10 @@ def calc_session_fractionation_TW(
         # calculate mean time for the spot
         this_spot_mean_time = this_spot['Time'].mean()
         this_spot_68_ratio = this_spot['206Pb/238U_DH_corrected']
-        this_spot_mean_68_ratio = this_spot['206Pb/238U_DH_corrected'].mean()
+        this_spot_mean_68_ratio = aggregate_ratio(
+            this_spot['206Pb/238U_DH_corrected'],
+            aggregation,
+        )
         this_spot_68_TW_projected = project_tw_206pb_238u(
             this_spot['207Pb/206Pb_session_corrected'],
             PR_68_rad,
@@ -1056,13 +1114,32 @@ def calc_session_fractionation_TW(
             PR_76_i,
         )
         this_spot_68_TW_mean_projected = project_tw_206pb_238u(
-            this_spot['207Pb/206Pb_session_corrected'].mean(),
+            aggregate_ratio(
+                this_spot['207Pb/206Pb_session_corrected'],
+                aggregation,
+            ),
             PR_68_rad,
             PR_76_rad,
             PR_76_i,
         )
-        this_spot_68_fractionation_std = np.std(this_spot_68_TW_projected/this_spot_68_ratio)
-        this_spot_mean_68_fractionation = this_spot_68_TW_mean_projected/this_spot_mean_68_ratio
+        sweep_fractionations = (
+            this_spot_68_TW_projected / this_spot_68_ratio
+        )
+        this_spot_mean_68_fractionation = (
+            this_spot_68_TW_mean_projected / this_spot_mean_68_ratio
+        )
+        if aggregation == "logratio":
+            positive = sweep_fractionations[
+                np.isfinite(sweep_fractionations)
+                & (sweep_fractionations > 0)
+            ]
+            this_spot_68_fractionation_std = (
+                this_spot_mean_68_fractionation * np.std(np.log(positive))
+                if positive.size
+                else np.nan
+            )
+        else:
+            this_spot_68_fractionation_std = np.std(sweep_fractionations)
         # store the calculated mean time and fractionation factors
         spot_mean_times.append(this_spot_mean_time)
         spot_mean_68_fractionation.append(this_spot_mean_68_fractionation)
@@ -1076,10 +1153,11 @@ def calc_session_fractionation_TW(
     )
     model_kwargs_68 = {} if model_kwargs is None else dict(model_kwargs)
     model_kwargs_68.setdefault('degree', degree)
-    fitted_model_68 = fit_calibration_model(
+    fitted_model_68 = fit_multiplicative_calibration_model(
         spot_mean_times,
         spot_mean_68_fractionation,
         method=model,
+        fit_space=aggregation,
         weights=spot_mean_68_fractionation_weights,
         **model_kwargs_68,
     )
@@ -1131,6 +1209,7 @@ def calc_session_fractionation_TW(
         degree,
         model=model,
         model_kwargs=model_kwargs,
+        ratio_aggregation=ratio_aggregation,
         build_plot=build_plot,
     )
     session_correction_results.update({'208Pb/232Th': {

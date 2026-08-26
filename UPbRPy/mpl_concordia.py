@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from .isoplot import get_wetherill_point, weighted_mean
+from .isochron import tera_wasserburg_point
 
 
 def ellipse_from_covariance(ax, x, y, sx_2sigma, sy_2sigma, rho,
@@ -127,6 +128,99 @@ def plot_wetherill_concordia(
     return ax
 
 
+def plot_tera_wasserburg_concordia(
+    ax,
+    data,
+    age_min,
+    age_max,
+    age_points=None,
+    accepted=None,
+    accepted_color="#77c9b1",
+    rejected_color="0.65",
+    concordia_color="0.25",
+    ellipse_alpha=0.35,
+    fontsize=11,
+    x_column="238U/206Pb",
+    y_column="207Pb/206Pb",
+    x_2sigma_column="238U/206Pb_2e",
+    y_2sigma_column="207Pb/206Pb_2e",
+    correlation_column="tw_rho",
+):
+    """Plot a static Tera-Wasserburg concordia and two-sigma ellipses.
+
+    Ratio uncertainties are absolute two-sigma values. ``age_min`` and
+    ``age_max`` control the complete concordia segment, allowing callers to
+    span the entire axis range independently from the labeled age points.
+    Current result tables supply ``tw_rho``; older tables without that column
+    are plotted with zero correlation rather than reusing Wetherill rho.
+    """
+    frame = pd.DataFrame(data).reset_index(drop=True)
+    ages = np.linspace(age_min, age_max, 800)
+    concordia_x, concordia_y = tera_wasserburg_point(ages)
+    ax.plot(
+        concordia_x,
+        concordia_y,
+        color=concordia_color,
+        linewidth=1.4,
+        zorder=1,
+    )
+
+    if accepted is None:
+        accepted = np.ones(len(frame), dtype=bool)
+    accepted = np.asarray(accepted, dtype=bool)
+    if accepted.size != len(frame):
+        raise ValueError("accepted must have one value per analysis")
+    if correlation_column in frame:
+        correlations = pd.to_numeric(
+            frame[correlation_column], errors="coerce"
+        ).fillna(0).clip(-1, 1)
+    else:
+        correlations = pd.Series(0.0, index=frame.index)
+    for idx, row in frame.iterrows():
+        color = accepted_color if accepted[idx] else rejected_color
+        ellipse_from_covariance(
+            ax,
+            float(row[x_column]),
+            float(row[y_column]),
+            float(row[x_2sigma_column]),
+            float(row[y_2sigma_column]),
+            float(correlations.iloc[idx]),
+            color,
+            alpha=ellipse_alpha if accepted[idx] else ellipse_alpha * 0.5,
+        )
+
+    if age_points is None:
+        age_points = np.linspace(age_min, age_max, 6)
+    age_points = np.asarray(age_points, dtype=float)
+    point_x, point_y = tera_wasserburg_point(age_points)
+    ax.scatter(point_x, point_y, s=18, color=concordia_color, zorder=4)
+    for age, x, y in zip(age_points, point_x, point_y):
+        ax.annotate(
+            f"{age:g}",
+            (x, y),
+            xytext=(0, -10),
+            textcoords="offset points",
+            fontsize=fontsize - 2,
+            color=concordia_color,
+            ha="center",
+            va="top",
+            bbox=dict(
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.82,
+                boxstyle="round,pad=0.08",
+            ),
+            zorder=5,
+        )
+
+    ax.set_xlabel(r"$^{238}$U/$^{206}$Pb", fontsize=fontsize)
+    ax.set_ylabel(r"$^{207}$Pb/$^{206}$Pb", fontsize=fontsize)
+    ax.tick_params(labelsize=fontsize - 1)
+    ax.ticklabel_format(useOffset=False)
+    ax.grid(color="0.9", linewidth=0.6)
+    return ax
+
+
 def plot_ranked_weighted_mean(
     ax,
     dates,
@@ -172,6 +266,7 @@ def plot_ranked_weighted_mean(
 
 __all__ = [
     "ellipse_from_covariance",
+    "plot_tera_wasserburg_concordia",
     "plot_wetherill_concordia",
     "plot_ranked_weighted_mean",
 ]

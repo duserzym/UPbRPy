@@ -758,6 +758,10 @@ def finalize_reduction_results(
             "207Pb/206Pb",
             "207Pb/206Pb_2e_no_calibration",
             "207Pb/206Pb_2e_with_calibration",
+            "err_corr_no_calibration",
+            "err_corr_with_calibration",
+            "tw_rho_no_calibration",
+            "tw_rho_with_calibration",
             "208Pb/232Th",
             "208Pb/232Th_2e_no_calibration",
             "208Pb/232Th_2e_with_calibration",
@@ -810,7 +814,8 @@ def publication_depth_profile_table(depth_profile):
             or "intercept" in str(column).casefold()
             or "preferred" in str(column).casefold()
             or "automatic_flag" in str(column).casefold()
-            or str(column) == "err_corr"
+            or str(column).startswith("err_corr")
+            or str(column).startswith("tw_rho")
         )
     ]
     return depth_profile.loc[:, leading + scientific].copy()
@@ -836,7 +841,14 @@ def publication_table_notes(tables):
         ),
         (
             "err_corr is the propagated correlation coefficient for the "
-            "207Pb/235U--206Pb/238U Wetherill coordinates."
+            "207Pb/235U--206Pb/238U Wetherill coordinates; tw_rho is the "
+            "correlation for the 238U/206Pb--207Pb/206Pb Tera--Wasserburg "
+            "coordinates."
+        ),
+        (
+            "Reported spot 206Pb/204Pb is the ratio of the accepted plateau "
+            "mean 206Pb signal to the mean Hg-corrected mass-204 signal; "
+            "depth-profile 206Pb/204Pb values remain sweep resolved."
         ),
     ]
     notes = {
@@ -1109,10 +1121,15 @@ def export_publication_tables(tables, output_path):
                     )
                 elif column_text.endswith("_2e"):
                     comment = "Absolute two-standard-error (2SE) uncertainty."
-                elif column_text == "err_corr":
+                elif column_text.startswith("err_corr"):
                     comment = (
                         "Error correlation for 207Pb/235U and 206Pb/238U in "
                         "Wetherill space."
+                    )
+                elif column_text.startswith("tw_rho"):
+                    comment = (
+                        "Error correlation for 238U/206Pb and 207Pb/206Pb in "
+                        "Tera-Wasserburg space."
                     )
                 elif column_text == "signal_relative_time":
                     comment = (

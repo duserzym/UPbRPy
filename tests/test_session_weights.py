@@ -43,6 +43,33 @@ def test_session_standard_observations_use_ratio_of_known_to_plateau_mean():
     )
 
 
+def test_session_logratio_observations_use_geometric_spot_ratio():
+    rows = []
+    for spot_index in range(4):
+        for sweep, ratio in enumerate((0.5, 2.0)):
+            rows.append(
+                {
+                    "sample": "RM",
+                    "spot_name": f"RM_{spot_index}",
+                    "Time": float(spot_index * 10 + sweep),
+                    "206Pb/238U_DH_corrected": ratio,
+                }
+            )
+    data = pd.DataFrame(rows)
+
+    _, _, _, metadata = calc_session_nominal_fractionation(
+        1.0,
+        data,
+        "206Pb/238U",
+        degree=1,
+        ratio_aggregation="logratio",
+    )
+
+    np.testing.assert_allclose(metadata["spot_mean_fractionation"], 1.0)
+    assert metadata["ratio_aggregation"] == "logratio"
+    assert metadata["model_settings"]["fit_space"] == "logratio"
+
+
 def test_covariance_store_survives_pandas_concat_without_array_comparison():
     frame = pd.DataFrame({
         "spot_name": ["one", "one", "two", "two"],

@@ -37,3 +37,30 @@ def test_concordia_figure_serializes_for_bokeh_widget_rendering():
     item = json_item(concordia(data))
 
     assert "doc" in item
+
+
+def test_tw_concordia_uses_tw_correlation_by_default(monkeypatch):
+    recorded = []
+
+    def capture_ellipse(x, y, sx, sy, rho):
+        recorded.append(rho)
+        return np.array([x, x]), np.array([y, y])
+
+    monkeypatch.setattr(
+        "UPbRPy.isoplot.calc_concordia_ellipse",
+        capture_ellipse,
+    )
+    data = pd.DataFrame(
+        {
+            "238U/206Pb": [9.0],
+            "207Pb/206Pb": [0.20],
+            "238U/206Pb_2e": [0.4],
+            "207Pb/206Pb_2e": [0.02],
+            "err_corr": [0.9],
+            "tw_rho": [0.25],
+        }
+    )
+
+    concordia(data, type="TW")
+
+    assert recorded == [0.25]

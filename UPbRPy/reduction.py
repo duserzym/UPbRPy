@@ -7,6 +7,12 @@ import pandas as pd
 
 from .calibration import evaluate_correction_result
 from .constants import common_U238_U235
+from .ratios import (
+    aggregate_ratio,
+    normalize_ratio_aggregation_method,
+    ratio_of_means_206pb_204pb,
+    ratio_standard_error,
+)
 from .age import (
     calc_68_date,
     calc_68_date_uncertainty,
@@ -76,7 +82,148 @@ def calc_err_corr_quotient(x, sx, u, su, v, sv):
     ``(sx/x)^2 = (su/u)^2 + (sv/v)^2 - 2*rho*(su/u)*(sv/v)``. Rearranging that
     identity gives the returned correlation.
     """
-    return ((su/u)**2 + (sv/v)**2 - (sx/x)**2) * u * v /2 / (su * sv)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (
+            ((su/u)**2 + (sv/v)**2 - (sx/x)**2)
+            * u
+            * v
+            / 2
+            / (su * sv)
+        )
+
+
+def calc_tw_err_corr_from_counts(n238, n206, n207):
+    """Return sweep-level Tera--Wasserburg error correlation.
+
+    Parameters
+    ----------
+    n238, n206, n207 : array-like
+        Baseline-subtracted integrated counts for the three isotope channels.
+
+    Returns
+    -------
+    numpy.ndarray
+        Correlation between ``238U/206Pb`` and ``207Pb/206Pb`` under the
+        independent-Poisson counting model.
+
+    Notes
+    -----
+    Both Tera--Wasserburg coordinates contain the same ``206Pb`` denominator,
+    so its counting fluctuation contributes positive covariance.  In relative
+    form, ``Cov(x, y) / (x y) = 1 / n206``.  Nonpositive or nonfinite counts
+    cannot support the Poisson ratio approximation and return ``NaN``.
+    """
+    n238, n206, n207 = np.broadcast_arrays(
+        np.asarray(n238, dtype=float),
+        np.asarray(n206, dtype=float),
+        np.asarray(n207, dtype=float),
+    )
+    valid = (
+        np.isfinite(n238)
+        & np.isfinite(n206)
+        & np.isfinite(n207)
+        & (n238 > 0)
+        & (n206 > 0)
+        & (n207 > 0)
+    )
+    result = np.full(n206.shape, np.nan, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denominator = np.sqrt(
+            (1 / n238 + 1 / n206)
+            * (1 / n207 + 1 / n206)
+        )
+        result[valid] = (1 / n206[valid]) / denominator[valid]
+    return np.clip(result, -1.0, 1.0)
+
+
+def calc_wetherill_err_corr_from_counts(n207, n206, n238):
+    """Return sweep-level Wetherill correlation from integrated counts.
+
+    The Wetherill coordinates are proportional to ``207Pb/238U`` and
+    ``206Pb/238U``.  Their shared ``238U`` denominator contributes positive
+    covariance, giving ``Cov(x, y) / (x y) = 1 / n238``.
+    """
+    n207, n206, n238 = np.broadcast_arrays(
+        np.asarray(n207, dtype=float),
+        np.asarray(n206, dtype=float),
+        np.asarray(n238, dtype=float),
+    )
+    valid = (
+        np.isfinite(n207)
+        & np.isfinite(n206)
+        & np.isfinite(n238)
+        & (n207 > 0)
+        & (n206 > 0)
+        & (n238 > 0)
+    )
+    result = np.full(n238.shape, np.nan, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denominator = np.sqrt(
+            (1 / n207 + 1 / n238)
+            * (1 / n206 + 1 / n238)
+        )
+        result[valid] = (1 / n238[valid]) / denominator[valid]
+    return np.clip(result, -1.0, 1.0)
+
+
+def calc_paired_ratio_correlation(ratio_x, ratio_y, method="arithmetic"):
+    """Return the correlation of paired sweep ratios in estimator space.
+
+    Arithmetic mode calculates the sample correlation of the paired corrected
+    ratios.  Log-ratio mode calculates the correlation after taking natural
+    logarithms, matching the space in which geometric spot means and their
+    standard errors are estimated.
+    """
+    aggregation = normalize_ratio_aggregation_method(method)
+    ratio_x, ratio_y = np.broadcast_arrays(
+        np.asarray(ratio_x, dtype=float),
+        np.asarray(ratio_y, dtype=float),
+    )
+    valid = np.isfinite(ratio_x) & np.isfinite(ratio_y)
+    if aggregation == "logratio":
+        valid &= (ratio_x > 0) & (ratio_y > 0)
+    if np.count_nonzero(valid) < 2:
+        return np.nan
+    x = ratio_x[valid]
+    y = ratio_y[valid]
+    if aggregation == "logratio":
+        x = np.log(x)
+        y = np.log(y)
+    if np.std(x, ddof=1) == 0 or np.std(y, ddof=1) == 0:
+        return np.nan
+    return float(np.clip(np.corrcoef(x, y)[0, 1], -1.0, 1.0))
+
+
+def calc_tw_err_corr_from_pairs(ratio_86, ratio_76, method="arithmetic"):
+    """Return spot-level Tera--Wasserburg correlation from paired sweeps."""
+    return calc_paired_ratio_correlation(ratio_86, ratio_76, method)
+
+
+def attenuate_correlation_for_independent_error(
+    correlation,
+    x_measurement_1s,
+    y_measurement_1s,
+    x_total_1s,
+    y_total_1s,
+):
+    """Rescale a measurement correlation after independent errors are added.
+
+    The measurement covariance is retained, while independently added session
+    calibration scatter enlarges one or both marginal variances.  This is the
+    production uncertainty policy described in the manuscript: no new
+    cross-ratio calibration covariance is introduced.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        covariance = (
+            np.asarray(correlation, dtype=float)
+            * np.asarray(x_measurement_1s, dtype=float)
+            * np.asarray(y_measurement_1s, dtype=float)
+        )
+        result = covariance / (
+            np.asarray(x_total_1s, dtype=float)
+            * np.asarray(y_total_1s, dtype=float)
+        )
+    return np.clip(result, -1.0, 1.0)
 
 def calc_68_76_discordance(t68, t76, s68, s76):
     """Calculate conventional 206Pb/238U–207Pb/206Pb discordance.
@@ -200,29 +347,82 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             isotope_ratio + '_fractionation_corrected_2e_with_calibration'
         ]
 
-    # calculate the 207Pb/235U ratio and error based on the 206Pb/238U and 207Pb/206Pb raw ratio calculations
-    depthpro_ratios['207Pb/235U_fractionation_corrected'] = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] * depthpro_ratios['206Pb/238U_fractionation_corrected'] * common_U238_U235
-    depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] = np.sqrt((depthpro_ratios['207Pb/206Pb_fractionation_corrected_2e%']**2 + depthpro_ratios['206Pb/238U_fractionation_corrected_2e%']**2))
-    depthpro_ratios['207Pb/235U_fractionation_corrected_2e'] = depthpro_ratios['207Pb/235U_fractionation_corrected'] * depthpro_ratios['207Pb/235U_fractionation_corrected_2e%'] / 100
-    for uncertainty_mode in ("no_calibration", "with_calibration"):
-        percent_column = (
-            f"207Pb/235U_fractionation_corrected_2e_{uncertainty_mode}%"
+    # The product 207Pb/206Pb * 206Pb/238U is exactly 207Pb/238U at the
+    # measurement level.  Its Poisson uncertainty must therefore omit the
+    # cancelling 206Pb term instead of treating the two component ratios as
+    # independent.  Independent session-scatter terms are added afterwards.
+    ratio_75_column = '207Pb/235U_fractionation_corrected'
+    ratio_76_column = '207Pb/206Pb_fractionation_corrected'
+    ratio_68_column = '206Pb/238U_fractionation_corrected'
+    depthpro_ratios[ratio_75_column] = (
+        depthpro_ratios[ratio_76_column]
+        * depthpro_ratios[ratio_68_column]
+        * common_U238_U235
+    )
+    count_columns = {'238U', '206Pb', '207Pb'}
+    relative_76_no = np.abs(
+        depthpro_ratios[f'{ratio_76_column}_2e_no_calibration']
+        / 2
+        / depthpro_ratios[ratio_76_column]
+    )
+    relative_68_no = np.abs(
+        depthpro_ratios[f'{ratio_68_column}_2e_no_calibration']
+        / 2
+        / depthpro_ratios[ratio_68_column]
+    )
+    if count_columns.issubset(depthpro_ratios.columns):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            relative_75_no = np.sqrt(
+                1 / depthpro_ratios['207Pb']
+                + 1 / depthpro_ratios['238U']
+            )
+        wetherill_rho_measurement = calc_wetherill_err_corr_from_counts(
+            depthpro_ratios['207Pb'],
+            depthpro_ratios['206Pb'],
+            depthpro_ratios['238U'],
         )
-        depthpro_ratios[percent_column] = np.sqrt(
-            depthpro_ratios[
-                f"207Pb/206Pb_fractionation_corrected_2e_{uncertainty_mode}%"
-            ] ** 2
-            + depthpro_ratios[
-                f"206Pb/238U_fractionation_corrected_2e_{uncertainty_mode}%"
-            ] ** 2
+    else:
+        # Legacy ratio-only intermediates cannot recover the cancelling 206Pb
+        # covariance.  Retain their historical independent-input uncertainty.
+        relative_75_no = np.sqrt(relative_76_no**2 + relative_68_no**2)
+        wetherill_rho_measurement = calc_err_corr_quotient(
+            depthpro_ratios[ratio_76_column],
+            relative_76_no * depthpro_ratios[ratio_76_column],
+            depthpro_ratios[ratio_75_column],
+            relative_75_no * depthpro_ratios[ratio_75_column],
+            depthpro_ratios[ratio_68_column],
+            relative_68_no * depthpro_ratios[ratio_68_column],
         )
-        depthpro_ratios[
-            f"207Pb/235U_fractionation_corrected_2e_{uncertainty_mode}"
-        ] = (
-            depthpro_ratios["207Pb/235U_fractionation_corrected"]
-            * depthpro_ratios[percent_column]
-            / 100
+    relative_76_with = np.abs(
+        depthpro_ratios[f'{ratio_76_column}_2e_with_calibration']
+        / 2
+        / depthpro_ratios[ratio_76_column]
+    )
+    relative_68_with = np.abs(
+        depthpro_ratios[f'{ratio_68_column}_2e_with_calibration']
+        / 2
+        / depthpro_ratios[ratio_68_column]
+    )
+    added_session_variance = (
+        np.clip(relative_76_with**2 - relative_76_no**2, 0.0, None)
+        + np.clip(relative_68_with**2 - relative_68_no**2, 0.0, None)
+    )
+    relative_75_with = np.sqrt(relative_75_no**2 + added_session_variance)
+    for uncertainty_mode, relative_75 in (
+        ('no_calibration', relative_75_no),
+        ('with_calibration', relative_75_with),
+    ):
+        absolute_column = f'{ratio_75_column}_2e_{uncertainty_mode}'
+        depthpro_ratios[absolute_column] = (
+            2 * depthpro_ratios[ratio_75_column] * relative_75
         )
+        depthpro_ratios[absolute_column + '%'] = 200 * relative_75
+    depthpro_ratios[ratio_75_column + '_2e'] = depthpro_ratios[
+        ratio_75_column + '_2e_with_calibration'
+    ]
+    depthpro_ratios[ratio_75_column + '_2e%'] = depthpro_ratios[
+        ratio_75_column + '_2e_with_calibration%'
+    ]
     
     # calculate the 238U/206Pb ratio and error based on the 206Pb/238U ratio and error
     depthpro_ratios['238U/206Pb_fractionation_corrected'] = 1 / depthpro_ratios['206Pb/238U_fractionation_corrected']
@@ -252,16 +452,69 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
             * 100
         )
 
-    # calculate error correlations for the 207Pb/235U-206Pb/238U ratios
-    x = depthpro_ratios['207Pb/206Pb_fractionation_corrected'] # 76 ratio
-    u = depthpro_ratios['207Pb/235U_fractionation_corrected']  # 75 ratio
-    v = depthpro_ratios['206Pb/238U_fractionation_corrected']  # 68 ratio
+    # Fixed corrections preserve the counting-statistical Wetherill
+    # covariance. Independent session scatter enlarges the marginal errors but
+    # does not add cross-ratio calibration covariance in the production model.
+    depthpro_ratios['err_corr_no_calibration'] = np.clip(
+        wetherill_rho_measurement, -1.0, 1.0
+    )
+    depthpro_ratios['err_corr_with_calibration'] = (
+        attenuate_correlation_for_independent_error(
+            wetherill_rho_measurement,
+            depthpro_ratios[
+                ratio_75_column + '_2e_no_calibration'
+            ] / 2,
+            depthpro_ratios[
+                ratio_68_column + '_2e_no_calibration'
+            ] / 2,
+            depthpro_ratios[
+                ratio_75_column + '_2e_with_calibration'
+            ] / 2,
+            depthpro_ratios[
+                ratio_68_column + '_2e_with_calibration'
+            ] / 2,
+        )
+    )
+    depthpro_ratios['err_corr'] = depthpro_ratios[
+        'err_corr_with_calibration'
+    ]
 
-    sx = depthpro_ratios['207Pb/206Pb_fractionation_corrected_2e']/2 # 76 std
-    su = depthpro_ratios['207Pb/235U_fractionation_corrected_2e']/2 # 75 std
-    sv = depthpro_ratios['206Pb/238U_fractionation_corrected_2e']/2 # 68 std
-
-    depthpro_ratios['err_corr'] = calc_err_corr_quotient(x, sx, u, su, v, sv)
+    # Tera--Wasserburg sweep covariance comes directly from the shared 206Pb
+    # denominator.  Fixed fractionation corrections preserve this correlation.
+    # Independent session scatter increases the marginal errors without adding
+    # covariance, so the inclusive correlation is attenuated accordingly.
+    if count_columns.issubset(depthpro_ratios.columns):
+        tw_rho_measurement = calc_tw_err_corr_from_counts(
+            depthpro_ratios['238U'],
+            depthpro_ratios['206Pb'],
+            depthpro_ratios['207Pb'],
+        )
+    else:
+        # Legacy intermediate tables may contain ratios without the original
+        # integrated counts.  Keep those tables usable, but do not invent a
+        # Tera--Wasserburg covariance that the available data cannot support.
+        tw_rho_measurement = np.full(len(depthpro_ratios), np.nan)
+    depthpro_ratios['tw_rho_no_calibration'] = tw_rho_measurement
+    depthpro_ratios['tw_rho_with_calibration'] = (
+        attenuate_correlation_for_independent_error(
+            tw_rho_measurement,
+            depthpro_ratios[
+                '238U/206Pb_fractionation_corrected_2e_no_calibration'
+            ] / 2,
+            depthpro_ratios[
+                '207Pb/206Pb_fractionation_corrected_2e_no_calibration'
+            ] / 2,
+            depthpro_ratios[
+                '238U/206Pb_fractionation_corrected_2e_with_calibration'
+            ] / 2,
+            depthpro_ratios[
+                '207Pb/206Pb_fractionation_corrected_2e_with_calibration'
+            ] / 2,
+        )
+    )
+    depthpro_ratios['tw_rho'] = depthpro_ratios[
+        'tw_rho_with_calibration'
+    ]
 
     # age calculations
     depthpro_ratios['207Pb/235U_age'] = calc_75_date(depthpro_ratios['207Pb/235U_fractionation_corrected'])
@@ -376,6 +629,7 @@ def calc_ratio_mean_and_uncertainty(
     fractionation_corrected_ratios,
     session_correction_results,
     sep='_',
+    ratio_aggregation="arithmetic",
 ):
     """Aggregate corrected sweeps into spot ratios, ages, and uncertainties.
 
@@ -394,6 +648,14 @@ def calc_ratio_mean_and_uncertainty(
     sep : str
         Retained for backward compatibility with older notebooks; column names
         use the package's canonical slash notation.
+    ratio_aggregation : str
+        ``"arithmetic"`` preserves the historical mean-of-ratios estimator.
+        ``"logratio"`` calculates geometric means and log-space standard
+        errors following the compositional treatment of McLean et al. (2016).
+        The reported ``206Pb/204Pb`` spot value is an intentional exception:
+        it always uses the ratio of the integrated 206Pb and Hg-corrected
+        mass-204 plateau means because individual mass-204 sweeps are commonly
+        count limited.
 
     Returns
     -------
@@ -409,6 +671,7 @@ def calc_ratio_mean_and_uncertainty(
     scatter in quadrature. Coefficient covariance and cross-ratio calibration
     covariance are deliberately not propagated.
     """
+    aggregation = normalize_ratio_aggregation_method(ratio_aggregation)
     records = []
     for spot_name, spot_data in fractionation_corrected_ratios.groupby(
         'spot_name', sort=False
@@ -416,15 +679,36 @@ def calc_ratio_mean_and_uncertainty(
         record = {
             'spot_name': spot_name,
             'sample': spot_data['sample'].iloc[0],
+            'ratio_aggregation': aggregation,
         }
         spot_mean_time = spot_data['Time'].mean()
-        spot_size = spot_data.shape[0]
 
         # Preserve the mass-204 and Pb/Pb measurements needed by the
         # conventional 204-method correction. They are not session calibrated,
         # so their spot uncertainties contain counting/within-spot scatter only.
         for auxiliary_ratio in ("206Pb/204Pb", "206Pb/208Pb"):
             if auxiliary_ratio not in spot_data.columns:
+                continue
+            if auxiliary_ratio == "206Pb/204Pb":
+                required_mass_columns = {"206Pb", "204Pb"}
+                missing_mass_columns = required_mass_columns - set(
+                    spot_data.columns
+                )
+                if missing_mass_columns:
+                    raise KeyError(
+                        "Ratio-of-means 206Pb/204Pb requires the underlying "
+                        "206Pb and Hg-corrected 204Pb signals. Recalculate raw "
+                        "ratios with the current pipeline instead of reusing a "
+                        "legacy intermediate ratio table."
+                    )
+                ratio_value, ratio_1e = ratio_of_means_206pb_204pb(
+                    spot_data["206Pb"],
+                    spot_data["204Pb"],
+                    spot_data.get("204Pb_2e"),
+                )
+                record[auxiliary_ratio] = ratio_value
+                record[auxiliary_ratio + "_2e"] = 2 * ratio_1e
+                record[auxiliary_ratio + "_aggregation"] = "ratio_of_means"
                 continue
             auxiliary_values = pd.to_numeric(
                 spot_data[auxiliary_ratio], errors="coerce"
@@ -436,8 +720,14 @@ def calc_ratio_mean_and_uncertainty(
                 record[auxiliary_ratio] = np.nan
                 record[auxiliary_ratio + "_2e"] = np.nan
                 continue
-            record[auxiliary_ratio] = valid_values.mean()
-            auxiliary_sem = valid_values.std() / np.sqrt(valid_values.size)
+            record[auxiliary_ratio] = aggregate_ratio(
+                valid_values,
+                aggregation,
+            )
+            auxiliary_sem = ratio_standard_error(
+                valid_values,
+                aggregation,
+            )
             if not np.isfinite(auxiliary_sem):
                 uncertainty_column = auxiliary_ratio + "_2e"
                 auxiliary_sem = (
@@ -452,8 +742,14 @@ def calc_ratio_mean_and_uncertainty(
             record[auxiliary_ratio + "_2e"] = 2 * auxiliary_sem
 
         for isotope_ratio, session_result in session_correction_results.items():
-            measured_mean = spot_data[isotope_ratio].mean()
-            measured_sem = spot_data[isotope_ratio].std() / np.sqrt(spot_size)
+            measured_mean = aggregate_ratio(
+                spot_data[isotope_ratio],
+                aggregation,
+            )
+            measured_sem = ratio_standard_error(
+                spot_data[isotope_ratio],
+                aggregation,
+            )
             if not np.isfinite(measured_sem):
                 uncertainty_column = isotope_ratio + '_2e'
                 measured_sem = (
@@ -466,9 +762,10 @@ def calc_ratio_mean_and_uncertainty(
                 evaluate_correction_result(session_result, spot_mean_time)
             )
             session_scatter = session_result['std']
-            corrected_mean = spot_data[
-                isotope_ratio + '_fractionation_corrected'
-            ].mean()
+            corrected_mean = aggregate_ratio(
+                spot_data[isotope_ratio + '_fractionation_corrected'],
+                aggregation,
+            )
             no_calibration_1sigma = np.abs(
                 corrected_mean * measured_sem / measured_mean
             )
@@ -512,22 +809,85 @@ def calc_ratio_mean_and_uncertainty(
             * record['206Pb/238U']
             * common_U238_U235
         )
-        record['207Pb/235U_2e%'] = np.sqrt(
-            record['207Pb/206Pb_2e%'] ** 2
-            + record['206Pb/238U_2e%'] ** 2
+        paired_76 = pd.to_numeric(
+            spot_data['207Pb/206Pb_fractionation_corrected'],
+            errors='coerce',
         )
-        record['207Pb/235U_2e'] = (
-            record['207Pb/235U'] * record['207Pb/235U_2e%'] / 100
+        paired_68 = pd.to_numeric(
+            spot_data['206Pb/238U_fractionation_corrected'],
+            errors='coerce',
         )
-        for uncertainty_mode in ("no_calibration", "with_calibration"):
-            percent_column = f"207Pb/235U_2e_{uncertainty_mode}%"
-            record[percent_column] = np.sqrt(
-                record[f"207Pb/206Pb_2e_{uncertainty_mode}%"] ** 2
-                + record[f"206Pb/238U_2e_{uncertainty_mode}%"] ** 2
+        rho_76_68_measurement = calc_paired_ratio_correlation(
+            paired_76,
+            paired_68,
+            aggregation,
+        )
+        relative_76_no = (
+            record['207Pb/206Pb_2e_no_calibration']
+            / 2
+            / record['207Pb/206Pb']
+        )
+        relative_68_no = (
+            record['206Pb/238U_2e_no_calibration']
+            / 2
+            / record['206Pb/238U']
+        )
+        covariance_term = (
+            0.0
+            if not np.isfinite(rho_76_68_measurement)
+            else 2 * rho_76_68_measurement * relative_76_no * relative_68_no
+        )
+        relative_75_no = np.sqrt(max(
+            relative_76_no**2 + relative_68_no**2 + covariance_term,
+            0.0,
+        ))
+        relative_76_with = (
+            record['207Pb/206Pb_2e_with_calibration']
+            / 2
+            / record['207Pb/206Pb']
+        )
+        relative_68_with = (
+            record['206Pb/238U_2e_with_calibration']
+            / 2
+            / record['206Pb/238U']
+        )
+        relative_75_with = np.sqrt(
+            relative_75_no**2
+            + max(relative_76_with**2 - relative_76_no**2, 0.0)
+            + max(relative_68_with**2 - relative_68_no**2, 0.0)
+        )
+        for uncertainty_mode, relative_75 in (
+            ('no_calibration', relative_75_no),
+            ('with_calibration', relative_75_with),
+        ):
+            record[f'207Pb/235U_2e_{uncertainty_mode}'] = (
+                2 * record['207Pb/235U'] * relative_75
             )
-            record[f"207Pb/235U_2e_{uncertainty_mode}"] = (
-                record["207Pb/235U"] * record[percent_column] / 100
+            record[f'207Pb/235U_2e_{uncertainty_mode}%'] = 200 * relative_75
+        record['207Pb/235U_2e'] = record[
+            '207Pb/235U_2e_with_calibration'
+        ]
+        record['207Pb/235U_2e%'] = record[
+            '207Pb/235U_2e_with_calibration%'
+        ]
+
+        # For R75 = k R76 R68, the measurement covariance with R68 is
+        # k[R68 Cov(R76,R68) + R76 Var(R68)].  Expressing this in relative
+        # terms yields the correlation below without inventing a calibration
+        # covariance between the two independently fitted session corrections.
+        if np.isfinite(rho_76_68_measurement) and relative_75_no > 0:
+            relative_covariance_75_68 = (
+                rho_76_68_measurement * relative_76_no * relative_68_no
+                + relative_68_no**2
             )
+            wetherill_rho_measurement = (
+                relative_covariance_75_68
+                / (relative_75_no * relative_68_no)
+                if relative_68_no > 0
+                else np.nan
+            )
+        else:
+            wetherill_rho_measurement = np.nan
 
         record['238U/206Pb'] = 1 / record['206Pb/238U']
         record['238U/206Pb_2e'] = propagate_reciprocal_uncertainty(
@@ -632,14 +992,48 @@ def calc_ratio_mean_and_uncertainty(
             record['206Pb/238U_age_2e'] / 2,
             record['207Pb/206Pb_age_2e'] / 2,
         )
-        record['err_corr'] = calc_err_corr_quotient(
-            record['207Pb/206Pb'],
-            record['207Pb/206Pb_2e'] / 2,
-            record['207Pb/235U'],
-            record['207Pb/235U_2e'] / 2,
-            record['206Pb/238U'],
-            record['206Pb/238U_2e'] / 2,
+        record['err_corr_no_calibration'] = float(np.clip(
+            wetherill_rho_measurement, -1.0, 1.0
+        ))
+        record['err_corr_with_calibration'] = float(
+            attenuate_correlation_for_independent_error(
+                wetherill_rho_measurement,
+                record['207Pb/235U_2e_no_calibration'] / 2,
+                record['206Pb/238U_2e_no_calibration'] / 2,
+                record['207Pb/235U_2e_with_calibration'] / 2,
+                record['206Pb/238U_2e_with_calibration'] / 2,
+            )
         )
+        record['err_corr'] = record['err_corr_with_calibration']
+
+        # Estimate spot-level Tera--Wasserburg covariance from the paired
+        # corrected sweeps, rather than assuming zero correlation.  In
+        # log-ratio mode the pairing is evaluated in log space, matching the
+        # estimator used for the reported geometric mean.
+        paired_86 = 1 / pd.to_numeric(
+            spot_data['206Pb/238U_fractionation_corrected'],
+            errors='coerce',
+        )
+        paired_76 = pd.to_numeric(
+            spot_data['207Pb/206Pb_fractionation_corrected'],
+            errors='coerce',
+        )
+        tw_rho_measurement = calc_tw_err_corr_from_pairs(
+            paired_86,
+            paired_76,
+            aggregation,
+        )
+        record['tw_rho_no_calibration'] = tw_rho_measurement
+        record['tw_rho_with_calibration'] = float(
+            attenuate_correlation_for_independent_error(
+                tw_rho_measurement,
+                record['238U/206Pb_2e_no_calibration'] / 2,
+                record['207Pb/206Pb_2e_no_calibration'] / 2,
+                record['238U/206Pb_2e_with_calibration'] / 2,
+                record['207Pb/206Pb_2e_with_calibration'] / 2,
+            )
+        )
+        record['tw_rho'] = record['tw_rho_with_calibration']
         records.append(record)
 
     final_ratios = pd.DataFrame.from_records(records)
@@ -649,7 +1043,7 @@ def calc_ratio_mean_and_uncertainty(
     if '208Pb/232Th' in session_correction_results.keys():
         first_columns = ['spot_name', 'sample', 
                         '207Pb/235U', '207Pb/235U_2e%', 
-                        '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
+                        '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 'tw_rho',
                         '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
                         '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
                         '208Pb/232Th_age', '208Pb/232Th_age_2e%', '208Pb/232Th_age_2e',
@@ -665,7 +1059,7 @@ def calc_ratio_mean_and_uncertainty(
     else:
         first_columns = ['spot_name', 'sample', 
                 '207Pb/235U', '207Pb/235U_2e%', 
-                '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 
+                '206Pb/238U', '206Pb/238U_2e%', 'err_corr', 'tw_rho',
                 '207Pb/235U_age', '207Pb/235U_age_2e%', '207Pb/235U_age_2e',
                 '206Pb/238U_age', '206Pb/238U_age_2e%', '206Pb/238U_age_2e',
                 'disc%', 'disc_2e%',
@@ -685,6 +1079,11 @@ def calc_ratio_mean_and_uncertainty(
 __all__ = [
     'calc_intercept_std',
     'calc_err_corr_quotient',
+    'calc_tw_err_corr_from_counts',
+    'calc_wetherill_err_corr_from_counts',
+    'calc_paired_ratio_correlation',
+    'calc_tw_err_corr_from_pairs',
+    'attenuate_correlation_for_independent_error',
     'calc_68_76_discordance',
     'calc_depth_profile',
     'calc_ratio_mean_and_uncertainty',

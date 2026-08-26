@@ -19,7 +19,7 @@ from UPbRPy.isochron import (
     apply_common_pb_corrections,
     stacey_kramers_common_pb,
 )
-from UPbRPy.isoplot import construct_final_df
+from UPbRPy.isoplot import construct_final_depthpro_df, construct_final_df
 
 
 def _synthetic_common_pb_measurement(
@@ -193,3 +193,32 @@ def test_common_pb_rich_material_enables_default_corrections():
     assert "207Pb_corrected_age" in apatite
     assert "208Pb_corrected_age" in apatite
     assert "207Pb_corrected_age" not in unspecified
+
+
+def test_depth_profile_merge_uses_spot_identity_as_well_as_time():
+    concentrations = pd.DataFrame(
+        {
+            "Time": [1.0, 1.0],
+            "sample": ["A", "B"],
+            "spot_name": ["A_1", "B_1"],
+            "U": [10.0, 20.0],
+        }
+    )
+    ratios = pd.DataFrame(
+        {
+            "Time": [1.0, 1.0],
+            "sample": ["A", "B"],
+            "spot_name": ["A_1", "B_1"],
+            "206Pb/238U": [0.1, 0.2],
+        }
+    )
+
+    merged = construct_final_depthpro_df(
+        concentrations,
+        ratios,
+        common_pb_correction=False,
+    )
+
+    assert len(merged) == 2
+    assert merged.set_index("spot_name").loc["A_1", "U"] == 10.0
+    assert merged.set_index("spot_name").loc["B_1", "206Pb/238U"] == 0.2

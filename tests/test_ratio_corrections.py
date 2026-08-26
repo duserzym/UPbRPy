@@ -2,11 +2,16 @@ import numpy as np
 import pandas as pd
 
 from UPbRPy import (
+    aggregate_ratio,
     align_downhole_traces,
     apply_DH_correction,
     build_downhole_fractionation_metadata,
     calc_raw_ratios,
+    calc_depth_profile,
     calc_ratio_mean_and_uncertainty,
+    calc_tw_err_corr_from_counts,
+    calc_tw_err_corr_from_pairs,
+    calc_wetherill_err_corr_from_counts,
     calc_68_date,
     calc_68_date_uncertainty,
     calc_75_date,
@@ -26,7 +31,194 @@ from UPbRPy import (
     propagate_reciprocal_covariance,
     propagate_reciprocal_uncertainty,
     evaluate_downhole_fractionation,
+    ratio_standard_error,
+    ratio_of_means_206pb_204pb,
 )
+
+
+def test_logratio_aggregation_is_reciprocal_and_reports_log_sem():
+    ratios = np.array([0.5, 1.0, 2.0, 4.0])
+
+    forward = aggregate_ratio(ratios, "logratio")
+    reverse = aggregate_ratio(1 / ratios, "logratio")
+
+    assert np.isclose(forward, np.exp(np.mean(np.log(ratios))))
+    assert np.isclose(reverse, 1 / forward)
+    assert ratio_standard_error(ratios, "logratio") > 0
+
+
+def test_tw_sweep_correlation_uses_shared_206pb_denominator():
+    n238 = np.array([400.0, 900.0])
+    n206 = np.array([100.0, 100.0])
+    n207 = np.array([25.0, 100.0])
+
+    result = calc_tw_err_corr_from_counts(n238, n206, n207)
+    expected = (1 / n206) / np.sqrt(
+        (1 / n238 + 1 / n206) * (1 / n207 + 1 / n206)
+    )
+
+    np.testing.assert_allclose(result, expected)
+    assert np.all((result > 0) & (result < 1))
+
+
+def test_wetherill_sweep_correlation_uses_shared_238u_denominator():
+    n207 = np.array([25.0, 100.0])
+    n206 = np.array([100.0, 225.0])
+    n238 = np.array([400.0, 900.0])
+
+    result = calc_wetherill_err_corr_from_counts(n207, n206, n238)
+    expected = (1 / n238) / np.sqrt(
+        (1 / n207 + 1 / n238) * (1 / n206 + 1 / n238)
+    )
+
+    np.testing.assert_allclose(result, expected)
+
+
+def test_depth_profile_207pb_235u_counting_error_cancels_206pb():
+    n206, n207, n238 = 100.0, 25.0, 400.0
+    ratio_68 = n206 / n238
+    ratio_76 = n207 / n206
+    data = pd.DataFrame(
+        {
+            "sample": ["unknown"],
+            "spot_name": ["u1"],
+            "Time": [10.0],
+            "signal_relative_time": [0.0],
+            "206Pb": [n206],
+            "207Pb": [n207],
+            "238U": [n238],
+            "206Pb/238U": [ratio_68],
+            "206Pb/238U_2e": [
+                2 * ratio_68 * np.sqrt(1 / n206 + 1 / n238)
+            ],
+            "207Pb/206Pb": [ratio_76],
+            "207Pb/206Pb_2e": [
+                2 * ratio_76 * np.sqrt(1 / n207 + 1 / n206)
+            ],
+            "206Pb/238U_fractionation_corrected": [ratio_68],
+            "207Pb/206Pb_fractionation_corrected": [ratio_76],
+        }
+    )
+    session = {
+        ratio: {
+            "fit": np.array([1.0]),
+            "std": 0.0,
+            "fit_observations": {"time": np.array([9.0, 11.0])},
+        }
+        for ratio in ("206Pb/238U", "207Pb/206Pb")
+    }
+
+    result = calc_depth_profile(data, session).iloc[0]
+    expected_relative_2e = 2 * np.sqrt(1 / n207 + 1 / n238)
+
+    assert np.isclose(
+        result["207Pb/235U_fractionation_corrected_2e_no_calibration%"],
+        100 * expected_relative_2e,
+    )
+    assert np.isclose(
+        result["tw_rho_no_calibration"],
+        calc_tw_err_corr_from_counts(n238, n206, n207),
+    )
+
+
+def test_tw_spot_correlation_respects_selected_ratio_estimator():
+    ratio_86 = np.array([8.0, 9.0, 11.0, 13.0])
+    ratio_76 = np.array([0.051, 0.052, 0.055, 0.058])
+
+    arithmetic = calc_tw_err_corr_from_pairs(
+        ratio_86, ratio_76, "arithmetic"
+    )
+    logratio = calc_tw_err_corr_from_pairs(
+        ratio_86, ratio_76, "logratio"
+    )
+
+    assert np.isclose(arithmetic, np.corrcoef(ratio_86, ratio_76)[0, 1])
+    assert np.isclose(
+        logratio,
+        np.corrcoef(np.log(ratio_86), np.log(ratio_76))[0, 1],
+    )
+
+
+def test_logratio_spot_summary_uses_geometric_corrected_ratios():
+    ratios = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th")
+    data = pd.DataFrame(
+        {
+            "sample": ["unknown"] * 3,
+            "spot_name": ["u1"] * 3,
+            "Time": [1.0, 2.0, 3.0],
+            "206Pb/238U": [0.1, 0.2, 0.4],
+            "207Pb/206Pb": [0.05, 0.06, 0.09],
+            "208Pb/232Th": [0.02, 0.03, 0.08],
+        }
+    )
+    session_results = {
+        ratio: {
+            "fit": np.array([1.0]),
+            "std": 0.0,
+            "fit_observations": {"time": np.array([0.0, 4.0])},
+        }
+        for ratio in ratios
+    }
+    for ratio in ratios:
+        data[ratio + "_fractionation_corrected"] = data[ratio]
+
+    summary = calc_ratio_mean_and_uncertainty(
+        data,
+        session_results,
+        ratio_aggregation="logratio",
+    )
+
+    assert summary.loc[0, "ratio_aggregation"] == "logratio"
+    assert np.isfinite(summary.loc[0, "tw_rho_no_calibration"])
+    for ratio in ratios:
+        assert np.isclose(
+            summary.loc[0, ratio],
+            np.exp(np.mean(np.log(data[ratio]))),
+        )
+
+
+def test_206pb_204pb_spot_summary_uses_ratio_of_integrated_means():
+    ratios = ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th")
+    data = pd.DataFrame(
+        {
+            "sample": ["unknown", "unknown"],
+            "spot_name": ["u1", "u1"],
+            "Time": [1.0, 2.0],
+            "206Pb": [100.0, 100.0],
+            "204Pb": [1.0, 9.0],
+            "204Pb_2e": [2.0, 6.0],
+            "206Pb/204Pb": [100.0, 100.0 / 9.0],
+            "206Pb/204Pb_2e": [20.0, 4.0],
+            "206Pb/238U": [0.1, 0.102],
+            "207Pb/206Pb": [0.05, 0.051],
+            "208Pb/232Th": [0.02, 0.021],
+        }
+    )
+    session_results = {
+        ratio: {
+            "fit": np.array([1.0]),
+            "std": 0.001,
+            "fit_observations": {"time": np.array([0.0, 3.0])},
+        }
+        for ratio in ratios
+    }
+    for ratio in ratios:
+        data[ratio + "_fractionation_corrected"] = data[ratio]
+
+    expected_ratio, expected_1e = ratio_of_means_206pb_204pb(
+        data["206Pb"], data["204Pb"], data["204Pb_2e"]
+    )
+    arithmetic = calc_ratio_mean_and_uncertainty(data, session_results)
+    logratio = calc_ratio_mean_and_uncertainty(
+        data, session_results, ratio_aggregation="logratio"
+    )
+
+    assert np.isclose(expected_ratio, 20.0)
+    assert not np.isclose(expected_ratio, data["206Pb/204Pb"].mean())
+    for summary in (arithmetic, logratio):
+        assert np.isclose(summary.loc[0, "206Pb/204Pb"], expected_ratio)
+        assert np.isclose(summary.loc[0, "206Pb/204Pb_2e"], 2 * expected_1e)
+        assert summary.loc[0, "206Pb/204Pb_aggregation"] == "ratio_of_means"
 
 
 def test_raw_ratio_regions_share_signal_start_relative_time():

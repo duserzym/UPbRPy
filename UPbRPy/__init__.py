@@ -22,6 +22,7 @@ FOCUSED_SUBMODULES = frozenset(
         "calibration",
         "concentration",
         "constants",
+        "depth",
         "fractionation",
         "io",
         "isochron",

@@ -232,6 +232,7 @@ def test_gui_restore_keeps_saved_config_and_reviewed_windows(
         primary_channel="44Ca",
         workflow_key="apatite",
         workflow_title="Apatite",
+        ratio_aggregation="logratio",
         concentration_standards=preset.concentration_standards,
         primary_68_standard="MAD",
         primary_76_standard="NIST610",
@@ -292,6 +293,7 @@ def test_gui_restore_keeps_saved_config_and_reviewed_windows(
 
     assert shared is restored.session.pipeline
     assert shared.config == config
+    assert restored.session.ratio_aggregation == "logratio"
     assert restored.session.experiment.loc[0, "signal_start_times"] == 2.5
     assert restored.session.experiment.loc[0, "signal_end_times"] == 9.0
     assert shared.cache.stages() == (

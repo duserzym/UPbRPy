@@ -1,6 +1,6 @@
 # UPbRPy
 
-U-Pb data (R)eduction engine in Python for LA-ICP-MS data. Currently supports data collected with a Thermo iCAP RQ ICP-Ms coupled to a Teledyne Analyte Excite+ 193 nm excimer laser ablation system. 
+U-Pb data (R)eduction engine in Python for LA-ICP-MS data. Currently supports data collected with a Thermo iCAP RQ ICP-MS coupled to a Teledyne Analyte Excite+ 193 nm excimer laser ablation system.
 
 ## About
 UPbRPy is developed with a goal of providing a Python-based reproducible data reduction and final result visualization workflow for U-Pb LA-ICP-MS data. The package features:
@@ -20,8 +20,8 @@ UPbRPy is developed with a goal of providing a Python-based reproducible data re
 ### Elemental concentration calibration
 <img src="./examples/example_concentration_calibration.png" alt="Elemental concentration calibration" width="550">
 
-### Dowwhole fractionation characterization and correction
-<img src="./examples/example_downhole_fractionation.png" alt="Dowwhole fractionation characterization and correction" width="600">
+### Downhole fractionation characterization and correction
+<img src="./examples/example_downhole_fractionation.png" alt="Downhole fractionation characterization and correction" width="600">
 
 ### Session-wide fractionation correction
 <img src="./examples/example_session_correction.png" alt="Session-wide fractionation correction" width="600">
@@ -37,6 +37,10 @@ Compact, executed notebooks now live in the separate private
 [UPbRPy-examples](https://github.com/duserzym/UPbRPy-examples) repository.
 This source repository keeps the reusable calculation and visualization code;
 production analytical sessions remain in the LAICPMS database repository.
+
+The maintained mapping between the methods-paper sequence and the shared
+numerical core is documented in
+[`docs/manuscript_workflow_compatibility.md`](docs/manuscript_workflow_compatibility.md).
 
 ## Installation
 pip release will be made available. During development, the most reproducible setup is the conda environment defined in `UPbR_environment.yml`.

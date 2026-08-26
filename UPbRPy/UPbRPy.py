@@ -13,6 +13,7 @@ from .concentration import *  # noqa: F401,F403
 from .ratios import *  # noqa: F401,F403
 from .isoplot import *  # noqa: F401,F403
 from .calibration import *  # noqa: F401,F403
+from .depth import *  # noqa: F401,F403
 from .uncertainty import *  # noqa: F401,F403
 from .fractionation import *  # noqa: F401,F403
 from .reduction import *  # noqa: F401,F403
@@ -31,6 +32,7 @@ from .concentration import __all__ as _concentration_all
 from .ratios import __all__ as _ratios_all
 from .isoplot import __all__ as _isoplot_all
 from .calibration import __all__ as _calibration_all
+from .depth import __all__ as _depth_all
 from .uncertainty import __all__ as _uncertainty_all
 from .fractionation import __all__ as _fractionation_all
 from .reduction import __all__ as _reduction_all
@@ -50,6 +52,7 @@ __all__ = [
     *_ratios_all,
     *_isoplot_all,
     *_calibration_all,
+    *_depth_all,
     *_uncertainty_all,
     *_fractionation_all,
     *_reduction_all,

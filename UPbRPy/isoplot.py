@@ -117,9 +117,21 @@ def construct_final_depthpro_df(
     ``common_pb_options`` to
     :func:`UPbRPy.isochron.apply_common_pb_corrections`.
     """
-    # first drop the sample column from the concentration dataframe
-    depthpro_ratios_df = depthpro_ratios_df.drop(columns=['sample', 'spot_name'])
-    final_depthpro_df = pd.merge(depthpro_concentration_df, depthpro_ratios_df, on='Time')
+    merge_keys = [
+        key
+        for key in ('Time', 'sample', 'spot_name')
+        if key in depthpro_concentration_df.columns
+        and key in depthpro_ratios_df.columns
+    ]
+    if 'Time' not in merge_keys:
+        raise KeyError("Both depth-profile tables must contain 'Time'.")
+    final_depthpro_df = pd.merge(
+        depthpro_concentration_df,
+        depthpro_ratios_df,
+        on=merge_keys,
+        how='inner',
+        validate='one_to_one',
+    )
     final_depthpro_df.sort_values(by='Time', inplace=True, ignore_index=True)
     final_depthpro_df = apply_default_common_pb_corrections(
         final_depthpro_df,
@@ -556,7 +568,7 @@ def concordia(data, type='Wetherill',
               r86='238U/206Pb', r76='207Pb/206Pb',
               s75='207Pb/235U_2e', s68='206Pb/238U_2e', 
               s86='238U/206Pb_2e', s76='207Pb/206Pb_2e',
-              rho='err_corr',
+              rho=None,
               color_by=None, color_map='viridis_r', color_key='bar',
               discordia_fit=False, discordia_anchor=None, discordia_anchor_age=None, 
               age_min=None, age_max=None, xlim=None, ylim=None,
@@ -579,7 +591,10 @@ def concordia(data, type='Wetherill',
     s75, s68, s86, s76 : str, optional
         the names of the columns in the data to be used for the 75, 68, 86, and 76 ratio uncertainties, respectively, by default '207Pb/235U_2e', '206Pb/238U_2e', '238U/206Pb_2e', '207Pb/206Pb_2e'
     rho : str, optional
-        the name of the error correlation column in the data, by default 'err_corr'
+        Error-correlation column. By default Wetherill plots use
+        ``err_corr`` and Tera--Wasserburg plots use ``tw_rho``. If the
+        selected column is absent, uncorrelated ellipses are drawn for
+        backward compatibility with older result tables.
     color_by : str, optional
         the name of the column in the data to color the points by, by default None
     color_map : str, optional
@@ -644,15 +659,24 @@ def concordia(data, type='Wetherill',
         y = pd.to_numeric(data[r68], errors='coerce').to_numpy(dtype=float)
         sx = pd.to_numeric(data[s75], errors='coerce').to_numpy(dtype=float) / 2
         sy = pd.to_numeric(data[s68], errors='coerce').to_numpy(dtype=float) / 2
-        err_corr = pd.to_numeric(data[rho], errors='coerce').fillna(0).to_numpy(dtype=float)
+        correlation_column = 'err_corr' if rho is None else rho
     elif type == 'TW':
         x = pd.to_numeric(data[r86], errors='coerce').to_numpy(dtype=float)
         y = pd.to_numeric(data[r76], errors='coerce').to_numpy(dtype=float)
         sx = pd.to_numeric(data[s86], errors='coerce').to_numpy(dtype=float) / 2
         sy = pd.to_numeric(data[s76], errors='coerce').to_numpy(dtype=float) / 2
-        err_corr = np.zeros(x.shape[0])
+        correlation_column = 'tw_rho' if rho is None else rho
     else:
         raise ValueError('type must be either Wetherill or TW')
+    if correlation_column in data:
+        err_corr = (
+            pd.to_numeric(data[correlation_column], errors='coerce')
+            .fillna(0)
+            .clip(-1, 1)
+            .to_numpy(dtype=float)
+        )
+    else:
+        err_corr = np.zeros(x.shape[0])
 
     xlim, ylim, _curve_min_age, _curve_max_age, _tick_ages, _age_step = concordia_plot_ranges(
         type, x, y, sx, sy, age_min, age_max, xlim, ylim

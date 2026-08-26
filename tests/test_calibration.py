@@ -72,6 +72,35 @@ def test_downhole_default_is_pointwise_mean_and_model_is_replaceable():
     assert np.all(np.isfinite(linear_model(linear_metadata["time"])))
 
 
+def test_downhole_logratio_mode_uses_geometric_standard_center():
+    rows = []
+    for spot_name, ratio in (("RM_1", 0.5), ("RM_2", 2.0)):
+        for time in (0.0, 1.0, 2.0):
+            rows.append(
+                {
+                    "sample": "RM",
+                    "spot_name": spot_name,
+                    "Time": time,
+                    "signal_relative_time": time,
+                    "206Pb/238U": ratio,
+                }
+            )
+    data = pd.DataFrame(rows)
+
+    _, fitted, metadata = calc_DH_nominal_fractionation(
+        1.0,
+        data,
+        "206Pb/238U",
+        return_metadata=True,
+        ratio_aggregation="logratio",
+    )
+
+    np.testing.assert_allclose(metadata["mean_fractionation"], 1.0)
+    np.testing.assert_allclose(fitted(metadata["time"]), 1.0)
+    assert metadata["ratio_aggregation"] == "logratio"
+    assert metadata["model_settings"]["fit_space"] == "logratio"
+
+
 def test_dynamic_downhole_filter_rejects_one_extreme_primary_sweep():
     rows = []
     for spot_index in range(6):

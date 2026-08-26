@@ -8,27 +8,30 @@ separate reduction algorithms.
 
 from __future__ import annotations
 
+import hashlib
+import platform
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-import hashlib
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-import platform
-import sys
-from typing import Any
 
 import pandas as pd
 
+from .depth import (
+    LinearDepthCalibration,
+    apply_depth_calibration,
+    linear_depth_calibration_from_dict,
+)
 from .results import (
     AutomaticFlagSettings,
     FinalizedReduction,
     ReductionDecision,
     finalize_reduction_results,
 )
-
 
 PIPELINE_FORMAT_VERSION = 1
 
@@ -236,6 +239,7 @@ class PipelineConfig:
         "207Pb/206Pb",
         "208Pb/232Th",
     )
+    ratio_aggregation: str = "arithmetic"
     common_pb_calibration: str = "radiogenic"
     downhole: FitSettings = field(
         default_factory=lambda: FitSettings(
@@ -254,6 +258,7 @@ class PipelineConfig:
         default_factory=AutomaticFlagSettings
     )
     common_pb_options: dict[str, object] = field(default_factory=dict)
+    depth_calibration: LinearDepthCalibration | None = None
 
     def __post_init__(self) -> None:
         """Validate calibration mode and required configuration invariants."""
@@ -265,7 +270,28 @@ class PipelineConfig:
             )
         if not self.ratio_names:
             raise ValueError("ratio_names must contain at least one ratio")
+        from .ratios import normalize_ratio_aggregation_method
+
         object.__setattr__(self, "common_pb_calibration", mode)
+        object.__setattr__(
+            self,
+            "ratio_aggregation",
+            normalize_ratio_aggregation_method(self.ratio_aggregation),
+        )
+        if isinstance(self.depth_calibration, Mapping):
+            object.__setattr__(
+                self,
+                "depth_calibration",
+                linear_depth_calibration_from_dict(self.depth_calibration),
+            )
+        elif (
+            self.depth_calibration is not None
+            and not isinstance(self.depth_calibration, LinearDepthCalibration)
+        ):
+            raise TypeError(
+                "depth_calibration must be LinearDepthCalibration, a saved "
+                "mapping, or None."
+            )
 
     @property
     def primary_standard(self) -> str:
@@ -286,12 +312,18 @@ class PipelineConfig:
             "primary_82_standard": self.primary_82_standard,
             "secondary_standards": list(self.secondary_standards),
             "ratio_names": list(self.ratio_names),
+            "ratio_aggregation": self.ratio_aggregation,
             "common_pb_calibration": self.common_pb_calibration,
             "downhole": self.downhole.to_dict(),
             "session": self.session.to_dict(),
             "decision": asdict(self.decision),
             "automatic_flags": asdict(self.automatic_flags),
             "common_pb_options": dict(self.common_pb_options),
+            "depth_calibration": (
+                None
+                if self.depth_calibration is None
+                else self.depth_calibration.to_dict()
+            ),
         }
 
 
@@ -319,6 +351,11 @@ def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
     data["automatic_flags"] = AutomaticFlagSettings(
         **dict(data.get("automatic_flags", {}))
     )
+    depth_calibration = data.get("depth_calibration")
+    if isinstance(depth_calibration, Mapping):
+        data["depth_calibration"] = linear_depth_calibration_from_dict(
+            depth_calibration
+        )
     return PipelineConfig(**data)
 
 
@@ -515,6 +552,8 @@ class ReductionPipeline:
             self.run_baseline(),
             self.standard_archive,
             material=self.config.material,
+            internal_channel=self.config.primary_channel,
+            region="plateau",
         )
         return self.cache.set(PipelineStage.NORMALIZATION, result)
 
@@ -547,6 +586,7 @@ class ReductionPipeline:
             calibrants,
             list(self.channels),
             self.standard_archive,
+            internal_channel=self.config.primary_channel,
             build_plot=self.build_diagnostic_plots,
         )
         unknowns = normalized[
@@ -639,6 +679,7 @@ class ReductionPipeline:
                 model=config.downhole.method,
                 model_kwargs=model_options,
                 outlier_sigma=config.downhole.outlier_sigma,
+                ratio_aggregation=config.ratio_aggregation,
                 build_plot=self.build_diagnostic_plots,
             )
         else:
@@ -649,6 +690,7 @@ class ReductionPipeline:
                 model=config.downhole.method,
                 model_kwargs=model_options,
                 outlier_sigma=config.downhole.outlier_sigma,
+                ratio_aggregation=config.ratio_aggregation,
                 build_plot=self.build_diagnostic_plots,
             )
         result = {
@@ -703,6 +745,7 @@ class ReductionPipeline:
                 degree=degree,
                 model=config.session.method,
                 model_kwargs=options,
+                ratio_aggregation=config.ratio_aggregation,
                 build_plot=self.build_diagnostic_plots,
             )
         else:
@@ -713,6 +756,7 @@ class ReductionPipeline:
                 degree=degree,
                 model=config.session.method,
                 model_kwargs=options,
+                ratio_aggregation=config.ratio_aggregation,
                 build_plot=self.build_diagnostic_plots,
             )
         result = {
@@ -741,6 +785,7 @@ class ReductionPipeline:
         ratio_means = calc_ratio_mean_and_uncertainty(
             session["plateau_corrected"],
             session["correction_results"],
+            ratio_aggregation=self.config.ratio_aggregation,
         )
         if self.config.concentration_standards:
             concentration = self.run_concentration()[
@@ -764,17 +809,62 @@ class ReductionPipeline:
         return self.cache.set(PipelineStage.SPOT_MEANS, result)
 
     def run_depth_profile(self) -> pd.DataFrame:
-        """Calculate corrected sweep-wise ratios, dates, and uncertainties."""
+        """Calculate a complete calibrated sweep-wise depth product.
+
+        Ratio and concentration calculations both use the inclusive reviewed
+        signal interval.  This is intentionally different from spot means,
+        which use the filtered plateau.  Common-Pb calculations are appended
+        for configured common-Pb-rich minerals before an optional physical
+        pulse-to-depth calibration is applied.
+        """
+        from .concentration import (
+            calc_concentration_depth_profile,
+            internal_normalization,
+        )
+        from .isoplot import construct_final_depthpro_df
         from .reduction import calc_depth_profile
 
         cached = self.cache.get(PipelineStage.DEPTH_PROFILE)
         if isinstance(cached, pd.DataFrame):
             return cached
         session = self.run_session()
-        result = calc_depth_profile(
+        ratio_profile = calc_depth_profile(
             session["signal_corrected"],
             session["correction_results"],
         )
+        if self.config.concentration_standards:
+            concentration_result = self.run_concentration()
+            signal_normalized = internal_normalization(
+                self.experiment,
+                list(self.channels),
+                self.run_baseline(),
+                self.standard_archive,
+                material=self.config.material,
+                internal_channel=self.config.primary_channel,
+                region="signal",
+            )
+            active_standards = concentration_result["active_standards"]
+            analytes = signal_normalized[
+                ~signal_normalized["sample"].isin(active_standards)
+            ].reset_index(drop=True)
+            concentration_profile = calc_concentration_depth_profile(
+                analytes,
+                concentration_result["calibration"],
+                internal_channel=self.config.primary_channel,
+            )
+            result = construct_final_depthpro_df(
+                concentration_profile,
+                ratio_profile,
+                material=self.config.material,
+                common_pb_options=self.config.common_pb_options,
+            )
+        else:
+            result = ratio_profile
+        if self.config.depth_calibration is not None:
+            result = apply_depth_calibration(
+                result,
+                self.config.depth_calibration,
+            )
         return self.cache.set(PipelineStage.DEPTH_PROFILE, result)
 
     def run_finalize(self) -> FinalizedReduction:

@@ -308,6 +308,109 @@ def fit_calibration_model(
     )
 
 
+def fit_multiplicative_calibration_model(
+    x,
+    factors,
+    method="polynomial",
+    *,
+    fit_space="linear",
+    weights=None,
+    **model_kwargs,
+):
+    """Fit positive multiplicative corrections in linear or log space.
+
+    The ``logratio`` mode implements the additive fractionation relationship
+    described by McLean et al. (2016),
+    ``log(R_true) = log(C) + log(R_measured)``.  Built-in calibration models
+    are fitted to ``log(C)`` and exponentiated when evaluated, ensuring every
+    returned correction factor remains positive.  Residual diagnostics are
+    returned in ordinary factor units for compatibility with existing plots
+    and uncertainty columns.
+
+    Custom callables retain their established factor-space semantics and are
+    therefore rejected in log space.  A custom log-space model can still be
+    supplied after fitting by evaluating it outside this convenience wrapper.
+    """
+    normalized_space = str(fit_space).strip().lower().replace("-", "_")
+    aliases = {
+        "linear": "linear",
+        "arithmetic": "linear",
+        "ratio": "linear",
+        "log": "logratio",
+        "log_ratio": "logratio",
+        "logratio": "logratio",
+        "geometric": "logratio",
+    }
+    try:
+        normalized_space = aliases[normalized_space]
+    except KeyError as error:
+        raise ValueError("fit_space must be 'linear' or 'logratio'.") from error
+    if normalized_space == "linear":
+        return fit_calibration_model(
+            x,
+            factors,
+            method=method,
+            weights=weights,
+            **model_kwargs,
+        )
+    if callable(method):
+        raise ValueError(
+            "Log-space calibration currently requires a built-in model name; "
+            "custom callables retain factor-space semantics."
+        )
+
+    x_array = np.asarray(x, dtype=float)
+    factor_array = np.asarray(factors, dtype=float)
+    if x_array.shape != factor_array.shape:
+        raise ValueError("x and factors must have the same shape.")
+    valid = np.isfinite(x_array) & np.isfinite(factor_array) & (factor_array > 0)
+    if weights is not None:
+        weight_array = np.asarray(weights, dtype=float)
+        if weight_array.shape != factor_array.shape:
+            raise ValueError("weights must match x and factors.")
+        valid &= np.isfinite(weight_array) & (weight_array > 0)
+        # If supplied weights are inverse absolute factor uncertainties, the
+        # delta method gives inverse log-factor uncertainty C / sigma_C.
+        log_weights = factor_array[valid] * weight_array[valid]
+    else:
+        log_weights = None
+    if not np.any(valid):
+        raise ValueError("Log-space calibration requires positive factors.")
+
+    log_model = fit_calibration_model(
+        x_array[valid],
+        np.log(factor_array[valid]),
+        method=method,
+        weights=log_weights,
+        **model_kwargs,
+    )
+    predictor = lambda values, fitted=log_model: np.exp(fitted(values))
+    fitted_factors = predictor(x_array[valid])
+    factor_residuals = factor_array[valid] - fitted_factors
+    residual_standard_deviation = float(
+        np.sqrt(
+            np.sum(factor_residuals**2)
+            / max(log_model.degrees_of_freedom, 1)
+        )
+    )
+    settings = dict(log_model.settings)
+    settings["fit_space"] = "logratio"
+    settings["log_residual_standard_deviation"] = (
+        log_model.residual_standard_deviation
+    )
+    return CalibrationModel(
+        method=log_model.method,
+        predictor=predictor,
+        parameters=log_model.parameters,
+        x=x_array[valid],
+        y=factor_array[valid],
+        residuals=factor_residuals,
+        residual_standard_deviation=residual_standard_deviation,
+        degrees_of_freedom=log_model.degrees_of_freedom,
+        settings=settings,
+    )
+
+
 def evaluate_correction_result(result, values):
     """Evaluate either a modern or legacy correction-result mapping.
 
@@ -324,6 +427,7 @@ def evaluate_correction_result(result, values):
 __all__ = [
     "CalibrationModel",
     "fit_calibration_model",
+    "fit_multiplicative_calibration_model",
     "evaluate_correction_result",
     "running_mean_curve",
 ]
