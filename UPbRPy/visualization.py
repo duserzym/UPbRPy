@@ -1149,7 +1149,9 @@ for (let i = 0; i < ranges.data.spot.length; i += 1) {
 }
 if (rangeIndex < 0) return;
 
-const cutoff = 5.991464547107979;
+// A true 2-sigma ellipse uses semiaxes two standard deviations long.
+// This differs from a 95% joint contour (sqrt(chi2_0.95,2) = 2.448 sigma).
+const cutoff = 4.0;
 function ellipsePolygon(index) {
   if (![x[index], y[index], sx[index], sy[index], rho[index]].every(Number.isFinite)) {
     return null;

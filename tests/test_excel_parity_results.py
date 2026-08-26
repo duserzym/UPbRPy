@@ -206,6 +206,10 @@ def test_publication_tables_include_depth_results_and_explanatory_notes():
             "spot_name": ["spot_1"],
             "preferred_age": [100.0],
             "preferred_age_2e": [2.0],
+            "preferred_date": [100.0],
+            "preferred_date_2e": [2.0],
+            "U": [40.0],
+            "U_2s": [2.0],
         }
     )
     finalized = FinalizedReduction(
@@ -224,6 +228,9 @@ def test_publication_tables_include_depth_results_and_explanatory_notes():
             "206Pb/238U_fractionation_corrected_2e_no_calibration": [0.001],
             "206Pb/238U_fractionation_corrected_2e_with_calibration": [0.002],
             "206Pb/238U_age": [127.7],
+            "U": [42.0],
+            "U_2s": [2.0],
+            "U_95CI": [2.1],
             "raw_detector_column": [12345.0],
         }
     )
@@ -234,8 +241,15 @@ def test_publication_tables_include_depth_results_and_explanatory_notes():
     )
 
     assert "Depth profiles" in tables
+    assert "Spot concentrations" in tables
     assert "Table notes" in tables
     assert "raw_detector_column" not in tables["Depth profiles"]
+    assert {"U", "U_2s", "U_95CI"}.issubset(tables["Depth profiles"])
+    assert "206Pb/238U_date" in tables["Depth profiles"]
+    assert "206Pb/238U_age" not in tables["Depth profiles"]
+    assert {"preferred_date", "U", "U_2s"}.issubset(
+        tables["Spot concentrations"]
+    )
     depth_notes = tables["Table notes"].query(
         "worksheet == 'Depth profiles'"
     )["note"].str.cat(sep=" ")

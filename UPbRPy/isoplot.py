@@ -906,7 +906,7 @@ def cor2cov2(sx,sy,rxy):
     covmat[0][1] = covmat[1][0] = rxy*sx*sy
     return covmat
 
-def calc_concordia_ellipse(x,y,sx,sy,rxy, alpha=0.05, n=100):
+def calc_concordia_ellipse(x, y, sx, sy, rxy, alpha=None, n=100, sigma_level=2.0):
     '''
     function for calculating error ellipses for Wetherill concordia diagram
     
@@ -920,11 +920,14 @@ def calc_concordia_ellipse(x,y,sx,sy,rxy, alpha=0.05, n=100):
 
     Required Parameters:
     ---------------------
-    alpha: (1-alpha)*100% confidence range
+    alpha: optional joint-confidence tail probability. When supplied it
+        overrides ``sigma_level`` for backward-compatible custom contours.
+    sigma_level: semiaxis multiplier. The default is a true 2-sigma ellipse,
+        which encloses about 86.5% of a bivariate normal distribution.
     n: number of points to calculate on the ellipse to smooth the shape
     '''
     cov_mat = cor2cov2(sx, sy, rxy)
-    cutoff = chi2.ppf(1-alpha,2)
+    cutoff = sigma_level**2 if alpha is None else chi2.ppf(1-alpha, 2)
     eigenvalues, eigenvectors = np.linalg.eigh(cov_mat)
     eigenvalues = np.maximum(eigenvalues, 0)
     major_index = int(np.argmax(eigenvalues))

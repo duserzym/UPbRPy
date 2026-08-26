@@ -9,10 +9,21 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
 
+from .constants import (
+    common_U238_U235,
+    lambda_232,
+    lambda_235,
+    lambda_238,
+    sigma_232,
+    sigma_235,
+    sigma_238,
+    sigma_common_U238_U235,
+)
 
 
 @dataclass(frozen=True)
@@ -395,6 +406,7 @@ def assign_preferred_age(
     results,
     *,
     decision: ReductionDecision | None = None,
+    use_selected_systematics: bool = False,
 ):
     """Select preferred ages without discarding any parallel calculation.
 
@@ -424,6 +436,9 @@ def assign_preferred_age(
         if decision.include_calibration_uncertainty
         else "no_calibration"
     )
+    uncertainty_suffix = f"_2e_{uncertainty_mode}"
+    if use_selected_systematics:
+        uncertainty_suffix += "_selected_systematic"
 
     if decision.common_pb_method in {"207", "208"}:
         base = f"{decision.common_pb_method}Pb_corrected_age"
@@ -432,8 +447,10 @@ def assign_preferred_age(
                 f"{base!r} is absent; calculate common-Pb outputs first"
             )
         frame["preferred_age"] = frame[base]
+        requested = base + uncertainty_suffix
+        fallback = f"{base}_2e_{uncertainty_mode}"
         frame["preferred_age_2e"] = frame[
-            f"{base}_2e_{uncertainty_mode}"
+            requested if requested in frame else fallback
         ]
         frame["preferred_age_method"] = (
             decision.common_pb_method + "Pb-corrected"
@@ -454,8 +471,12 @@ def assign_preferred_age(
         )
         young_age = prefix + "206Pb/238U_age"
         old_age = prefix + "207Pb/206Pb_age"
-        young_uncertainty = young_age + f"_2e_{uncertainty_mode}"
-        old_uncertainty = old_age + f"_2e_{uncertainty_mode}"
+        young_uncertainty = young_age + uncertainty_suffix
+        old_uncertainty = old_age + uncertainty_suffix
+        if young_uncertainty not in frame:
+            young_uncertainty = young_age + f"_2e_{uncertainty_mode}"
+        if old_uncertainty not in frame:
+            old_uncertainty = old_age + f"_2e_{uncertainty_mode}"
         missing = [
             column
             for column in (
@@ -507,6 +528,13 @@ def assign_preferred_age(
     frame["preferred_age_pass"] = (
         frame["preferred_age_valid"] & automatic_pass
     )
+    # Public single-analysis terminology follows Horstwood et al. (2016).
+    # Legacy age names remain aliases so existing notebooks do not break.
+    frame["preferred_date"] = frame["preferred_age"]
+    frame["preferred_date_2e"] = frame["preferred_age_2e"]
+    frame["preferred_date_method"] = frame["preferred_age_method"]
+    frame["preferred_date_valid"] = frame["preferred_age_valid"]
+    frame["preferred_date_pass"] = frame["preferred_age_pass"]
     frame.attrs = dict(results.attrs)
     frame.attrs["reduction_decision"] = asdict(decision)
     return frame
@@ -670,6 +698,7 @@ def finalize_reduction_results(
     quality_signal_data=None,
     secondary_standard_names=None,
     accepted_secondary_ages=None,
+    uncertainty_settings=None,
 ):
     """Run common-Pb alternatives, QC, selection, and summaries.
 
@@ -698,6 +727,7 @@ def finalize_reduction_results(
         secondary-standard summary.
     """
     from .isochron import apply_common_pb_corrections
+    from .uncertainty import UncertaintySettings, append_systematic_date_uncertainties
 
     decision = decision or ReductionDecision()
     expected_columns = {
@@ -714,6 +744,9 @@ def finalize_reduction_results(
             **(common_pb_options or {}),
         )
     )
+    settings = uncertainty_settings or UncertaintySettings()
+    if not isinstance(settings, UncertaintySettings):
+        settings = UncertaintySettings(**dict(settings))
     metrics = (
         calculate_spot_quality_metrics(
             sweep_data,
@@ -728,7 +761,24 @@ def finalize_reduction_results(
         quality_metrics=metrics,
         settings=flag_settings,
     )
-    selected = assign_preferred_age(parallel, decision=decision)
+    systematic_requested = (
+        settings.propagate_decay_constants
+        or settings.propagate_u238_u235
+        or settings.long_term_reproducibility_mode != "none"
+    )
+    if settings.long_term_reproducibility_mode == "user":
+        parallel = append_systematic_date_uncertainties(parallel, settings)
+    elif settings.propagate_decay_constants or settings.propagate_u238_u235:
+        parallel = append_systematic_date_uncertainties(
+            parallel,
+            settings,
+            long_term_relative_1s=0.0,
+        )
+    selected = assign_preferred_age(
+        parallel,
+        decision=decision,
+        use_selected_systematics=systematic_requested,
+    )
     secondary_source = selected
     if secondary_standard_names is not None:
         secondary_source = selected[
@@ -742,15 +792,51 @@ def finalize_reduction_results(
         if not secondary_source.empty
         else pd.DataFrame()
     )
+    if settings.long_term_reproducibility_mode == "secondary":
+        offsets = pd.to_numeric(
+            secondary.get("offset_percent", pd.Series(dtype=float)),
+            errors="coerce",
+        ).abs()
+        # A single session cannot establish true long-term reproducibility.
+        # This explicit option uses the largest observed secondary-standard
+        # weighted-mean offset as a conservative relative 1-sigma term.
+        relative_1s = float(offsets.max() / 100) if offsets.notna().any() else 0.0
+        parallel = append_systematic_date_uncertainties(
+            parallel,
+            settings,
+            long_term_relative_1s=relative_1s,
+        )
+        selected = assign_preferred_age(
+            parallel,
+            decision=decision,
+            use_selected_systematics=True,
+        )
+        selected.attrs["secondary_reproducibility_estimator"] = (
+            "maximum absolute weighted-mean offset from accepted date"
+        )
+        selected.attrs["secondary_reproducibility_relative_1s"] = relative_1s
+        secondary_source = selected
+        if secondary_standard_names is not None:
+            secondary_source = selected[
+                selected["sample"].isin(secondary_standard_names)
+            ]
+        secondary = (
+            summarize_secondary_standards(
+                secondary_source,
+                accepted_values=accepted_secondary_ages,
+            )
+            if not secondary_source.empty
+            else pd.DataFrame()
+        )
     concise_columns = [
         column
         for column in (
             "sample",
             "spot_name",
-            "preferred_age",
-            "preferred_age_2e",
-            "preferred_age_method",
-            "preferred_age_pass",
+            "preferred_date",
+            "preferred_date_2e",
+            "preferred_date_method",
+            "preferred_date_pass",
             "automatic_flags",
             "206Pb/238U",
             "206Pb/238U_2e_no_calibration",
@@ -779,7 +865,7 @@ def finalize_reduction_results(
     )
 
 
-def publication_depth_profile_table(depth_profile):
+def publication_depth_profile_table(depth_profile, *, include_concentrations=False):
     """Return publication-relevant sweep columns in a readable order.
 
     Raw detector channels and transient intermediate columns remain available
@@ -818,26 +904,284 @@ def publication_depth_profile_table(depth_profile):
             or str(column).startswith("tw_rho")
         )
     ]
-    return depth_profile.loc[:, leading + scientific].copy()
+    if include_concentrations:
+        concentration_pattern = re.compile(
+            r"^[A-Z][a-z]?(?:_(?:1s|1s%|2s|2s%|2e|2e%|95ci|95ci%))?$",
+            flags=re.IGNORECASE,
+        )
+        scientific.extend(
+            column
+            for column in depth_profile.columns
+            if column not in leading
+            and column not in scientific
+            and concentration_pattern.match(str(column))
+        )
+    result = depth_profile.loc[:, leading + scientific].copy()
+    result = result.rename(
+        columns={
+            column: str(column).replace("_age", "_date")
+            for column in result.columns
+            if "_age" in str(column)
+        }
+    )
+    return result
+
+
+def publication_spot_concentration_table(finalized):
+    """Return spot dates beside all available elemental concentrations.
+
+    Element names are isotope agnostic (for example ``U`` rather than
+    ``238U``). Their ``1s``, ``2s``, and ``95CI`` companion columns are kept
+    when present. Raw detector-isotope channels are excluded.
+    """
+    if not isinstance(finalized, FinalizedReduction):
+        raise TypeError("finalized must be a FinalizedReduction")
+    source = finalized.parallel_results
+    concentration_pattern = re.compile(
+        r"^[A-Z][a-z]?(?:_(?:1s|1s%|2s|2s%|2e|2e%|95ci|95ci%))?$",
+        flags=re.IGNORECASE,
+    )
+    leading = [
+        column
+        for column in (
+            "sample",
+            "spot_name",
+            "preferred_date",
+            "preferred_date_2e",
+            "preferred_date_method",
+            "preferred_date_pass",
+        )
+        if column in source
+    ]
+    date_columns = [
+        column
+        for column in source
+        if column not in leading
+        and (
+            "_date" in str(column).casefold()
+            or (
+                "_age" in str(column).casefold()
+                and "preferred_age" not in str(column).casefold()
+            )
+        )
+    ]
+    concentration_columns = [
+        column
+        for column in source
+        if column not in leading
+        and column not in date_columns
+        and concentration_pattern.match(str(column))
+    ]
+    result = source.loc[
+        :,
+        leading + date_columns + concentration_columns,
+    ].copy()
+    return result.rename(
+        columns={
+            column: str(column).replace("_age", "_date")
+            for column in result.columns
+            if "_age" in str(column)
+        }
+    )
+
+
+def build_horstwood_table4(finalized, *, include_concentrations=True):
+    """Return a Horstwood et al. (2016) Table 4-style single-analysis table.
+
+    The export uses ``date`` for single-analysis daughter/parent results and
+    reports analytical and systematic-inclusive 2-sigma columns separately.
+    Internal legacy ``*_age`` columns remain untouched for notebook
+    compatibility. Missing optional measurements are simply omitted.
+    """
+    if not isinstance(finalized, FinalizedReduction):
+        raise TypeError("finalized must be a FinalizedReduction")
+    source = finalized.parallel_results
+    output = pd.DataFrame(index=source.index)
+
+    def copy_first(label, candidates):
+        for candidate in candidates:
+            if candidate in source.columns:
+                output[label] = source[candidate]
+                return
+
+    copy_first("Analysis", ("spot_name",))
+    copy_first("Sample", ("sample",))
+    copy_first("Comments / flags", ("automatic_flags",))
+    copy_first(
+        "Beam diameter (µm)",
+        ("beam_diameter_um", "spot_diameter_um", "laser_spot_size_um"),
+    )
+    method = finalized.decision.common_pb_method
+    fraction_candidates = (
+        (f"{method}Pb_common_fraction_206",)
+        if method in {"204", "207", "208"}
+        else ()
+    ) + (
+        "204Pb_common_fraction_206",
+        "207Pb_common_fraction_206",
+        "208Pb_common_fraction_206",
+    )
+    copy_first("f206c", fraction_candidates)
+    if include_concentrations:
+        copy_first("U (µg g-1)", ("U",))
+        copy_first("U 2SD (µg g-1)", ("U_2s", "U_2e"))
+        copy_first("U 95% CI (µg g-1)", ("U_95CI",))
+        copy_first("Th/U", ("Th/U",))
+
+    def copy_ratio(label, base, *, inverse_base=None):
+        """Copy a reported ratio and its two uncertainty branches."""
+        direct_candidates = (f"{base}_fractionation_corrected", base)
+        direct = next(
+            (candidate for candidate in direct_candidates if candidate in source),
+            None,
+        )
+        if direct is not None:
+            output[label] = source[direct]
+        elif inverse_base is not None:
+            inverse = next(
+                (
+                    candidate
+                    for candidate in (
+                        f"{inverse_base}_fractionation_corrected",
+                        inverse_base,
+                    )
+                    if candidate in source
+                ),
+                None,
+            )
+            if inverse is not None:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    output[label] = 1.0 / pd.to_numeric(
+                        source[inverse], errors="coerce"
+                    )
+                for branch, suffix in (
+                    ("no_calibration", " 2σ analytical"),
+                    ("with_calibration", " 2σ incl. calibration"),
+                ):
+                    uncertainty = next(
+                        (
+                            candidate
+                            for candidate in (
+                                inverse + f"_2e_{branch}",
+                                inverse_base + f"_2e_{branch}",
+                                inverse + "_2e",
+                                inverse_base + "_2e",
+                            )
+                            if candidate in source
+                        ),
+                        None,
+                    )
+                    if uncertainty is not None:
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            output[label + suffix] = pd.to_numeric(
+                                source[uncertainty], errors="coerce"
+                            ) / pd.to_numeric(source[inverse], errors="coerce") ** 2
+                return
+        if direct is None:
+            return
+        copy_first(
+            label + " 2σ analytical",
+            (
+                direct + "_2e_no_calibration",
+                f"{base}_2e_no_calibration",
+                direct + "_2e",
+                f"{base}_2e",
+            ),
+        )
+        copy_first(
+            label + " 2σ incl. calibration",
+            (
+                direct + "_2e_with_calibration",
+                f"{base}_2e_with_calibration",
+                direct + "_2e",
+                f"{base}_2e",
+            ),
+        )
+
+    for label, base, inverse in (
+        ("206Pb/204Pb", "206Pb/204Pb", None),
+        ("238U/206Pb", "238U/206Pb", "206Pb/238U"),
+        ("207Pb/206Pb", "207Pb/206Pb", None),
+        ("208Pb/206Pb", "208Pb/206Pb", "206Pb/208Pb"),
+        ("207Pb/235U", "207Pb/235U", None),
+        ("206Pb/238U", "206Pb/238U", None),
+        ("208Pb/232Th", "208Pb/232Th", None),
+    ):
+        copy_ratio(label, base, inverse_base=inverse)
+    copy_first("rho Wetherill", ("err_corr_with_calibration", "err_corr"))
+    copy_first("rho Tera-Wasserburg", ("tw_rho_with_calibration", "tw_rho"))
+
+    for system in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "208Pb/232Th"):
+        age = f"{system}_age"
+        copy_first(f"{system} date (Ma)", (age,))
+        copy_first(
+            f"{system} date 2σ analytical (Ma)",
+            (age + "_2e_no_calibration", age + "_2e"),
+        )
+        copy_first(
+            f"{system} date 2σ incl. calibration (Ma)",
+            (age + "_2e_with_calibration", age + "_2e"),
+        )
+        copy_first(
+            f"{system} date 2σ selected total (Ma)",
+            (
+                age + "_2e_selected_systematic",
+                age + "_2e_with_calibration",
+                age + "_2e",
+            ),
+        )
+    copy_first("Preferred date (Ma)", ("preferred_date", "preferred_age"))
+    copy_first(
+        "Preferred date 2σ (Ma)",
+        ("preferred_date_2e", "preferred_age_2e"),
+    )
+    copy_first(
+        "Preferred date method",
+        ("preferred_date_method", "preferred_age_method"),
+    )
+    return output.reset_index(drop=True)
 
 
 def publication_table_notes(tables):
     """Build geology-facing footnotes for each exported result table."""
     shared = [
-        "Ratios are dimensionless; ages and age uncertainties are reported in Ma.",
         (
-            "Columns ending in _2e are absolute two-standard-error (2SE) "
-            "uncertainties, approximately 95% under a normal model."
+            "Ratios are dimensionless. Single-analysis daughter/parent results "
+            "are dates in Ma; the term age is reserved for an interpreted "
+            "population or geological event."
         ),
         (
-            "_2e_no_calibration contains counting and within-spot analytical "
-            "uncertainty; _2e_with_calibration additionally includes session "
-            "calibration residual scatter."
+            "Uncertainty columns are absolute 2σ values: spot aggregates use "
+            "two standard errors of the mean, whereas individual sweeps use "
+            "twice their propagated one-sigma measurement uncertainty. A two-sigma "
+            "concordia ellipse uses semiaxes of 2 standard errors "
+            "and contains about 86.5% joint probability for a bivariate normal "
+            "distribution; it is not a 95% joint-confidence ellipse."
         ),
         (
-            "Downhole and session fitted coefficients are treated as systematic; "
-            "coefficient covariance and cross-ratio session covariance are not "
-            "propagated."
+            "Analytical 2σ includes counting statistics, propagated baseline-mean "
+            "uncertainty, within-analysis dispersion, and applicable common-Pb "
+            "composition uncertainty. The calibration-inclusive branch additionally "
+            "includes session-calibration residual scatter."
+        ),
+        (
+            "Selected-total date uncertainty begins with the calibration-inclusive "
+            "branch and adds only the user-selected systematic terms: decay constants, "
+            "238U/235U, and/or external long-term reproducibility. Each choice and "
+            "numerical value is recorded in the Methods worksheet."
+        ),
+        (
+            "Long-term reproducibility is entered as relative 1SD in calibrated-ratio "
+            "space and converted to date uncertainty with the local ratio--date "
+            "derivative. A secondary-standard estimate is a session validation "
+            "diagnostic; a defensible long-term value normally requires repeated "
+            "measurements across many sessions."
+        ),
+        (
+            "Downhole-fit uncertainty is treated as a systematic alignment/correction "
+            "model and is not propagated sweep by sweep. Session residual scatter is "
+            "propagated; fitted-coefficient covariance and cross-ratio session "
+            "covariance are not propagated."
         ),
         (
             "err_corr is the propagated correlation coefficient for the "
@@ -850,18 +1194,23 @@ def publication_table_notes(tables):
             "mean 206Pb signal to the mean Hg-corrected mass-204 signal; "
             "depth-profile 206Pb/204Pb values remain sweep resolved."
         ),
+        (
+            "Common-Pb fraction names have the form METHODPb_common_fraction_206 "
+            "and report the fraction of measured 206Pb inferred to be common Pb. "
+            "The f206c column uses the method selected in the Methods worksheet."
+        ),
     ]
     notes = {
         "Results": shared
         + [
             (
-                "preferred_age and preferred_age_method record the selected "
+                "preferred_date and preferred_date_method record the selected "
                 "common-Pb and age-transition decision; parallel alternatives "
                 "are retained in Parallel audit."
             ),
             (
                 "automatic_flags are screening diagnostics, not silently applied "
-                "deletions; preferred_age_pass records the resulting decision."
+                "deletions; preferred_date_pass records the resulting decision."
             ),
         ],
         "Secondary standards": [
@@ -869,6 +1218,47 @@ def publication_table_notes(tables):
                 "Weighted means use inverse-variance weights from accepted spot "
                 "uncertainties; MSWD describes dispersion relative to those errors."
             )
+        ],
+        "Horstwood Table 4": shared
+        + [
+            (
+                "Reporting structure and uncertainty terminology follow Horstwood "
+                "et al. (2016), https://doi.org/10.1111/j.1751-908X.2016.00379.x."
+            ),
+            (
+                "Single-analysis daughter/parent results are termed dates; "
+                "interpretive weighted means or geological populations may be ages."
+            ),
+            (
+                "The analytical, calibration-inclusive, and selected-total 2σ date "
+                "columns are kept separate following Horstwood et al. (2016). Blank "
+                "cells mean that the isotope system or optional field was not measured "
+                "or could not be calculated; they are not zeros."
+            ),
+            (
+                "The default 238U/235U ratio is 137.818 ± 0.045 (2SD; Hiess "
+                "et al., 2012, https://doi.org/10.1126/science.1215507). Decay "
+                "constants are lambda-238 = 1.55125e-10 yr-1 ± 0.11% (2SD) "
+                "and lambda-235 = 9.8485e-10 yr-1 ± 0.14% (2SD; Jaffey et "
+                "al., 1971, https://doi.org/10.1103/PhysRevC.4.1889), and "
+                "lambda-232 = 4.9475e-11 yr-1 ± 0.042e-11 yr-1 (2SD; Holden, "
+                "1990, https://doi.org/10.1351/pac199062050941). These systematic "
+                "uncertainties enter a reported date only when their corresponding "
+                "Methods-sheet option is enabled."
+            ),
+            (
+                "Initial common-Pb compositions may be fixed from a cogenetic phase or "
+                "calculated with the Stacey--Kramers model. Model uncertainty is not "
+                "defined by Stacey and Kramers (1975) itself: the selected uncertainty "
+                "preset, relative 1SD values, and correlations are recorded explicitly "
+                "in Methods. Stacey and Kramers (1975): "
+                "https://doi.org/10.1016/0012-821X(75)90088-6."
+            ),
+            (
+                "U and Th/U are elemental concentrations or concentration ratios. "
+                "They are included only when concentration export is enabled; units "
+                "are micrograms per gram for U and dimensionless for Th/U."
+            ),
         ],
         "Depth profiles": shared
         + [
@@ -886,6 +1276,19 @@ def publication_table_notes(tables):
                 "Downhole correction is indexed by signal-relative time and is "
                 "derived from pooled primary-standard full-signal profiles; "
                 "session correction is derived from primary-standard plateau means."
+            ),
+        ],
+        "Spot concentrations": shared
+        + [
+            (
+                "Element columns are isotope-agnostic calibrated concentrations "
+                "in micrograms per gram. Companion 1SD, 2SD, and 95% confidence "
+                "interval columns are retained when calculated; Th/U is dimensionless."
+            ),
+            (
+                "This optional sheet places the full concentration inventory beside "
+                "the corresponding single-analysis dates. Detector isotope-count "
+                "columns are retained only in the Parallel audit sheet."
             ),
         ],
         "QC metrics": [
@@ -918,7 +1321,14 @@ def publication_table_notes(tables):
     return pd.DataFrame(rows)
 
 
-def build_publication_tables(finalized, *, metadata=None, depth_profile=None):
+def build_publication_tables(
+    finalized,
+    *,
+    metadata=None,
+    depth_profile=None,
+    include_concentrations=True,
+    include_depth_concentrations=True,
+):
     """Build the logical tables written to a publication workbook.
 
     Parameters
@@ -954,6 +1364,7 @@ def build_publication_tables(finalized, *, metadata=None, depth_profile=None):
     for section in (
         "common_pb_correction",
         "mass_204_common_pb_correction",
+        "uncertainty_settings",
     ):
         settings = finalized.parallel_results.attrs.get(section, {})
         for key, value in settings.items():
@@ -967,6 +1378,32 @@ def build_publication_tables(finalized, *, metadata=None, depth_profile=None):
             )
     decision_rows.extend(
         [
+            {
+                "setting": "constant.238U/235U",
+                "value": common_U238_U235,
+            },
+            {
+                "setting": "constant.238U/235U_1SD",
+                "value": sigma_common_U238_U235,
+            },
+            {
+                "setting": "constant.238U/235U_reference",
+                "value": "Hiess et al. (2012); https://doi.org/10.1126/science.1215507",
+            },
+            {"setting": "constant.lambda_238_yr-1", "value": lambda_238},
+            {"setting": "constant.lambda_238_1SD_yr-1", "value": sigma_238},
+            {"setting": "constant.lambda_235_yr-1", "value": lambda_235},
+            {"setting": "constant.lambda_235_1SD_yr-1", "value": sigma_235},
+            {
+                "setting": "constant.uranium_decay_reference",
+                "value": "Jaffey et al. (1971); https://doi.org/10.1103/PhysRevC.4.1889",
+            },
+            {"setting": "constant.lambda_232_yr-1", "value": lambda_232},
+            {"setting": "constant.lambda_232_1SD_yr-1", "value": sigma_232},
+            {
+                "setting": "constant.thorium_decay_reference",
+                "value": "Holden (1990); https://doi.org/10.1351/pac199062050941",
+            },
             {
                 "setting": "uncertainty.no_calibration",
                 "value": (
@@ -991,13 +1428,31 @@ def build_publication_tables(finalized, *, metadata=None, depth_profile=None):
         ]
     )
     tables = {
-        "Results": finalized.selected_results.copy(),
+        "Results": finalized.selected_results.drop(
+            columns=[
+                column
+                for column in finalized.selected_results.columns
+                if str(column).startswith("preferred_age")
+            ],
+            errors="ignore",
+        ).copy(),
+        "Horstwood Table 4": build_horstwood_table4(
+            finalized,
+            include_concentrations=include_concentrations,
+        ),
         "Secondary standards": finalized.secondary_standard_summary.copy(),
         "QC metrics": finalized.quality_metrics.copy(),
         "Methods": pd.DataFrame(decision_rows),
         "Parallel audit": finalized.parallel_results.copy(),
     }
-    depth_table = publication_depth_profile_table(depth_profile)
+    if include_concentrations:
+        spot_concentrations = publication_spot_concentration_table(finalized)
+        if not spot_concentrations.empty:
+            tables["Spot concentrations"] = spot_concentrations
+    depth_table = publication_depth_profile_table(
+        depth_profile,
+        include_concentrations=include_depth_concentrations,
+    )
     if not depth_table.empty:
         tables["Depth profiles"] = depth_table
     tables["Table notes"] = publication_table_notes(tables)
@@ -1017,6 +1472,25 @@ def publication_column_width(values, heading, minimum=10, maximum=34):
         if value is not None and not pd.isna(value)
     )
     return min(max(max(text_lengths, default=minimum) + 2, minimum), maximum)
+
+
+def publication_number_format(column):
+    """Return an isotope-aware Excel number format for a publication column."""
+    label = str(column)
+    folded = label.casefold()
+    if "date" in folded or "age" in folded:
+        return "0.0"
+    if folded == "footnote":
+        return "0"
+    if label in {"f206c", "Th/U"} or "rho" in folded:
+        return "0.000"
+    if "diameter" in folded:
+        return "0"
+    if "µg g-1" in label or "concentration" in folded:
+        return "0.0"
+    if any(token in label for token in ("Pb/", "U/", "/Pb", "/U", "/Th")):
+        return "0.000000"
+    return "0.0000"
 
 
 def export_publication_tables(tables, output_path):
@@ -1066,8 +1540,64 @@ def export_publication_tables(tables, output_path):
                 "valign": "vcenter",
             }
         )
-        numeric_format = workbook.add_format({"num_format": "0.0000"})
-        age_format = workbook.add_format({"num_format": "0.0"})
+        group_formats = {
+            "Identification & screening": workbook.add_format(
+                {
+                    "bold": True,
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#44546A",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "border_color": "#FFFFFF",
+                }
+            ),
+            "Composition": workbook.add_format(
+                {
+                    "bold": True,
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#548235",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "border_color": "#FFFFFF",
+                }
+            ),
+            "Isotope ratios (2σ)": workbook.add_format(
+                {
+                    "bold": True,
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#2F75B5",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "border_color": "#FFFFFF",
+                }
+            ),
+            "Single-analysis dates (Ma; 2σ)": workbook.add_format(
+                {
+                    "bold": True,
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#8064A2",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "border_color": "#FFFFFF",
+                }
+            ),
+            "Preferred result": workbook.add_format(
+                {
+                    "bold": True,
+                    "font_color": "#FFFFFF",
+                    "bg_color": "#C65911",
+                    "align": "center",
+                    "valign": "vcenter",
+                    "border": 1,
+                    "border_color": "#FFFFFF",
+                }
+            ),
+        }
+        numeric_formats = {}
         failed_format = workbook.add_format(
             {"bg_color": "#F4CCCC", "font_color": "#9C0006"}
         )
@@ -1087,37 +1617,122 @@ def export_publication_tables(tables, output_path):
                 "valign": "top",
             }
         )
+        wrapped_text_format = workbook.add_format(
+            {"text_wrap": True, "valign": "top"}
+        )
         notes_frame = tables.get("Table notes", pd.DataFrame())
         for sheet_name, table in tables.items():
             safe_name = str(sheet_name)[:31]
-            table.to_excel(writer, sheet_name=safe_name, index=False)
+            is_table4 = sheet_name == "Horstwood Table 4"
+            header_row = 1 if is_table4 else 0
+            table.to_excel(
+                writer,
+                sheet_name=safe_name,
+                index=False,
+                startrow=header_row,
+            )
             worksheet = writer.sheets[safe_name]
             worksheet.hide_gridlines(2)
-            worksheet.freeze_panes(1, 2 if table.shape[1] > 6 else 1)
-            worksheet.set_row(0, 24, header_format)
+            worksheet.set_landscape()
+            worksheet.fit_to_pages(1, 0)
+            worksheet.set_margins(left=0.25, right=0.25, top=0.55, bottom=0.55)
+            worksheet.repeat_rows(0, header_row)
+            worksheet.set_footer(
+                "&LUPbRPy publication export&C&P of &N&R&D"
+            )
+            worksheet.freeze_panes(
+                header_row + 1,
+                2 if table.shape[1] > 6 else 1,
+            )
+            worksheet.set_row(header_row, 34 if is_table4 else 24, header_format)
             if table.shape[1]:
-                worksheet.autofilter(0, 0, len(table), len(table.columns) - 1)
+                worksheet.autofilter(
+                    header_row,
+                    0,
+                    header_row + len(table),
+                    len(table.columns) - 1,
+                )
+            if is_table4 and table.shape[1]:
+                groups = []
+                for index, column in enumerate(table.columns):
+                    text = str(column)
+                    if text in {
+                        "Analysis",
+                        "Sample",
+                        "Comments / flags",
+                        "Beam diameter (µm)",
+                    }:
+                        group = "Identification & screening"
+                    elif text in {
+                        "f206c",
+                        "U (µg g-1)",
+                        "U 2SD (µg g-1)",
+                        "U 95% CI (µg g-1)",
+                        "Th/U",
+                    }:
+                        group = "Composition"
+                    elif "date" in text.casefold():
+                        group = (
+                            "Preferred result"
+                            if text.startswith("Preferred")
+                            else "Single-analysis dates (Ma; 2σ)"
+                        )
+                    else:
+                        group = "Isotope ratios (2σ)"
+                    groups.append(group)
+                start = 0
+                while start < len(groups):
+                    end = start
+                    while end + 1 < len(groups) and groups[end + 1] == groups[start]:
+                        end += 1
+                    group = groups[start]
+                    if end > start:
+                        worksheet.merge_range(
+                            0,
+                            start,
+                            0,
+                            end,
+                            group,
+                            group_formats[group],
+                        )
+                    else:
+                        worksheet.write(0, start, group, group_formats[group])
+                    start = end + 1
+                worksheet.set_row(0, 23)
             for index, column in enumerate(table.columns):
                 width = publication_column_width(table[column], column)
-                column_format = (
-                    age_format
-                    if "age" in str(column).casefold()
-                    else numeric_format
-                    if pd.api.types.is_numeric_dtype(table[column])
-                    else None
-                )
+                column_format = None
+                if pd.api.types.is_numeric_dtype(table[column]):
+                    format_code = publication_number_format(column)
+                    if format_code not in numeric_formats:
+                        numeric_formats[format_code] = workbook.add_format(
+                            {"num_format": format_code}
+                        )
+                    column_format = numeric_formats[format_code]
                 worksheet.set_column(index, index, width, column_format)
                 column_text = str(column)
                 comment = None
-                if column_text.endswith("_2e_no_calibration"):
+                if (
+                    column_text.endswith("_2e_no_calibration")
+                    or "2σ analytical" in column_text
+                ):
                     comment = (
-                        "Absolute 2SE analytical uncertainty without session "
-                        "calibration residual scatter."
+                        "Absolute 2SE analytical uncertainty. Includes counting, "
+                        "baseline, within-analysis, and applicable common-Pb "
+                        "composition uncertainty; excludes session residual scatter."
                     )
-                elif column_text.endswith("_2e_with_calibration"):
+                elif (
+                    column_text.endswith("_2e_with_calibration")
+                    or "2σ incl. calibration" in column_text
+                ):
                     comment = (
                         "Absolute 2SE uncertainty including session calibration "
                         "residual scatter."
+                    )
+                elif "2σ selected total" in column_text:
+                    comment = (
+                        "Absolute 2SE selected total uncertainty: calibration-inclusive "
+                        "uncertainty plus the systematic components enabled in Methods."
                     )
                 elif column_text.endswith("_2e"):
                     comment = "Absolute two-standard-error (2SE) uncertainty."
@@ -1136,17 +1751,33 @@ def export_publication_tables(tables, output_path):
                         "Elapsed seconds from the reviewed beginning of sample "
                         "signal (time zero)."
                     )
+                elif column_text == "f206c":
+                    comment = (
+                        "Fraction of measured 206Pb inferred to be common Pb using "
+                        "the selected correction method."
+                    )
                 if comment:
-                    worksheet.write_comment(0, index, comment)
+                    worksheet.write_comment(header_row, index, comment)
+            if sheet_name == "Table notes" and "note" in table.columns:
+                note_index = table.columns.get_loc("note")
+                worksheet.set_column(note_index, note_index, 105, wrapped_text_format)
+                for row_index, note in enumerate(table["note"], start=header_row + 1):
+                    line_count = max(2, int(np.ceil(len(str(note)) / 115)))
+                    worksheet.set_row(row_index, min(18 * line_count, 90))
+            elif sheet_name == "Methods" and "value" in table.columns:
+                setting_index = table.columns.get_loc("setting")
+                value_index = table.columns.get_loc("value")
+                worksheet.set_column(setting_index, setting_index, 44)
+                worksheet.set_column(value_index, value_index, 90, wrapped_text_format)
             if (
                 "preferred_age_pass" in table.columns
                 and len(table) > 0
             ):
                 column_index = table.columns.get_loc("preferred_age_pass")
                 worksheet.conditional_format(
-                    1,
+                    header_row + 1,
                     column_index,
-                    len(table),
+                    header_row + len(table),
                     column_index,
                     {
                         "type": "cell",
@@ -1161,8 +1792,8 @@ def export_publication_tables(tables, output_path):
                     notes_frame["worksheet"].eq(sheet_name)
                 ]
                 if not sheet_notes.empty:
-                    first_note_row = len(table) + 3
-                    last_column = max(len(table.columns) - 1, 0)
+                    first_note_row = header_row + len(table) + 3
+                    last_column = min(max(len(table.columns) - 1, 0), 9)
                     if last_column:
                         worksheet.merge_range(
                             first_note_row,
@@ -1195,7 +1826,7 @@ def export_publication_tables(tables, output_path):
                             )
                         else:
                             worksheet.write(row, 0, text, footnote_format)
-                        worksheet.set_row(row, 32)
+                        worksheet.set_row(row, 44)
 
     csv_directory = output_path.with_suffix("")
     csv_directory.mkdir(parents=True, exist_ok=True)
@@ -1219,7 +1850,10 @@ __all__ = [
     "finalize_reduction_results",
     "build_publication_tables",
     "publication_depth_profile_table",
+    "publication_spot_concentration_table",
+    "build_horstwood_table4",
     "publication_table_notes",
     "publication_column_width",
+    "publication_number_format",
     "export_publication_tables",
 ]

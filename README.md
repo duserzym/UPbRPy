@@ -199,6 +199,13 @@ materials, fit models, outlier filtering, common-Pb method, calibration
 uncertainty, and preferred-age transition are represented directly in the
 shared pipeline configuration.
 
+Publication exports follow a Horstwood Table 4-style layout and keep
+analytical, calibration-inclusive, and optional systematic uncertainty
+components explicit. See
+[`docs/uncertainty_and_publication_exports.md`](docs/uncertainty_and_publication_exports.md)
+for the baseline, physical-constant, long-term reproducibility, initial-Pb,
+and concentration-export conventions.
+
 The interface shows a compact icon-and-label workflow rail, plots, and the
 spot/isotope inspector together on large displays. The complete ordered
 sequence fits without scrolling on normal screens, while the selected step's
