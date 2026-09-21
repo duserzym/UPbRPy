@@ -153,6 +153,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         primary_standard="MADUCSB",
         pb_ratio_standard="NIST610",
         th_ratio_standard="NIST610",
+        secondary_standards=("MADJCU",),
         common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
@@ -231,6 +232,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         primary_standard="TR1",
         pb_ratio_standard="NIST610",
         th_ratio_standard="NIST610",
+        secondary_standards=("R632",),
         common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
@@ -297,7 +299,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
     "titanite": WorkflowPreset(
         key="titanite",
         title="Titanite",
-        description="Titanite workflow following the current notebook defaults, with Si-based import settings and a backend note that the current notebooks still reuse the rutile-style internal normalization branch.",
+        description="Titanite workflow following the current notebook defaults, with Si-based selection and titanite-specific internal normalization.",
         primary_channel="29Si",
         read_kwargs={
             "selection_method": "threshold",
@@ -308,13 +310,14 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             "baseline_offset": 2,
             "plateau_offset": 2,
         },
-        internal_material="rutile",
+        internal_material="titanite",
         supports_depth_profiles=True,
-        special_note="The titanite notebook currently calls the rutile internal-normalization material mode even though the broader workflow is titanite-specific. The GUI should make that current backend caveat explicit.",
+        special_note="Titanite concentrations use the titanite stoichiometric Si abundance; isotope ratios use baseline-subtracted signals.",
         concentration_standards=("NIST610", "NIST612"),
         primary_standard="MKED",
         pb_ratio_standard="NIST610",
         th_ratio_standard="NIST610",
+        secondary_standards=("BLR",),
         common_pb_calibration="tera_wasserburg",
         default_ratio="206Pb/238U",
         steps=(
@@ -335,13 +338,13 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             ),
             WorkflowStep(
                 title="Internal normalization",
-                summary="Follow the current notebook path, which still reuses the rutile-style backend branch.",
-                hint="This is a backend caveat, not a silent assumption. Until a dedicated titanite normalization branch exists in UPbRPy, the GUI should tell users exactly what is happening.",
+                summary="Normalize concentration signals using titanite and the selected internal channel.",
+                hint="The titanite material and Si channel match the current manuscript and notebook workflow.",
             ),
             WorkflowStep(
                 title="Calibrate concentrations and titanite thermometry",
                 summary="Use the notebook sequence of NIST inspection, optional outlier filtering, concentration calibration, and titanite thermometry-ready outputs.",
-                hint="The titanite notebook mirrors the rutile concentration path closely here. The core library already contains titanite thermometry functions, even though the normalization branch still needs cleanup, so the GUI presents that concentration stage as one combined action.",
+                hint="The titanite notebook mirrors the rutile concentration path closely here. The core library already contains titanite thermometry functions, and the GUI presents that concentration stage as one combined action.",
             ),
             COMMON_RATIO_STEP,
             WorkflowStep(
@@ -357,7 +360,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             WorkflowStep(
                 title="Final titanite review",
                 summary="Review corrected ratios, concentration outputs, and any thermometry products together.",
-                hint="This final page should keep the backend caveat visible so users know when they are still following a provisional notebook convention.",
+                hint="Review the selected common-Pb method and uncertainty branch before exporting.",
             ),
         ),
         stage_sequence=(

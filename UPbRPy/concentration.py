@@ -423,7 +423,11 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
     ):
         record = {
             'spot_name': spot_name,
-            'sample': str(spot_name).split(sep)[0],
+            'sample': (
+                this_spot_data['sample'].iloc[0]
+                if 'sample' in this_spot_data
+                else str(spot_name).split(sep)[0]
+            ),
         }
         spot_t_multiplier = t.ppf(0.975, this_spot_data.shape[0] - 1)
         for channel, element in zip(element_channels, elements):

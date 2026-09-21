@@ -133,3 +133,15 @@ def test_internal_normalization_distinguishes_plateau_and_full_signal():
     assert plateau.attrs["selection_region"] == "plateau"
     assert signal.attrs["selection_region"] == "signal"
     assert signal.attrs["internal_channel"] == "44Ca"
+
+
+def test_spot_concentrations_preserve_imported_sample_aliases():
+    data = pd.DataFrame({
+        "spot_name": ["MA1 31"] * 4,
+        "sample": ["reviewed alias"] * 4,
+        "238U": [10.0, 11.0, 12.0, 13.0],
+    })
+    calibration = pd.Series({"238U": 2.0})
+    assert calc_concentration(data, calibration).iloc[0]["sample"] == "reviewed alias"
+    legacy = calc_concentration(data.drop(columns="sample"), calibration, sep=" ")
+    assert legacy.iloc[0]["sample"] == "MA1"

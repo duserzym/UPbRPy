@@ -188,7 +188,7 @@ def test_session_fit_evaluation_returns_arbitrary_time_covariance_and_flags():
     np.testing.assert_equal(evaluated["is_extrapolated"], [False, True])
 
 
-def test_apply_session_correction_records_prediction_uncertainty_columns():
+def test_apply_session_correction_records_residual_scatter_not_coefficient_uncertainty():
     x = np.array([0.0, 1.0, 2.0, 3.0])
     y = 1.0 + 0.02 * x
     sigma = np.full_like(x, 0.01)
@@ -215,7 +215,15 @@ def test_apply_session_correction_records_prediction_uncertainty_columns():
         corrected["206Pb/238U_fractionation_corrected"],
         corrected["206Pb/238U_DH_corrected"] * expected_factor,
     )
-    assert np.all(corrected["206Pb/238U_session_correction_1s"] > 0)
+    # The manuscript specifies scalar session residual scatter; a perfect
+    # fit has zero scatter even with nonzero coefficient covariance.
+    np.testing.assert_allclose(
+        corrected["206Pb/238U_session_correction_1s"],
+        fit["residual_standard_deviation"],
+    )
+    session_results["206Pb/238U"]["std"] = 0.025
+    noisy = apply_session_correction(data, session_results)
+    np.testing.assert_allclose(noisy["206Pb/238U_session_correction_1s"], 0.025)
     assert corrected["206Pb/238U_session_correction_extrapolated"].tolist() == [False, True]
 
 

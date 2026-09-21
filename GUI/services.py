@@ -245,6 +245,7 @@ def pipeline_config_from_session(
             age_transition_ma=session.age_transition_ma,
         ),
         automatic_flags=retained_config.automatic_flags,
+        depth_calibration=retained_config.depth_calibration,
         common_pb_options=common_pb_options,
         uncertainty=UncertaintySettings(
             propagate_baseline=True,

@@ -930,7 +930,7 @@ class ReductionPipeline:
             common_pb_options=self.config.common_pb_options,
             flag_settings=self.config.automatic_flags,
             primary_signal_column=self.config.primary_channel,
-            quality_signal_data=self.total_data,
+            quality_signal_data=self.run_baseline(),
             secondary_standard_names=self.config.secondary_standards,
             accepted_secondary_ages=accepted_secondary_ages,
             uncertainty_settings=self.config.uncertainty,
