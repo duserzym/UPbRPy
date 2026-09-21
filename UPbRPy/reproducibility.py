@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ def selection_export_frame(experiment: pd.DataFrame) -> pd.DataFrame:
         for column in SELECTION_EXPORT_COLUMNS
         if column in experiment.columns
     ]
+    columns.extend(
+        column for column in experiment.columns
+        if column not in columns and str(column).startswith("selection_")
+    )
     return experiment.loc[:, columns].copy()
 
 
@@ -52,6 +57,7 @@ def notebook_code_cell(source: str) -> dict[str, Any]:
     """Build one unexecuted Jupyter code cell without requiring nbformat."""
     return {
         "cell_type": "code",
+        "id": uuid4().hex,
         "execution_count": None,
         "metadata": {},
         "outputs": [],
@@ -63,6 +69,7 @@ def notebook_markdown_cell(source: str) -> dict[str, Any]:
     """Build one Jupyter Markdown cell without requiring nbformat."""
     return {
         "cell_type": "markdown",
+        "id": uuid4().hex,
         "metadata": {},
         "source": source.splitlines(keepends=True),
     }
@@ -131,7 +138,7 @@ def build_reproducibility_notebook(
             "    if reference_library_text\n"
             "    else None\n"
             ")\n"
-            f"config = pipeline_config_from_dict(json.loads(r'''{config_json}'''))\n"
+            f"config = pipeline_config_from_dict(json.loads({config_json!r}))\n"
             "read_options = dict(config.selection_options)\n"
             "read_options.pop('primary_channel', None)\n"
             "read_options.setdefault('selection_method', config.selection_method)\n"
@@ -147,7 +154,7 @@ def build_reproducibility_notebook(
             "for matching spot names."
         ),
         notebook_code_cell(
-            f"selection_records = json.loads(r'''{selections_json}''')\n"
+            f"selection_records = json.loads({selections_json!r})\n"
             "saved_selections = pd.DataFrame.from_records(selection_records)\n"
             "saved_selections = saved_selections.set_index('spot_names')\n"
             "experiment = experiment.set_index('spot_names')\n"
@@ -156,7 +163,9 @@ def build_reproducibility_notebook(
             "experiment = experiment.reset_index()\n"
         ),
         notebook_code_cell(
-            "if reference_library_path is not None and reference_library_path.exists():\n"
+            "if reference_library_path is not None:\n"
+            "    if not reference_library_path.exists():\n"
+            "        raise FileNotFoundError(reference_library_path)\n"
             "    if reference_library_path.suffix.lower() == '.csv':\n"
             "        archive = pd.read_csv(reference_library_path, index_col=0)\n"
             "    else:\n"
@@ -175,6 +184,7 @@ def build_reproducibility_notebook(
             "    config,\n"
             "    source_directory=source_directory,\n"
             "    reference_library_path=reference_library_path,\n"
+            "    input_files=tuple(sorted(source_directory.glob('*.csv'))),\n"
             ")\n"
         ),
         notebook_markdown_cell("## Baseline, normalization, and concentration"),
@@ -216,7 +226,7 @@ def build_reproducibility_notebook(
             "    finalized,\n"
             "    metadata={\n"
             "        'workflow_key': config.workflow_key,\n"
-            "        'package_version': manifest['package_version'],\n"
+            "        'package_version': manifest['upbrpy_version'],\n"
             "        'pipeline_format_version': manifest['format_version'],\n"
             "        'source_directory': str(source_directory),\n"
             "        'reference_library_path': str(reference_library_path or ''),\n"
@@ -304,7 +314,7 @@ def export_reduction_bundle(
         finalized,
         metadata={
             "workflow_key": pipeline.config.workflow_key,
-            "package_version": manifest["package_version"],
+            "package_version": manifest["upbrpy_version"],
             "pipeline_format_version": manifest["format_version"],
             "source_directory": str(pipeline.source_directory or ""),
             "reference_library_path": str(

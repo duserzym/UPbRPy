@@ -2,18 +2,6 @@
 
 from __future__ import annotations
 
-from bokeh.models import (
-    ColorBar,
-    ColumnDataSource,
-    CustomJS,
-    HoverTool,
-    LabelSet,
-    LinearColorMapper,
-)
-from bokeh.palettes import Viridis256
-from bokeh.plotting import figure
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.stats import chi2, t
@@ -306,6 +294,15 @@ def add_dynamic_concordia_age_labels(
     curve_source=None,
 ):
     """Attach client-side age labels that update as a Bokeh plot is zoomed."""
+    from bokeh.models import (
+        ColorBar,
+        ColumnDataSource,
+        CustomJS,
+        HoverTool,
+        LabelSet,
+        LinearColorMapper,
+    )
+
     initial_ages = np.asarray(initial_ages, dtype=float)
     if plot_type == "Wetherill":
         initial_x, initial_y = get_wetherill_point(initial_ages)
@@ -652,6 +649,17 @@ def concordia(data, type='Wetherill',
     bokeh.plotting.figure
         A native Bokeh concordia diagram.
     '''
+    from bokeh.models import (
+        ColorBar,
+        ColumnDataSource,
+        CustomJS,
+        HoverTool,
+        LabelSet,
+        LinearColorMapper,
+    )
+    from bokeh.palettes import Viridis256
+    from bokeh.plotting import figure
+
     if color_key not in {'bar', 'legend'}:
         raise ValueError("color_key must be either 'bar' or 'legend'")
     if type == 'Wetherill':
@@ -1116,6 +1124,9 @@ def plot_dates(zircon_means, zircon_2sigmas, include,
     - linewidth = zircon linewidth (optional)
     - bbox_to_anchor = for the legend (optional)
     """
+    import matplotlib
+    import matplotlib.pyplot as plt
+
     # formatting constants
     zircon_spacing = 0.9
     sample_spacing = 5.75 - zircon_spacing
@@ -1293,6 +1304,9 @@ def plot_sample_weighted_mean(means, uncertainties, student_T = True,
     -------
     fig: figure object
     '''
+    import matplotlib
+    import matplotlib.pyplot as plt
+
     # sort the means and uncertainties
     means, uncertainties = zip(*sorted(zip(means, uncertainties)))
     # first calculate the weighted mean and 95% confidence interval

@@ -2849,6 +2849,8 @@ class MainWindow(QtWidgets.QMainWindow):
             written = write_reproducibility_notebook(
                 pipeline,
                 target,
+                include_concentrations=self.session.include_export_concentrations,
+                include_depth_concentrations=self.session.include_export_depth_concentrations,
             )
         except Exception as exc:
             self._handle_action_error("Notebook export failed", exc)
