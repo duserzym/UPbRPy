@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -21,8 +22,11 @@ import tomllib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SPEC_FILE = PROJECT_ROOT / "packaging" / "UPbRPyStudio.spec"
-DEFAULT_DIST_DIRECTORY = PROJECT_ROOT / "dist"
-DEFAULT_WORK_DIRECTORY = PROJECT_ROOT / "build" / "pyinstaller"
+CACHE_BASE = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) if sys.platform == "win32" else (Path.home() / "Library/Caches" if sys.platform == "darwin" else Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))))
+CHECKOUT_KEY = hashlib.sha256(str(PROJECT_ROOT).encode()).hexdigest()[:12]
+BUILD_ROOT = Path(os.environ.get("UPBRPY_BUILD_ROOT", str(CACHE_BASE / "UPbRPy" / CHECKOUT_KEY)))
+DEFAULT_DIST_DIRECTORY = BUILD_ROOT / "dist"
+DEFAULT_WORK_DIRECTORY = BUILD_ROOT / "work"
 APPLICATION_NAME = "UPbRPy Studio"
 
 
@@ -148,6 +152,8 @@ def smoke_test_application(
     if screenshot.exists():
         screenshot.unlink()
     environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["MPLCONFIGDIR"] = str(work_directory / "matplotlib")
     subprocess.run(
@@ -158,7 +164,7 @@ def smoke_test_application(
             "--export",
             str(screenshot),
         ],
-        cwd=PROJECT_ROOT,
+        cwd=work_directory,
         env=environment,
         check=True,
         timeout=180,
@@ -256,6 +262,9 @@ def main(argv: list[str] | None = None) -> int:
     require_build_dependencies()
     dist_directory = arguments.dist_dir.expanduser().resolve()
     work_directory = arguments.work_dir.expanduser().resolve()
+    for output in (dist_directory, work_directory):
+        if output == PROJECT_ROOT or PROJECT_ROOT in output.parents:
+            raise ValueError("Build outputs must be outside the source repository")
     dist_directory.mkdir(parents=True, exist_ok=True)
     work_directory.mkdir(parents=True, exist_ok=True)
 

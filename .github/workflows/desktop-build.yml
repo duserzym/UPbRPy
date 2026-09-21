@@ -40,12 +40,12 @@ jobs:
         run: python -m pytest -q
 
       - name: Build, launch-test, and archive
-        run: python scripts/build_desktop.py --archive
+        run: python scripts/build_desktop.py --archive --dist-dir "${{ runner.temp }}/upbrpy-dist" --work-dir "${{ runner.temp }}/upbrpy-work"
 
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v4
         with:
           name: UPbRPy-Studio-${{ matrix.label }}
-          path: dist/UPbRPy-Studio-*.zip
+          path: ${{ runner.temp }}/upbrpy-dist/UPbRPy-Studio-*.zip
           if-no-files-found: error
           retention-days: 14

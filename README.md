@@ -254,10 +254,24 @@ python -m pip install -e ".[gui,build]"
 python scripts/build_desktop.py --archive
 ```
 
-On macOS the directly testable application is
-`dist/UPbRPy Studio.app`; the platform-labelled ZIP preserves the application
-bundle for transport. Windows builds produce an on-directory
-`dist/UPbRPy Studio/UPbRPy Studio.exe`. The GitHub Actions desktop workflow
+Builds now stay outside the source checkout. Defaults are
+`~/Library/Caches/UPbRPy/<checkout-id>/` on macOS,
+`${XDG_CACHE_HOME:-~/.cache}/UPbRPy/<checkout-id>/` on Linux, and
+`%LOCALAPPDATA%/UPbRPy/<checkout-id>/` on Windows. The script prints the exact
+application, screenshot, and archive paths. Override the root with
+`UPBRPY_BUILD_ROOT`, or pass external `--dist-dir` and `--work-dir` directories.
+Paths inside the source repository are rejected.
+
+The macOS app is `dist/UPbRPy Studio.app` inside that cache; Windows uses
+`dist/UPbRPy Studio/UPbRPy Studio.exe`. The ZIP preserves the application bundle
+for transport. Keep the `dist` application while using it; the disposable `work`
+cache can be removed after building. Development virtual environments can also
+live outside the repository (a local ignored `.venv` symlink is supported).
+
+To exercise numerical reduction and publication export in the frozen executable,
+run it with `--verify-reduction /path/to/session --verification-output /path/to/scratch`.
+It writes a full bundle plus `verification.json`, exits nonzero on export errors,
+and records whether the runtime was frozen. The GitHub Actions desktop workflow
 performs the source tests, frozen-app screenshot smoke test, and ZIP upload for
 macOS arm64 and Windows x86-64 on version tags or manual dispatch. Release
 signing and Apple notarization are intentionally separate because they require

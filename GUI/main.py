@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -113,7 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
     parser.add_argument("--open", metavar="DIR", help="Open an experiment directory on startup")
     parser.add_argument("--theme", choices=["system", "light", "dark"], help="Override the saved GUI theme mode")
+    parser.add_argument("--verify-reduction", metavar="DIR", help="Run a full reduction/export smoke check on an experiment and exit")
+    parser.add_argument("--verification-output", metavar="DIR", help="Output directory required by --verify-reduction")
     args = parser.parse_args(argv)
+    if args.verify_reduction and not args.verification_output:
+        parser.error("--verify-reduction requires --verification-output")
 
     settings = QtCore.QSettings("UPbRPy", "Studio")
     theme_mode = args.theme or str(settings.value("theme_mode", "light", type=str) or "light")
@@ -125,6 +130,27 @@ def main(argv: list[str] | None = None) -> int:
         app_icon=icon,
     )
     window = controller.create_window(show=False)
+
+    if args.verify_reduction:
+        from GUI.services import load_session, ensure_shared_pipeline
+        from GUI.workflows import infer_workflow_preset
+        from UPbRPy.reproducibility import export_reduction_bundle
+        preset = infer_workflow_preset(args.verify_reduction)
+        session = load_session(args.verify_reduction, preset=preset)
+        pipeline = ensure_shared_pipeline(session, preset)
+        bundle = export_reduction_bundle(pipeline, args.verification_output, hash_inputs=True)
+        if bundle.warnings:
+            raise RuntimeError("; ".join(bundle.warnings))
+        report = {
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "workflow": preset.key,
+            "spots": len(pipeline.run_spot_means()),
+            "sweeps": len(pipeline.run_depth_profile()),
+            "files": [str(path) for path in bundle.files],
+        }
+        Path(args.verification_output, "verification.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        return 0
 
     if args.open:
         window.load_experiment_directory(

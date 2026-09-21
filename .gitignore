@@ -6,7 +6,7 @@ data/zircon/.DS_Store
 GUI/__pycache__/util.cpython-39.pyc
 *.pyc
 __pycache__/
-.venv/
+.venv
 build/
 dist/
 *.egg-info/
