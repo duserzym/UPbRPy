@@ -51,7 +51,7 @@ from GUI.services import (
     update_selection_region,
 )
 from GUI.state import ReductionSession
-from GUI.theme import active_theme, apply_theme
+from GUI.theme import NeumorphicFrame, active_theme, apply_theme
 from GUI.widgets import (
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
@@ -722,7 +722,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_workflow_rail(self) -> QtWidgets.QWidget:
         """Build the always-readable icon rail for ordered reduction stages."""
-        frame = QtWidgets.QFrame()
+        frame = NeumorphicFrame()
         frame.setObjectName("WorkflowRail")
         frame.setMinimumWidth(170)
         frame.setSizePolicy(
@@ -1033,7 +1033,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        header = QtWidgets.QFrame()
+        header = NeumorphicFrame()
         header.setObjectName("HeaderCard")
         header.setMinimumHeight(84)
         header.setMaximumHeight(96)
@@ -1120,7 +1120,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(header)
         layout.addWidget(self._build_workflow_context_bar())
 
-        plot_card = QtWidgets.QFrame()
+        plot_card = NeumorphicFrame()
         plot_card.setObjectName("PlotCard")
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(12, 12, 12, 12)
@@ -1327,7 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lower.setContentsMargins(0, 0, 0, 0)
         lower_container.setLayout(lower)
 
-        notes_card = QtWidgets.QFrame()
+        notes_card = NeumorphicFrame()
         notes_card.setObjectName("NotesCard")
         notes_layout = QtWidgets.QVBoxLayout(notes_card)
         notes_layout.setContentsMargins(18, 18, 18, 18)
@@ -1348,7 +1348,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         lower.addWidget(notes_card, 1)
 
-        log_card = QtWidgets.QFrame()
+        log_card = NeumorphicFrame()
         log_card.setObjectName("NotesCard")
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(18, 18, 18, 18)
@@ -1383,7 +1383,7 @@ class MainWindow(QtWidgets.QMainWindow):
         prevents the spot tree and periodic-table grid from competing with a
         long column of session settings for the same vertical space.
         """
-        panel = QtWidgets.QFrame()
+        panel = NeumorphicFrame()
         panel.setObjectName("InspectorPanel")
         panel.setMinimumWidth(260)
         panel.setSizePolicy(
@@ -1423,7 +1423,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_channel_splitter.setChildrenCollapsible(False)
         self.spot_channel_splitter.setHandleWidth(7)
 
-        spots_card = QtWidgets.QFrame()
+        spots_card = NeumorphicFrame()
         spots_card.setObjectName("InspectorSubsection")
         spots_layout = QtWidgets.QVBoxLayout(spots_card)
         spots_layout.setContentsMargins(10, 10, 10, 10)
@@ -1461,7 +1461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         spots_card.setMinimumHeight(180)
         self.spot_channel_splitter.addWidget(spots_card)
 
-        channels_card = QtWidgets.QFrame()
+        channels_card = NeumorphicFrame()
         channels_card.setObjectName("InspectorSubsection")
         channels_card_layout = QtWidgets.QVBoxLayout(channels_card)
         channels_card_layout.setContentsMargins(10, 10, 10, 10)
@@ -1507,7 +1507,7 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_layout.addWidget(self.channel_list, 0)
         self.channel_list.setVisible(False)  # hidden; isotope_grid is the primary UI
 
-        color_controls = QtWidgets.QHBoxLayout()
+        color_controls = QtWidgets.QGridLayout()
         color_controls.setContentsMargins(0, 0, 0, 0)
         color_controls.setSpacing(6)
         self.channel_color_button = QtWidgets.QPushButton("Channel color")
@@ -1528,7 +1528,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Fixed,
             )
-            color_controls.addWidget(button, 1)
+        color_controls.addWidget(self.channel_color_button, 0, 0, 1, 2)
+        color_controls.addWidget(self.baseline_color_button, 1, 0)
+        color_controls.addWidget(self.plateau_color_button, 1, 1)
         browse_layout.addLayout(color_controls)
         self.inspector_tabs.addTab(browse_page, "Browse")
 
@@ -1543,7 +1545,7 @@ class MainWindow(QtWidgets.QMainWindow):
         calibration_layout.setContentsMargins(6, 8, 6, 8)
         calibration_layout.setSpacing(10)
 
-        standards_card = QtWidgets.QFrame()
+        standards_card = NeumorphicFrame()
         standards_card.setObjectName("SessionCard")
         self.standards_card = standards_card
         standards_layout = QtWidgets.QFormLayout(standards_card)
@@ -1596,7 +1598,7 @@ class MainWindow(QtWidgets.QMainWindow):
         standards_layout.addRow("Secondary", self.secondary_standards_edit)
         calibration_layout.addWidget(standards_card, 0)
 
-        fit_card = QtWidgets.QFrame()
+        fit_card = NeumorphicFrame()
         fit_card.setObjectName("SessionCard")
         self.fit_card = fit_card
         fit_layout = QtWidgets.QVBoxLayout(fit_card)
@@ -1700,7 +1702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         results_layout.setContentsMargins(6, 8, 6, 8)
         results_layout.setSpacing(10)
 
-        decision_card = QtWidgets.QFrame()
+        decision_card = NeumorphicFrame()
         decision_card.setObjectName("SessionCard")
         self.decision_card = decision_card
         decision_layout = QtWidgets.QFormLayout(decision_card)

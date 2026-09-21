@@ -32,16 +32,19 @@ class ThemeSpec:
     axis_text: str
     axis_line: str
     grid_alpha: float
+    shadow_light: str
+    shadow_dark: str
+    on_accent: str
 
 
 THEMES: dict[str, ThemeSpec] = {
     "light": ThemeSpec(
         name="light",
         window="#edf3fb",
-        window_alt="#f5f9ff",
-        surface="#ffffff",
-        surface_soft="#f6faff",
-        input_bg="#ffffff",
+        window_alt="#edf3fb",
+        surface="#edf3fb",
+        surface_soft="#f2f6fc",
+        input_bg="#e7eef8",
         input_border="#bfd0e3",
         text="#102238",
         muted="#4f6783",
@@ -51,18 +54,21 @@ THEMES: dict[str, ThemeSpec] = {
         accent_strong="#0f55bf",
         success="#19836d",
         success_soft="rgba(25, 131, 109, 0.12)",
-        plot_background="#ffffff",
+        plot_background="#edf3fb",
         axis_text="#243d5a",
         axis_line="#a0b8cc",
-        grid_alpha=0.35,
+        grid_alpha=0.25,
+        shadow_light="#ffffff",
+        shadow_dark="#c8d3e2",
+        on_accent="#ffffff",
     ),
     "dark": ThemeSpec(
         name="dark",
-        window="#07111c",
-        window_alt="#0a1726",
+        window="#0d1c2d",
+        window_alt="#0d1c2d",
         surface="#0d1c2d",
-        surface_soft="#11263a",
-        input_bg="#091523",
+        surface_soft="#122337",
+        input_bg="#0b1827",
         input_border="#2a4159",
         text="#eaf2ff",
         muted="#90a6c1",
@@ -72,12 +78,51 @@ THEMES: dict[str, ThemeSpec] = {
         accent_strong="#8bd7ff",
         success="#7ef7c9",
         success_soft="rgba(126, 247, 201, 0.12)",
-        plot_background="#06111d",
+        plot_background="#0d1c2d",
         axis_text="#edf4ff",
         axis_line="#6d8298",
         grid_alpha=0.13,
+        shadow_light="#193149",
+        shadow_dark="#06101d",
+        on_accent="#07111c",
     ),
 }
+
+
+class NeumorphicFrame(QtWidgets.QFrame):
+    """Paint a soft two-sided rim without capturing or blurring child plots.
+
+    Shadows stay inside the frame's bounds. No graphics effect, animation,
+    offscreen plot copy, or global paint event filter is needed.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("neumorphic", True)
+        self.setContentsMargins(7, 7, 7, 7)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        theme = active_theme()
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        body = QtCore.QRectF(self.rect()).adjusted(7, 7, -7, -7)
+        if body.width() <= 0 or body.height() <= 0:
+            return
+        radius = 16.0
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        # A handful of translucent outlines approximates a small soft shadow.
+        for width, alpha in ((12, 12), (9, 18), (6, 25), (3, 35)):
+            for color, offset in ((theme.shadow_dark, 3), (theme.shadow_light, -3)):
+                shade = QtGui.QColor(color)
+                shade.setAlpha(alpha)
+                painter.setPen(QtGui.QPen(shade, width))
+                painter.drawRoundedRect(body.translated(offset, offset), radius, radius)
+        fill = QtGui.QLinearGradient(body.topLeft(), body.bottomRight())
+        fill.setColorAt(0, QtGui.QColor(theme.surface_soft))
+        fill.setColorAt(1, QtGui.QColor(theme.surface))
+        painter.setBrush(fill)
+        painter.setPen(QtGui.QPen(QtGui.QColor(theme.input_border), 0.6))
+        painter.drawRoundedRect(body, radius, radius)
 
 
 def build_application(argv: list[str] | None = None, theme_mode: str = "light") -> QtWidgets.QApplication:
@@ -145,7 +190,7 @@ def _build_palette(theme: ThemeSpec) -> QtGui.QPalette:
     palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(theme.text))
     palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(theme.surface))
     palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(theme.accent))
-    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(theme.surface))
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(theme.on_accent))
     return palette
 
 
@@ -337,8 +382,11 @@ def _stylesheet(theme: ThemeSpec) -> str:
         color: {theme.success};
     }}
     QPushButton, QToolButton[modeToggle="true"] {{
-        background: {theme.accent_soft};
-        border: 1px solid {theme.input_border};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                    stop:0 {theme.surface_soft}, stop:1 {theme.surface});
+        border: 1px solid {theme.shadow_dark};
+        border-top-color: {theme.shadow_light};
+        border-left-color: {theme.shadow_light};
         border-radius: 12px;
         padding: 10px 14px;
         font-weight: 600;
@@ -347,11 +395,15 @@ def _stylesheet(theme: ThemeSpec) -> str:
         background: {theme.accent_hover};
     }}
     QPushButton:pressed, QToolButton[modeToggle="true"]:pressed {{
-        background: {theme.accent_hover};
+        background: {theme.input_bg};
+        border-top-color: {theme.shadow_dark};
+        border-left-color: {theme.shadow_dark};
+        border-bottom-color: {theme.shadow_light};
+        border-right-color: {theme.shadow_light};
     }}
     QPushButton[accent="true"], QToolButton[modeToggle="true"]:checked {{
         background: {theme.accent};
-        color: #ffffff;
+        color: {theme.on_accent};
         border-color: {theme.accent_strong};
     }}
     QToolButton[compactToggle="true"] {{
@@ -503,6 +555,29 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QAbstractItemView::item:selected {{
         color: {theme.text};
     }}
+    QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QTextBrowser {{
+        background: {theme.input_bg};
+        border: 1px solid {theme.input_border};
+        border-top-color: {theme.shadow_dark};
+        border-left-color: {theme.shadow_dark};
+        border-bottom-color: {theme.shadow_light};
+        border-right-color: {theme.shadow_light};
+        border-radius: 10px;
+        padding: 7px 10px;
+    }}
+    QComboBox {{ padding-right: 30px; }}
+    QPushButton:focus, QToolButton:focus, QLineEdit:focus,
+    QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
+    QListWidget:focus, QTreeWidget:focus {{
+        border: 1px solid {theme.accent};
+    }}
+    #WorkflowStepRail::item:selected {{
+        background: {theme.accent_soft};
+        border: 1px solid {theme.input_border};
+        border-top-color: {theme.shadow_dark};
+        border-left-color: {theme.shadow_dark};
+        color: {theme.accent_strong};
+    }}
     QToolTip {{
         color: {theme.text};
         background: {theme.surface};
@@ -565,5 +640,9 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
         background: {scroll_track};
         border-radius: 7px;
+    }}
+    #WorkflowRail[neumorphic="true"], #HeaderCard[neumorphic="true"], #PlotCard[neumorphic="true"], #NotesCard[neumorphic="true"], #InspectorPanel[neumorphic="true"], #SessionCard[neumorphic="true"], #MetricCard[neumorphic="true"], #WorkflowContextBar[neumorphic="true"], #InspectorSubsection[neumorphic="true"] {{
+        background: transparent;
+        border: none;
     }}
     """

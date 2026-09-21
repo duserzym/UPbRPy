@@ -13,7 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
-from GUI.theme import ThemeSpec
+from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.ratios import (
     excel_plateau_inlier_mask,
@@ -1360,7 +1360,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.tabs.setCurrentWidget(self.depth_table)
 
 
-class MetricCard(QtWidgets.QFrame):
+class MetricCard(NeumorphicFrame):
     def __init__(self, label: str, value: str, tone: str) -> None:
         super().__init__()
         self.setObjectName("MetricCard")
@@ -1914,27 +1914,7 @@ class TracePlotWidget(pg.PlotWidget):
             )
         )
         self.plot_item = self.getPlotItem()
-        self._theme = ThemeSpec(
-            name="dark",
-            window="#07111c",
-            window_alt="#091a2b",
-            surface="#0d1c2d",
-            surface_soft="#11263a",
-            input_bg="#091523",
-            input_border="#2a4159",
-            text="#eaf2ff",
-            muted="#90a6c1",
-            accent="#69b4ff",
-            accent_soft="rgba(105, 180, 255, 0.12)",
-            accent_hover="rgba(105, 180, 255, 0.20)",
-            accent_strong="#8bd7ff",
-            success="#7ef7c9",
-            success_soft="rgba(126, 247, 201, 0.12)",
-            plot_background="#06111d",
-            axis_text="#edf4ff",
-            axis_line="#6d8298",
-            grid_alpha=0.13,
-        )
+        self._theme = active_theme()
         self._region_overlays: dict[str, dict[str, object]] = {}
         self._signal_boundaries: dict[str, pg.InfiniteLine] = {}
         self._signal_markers: dict[str, pg.ScatterPlotItem] = {}
@@ -2907,27 +2887,7 @@ class SessionOverviewWidget(pg.PlotWidget):
         # larger share of the plot card for sweep-level selection editing.
         self.setFixedHeight(115)
         self.plot_item = self.getPlotItem()
-        self._theme = ThemeSpec(
-            name="dark",
-            window="#07111c",
-            window_alt="#091a2b",
-            surface="#0d1c2d",
-            surface_soft="#11263a",
-            input_bg="#091523",
-            input_border="#2a4159",
-            text="#eaf2ff",
-            muted="#90a6c1",
-            accent="#69b4ff",
-            accent_soft="rgba(105, 180, 255, 0.12)",
-            accent_hover="rgba(105, 180, 255, 0.20)",
-            accent_strong="#8bd7ff",
-            success="#7ef7c9",
-            success_soft="rgba(126, 247, 201, 0.12)",
-            plot_background="#06111d",
-            axis_text="#edf4ff",
-            axis_line="#6d8298",
-            grid_alpha=0.13,
-        )
+        self._theme = active_theme()
         self._window_region: pg.LinearRegionItem | None = None
         self._sync_guard = False
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
