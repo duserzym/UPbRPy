@@ -5,6 +5,21 @@ windows, and small GUI workspace choices.  It intentionally does not embed raw
 measurements or calculated tables.  Opening the file therefore re-imports the
 source data and recalculates the stages that had been completed when the
 project was saved.
+
+Format version 2 adds one optional block, ``origin``, naming the database
+session a project was exported from (``upbstudio/docs/WORKFLOW.md`` section
+3.2)::
+
+    "origin": {
+        "server": "https://lab.example.org",
+        "session_id": "0192…",           # session UUID
+        "session_key": "Apatite_20Mar25",
+        "export_sha256": "…",            # hash of the session bundle zip
+        "exported_at": "2026-11-03T…Z",
+        "run_id": "0193…"                # after Submit to database
+    }
+
+Version 1 files load unchanged; they simply have no origin.
 """
 
 from __future__ import annotations
@@ -25,7 +40,16 @@ from .reproducibility import selection_export_frame
 
 PROJECT_FILE_EXTENSION = ".upbr"
 PROJECT_FORMAT_NAME = "UPbRPy reduction project"
-PROJECT_FORMAT_VERSION = 1
+PROJECT_FORMAT_VERSION = 2
+ORIGIN_REQUIRED_KEYS = ("server", "session_id")
+ORIGIN_KEYS = (
+    "server",
+    "session_id",
+    "session_key",
+    "export_sha256",
+    "exported_at",
+    "run_id",
+)
 
 
 def json_safe_value(value: object) -> object:
@@ -119,6 +143,40 @@ def resolve_project_path(
     )
 
 
+def normalize_origin(
+    origin: Mapping[str, object] | None,
+) -> dict[str, str] | None:
+    """Validate an ``origin`` block and return it with string values.
+
+    Unknown keys are kept (a newer server may add some) but must be JSON
+    scalars; ``server`` and ``session_id`` are required, the rest optional.
+    Empty optional values are dropped.
+    """
+    if origin is None:
+        return None
+    if not isinstance(origin, Mapping):
+        raise ValueError("Project origin must be a JSON object.")
+    cleaned: dict[str, str] = {}
+    for key, value in origin.items():
+        if value is None or value == "":
+            continue
+        if isinstance(value, (Mapping, list, tuple)):
+            raise ValueError(f"Project origin field {key!r} must be a string.")
+        cleaned[str(key)] = str(value)
+    missing = [key for key in ORIGIN_REQUIRED_KEYS if not cleaned.get(key)]
+    if missing:
+        raise ValueError(
+            "Project origin is missing " + ", ".join(missing) + "."
+        )
+    cleaned["server"] = cleaned["server"].rstrip("/")
+    return cleaned
+
+
+def project_origin(document: Mapping[str, object]) -> dict[str, str] | None:
+    """Return the validated database origin of a project document, if any."""
+    return normalize_origin(document.get("origin"))
+
+
 def selection_records(experiment: pd.DataFrame) -> list[dict[str, object]]:
     """Return JSON-safe reviewed selection decisions for every spot."""
     frame = selection_export_frame(experiment)
@@ -158,8 +216,12 @@ def build_reduction_project(
     *,
     resume_stage: PipelineStage | str | None = None,
     workspace: Mapping[str, object] | None = None,
+    origin: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build the lightweight document written inside a ``.upbr`` file."""
+    """Build the lightweight document written inside a ``.upbr`` file.
+
+    ``origin`` defaults to ``pipeline.origin``; it is written only when set.
+    """
     if pipeline.source_directory is None:
         raise ValueError(
             "A project can only be saved after an experiment directory is "
@@ -170,7 +232,10 @@ def build_reduction_project(
         if resume_stage is None
         else PipelineStage(resume_stage)
     )
-    return {
+    resolved_origin = normalize_origin(
+        origin if origin is not None else getattr(pipeline, "origin", None)
+    )
+    document: dict[str, object] = {
         "format": PROJECT_FORMAT_NAME,
         "format_version": PROJECT_FORMAT_VERSION,
         "saved_utc": datetime.now(timezone.utc).isoformat(),
@@ -194,6 +259,9 @@ def build_reduction_project(
         "selections": selection_records(pipeline.experiment),
         "workspace": json_safe_value(dict(workspace or {})),
     }
+    if resolved_origin:
+        document["origin"] = resolved_origin
+    return document
 
 
 def validate_reduction_project(
@@ -231,7 +299,12 @@ def validate_reduction_project(
         raise ValueError("Project completed stages must be a list.")
     completed_project_stages(stage_values)
     PipelineStage(pipeline.get("resume_stage", PipelineStage.IMPORT.value))
-    return dict(document)
+    result = dict(document)
+    if "origin" in result:
+        result["origin"] = normalize_origin(result["origin"])
+        if result["origin"] is None:
+            result.pop("origin")
+    return result
 
 
 def read_reduction_project(project_file: str | Path) -> dict[str, object]:
@@ -255,6 +328,7 @@ def write_reduction_project(
     *,
     resume_stage: PipelineStage | str | None = None,
     workspace: Mapping[str, object] | None = None,
+    origin: Mapping[str, object] | None = None,
 ) -> Path:
     """Atomically write a lightweight, human-readable project document."""
     target = Path(project_file).expanduser()
@@ -266,7 +340,22 @@ def write_reduction_project(
         target,
         resume_stage=resume_stage,
         workspace=workspace,
+        origin=origin,
     )
+    return write_project_document(document, target)
+
+
+def write_project_document(
+    document: Mapping[str, object],
+    project_file: str | Path,
+) -> Path:
+    """Atomically write an already built project document as JSON.
+
+    Used to update one field, such as ``origin.run_id`` after a submit,
+    without rebuilding the document from a live pipeline.
+    """
+    target = Path(project_file).expanduser()
+    validate_reduction_project(document)
     temporary_path: Path | None = None
     try:
         with NamedTemporaryFile(
@@ -342,7 +431,11 @@ __all__ = [
     "PROJECT_FILE_EXTENSION",
     "PROJECT_FORMAT_NAME",
     "PROJECT_FORMAT_VERSION",
+    "ORIGIN_KEYS",
     "json_safe_value",
+    "normalize_origin",
+    "project_origin",
+    "write_project_document",
     "project_path_record",
     "resolve_project_path",
     "selection_records",

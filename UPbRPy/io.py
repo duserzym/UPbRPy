@@ -885,6 +885,24 @@ def select_baseline_peak(
     ).as_tuple()
 
 
+def resolve_session_manifest(directory, session_manifest):
+    """Return the SessionManifest selected by ``read_experiment_data``."""
+    if session_manifest is False:
+        return None
+    from .session_manifest import (
+        SessionManifest,
+        find_session_manifest,
+        read_session_manifest,
+    )
+
+    if isinstance(session_manifest, SessionManifest):
+        return session_manifest
+    if session_manifest is None or session_manifest is True:
+        found = find_session_manifest(directory)
+        return None if found is None else read_session_manifest(found)
+    return read_session_manifest(session_manifest)
+
+
 def read_experiment_data(
     directory,
     primary_channel='29Si',
@@ -894,13 +912,14 @@ def read_experiment_data(
     filter_percentile=70,
     baseline_offset=2,
     plateau_offset=2,
-    sep='_',
+    sep=None,
     sample_aliases: Mapping[str, str] | None = None,
     selection_channels: Mapping[str, str] | None = None,
     selection_method='threshold',
     selection_fallback_methods: tuple[str, ...] = (),
     selection_options=None,
     signal_duration_limit_seconds=None,
+    session_manifest=None,
 ):
     """Read a directory of per-spot Thermo iCAP CSV exports.
 
@@ -921,13 +940,16 @@ def read_experiment_data(
     baseline_offset, plateau_offset : int
         Numbers of transition sweeps left between the detected onset and the
         baseline or plateau window, respectively.
-    sep : str
-        Delimiter used to obtain the sample label from each spot name.
+    sep : str, optional
+        Delimiter used to obtain the sample label from each spot name. When
+        omitted, the session manifest's ``sep`` is used, else ``'_'``.
     sample_aliases : mapping of str to str, optional
         Exact, case-insensitive replacements applied after splitting each spot
         name at ``sep``. This preserves legacy parsing while allowing session
         labels such as ``MAD_UCSB`` or ``MAD`` to resolve to the reference
         library name ``MADUCSB`` without editing the instrument exports.
+        Merged over the session manifest's ``[samples]`` map; an explicit
+        entry wins over the manifest's entry for the same alias.
     selection_channels : mapping of str to str, optional
         Per-spot or per-sample channels for automatic signal-window detection.
         Exact spot names take precedence; otherwise sample keys are matched
@@ -943,6 +965,13 @@ def read_experiment_data(
     signal_duration_limit_seconds : float or None
         Optional maximum elapsed time from detected signal start to inclusive
         signal end. ``None`` preserves the unrestricted automatic endpoint.
+    session_manifest : path-like, SessionManifest, bool or None
+        The ``session_manifest.toml`` of a database session bundle
+        (:mod:`UPbRPy.session_manifest`). ``None`` (default) looks for one
+        inside ``directory`` (a bundle root, whose ``raw/`` is then read) or
+        beside it (``directory`` is the bundle's ``raw/``); ``False`` ignores
+        any manifest. A manifest supplies ``sep`` and ``sample_aliases``;
+        explicit arguments still win.
 
     Returns
     -------
@@ -955,6 +984,24 @@ def read_experiment_data(
         All measured sweeps on one session time axis, with spot and sample
         identifiers attached.
     """
+    manifest = resolve_session_manifest(directory, session_manifest)
+    if manifest is not None:
+        from .session_manifest import raw_directory_for
+
+        directory = os.fspath(raw_directory_for(directory))
+        if sep is None and manifest.sep:
+            sep = manifest.sep
+        if manifest.sample_aliases:
+            merged = {
+                str(alias).strip().casefold(): target
+                for alias, target in manifest.sample_aliases.items()
+            }
+            for alias, target in (sample_aliases or {}).items():
+                merged[str(alias).strip().casefold()] = target
+            sample_aliases = merged
+    if sep is None:
+        sep = '_'
+
     spot_names = []
     spot_paths = []
     spot_starting_times = []
@@ -1291,6 +1338,7 @@ __all__ = [
     'select_baseline_peak',
     'select_signal_regions',
     'read_experiment_data',
+    'resolve_session_manifest',
     'read_spot_data',
     'auto_select_baseline_peak',
     'subtract_baseline',

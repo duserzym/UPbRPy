@@ -33,7 +33,10 @@ from .results import (
     finalize_reduction_results,
 )
 from .uncertainty import UncertaintySettings
-from .standards import canonicalize_reference_material_samples
+from .standards import (
+    canonicalize_reference_material_samples,
+    reference_library_info,
+)
 
 PIPELINE_FORMAT_VERSION = 2
 
@@ -466,6 +469,7 @@ class ReductionPipeline:
         reference_library_path: str | Path | None = None,
         input_files: tuple[str | Path, ...] = (),
         build_diagnostic_plots: bool = True,
+        origin: Mapping[str, object] | None = None,
     ) -> None:
         """Initialize a pipeline around imported data and immutable settings.
 
@@ -473,6 +477,10 @@ class ReductionPipeline:
         reduction setting. Notebook callers retain Bokeh diagnostics by
         default; native GUIs can disable them and render the returned numeric
         metadata with their own lightweight plotting widgets.
+
+        ``origin`` is the optional database origin of the session (the
+        ``origin`` block of a format-2 ``.upbr``); it is provenance only and
+        is echoed as ``metadata.origin`` in :meth:`manifest`.
         """
         if not isinstance(experiment, pd.DataFrame):
             raise TypeError("experiment must be a pandas DataFrame")
@@ -501,6 +509,7 @@ class ReductionPipeline:
         )
         self.input_files = tuple(Path(path) for path in input_files)
         self.build_diagnostic_plots = bool(build_diagnostic_plots)
+        self.origin = None if origin is None else dict(origin)
         self.cache = PipelineCache()
         self.cache.set(
             PipelineStage.IMPORT,
@@ -957,6 +966,17 @@ class ReductionPipeline:
             return self.run_finalize()
         return runners[resolved]()
 
+    def reference_library_identity(self) -> dict[str, str | None]:
+        """Return the reference library's version string and content hash.
+
+        A missing or unreadable library yields ``None`` values rather than an
+        error, because provenance must never block an export.
+        """
+        try:
+            return dict(reference_library_info(self.reference_library_path))
+        except (OSError, ValueError, TypeError):
+            return {"version": None, "sha256": None}
+
     def manifest(
         self,
         *,
@@ -974,6 +994,10 @@ class ReductionPipeline:
                 if hash_inputs:
                     record["sha256"] = sha256_file(path)
             files.append(record)
+        metadata_record = dict(metadata or {})
+        if self.origin and "origin" not in metadata_record:
+            metadata_record["origin"] = dict(self.origin)
+        library = self.reference_library_identity()
         return {
             "format_version": PIPELINE_FORMAT_VERSION,
             "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -990,13 +1014,15 @@ class ReductionPipeline:
                 if self.reference_library_path is None
                 else str(self.reference_library_path)
             ),
+            "reference_library_version": library.get("version"),
+            "reference_library_sha256": library.get("sha256"),
             "input_files": files,
             "config": self.config.to_dict(),
             "completed_stages": [stage.value for stage in self.cache.stages()],
             "spot_count": int(len(self.experiment)),
             "sweep_count": int(len(self.total_data)),
             "channels": list(self.channels),
-            "metadata": dict(metadata or {}),
+            "metadata": metadata_record,
             "implementation": {
                 "pipeline_module": __name__,
                 "executable": sys.executable,

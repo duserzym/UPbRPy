@@ -295,11 +295,16 @@ def export_reduction_bundle(
     output_directory: str | Path,
     *,
     include_depth_profile: bool = True,
-    hash_inputs: bool = False,
+    hash_inputs: bool = True,
     include_concentrations: bool = True,
     include_depth_concentrations: bool = True,
 ) -> ExportBundle:
-    """Export publication tables, audit data, provenance, and a notebook."""
+    """Export publication tables, audit data, provenance, and a notebook.
+
+    Input files are hashed by default (``hash_inputs=True``): the SHA-256 of
+    every raw CSV is what lets a database match the bundle to the session it
+    came from (``upbstudio/docs/WORKFLOW.md`` section 3.3).
+    """
     root = Path(output_directory)
     root.mkdir(parents=True, exist_ok=True)
     files: list[Path] = []

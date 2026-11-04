@@ -246,8 +246,16 @@ def _load_toml_measurements(root) -> tuple[pd.DataFrame, dict[str, dict]]:
     manifest_resource = _resolve_resource_case_insensitive(root, MANIFEST_FILENAME)
     manifest = _read_toml(manifest_resource)
     _validate_format_version(manifest, MANIFEST_FILENAME)
-    allowed_manifest_keys = {"format_version", "sources", "material_files"}
+    allowed_manifest_keys = {
+        "format_version",
+        "version",
+        "sources",
+        "material_files",
+    }
     _reject_unknown_keys(manifest, allowed_manifest_keys, MANIFEST_FILENAME)
+    library_version = manifest.get("version")
+    if library_version is not None and not isinstance(library_version, str):
+        raise ValueError(f"{MANIFEST_FILENAME} version must be a string.")
 
     source_filename = manifest.get("sources")
     material_files = manifest.get("material_files")
@@ -345,6 +353,64 @@ def _load_toml_measurements(root) -> tuple[pd.DataFrame, dict[str, dict]]:
 def _load_csv_measurements(path) -> pd.DataFrame:
     """Load the former long-form CSV representation for explicit migrations."""
     return pd.read_csv(path, keep_default_na=False)
+
+
+def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
+    """Identify a reference-material library for provenance records.
+
+    Returns ``version``, a human-readable string, and ``sha256``, a digest of
+    ``library.toml``, the source registry and every material file in manifest
+    order with line endings normalized to LF (or of the file itself for a
+    legacy CSV). ``version`` is the
+    manifest's optional ``version`` key, else ``format-<n>``, always followed
+    by ``+sha256.<first 12 hex digits>`` so two edited copies of the same
+    nominal version stay distinguishable.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    if path is not None and Path(path).suffix.lower() == ".csv":
+        digest.update(Path(path).read_bytes())
+        label = "legacy-csv"
+    else:
+        if path is None:
+            root = files(__package__) / REFERENCE_MATERIALS_DIRECTORY
+        else:
+            source_path = Path(path)
+            root = (
+                source_path.parent
+                if source_path.name == MANIFEST_FILENAME
+                else source_path
+            )
+        manifest_resource = _resolve_resource_case_insensitive(
+            root, MANIFEST_FILENAME
+        )
+        manifest = _read_toml(manifest_resource)
+        names = [MANIFEST_FILENAME]
+        if isinstance(manifest.get("sources"), str):
+            names.append(manifest["sources"])
+        names.extend(
+            str(name) for name in manifest.get("material_files", ()) or ()
+        )
+        for name in names:
+            resource = (
+                manifest_resource
+                if name == MANIFEST_FILENAME
+                else _resolve_resource_case_insensitive(root, name)
+            )
+            digest.update(name.encode("utf-8") + b"\0")
+            # Text is hashed with LF line endings so a Windows checkout
+            # (core.autocrlf) reports the same library as macOS.
+            digest.update(resource.read_bytes().replace(b"\r\n", b"\n"))
+            digest.update(b"\0")
+        declared = manifest.get("version")
+        label = (
+            str(declared)
+            if isinstance(declared, str) and declared
+            else f"format-{manifest.get('format_version', '?')}"
+        )
+    hexdigest = digest.hexdigest()
+    return {"version": f"{label}+sha256.{hexdigest[:12]}", "sha256": hexdigest}
 
 
 def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:
@@ -785,6 +851,7 @@ def canonicalize_reference_material_samples(data, archive):
 
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
+    "reference_library_info",
     "LAMBDA_232",
     "MANIFEST_FILENAME",
     "REFERENCE_MATERIALS_DIRECTORY",
