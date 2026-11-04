@@ -383,10 +383,30 @@ def get_workflow_preset(key: str) -> WorkflowPreset:
 
 
 def infer_workflow_preset(directory: str) -> WorkflowPreset:
-    name = Path(directory).name.lower()
-    for key in ["apatite", "zircon", "rutile", "titanite"]:
-        if key in name:
-            return WORKFLOW_PRESETS[key]
+    """Guess the mineral preset from the folder name.
+
+    A session bundle's ``raw/`` folder is named after nothing, so its
+    manifest's ``material`` and then the bundle folder's name are used.
+    """
+    folder = Path(directory)
+    names = [folder.name]
+    try:
+        from UPbRPy.session_manifest import (
+            find_session_manifest,
+            read_session_manifest,
+        )
+
+        manifest_path = find_session_manifest(folder)
+        if manifest_path is not None:
+            manifest = read_session_manifest(manifest_path)
+            names = [manifest.material, manifest.session_key, folder.parent.name, *names]
+    except (OSError, ValueError):
+        pass
+    for name in names:
+        lowered = (name or "").lower()
+        for key in ["apatite", "zircon", "rutile", "titanite"]:
+            if key in lowered:
+                return WORKFLOW_PRESETS[key]
     return WORKFLOW_PRESETS["zircon"]
 
 

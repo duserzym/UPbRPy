@@ -56,6 +56,7 @@ class StudioWindowController(QtCore.QObject):
             theme_mode=self.theme_mode,
             app_icon=self.app_icon,
         )
+        window.database_links = self.database
         identity = id(window)
         self.windows[identity] = window
         window.new_window_requested.connect(self.create_window)

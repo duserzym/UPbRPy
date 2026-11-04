@@ -57,6 +57,9 @@ class ReductionSession:
     age_transition_ma: float = 1000.0
     reduction_cache: dict[str, object] = field(default_factory=dict)
     pipeline: Optional["ReductionPipeline"] = None
+    # Database origin of the session (the .upbr ``origin`` block), or None
+    # for a standalone reduction.
+    origin: Optional[dict[str, str]] = None
 
     @property
     def loaded(self) -> bool:

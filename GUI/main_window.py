@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -180,6 +181,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._active_worker: FunctionWorker | None = None
         self._busy_label = ""
+        # Database-mode flows; the window controller shares one instance
+        # between windows, a lone window creates its own on first use.
+        self.database_links = None
         self.selection_colors = self._resolve_selection_colors()
         self.session.session_fit_options["polynomial_degree"] = self.workflow_preset.session_polynomial_degree
 
@@ -260,6 +264,40 @@ class MainWindow(QtWidgets.QMainWindow):
             "Export Reproducible Jupyter Notebook…"
         )
         notebook_action.triggered.connect(self.choose_notebook_export)
+
+        database_menu = file_menu.addMenu("Database")
+        database_menu.setToolTipsVisible(True)
+        self.open_from_database_action = database_menu.addAction(
+            "Open from Database…"
+        )
+        self.open_from_database_action.triggered.connect(
+            lambda _checked=False: self.database().open_from_database()
+        )
+        self.submit_to_database_action = database_menu.addAction(
+            "Submit to Database"
+        )
+        self.submit_to_database_action.triggered.connect(
+            lambda _checked=False: self.database().submit(self)
+        )
+        self.prefer_run_action = database_menu.addAction("Mark as Preferred")
+        self.prefer_run_action.triggered.connect(
+            lambda _checked=False: self.database().prefer(self)
+        )
+        database_menu.addSeparator()
+        self.sign_out_action = database_menu.addAction("Sign Out")
+        self.sign_out_action.triggered.connect(
+            lambda _checked=False: self.database().sign_out(
+                (self.session.origin or {}).get("server")
+            )
+        )
+        if sys.platform == "win32":
+            register_action = database_menu.addAction("Register upbr:// Links")
+            register_action.setToolTip(
+                "Let browsers and UPb Studio open database links in this "
+                "Studio (writes HKCU\\Software\\Classes\\upbr)."
+            )
+            register_action.triggered.connect(self.register_url_scheme)
+        self._update_database_actions()
 
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Quit")
@@ -914,6 +952,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_workflow_step_changed
         )
         layout.addWidget(self.workflow_step_list, 1)
+
+        self.database_origin_label = QtWidgets.QLabel()
+        self.database_origin_label.setObjectName("DatabaseOrigin")
+        self.database_origin_label.setWordWrap(True)
+        self.database_origin_label.setVisible(False)
+        layout.addWidget(self.database_origin_label)
 
         self.save_project_button = QtWidgets.QPushButton("Save project")
         self.save_project_button.setToolTip(
@@ -2823,7 +2867,86 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             label = ""
         suffix = "" if not label else f" — {label}"
+        origin = self.session.origin or {}
+        if origin:
+            from urllib.parse import urlsplit
+
+            host = urlsplit(origin.get("server", "")).netloc or origin.get("server", "")
+            suffix += f" — database {host}"
         self.setWindowTitle(f"UPbRPy Studio{suffix}")
+        if hasattr(self, "database_origin_label"):
+            from GUI.database import origin_summary
+
+            text, tooltip = origin_summary(origin)
+            self.database_origin_label.setText(text)
+            self.database_origin_label.setToolTip(tooltip)
+            self.database_origin_label.setVisible(bool(text))
+        self._update_database_actions()
+
+    def database(self):
+        """The database-mode flows serving this window."""
+        if self.database_links is None:
+            from GUI.database import DatabaseLinks
+
+            self.database_links = DatabaseLinks(
+                open_bundle=self._open_session_bundle_here,
+                open_project=self.load_project_file,
+                parent_widget=lambda: self,
+            )
+        return self.database_links
+
+    def _open_session_bundle_here(self, bundle) -> None:
+        if bundle.project_file is not None:
+            self.load_project_file(bundle.project_file)
+        else:
+            self.load_experiment_directory(str(bundle.raw_directory))
+
+    def _update_database_actions(self) -> None:
+        """Enable the database actions that apply, with the reason otherwise."""
+        if not hasattr(self, "submit_to_database_action"):
+            return
+        from GUI.database import ORIGIN_REQUIRED, RUN_REQUIRED, database_availability
+
+        available, reason = database_availability()
+        origin = self.session.origin or {}
+        states = {
+            self.open_from_database_action: (
+                available,
+                "Fetch a session from a laicpmsdb server and open it.",
+            ),
+            self.submit_to_database_action: (
+                available and bool(origin) and self.session.loaded,
+                "Post this reduction to its session on "
+                f"{origin.get('server', 'the database')} as a new run."
+                if origin
+                else ORIGIN_REQUIRED,
+            ),
+            self.prefer_run_action: (
+                available and bool(origin.get("run_id")),
+                f"Make run {origin['run_id']} the session's preferred run."
+                if origin.get("run_id")
+                else RUN_REQUIRED,
+            ),
+            self.sign_out_action: (available, "Forget this computer's sign-in."),
+        }
+        for action, (enabled, tip) in states.items():
+            action.setEnabled(enabled)
+            action.setToolTip(tip if available else reason)
+            action.setStatusTip(tip if available else reason)
+
+    def register_url_scheme(self) -> None:
+        from GUI.launch import LaunchError, register_url_scheme
+
+        try:
+            command = register_url_scheme()
+        except (LaunchError, OSError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Register upbr:// links", str(exc))
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "Register upbr:// links",
+            f"Database links now open in this Studio:\n{command}",
+        )
 
     def choose_notebook_export(self) -> None:
         """Save the current GUI settings and reviewed windows as a notebook."""
@@ -2894,7 +3017,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 include_depth_profile=(
                     self.workflow_preset.supports_depth_profiles
                 ),
-                hash_inputs=False,
+                hash_inputs=True,
                 include_concentrations=(
                     self.session.include_export_concentrations
                 ),

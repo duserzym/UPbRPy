@@ -21,6 +21,7 @@ from GUI.workflows import (
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.constants import standard_archive_legacy
 from UPbRPy.io import read_experiment_data, select_signal_regions
+from UPbRPy.session_manifest import find_session_manifest
 from UPbRPy.pipeline import (
     FitSettings,
     PipelineConfig,
@@ -30,6 +31,7 @@ from UPbRPy.pipeline import (
 )
 from UPbRPy.project import (
     completed_project_stages,
+    project_origin,
     read_reduction_project,
     resolve_project_path,
     restore_project_selections,
@@ -298,6 +300,22 @@ def config_invalidation_stage(
     return PipelineStage.FINALIZE
 
 
+def raw_input_files(directory: str | Path) -> tuple[Path, ...]:
+    """The files ``read_experiment_data`` imports: the folder's CSV files.
+
+    Only these are hashed into the reduction manifest, so a stray
+    ``.DS_Store`` or note beside the exports is not reported to a database
+    as an unknown input.
+    """
+    return tuple(
+        sorted(
+            path
+            for path in Path(directory).iterdir()
+            if path.is_file() and path.name.endswith(".csv")
+        )
+    )
+
+
 def ensure_shared_pipeline(
     session: ReductionSession,
     preset: WorkflowPreset,
@@ -305,11 +323,11 @@ def ensure_shared_pipeline(
     """Return the session's core pipeline, synchronizing current GUI choices."""
     config = pipeline_config_from_session(session, preset)
     if session.pipeline is None:
-        input_files = tuple(
-            path
-            for path in Path(session.directory).iterdir()
-            if path.is_file()
-        ) if session.directory and Path(session.directory).is_dir() else ()
+        input_files = (
+            raw_input_files(session.directory)
+            if session.directory and Path(session.directory).is_dir()
+            else ()
+        )
         session.pipeline = ReductionPipeline(
             session.experiment,
             session.total_data,
@@ -320,9 +338,11 @@ def ensure_shared_pipeline(
             reference_library_path=current_standard_archive_path(),
             input_files=input_files,
             build_diagnostic_plots=False,
+            origin=session.origin,
         )
     else:
         pipeline = session.pipeline
+        pipeline.origin = None if session.origin is None else dict(session.origin)
         if pipeline.config != config:
             pipeline.update_config(
                 config,
@@ -548,6 +568,60 @@ def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
     return _active_standard_archive
 
 
+def bundle_origin(directory: str | Path) -> dict[str, str] | None:
+    """Origin of a cached session bundle's ``raw/`` folder, if known.
+
+    Used when a bundle is opened as a folder rather than through its
+    ``.upbr``; needs the server recorded when the bundle was fetched.
+    """
+    from UPbRPy.session_bundle import read_bundle_record
+    from UPbRPy.project import normalize_origin
+
+    folder = Path(directory)
+    manifest = find_session_manifest(folder)
+    if manifest is None:
+        return None
+    record = read_bundle_record(manifest.parent)
+    origin = {
+        "server": record.get("server", ""),
+        "session_id": record.get("session_id", ""),
+        "session_key": record.get("session_key", ""),
+        "export_sha256": record.get("export_sha256", ""),
+    }
+    try:
+        return normalize_origin(origin)
+    except ValueError:
+        return None
+
+
+def normalize_import_settings(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep ``read_experiment_data`` keywords; nest detector options.
+
+    Project ``selection_options`` are the reader's keyword arguments with
+    detector options in a nested ``selection_options`` mapping. Keys the
+    reader does not take (for example ``plateau_width_mode`` written one
+    level too high) are moved into that nested mapping instead of failing.
+    """
+    import inspect
+
+    accepted = set(inspect.signature(read_experiment_data).parameters)
+    accepted.add("primary_channel")
+    result: dict[str, object] = {}
+    nested: dict[str, object] = {}
+    for key, value in dict(values).items():
+        if key == "selection_options" and isinstance(value, Mapping):
+            nested.update(dict(value))
+        elif key in accepted:
+            result[key] = value
+        else:
+            nested.setdefault(key, value)
+    if nested:
+        result["selection_options"] = nested
+    return result
+
+
 def load_session(
     directory: str,
     primary_channel: str | None = None,
@@ -562,7 +636,15 @@ def load_session(
     # would let an interactive session edit the global mineral defaults when
     # the user changes plateau duration or sigma settings.
     read_kwargs = deepcopy(dict(workflow_preset.read_kwargs))
-    read_kwargs.update(deepcopy(dict(import_settings or {})))
+    explicit = normalize_import_settings(import_settings or {})
+    if find_session_manifest(directory) is not None:
+        # A session manifest names the label separator of this session; a
+        # mineral preset's default must not override it (explicit project
+        # settings still do).
+        for key in ("sep", "sample_aliases"):
+            if key not in explicit:
+                read_kwargs.pop(key, None)
+    read_kwargs.update(deepcopy(explicit))
     read_kwargs.pop("primary_channel", None)
     if selection_method is not None:
         read_kwargs["selection_method"] = selection_method
@@ -606,6 +688,7 @@ def load_session(
         plot_mode="raw",
         reduction_cache={},
     )
+    session.origin = bundle_origin(directory)
     ensure_shared_pipeline(session, workflow_preset)
     return session
 
@@ -668,7 +751,9 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         None if reference_path is None else str(reference_path)
     )
 
-    restored_import_settings = dict(config.selection_options)
+    restored_import_settings = normalize_import_settings(
+        config.selection_options
+    )
     restored_import_settings.pop("primary_channel", None)
     restored_import_settings.pop("selection_method", None)
     session = load_session(
@@ -678,11 +763,15 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         selection_method=config.selection_method,
         import_settings=restored_import_settings,
     )
-    session.experiment = restore_project_selections(
-        session.experiment,
-        document["selections"],
-        strict_spot_names=True,
-    )
+    if document["selections"]:
+        session.experiment = restore_project_selections(
+            session.experiment,
+            document["selections"],
+            strict_spot_names=True,
+        )
+    # else: a project fresh from a session bundle has no reviewed windows
+    # yet; the auto-picked windows of this import are the starting point.
+    session.origin = project_origin(document) or session.origin
     session.import_settings = {
         "primary_channel": config.primary_channel,
         **restored_import_settings,
@@ -742,11 +831,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         session.selected_spot = selected_spot
     session.plot_mode = str(workspace.get("plot_mode", "raw"))
 
-    input_files = tuple(
-        path
-        for path in source_directory.iterdir()
-        if path.is_file()
-    )
+    input_files = raw_input_files(source_directory)
     session.pipeline = ReductionPipeline(
         session.experiment,
         session.total_data,
@@ -757,6 +842,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         reference_library_path=reference_path,
         input_files=input_files,
         build_diagnostic_plots=False,
+        origin=session.origin,
     )
     completed = completed_project_stages(
         pipeline_values.get("completed_stages", ())
