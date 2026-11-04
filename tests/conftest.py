@@ -20,7 +20,9 @@ class _BlockedImports(importlib.abc.MetaPathFinder):
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split(".", 1)[0] in self.names:
-            raise ImportError(f"{fullname} is blocked by UPBRPY_BLOCK_IMPORTS")
+            raise ModuleNotFoundError(
+                f"{fullname} is blocked by UPBRPY_BLOCK_IMPORTS", name=fullname
+            )
         return None
 
 

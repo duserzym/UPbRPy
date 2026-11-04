@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from pathlib import Path
 import sys
 import tomllib
@@ -40,9 +41,23 @@ data_files += copy_metadata("UPbRPy")
 hidden_imports = [
     "PySide6.QtSvg",
     "PySide6.QtOpenGLWidgets",
+    "PySide6.QtNetwork",
     "xlsxwriter",
     *collect_submodules("pyqtgraph.exporters"),
 ]
+
+# Database mode (the optional [database] extra) is bundled when the build
+# environment has it; the client imports requests and keyring lazily, so
+# PyInstaller cannot see them on its own. keyring finds its OS backends
+# through entry points, hence its metadata.
+if find_spec("requests") is not None and find_spec("keyring") is not None:
+    hidden_imports += [
+        "UPbRPy.integration.laicpmsdb",
+        "requests",
+        "keyring",
+        *collect_submodules("keyring.backends"),
+    ]
+    data_files += copy_metadata("keyring")
 
 analysis = Analysis(
     [str(PROJECT_ROOT / "GUI" / "main.py")],
@@ -136,5 +151,14 @@ if sys.platform == "darwin":
             "LSMinimumSystemVersion": "12.0",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
+            # upbr:// links (database mode) open Studio; Qt delivers them
+            # as QFileOpenEvent (GUI/launch.py).
+            "CFBundleURLTypes": [
+                {
+                    "CFBundleURLName": "org.upbrpy.studio.link",
+                    "CFBundleURLSchemes": ["upbr"],
+                    "CFBundleTypeRole": "Viewer",
+                }
+            ],
         },
     )

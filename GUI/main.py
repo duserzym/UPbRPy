@@ -12,6 +12,15 @@ if __package__ in {None, ""}:
 from PySide6 import QtCore, QtWidgets
 
 from GUI.icon import build_app_icon
+from GUI.launch import (
+    FileOpenFilter,
+    LaunchError,
+    LaunchTarget,
+    SingleInstance,
+    parse_open_target,
+    register_url_scheme,
+    unregister_url_scheme,
+)
 from GUI.main_window import MainWindow
 from GUI.theme import build_application
 
@@ -35,6 +44,7 @@ class StudioWindowController(QtCore.QObject):
         self.theme_mode = theme_mode
         self.app_icon = app_icon
         self.windows: dict[int, MainWindow] = {}
+        self._database = None
 
     def create_window(
         self,
@@ -79,6 +89,105 @@ class StudioWindowController(QtCore.QObject):
         window.load_experiment_directory(directory)
         return window
 
+    # ------------------------------------------------------------ --open
+    @property
+    def database(self):
+        """Database-mode flows (links, sign-in), created on first use."""
+        if self._database is None:
+            from GUI.database import DatabaseLinks
+
+            self._database = DatabaseLinks(
+                open_bundle=self.open_session_bundle,
+                open_project=self.open_project_in_window,
+                parent_widget=self.active_window,
+            )
+        return self._database
+
+    def active_window(self) -> MainWindow | None:
+        """The window dialogs should attach to."""
+        active = QtWidgets.QApplication.activeWindow()
+        if isinstance(active, MainWindow):
+            return active
+        visible = [w for w in self.windows.values() if w.isVisible()]
+        return visible[-1] if visible else next(iter(self.windows.values()), None)
+
+    def window_for_new_content(self) -> MainWindow:
+        """Reuse an empty, idle window; otherwise open a new one."""
+        for window in self.windows.values():
+            if (
+                not window.session.directory
+                and window.project_path is None
+                and window._active_worker is None
+            ):
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return window
+        return self.create_window()
+
+    def open_project_in_window(self, project_file: str) -> MainWindow:
+        window = self.window_for_new_content()
+        window.load_project_file(project_file)
+        return window
+
+    def open_directory_in_window(self, directory: str) -> MainWindow:
+        window = self.window_for_new_content()
+        window.load_experiment_directory(directory)
+        return window
+
+    def open_session_bundle(self, bundle) -> MainWindow:
+        """Open an unpacked session bundle: its project, else its raw/ folder."""
+        if bundle.project_file is not None:
+            window = self.open_project_in_window(str(bundle.project_file))
+        else:
+            window = self.open_directory_in_window(str(bundle.raw_directory))
+        note = "cached copy is current" if bundle.reused else "fetched"
+        window.append_log(
+            f"Session bundle {bundle.session_key} ({note}): {bundle.path}"
+        )
+        if bundle.superseded is not None:
+            window.append_log(
+                f"The previous cached copy was kept as {bundle.superseded}."
+            )
+        return window
+
+    def open_target(self, value: str | LaunchTarget) -> None:
+        """Open an ``--open`` value: folder, .upbr, bundle zip or upbr:// link."""
+        try:
+            target = value if isinstance(value, LaunchTarget) else parse_open_target(value)
+        except LaunchError as exc:
+            QtWidgets.QMessageBox.warning(self.active_window(), "Cannot open", str(exc))
+            return
+        if target.is_url:
+            self.database.handle(target)
+            return
+        if target.kind == "project":
+            self.open_project_in_window(str(target.path))
+        elif target.kind == "bundle_zip":
+            self._open_bundle_zip(target.path)
+        elif target.kind == "directory":
+            from UPbRPy.session_bundle import find_bundle_project
+            from UPbRPy.session_manifest import SESSION_MANIFEST_FILENAME
+
+            folder = target.path
+            if (folder / SESSION_MANIFEST_FILENAME).is_file() and (folder / "raw").is_dir():
+                project = find_bundle_project(folder, folder.name)
+                if project is not None:
+                    self.open_project_in_window(str(project))
+                else:
+                    self.open_directory_in_window(str(folder / "raw"))
+            else:
+                self.open_directory_in_window(str(folder))
+
+    def _open_bundle_zip(self, path: Path) -> None:
+        from UPbRPy.session_bundle import unpack_session_bundle
+
+        self.database.run(
+            lambda: unpack_session_bundle(path, self.database.cache_root),
+            self.open_session_bundle,
+            title="Open session bundle",
+        )
+
     def activate_next_window(self, source: MainWindow) -> None:
         """Cycle keyboard focus through the currently open reductions."""
         ordered = [
@@ -112,17 +221,62 @@ def export_window(window: QtWidgets.QMainWindow, output_path: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="UPbRPy PySide6 + pyqtgraph GUI")
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
-    parser.add_argument("--open", metavar="DIR", help="Open an experiment directory on startup")
+    parser.add_argument(
+        "--open",
+        metavar="TARGET",
+        help=(
+            "Open on startup: an experiment directory, a .upbr project, a "
+            "session-bundle .zip, or a upbr://session/<id>?server=…&code=…, "
+            "upbr://run/<id>?server=… or upbr://auth/callback?code=… link"
+        ),
+    )
     parser.add_argument("--theme", choices=["system", "light", "dark"], help="Override the saved GUI theme mode")
     parser.add_argument("--verify-reduction", metavar="DIR", help="Run a full reduction/export smoke check on an experiment and exit")
     parser.add_argument("--verification-output", metavar="DIR", help="Output directory required by --verify-reduction")
+    parser.add_argument(
+        "--register-url-scheme",
+        action="store_true",
+        help="Windows: register upbr:// links for this user (HKCU\\Software\\Classes\\upbr) and exit",
+    )
+    parser.add_argument(
+        "--unregister-url-scheme",
+        action="store_true",
+        help="Windows: remove the upbr:// registration and exit",
+    )
     args = parser.parse_args(argv)
     if args.verify_reduction and not args.verification_output:
         parser.error("--verify-reduction requires --verification-output")
 
+    if args.register_url_scheme or args.unregister_url_scheme:
+        try:
+            if args.unregister_url_scheme:
+                unregister_url_scheme()
+                print("Removed the upbr:// registration.")
+            else:
+                print(f"Registered upbr:// links: {register_url_scheme()}")
+        except LaunchError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return 0
+
+    target = None
+    if args.open:
+        try:
+            target = parse_open_target(args.open)
+        except LaunchError as exc:
+            parser.error(str(exc))
+
     settings = QtCore.QSettings("UPbRPy", "Studio")
     theme_mode = args.theme or str(settings.value("theme_mode", "light", type=str) or "light")
     app = build_application(argv, theme_mode=theme_mode)
+
+    interactive = not (args.export or args.verify_reduction)
+    instance = SingleInstance() if interactive else None
+    if instance is not None and target is not None and target.is_url:
+        # A link while Studio runs: hand it over and leave.
+        if instance.send(args.open):
+            return 0
+
     icon = build_app_icon()
     app.setWindowIcon(icon)
     controller = StudioWindowController(
@@ -152,18 +306,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2))
         return 0
 
-    if args.open:
-        window.load_experiment_directory(
-            args.open,
-            background=not bool(args.export),
-        )
-
     if args.export:
+        if target is not None and target.kind == "directory":
+            window.load_experiment_directory(args.open, background=False)
+        elif target is not None and target.kind == "project":
+            window.load_project_file(target.path, background=False)
         export_window(window, args.export)
         return 0
 
+    if instance is not None:
+        instance.received.connect(controller.open_target)
+        instance.listen()
+    # macOS delivers upbr:// links and Finder opens as QFileOpenEvent.
+    file_open_filter = FileOpenFilter(controller.open_target, app)
+    app.installEventFilter(file_open_filter)
+
     window.show()
-    return app.exec()
+    if target is not None:
+        controller.open_target(target)
+    try:
+        return app.exec()
+    finally:
+        if instance is not None:
+            instance.close()
 
 
 if __name__ == "__main__":

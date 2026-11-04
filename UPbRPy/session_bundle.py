@@ -198,7 +198,8 @@ def _update_project_origin(
     )
 
 
-def _find_project(folder: Path, session_key: str) -> Path | None:
+def find_bundle_project(folder: Path, session_key: str) -> Path | None:
+    """The bundle's ``<session_key>.upbr``, else its first ``.upbr``."""
     preferred = folder / f"{session_key}.upbr"
     if preferred.is_file():
         return preferred
@@ -309,7 +310,7 @@ def _install(
                 session_id=session_id,
                 export_sha256=export_sha256,
                 zip_sha256=str(previous.get("zip_sha256", zip_sha256)),
-                project_file=_find_project(destination, session_key),
+                project_file=find_bundle_project(destination, session_key),
                 reused=True,
             )
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
@@ -317,7 +318,7 @@ def _install(
             f"{destination.name}.superseded-{stamp}"
         )
         destination.rename(superseded)
-    project = _find_project(unpacked, session_key)
+    project = find_bundle_project(unpacked, session_key)
     if project is not None:
         _update_project_origin(
             project,
@@ -336,7 +337,7 @@ def _install(
         session_id=session_id,
         export_sha256=export_sha256,
         zip_sha256=zip_sha256,
-        project_file=_find_project(destination, session_key),
+        project_file=find_bundle_project(destination, session_key),
         superseded=superseded,
     )
 
@@ -381,6 +382,7 @@ __all__ = [
     "default_cache_root",
     "read_bundle_record",
     "unpack_session_bundle",
+    "find_bundle_project",
     "find_cached_session",
     "find_project_for_run",
     "sha256_bytes",
