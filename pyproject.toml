@@ -35,6 +35,10 @@ export = [
   "cairosvg>=2.8.2",
   "selenium>=4.39.0"
 ]
+database = [
+  "requests>=2.32",
+  "keyring>=25.0"
+]
 build = [
   "PyInstaller>=6.17.0,<7",
   "pyinstaller-hooks-contrib>=2025.9"

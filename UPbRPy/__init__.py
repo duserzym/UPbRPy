@@ -35,6 +35,7 @@ FOCUSED_SUBMODULES = frozenset(
         "reproducibility",
         "results",
         "selection",
+        "session_bundle",
         "session_manifest",
         "standards",
         "thermometry",
