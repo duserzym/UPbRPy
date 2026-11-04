@@ -213,6 +213,12 @@ explanation and actions appear above the plot. Side panels collapse on smaller
 monitors and can be restored from the View menu. File, Workflow, Calibration,
 Results, View, and Help menus expose the same operations without depending on
 panel visibility.
+On a laptop (tested at 1440 × 900 and 1280 × 800 points) the header becomes
+one line, the auto-pick settings fold behind a toggle in the workflow rail,
+the notes and activity log start hidden (**View → Reduction Notes and
+Activity Log**, Ctrl+Shift+L), and long labels shorten with "…" rather than
+widening the window. The window size and every panel width are remembered;
+**View → Reset Layout** fits the default layout to the current screen.
 
 Run the desktop application from source with:
 

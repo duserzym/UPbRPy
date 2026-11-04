@@ -965,6 +965,92 @@ class ConcordiaReviewWidget(pg.GraphicsLayoutWidget):
         )
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """A one-line label that shortens its text with "…" instead of forcing
+    its parent wider; the full text is the tooltip while it is shortened.
+
+    Small screens (a 14-inch laptop) cannot give every header label its
+    natural width, and a plain ``QLabel`` would either widen the window or
+    be cut off mid-character.
+    """
+
+    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self._own_tooltip = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
+        self._full_text = str(text)
+        self._elide()
+
+    def text(self) -> str:  # noqa: D401 - Qt API
+        return self._full_text
+
+    def setToolTip(self, tooltip: str) -> None:  # noqa: N802 - Qt API
+        self._own_tooltip = tooltip
+        super().setToolTip(tooltip)
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        metrics = self.fontMetrics()
+        margins = self.contentsMargins()
+        return QtCore.QSize(
+            metrics.horizontalAdvance(self._full_text) + margins.left() + margins.right() + 2,
+            super().sizeHint().height(),
+        )
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        metrics = self.fontMetrics()
+        return QtCore.QSize(
+            metrics.horizontalAdvance("…") + 4,
+            super().minimumSizeHint().height(),
+        )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._elide()
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.Type.FontChange, QtCore.QEvent.Type.StyleChange):
+            self._elide()
+
+    def _elide(self) -> None:
+        margins = self.contentsMargins()
+        width = max(0, self.width() - margins.left() - margins.right())
+        shown = self.fontMetrics().elidedText(
+            self._full_text, QtCore.Qt.TextElideMode.ElideRight, width
+        )
+        super().setText(shown)
+        elided = shown != self._full_text
+        super().setToolTip(self._full_text if elided and not self._own_tooltip else self._own_tooltip)
+
+
+def scrolling_page(page: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+    """Put a tab page in a frameless scroll area: it fills the tab when
+    there is room and scrolls instead of imposing its minimum size."""
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    scroll.setWidget(page)
+    return scroll
+
+
+def elide_tab_titles(tabs: QtWidgets.QTabWidget) -> None:
+    """Shorten tab titles with "…" on narrow panels instead of showing the
+    tab bar's scroll arrows; each title stays readable as its tooltip."""
+    tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+    tabs.setUsesScrollButtons(False)
+    for index in range(tabs.count()):
+        if not tabs.tabToolTip(index):
+            tabs.setTabToolTip(index, tabs.tabText(index))
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
@@ -987,10 +1073,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.tabs.addTab(self.results_table, "Final results")
         self.tabs.addTab(self.secondary_table, "Secondary standards")
         self.tabs.addTab(self.depth_table, "Depth profile")
-        self.spot_concordia_page = self.create_spot_concordia_page()
-        self.depth_concordia_page = self.create_depth_concordia_page()
+        # The concordia pages scroll when the plot column is short, so a
+        # laptop screen does not force every results page to their height.
+        self.spot_concordia_page = scrolling_page(self.create_spot_concordia_page())
+        self.depth_concordia_page = scrolling_page(self.create_depth_concordia_page())
         self.tabs.addTab(self.spot_concordia_page, "Spot concordia")
         self.tabs.addTab(self.depth_concordia_page, "Depth concordia")
+        elide_tab_titles(self.tabs)
         layout.addWidget(self.tabs, 1)
 
         self._theme: ThemeSpec | None = None
@@ -1068,18 +1157,24 @@ class ResultsTableWidget(QtWidgets.QWidget):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
+        # Two short rows rather than one long one, so the page (and with it
+        # the whole results area) fits a laptop-width plot column.
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Depth-profile spot"))
         self.depth_spot_combo = StyledComboBox()
+        self.depth_spot_combo.setMinimumContentsLength(8)
+        self.depth_spot_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self.depth_spot_combo.currentIndexChanged.connect(
             self.refresh_depth_concordia
         )
         controls.addWidget(self.depth_spot_combo, 1)
+        layout.addLayout(controls)
         diagram_row, self.depth_diagram_buttons = self.create_diagram_buttons(
             self.refresh_depth_concordia
         )
-        controls.addWidget(diagram_row)
-        layout.addLayout(controls)
+        layout.addWidget(diagram_row)
         self.depth_concordia = ConcordiaReviewWidget()
         layout.addWidget(self.depth_concordia, 1)
         return page
@@ -1906,7 +2001,9 @@ class TracePlotWidget(pg.PlotWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(200)
+        # 160 px keeps the trace editable when a laptop screen squeezes the
+        # column; it normally gets 250 px or more (tests/test_small_screens.py).
+        self.setMinimumHeight(160)
         self.setSizePolicy(
             QtWidgets.QSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,

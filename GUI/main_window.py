@@ -56,6 +56,8 @@ from GUI.theme import NeumorphicFrame, active_theme, apply_theme
 from GUI.widgets import (
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
+    ElidedLabel,
+    elide_tab_titles,
     IsotopeGridWidget,
     ResultsTableWidget,
     SessionFractionationWidget,
@@ -428,6 +430,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 visible,
             )
         )
+        self.notes_log_action = view_menu.addAction("Reduction Notes and Activity Log")
+        self.notes_log_action.setCheckable(True)
+        self.notes_log_action.setChecked(True)
+        self.notes_log_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+L"))
+        self.notes_log_action.triggered.connect(self.set_notes_log_visible)
+        view_menu.addSeparator()
+        reset_layout_action = view_menu.addAction("Reset Layout")
+        reset_layout_action.setToolTip(
+            "Forget the saved window size and panel widths and fit the "
+            "default layout to this screen."
+        )
+        reset_layout_action.triggered.connect(self.reset_layout)
 
         window_menu = self.menuBar().addMenu("Window")
         window_new_action = window_menu.addAction("New Reduction Window")
@@ -614,6 +628,7 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         if not self.has_unsaved_changes():
+            self.persist_layout_state()
             event.accept()
             return
         dialog = QtWidgets.QMessageBox(self)
@@ -632,11 +647,13 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Save)
         choice = dialog.exec()
         if choice == QtWidgets.QMessageBox.StandardButton.Discard:
+            self.persist_layout_state()
             event.accept()
             return
         if choice == QtWidgets.QMessageBox.StandardButton.Save:
             self.save_project()
             if not self.has_unsaved_changes():
+                self.persist_layout_state()
                 event.accept()
                 return
         event.ignore()
@@ -671,11 +688,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # centre plot remains the stretchable pane and therefore absorbs
         # changes when the application window is resized.
         self.workspace_splitter.setSizes([260, 1050, 430])
-        saved_splitter_state = self.settings.value(
-            "workspace_splitter_state_v4"
-        )
-        if isinstance(saved_splitter_state, QtCore.QByteArray):
-            self.workspace_splitter.restoreState(saved_splitter_state)
         self.workspace_splitter.splitterMoved.connect(
             self.persist_workspace_splitter_state
         )
@@ -687,9 +699,186 @@ class MainWindow(QtWidgets.QMainWindow):
         self.busy_progress.setFixedWidth(150)
         self.busy_progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.busy_progress)
+
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
         self._sync_fit_controls()
+        self.spot_channel_splitter.splitterMoved.connect(
+            lambda _pos, _index: self.persist_layout_state()
+        )
+        self._layout_restored = self._restore_layout_state()
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(self.persist_layout_state)
+
+    # ── Layout: small screens, remembered geometry, reset ─────────────────
+    LAYOUT_SETTINGS = {
+        "notes_log": "notes_log_visible_v1",
+        "geometry": "window_geometry_v1",
+        "workspace": "workspace_splitter_state_v4",
+        "content": "content_splitter_state_v1",
+        "spot_channel": "spot_channel_splitter_state_v1",
+    }
+
+    def _layout_splitters(self) -> dict[str, QtWidgets.QSplitter]:
+        return {
+            "workspace": self.workspace_splitter,
+            "content": self.content_splitter,
+            "spot_channel": self.spot_channel_splitter,
+        }
+
+    def _restore_layout_state(self) -> bool:
+        """Restore saved splitter positions; ``False`` if none were saved."""
+        restored = False
+        for name, splitter in self._layout_splitters().items():
+            state = self.settings.value(self.LAYOUT_SETTINGS[name])
+            if isinstance(state, QtCore.QByteArray) and not state.isEmpty():
+                restored = splitter.restoreState(state) or restored
+        notes = self.settings.value(self.LAYOUT_SETTINGS["notes_log"])
+        if notes is not None:
+            self.lower_container.setVisible(str(notes).lower() in {"true", "1"})
+        self._sync_notes_log_action()
+        return restored
+
+    def persist_layout_state(self) -> None:
+        """Remember the window geometry and every splitter position."""
+        try:
+            self.settings.setValue(self.LAYOUT_SETTINGS["geometry"], self.saveGeometry())
+            for name, splitter in self._layout_splitters().items():
+                self.settings.setValue(self.LAYOUT_SETTINGS[name], splitter.saveState())
+            self.settings.setValue(self.LAYOUT_SETTINGS["notes_log"], self.notes_log_visible())
+        except RuntimeError:  # the C++ window is already gone at quit
+            return
+        self._sync_notes_log_action()
+
+    def default_window_size(self) -> QtCore.QSize:
+        """A window that fits the available screen (a 14-inch laptop too)."""
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return QtCore.QSize(1600, 1000)
+        available = screen.availableGeometry()
+        width = min(1800, max(960, int(available.width() * 0.92)), available.width())
+        height = min(1150, max(680, int(available.height() * 0.90)), available.height())
+        return QtCore.QSize(width, height)
+
+    def fit_window_to_screen(self) -> None:
+        """Shrink and move the window so all of it is on its screen."""
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra_w = max(0, frame.width() - self.width())
+        extra_h = max(0, frame.height() - self.height())
+        width = min(self.width(), available.width() - extra_w)
+        height = min(self.height(), available.height() - extra_h)
+        if (width, height) != (self.width(), self.height()):
+            self.resize(max(width, self.minimumWidth()), max(height, self.minimumHeight()))
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), available.left()), available.right() - frame.width() + 1)
+        y = min(max(frame.y(), available.top()), available.bottom() - frame.height() + 1)
+        if (x, y) != (frame.x(), frame.y()):
+            self.move(x, y)
+
+    def apply_default_layout(self) -> None:
+        """Panel widths and the notes/log strip chosen for this window size."""
+        width = max(self.width(), 760)
+        compact = width < 1500
+        rail = 240 if compact else 260
+        inspector = 340 if compact else 430
+        self.workspace_splitter.setSizes([rail, max(400, width - rail - inspector - 40), inspector])
+        self.set_notes_log_visible(self.height() >= 950)
+        self.spot_channel_splitter.setSizes([3, 2])
+
+    def reset_layout(self) -> None:
+        """View > Reset Layout: forget saved sizes, fit the default to the screen."""
+        for key in self.LAYOUT_SETTINGS.values():
+            self.settings.remove(key)
+        self.set_workspace_panel_visible("sidebar", True)
+        self.set_workspace_panel_visible("inspector", True)
+        if self.isMaximized() or self.isFullScreen():
+            self.showNormal()
+        self.resize(self.default_window_size())
+        self.fit_window_to_screen()
+        QtWidgets.QApplication.processEvents()
+        self.apply_default_layout()
+        self.statusBar().showMessage("Layout reset to fit this screen.")
+
+    def set_notes_log_visible(self, visible: bool) -> None:
+        """Show or hide the reduction notes and activity log strip.
+
+        Hidden rather than merely collapsed: a collapsed splitter pane still
+        adds its minimum height to the column and would squeeze the header
+        and plot on a short laptop screen.
+        """
+        total = max(sum(self.content_splitter.sizes()), 1)
+        self.lower_container.setVisible(bool(visible))
+        if visible:
+            lower = min(220, max(self.lower_container.minimumSizeHint().height(), total // 5))
+            self.content_splitter.setSizes([max(total - lower, 1), lower])
+        self._sync_notes_log_action(bool(visible))
+
+    def notes_log_visible(self) -> bool:
+        if self.lower_container.isHidden():
+            return False
+        sizes = self.content_splitter.sizes()
+        return len(sizes) > 1 and sizes[1] > 0
+
+    def _on_content_splitter_moved(self) -> None:
+        # Dragged fully closed: hide it so it stops costing height.
+        if not self.lower_container.isHidden() and self.content_splitter.sizes()[1] == 0:
+            self.lower_container.setVisible(False)
+        self._sync_notes_log_action()
+        self.persist_layout_state()
+
+    def _sync_notes_log_action(self, visible: bool | None = None) -> None:
+        open_now = self.notes_log_visible() if visible is None else visible
+        for control in (getattr(self, "notes_log_action", None),):
+            if control is None:
+                continue
+            control.blockSignals(True)
+            control.setChecked(open_now)
+            control.blockSignals(False)
+
+    def _sync_toolbar_strips(self) -> None:
+        """Size the scrolling button strips from their themed size hints.
+
+        The strips are built before the theme's padding is applied, so the
+        heights measured at construction would clip the buttons.
+        """
+        for scroll, bar in getattr(self, "_toolbar_strips", ()):
+            # The buttons' cached size hints predate the stylesheet padding.
+            for child in bar.findChildren(QtWidgets.QWidget):
+                child.updateGeometry()
+            bar.layout().invalidate()
+            bar.layout().activate()
+            hint = bar.sizeHint()
+            margins = bar.layout().contentsMargins()
+            height = max(
+                [hint.height()]
+                + [
+                    child.sizeHint().height() + margins.top() + margins.bottom()
+                    for child in bar.findChildren(QtWidgets.QWidget)
+                    if child.parentWidget() is bar and not child.isHidden()
+                ]
+            )
+            bar.setMinimumWidth(hint.width())
+            bar.setFixedHeight(height)
+            bar.resize(max(hint.width(), bar.width()), height)
+            scroll.setFixedHeight(height + 18)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        self._sync_toolbar_strips()
+        # Children inside the strips are polished after this event; size
+        # the strips again once they carry the stylesheet's padding.
+        QtCore.QTimer.singleShot(0, self._sync_toolbar_strips)
+        if not getattr(self, "_first_show_done", False):
+            self._first_show_done = True
+            if self.size() == getattr(self, "_initial_size", None):
+                self.fit_window_to_screen()
+            if not self._layout_restored:
+                self.apply_default_layout()
 
     def persist_workspace_splitter_state(
         self,
@@ -697,10 +886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         _index: int,
     ) -> None:
         """Remember a valid user-adjusted three-panel layout."""
-        self.settings.setValue(
-            "workspace_splitter_state_v4",
-            self.workspace_splitter.saveState(),
-        )
+        self.persist_layout_state()
 
     def set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
         """Expose responsive side panels through the View menu."""
@@ -727,19 +913,43 @@ class MainWindow(QtWidgets.QMainWindow):
         # Side-panel visibility is an explicit View-menu choice. Automatically
         # hiding a panel while the window or a splitter was being adjusted
         # made the handles appear to jump and collapse whole columns.
-        if hasattr(self, "lower_container"):
-            self.lower_container.setVisible(event.size().height() >= 780)
+        # The notes/log strip is a collapsible splitter pane (View menu)
+        # rather than something hidden below a fixed window height.
+        if hasattr(self, "header_card"):
+            self.apply_header_density(event.size().height())
         if hasattr(self, "workflow_step_list"):
             self.adapt_workflow_rail_height(event.size().height())
 
+    def apply_header_density(self, height: int) -> None:
+        """A one-line header on short screens leaves the height to the plot."""
+        compact = height < 880
+        self.header_subtitle.setVisible(not compact)
+        # The theme buttons repeat View > Theme; the engine label is static.
+        for widget in (self.project_engine_label, self._header_separator, *self.theme_mode_buttons.values()):
+            widget.setVisible(not compact)
+        self.header_card.layout().setContentsMargins(20, 4 if compact else 10, 20, 4 if compact else 10)
+        self.header_card.setMinimumHeight(68 if compact else 84)
+        self.header_card.setMaximumHeight(68 if compact else 96)
+
     def adapt_workflow_rail_height(self, height: int) -> None:
-        """Keep every workflow stage visible on short displays."""
-        compact = height < 850
+        """Keep every workflow stage visible on short displays.
+
+        Below 940 px (a 14-inch laptop) the auto-pick controls fold behind
+        the "Auto-pick settings" toggle instead of pushing the stage list
+        into a scroll area; the reference library stays in the File menu.
+        """
+        compact = height < 940
         very_compact = height < 700
-        self.selection_method_combo.setVisible(not compact)
-        self.selection_parameter_stack.setVisible(not compact)
-        self.plateau_width_control.setVisible(not compact)
-        self.plateau_filter_combo.setVisible(not compact)
+        toggle = self.autopick_settings_toggle
+        toggle.setVisible(compact)
+        show_autopick = not compact or toggle.isChecked()
+        toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if toggle.isChecked() else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.selection_method_combo.setVisible(show_autopick)
+        self.selection_parameter_stack.setVisible(show_autopick)
+        self.plateau_width_control.setVisible(show_autopick)
+        self.plateau_filter_combo.setVisible(show_autopick)
         self.reference_library_button.setVisible(not compact)
         self.workflow_combo.setVisible(not very_compact)
         item_height = 37 if compact else 45
@@ -749,14 +959,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setSizeHint(QtCore.QSize(0, item_height))
 
     def _apply_initial_window_geometry(self) -> None:
-        screen = QtGui.QGuiApplication.primaryScreen()
-        if screen is None:
-            self.resize(1600, 1000)
-            return
-        available = screen.availableGeometry()
-        width = min(1800, max(960, int(available.width() * 0.92)))
-        height = min(1150, max(680, int(available.height() * 0.90)))
-        self.resize(width, height)
+        """Restore the saved window geometry, else fit a default to the screen.
+
+        Saved geometry from a larger monitor is clamped on first show
+        (:meth:`fit_window_to_screen`).
+        """
+        saved = self.settings.value(self.LAYOUT_SETTINGS["geometry"])
+        if not (
+            isinstance(saved, QtCore.QByteArray)
+            and not saved.isEmpty()
+            and self.restoreGeometry(saved)
+        ):
+            self.resize(self.default_window_size())
+        # Clamped to the screen on first show unless a caller resizes first.
+        self._initial_size = self.size()
 
     def _build_workflow_rail(self) -> QtWidgets.QWidget:
         """Build the always-readable icon rail for ordered reduction stages."""
@@ -791,6 +1007,26 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.workflow_combo)
 
+        # On short screens the auto-pick controls fold away behind this
+        # toggle so every workflow stage stays in view; one click opens them.
+        self.autopick_settings_toggle = QtWidgets.QToolButton()
+        self.autopick_settings_toggle.setObjectName("AutopickSettingsToggle")
+        self.autopick_settings_toggle.setText("Auto-pick settings")
+        self.autopick_settings_toggle.setCheckable(True)
+        self.autopick_settings_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.autopick_settings_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.autopick_settings_toggle.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.autopick_settings_toggle.setVisible(False)
+        self.autopick_settings_toggle.toggled.connect(
+            lambda _checked: self.adapt_workflow_rail_height(self.height())
+        )
+        layout.addWidget(self.autopick_settings_toggle)
+
         self.selection_method_combo = StyledComboBox()
         for method in SELECTION_METHODS:
             self.selection_method_combo.addItem(
@@ -803,6 +1039,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_method_combo.currentIndexChanged.connect(
             self.on_selection_method_changed
         )
+        for combo in (self.workflow_combo, self.selection_method_combo):
+            combo.setMinimumContentsLength(10)
+            combo.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
         layout.addWidget(self.selection_method_combo)
 
         self.selection_parameter_stack = QtWidgets.QStackedWidget()
@@ -953,9 +1194,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.workflow_step_list, 1)
 
-        self.database_origin_label = QtWidgets.QLabel()
+        self.database_origin_label = ElidedLabel()
         self.database_origin_label.setObjectName("DatabaseOrigin")
-        self.database_origin_label.setWordWrap(True)
         self.database_origin_label.setVisible(False)
         layout.addWidget(self.database_origin_label)
 
@@ -1087,26 +1327,17 @@ class MainWindow(QtWidgets.QMainWindow):
         header_layout.setSpacing(18)
         title_box = QtWidgets.QVBoxLayout()
         title_box.setSpacing(2)
-        title = QtWidgets.QLabel("U-Pb reduction workspace")
+        title = ElidedLabel("U-Pb reduction workspace")
         title.setObjectName("HeroTitle")
-        title.setWordWrap(True)
-        title.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        subtitle = QtWidgets.QLabel(
+        subtitle = ElidedLabel(
             "Shared scientific pipeline, editable selections, and "
             "stage-by-stage diagnostic review."
         )
         subtitle.setObjectName("SecondaryText")
-        subtitle.setWordWrap(True)
-        subtitle.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
+        self.header_subtitle = subtitle
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        header_layout.addLayout(title_box, 3)
+        header_layout.addLayout(title_box, 2)
 
         summary_box = QtWidgets.QVBoxLayout()
         summary_box.setSpacing(3)
@@ -1115,29 +1346,27 @@ class MainWindow(QtWidgets.QMainWindow):
         workspace_row.addStretch(1)
         workspace_label = QtWidgets.QLabel("Workspace")
         workspace_label.setObjectName("SectionTitle")
-        self.project_name_label = QtWidgets.QLabel("No experiment loaded")
-        self.project_name_label.setWordWrap(False)
+        self.project_name_label = ElidedLabel("No experiment loaded")
         self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.project_name_label.setStyleSheet("font-size: 16px; font-weight: 700;")
         workspace_row.addWidget(workspace_label)
-        workspace_row.addWidget(self.project_name_label)
+        workspace_row.addWidget(self.project_name_label, 4)
 
         metadata_row = QtWidgets.QHBoxLayout()
         metadata_row.setSpacing(8)
         metadata_row.addStretch(1)
-        self.project_spots_label = QtWidgets.QLabel("Import a Thermo iCAP export directory")
+        self.project_spots_label = ElidedLabel("Import a Thermo iCAP export directory")
         self.project_spots_label.setObjectName("SecondaryText")
-        self.project_spots_label.setWordWrap(False)
         self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_engine_label = QtWidgets.QLabel("Shared UPbRPy core")
+        self.project_engine_label = ElidedLabel("Shared UPbRPy core")
         self.project_engine_label.setObjectName("SecondaryText")
-        self.project_engine_label.setWordWrap(False)
         self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        metadata_row.addWidget(self.project_spots_label)
+        metadata_row.addWidget(self.project_spots_label, 3)
         metadata_separator = QtWidgets.QLabel("·")
         metadata_separator.setObjectName("SecondaryText")
+        self._header_separator = metadata_separator
         metadata_row.addWidget(metadata_separator)
-        metadata_row.addWidget(self.project_engine_label)
+        metadata_row.addWidget(self.project_engine_label, 2)
 
         self.theme_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.theme_mode_group = QtWidgets.QButtonGroup(self)
@@ -1216,6 +1445,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         mode_scroll.setFixedHeight(mode_bar.sizeHint().height() + 18)
         mode_scroll.setWidget(mode_bar)
+        self._toolbar_strips = [(mode_scroll, mode_bar)]
         plot_layout.addWidget(mode_scroll)
 
         # ── Plot canvas ────────────────────────────────────────────────────
@@ -1358,11 +1588,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         control_scroll.setFixedHeight(control_bar.sizeHint().height() + 18)
         control_scroll.setWidget(control_bar)
+        self._toolbar_strips.append((control_scroll, control_bar))
         plot_layout.addWidget(control_scroll)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         content_splitter.setChildrenCollapsible(False)
         content_splitter.addWidget(plot_card)
+        self.content_splitter = content_splitter
 
         lower_container = QtWidgets.QWidget()
         self.lower_container = lower_container
@@ -1395,12 +1627,12 @@ class MainWindow(QtWidgets.QMainWindow):
         log_card = NeumorphicFrame()
         log_card.setObjectName("NotesCard")
         log_layout = QtWidgets.QVBoxLayout(log_card)
-        log_layout.setContentsMargins(18, 18, 18, 18)
+        log_layout.setContentsMargins(18, 12, 18, 12)
         log_label = QtWidgets.QLabel("Activity log")
         log_label.setObjectName("SectionTitle")
         self.log_view = QtWidgets.QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMinimumHeight(140)
+        self.log_view.setMinimumHeight(60)
         log_layout.addWidget(log_label)
         log_layout.addWidget(self.log_view)
         log_card.setMaximumHeight(220)
@@ -1414,7 +1646,13 @@ class MainWindow(QtWidgets.QMainWindow):
         content_splitter.addWidget(lower_container)
         content_splitter.setStretchFactor(0, 5)
         content_splitter.setStretchFactor(1, 2)
+        # The notes and activity log may be dragged closed (or toggled in
+        # View) so a short laptop screen gives the plot the height instead.
+        content_splitter.setCollapsible(1, True)
         content_splitter.setSizes([900, 200])
+        content_splitter.splitterMoved.connect(
+            lambda _pos, _index: self._on_content_splitter_moved()
+        )
         layout.addWidget(content_splitter, 1)
         return widget
 
@@ -1484,7 +1722,6 @@ class MainWindow(QtWidgets.QMainWindow):
         spots_toolbar.addWidget(spots_label)
         spots_toolbar.addStretch(1)
         _add_folder_btn = QtWidgets.QPushButton("+ Folder")
-        _add_folder_btn.setFixedHeight(28)
         _add_folder_btn.setMinimumWidth(80)
         _add_folder_btn.setStyleSheet("QPushButton { padding: 2px 10px; border-radius: 8px; font-size: 11px; }")
         _add_folder_btn.setToolTip("Add a new custom folder under Unknowns")
@@ -1502,7 +1739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
         spots_layout.addLayout(spots_toolbar)
         spots_layout.addWidget(self.spot_list, 1)
-        spots_card.setMinimumHeight(180)
+        spots_card.setMinimumHeight(140)
         self.spot_channel_splitter.addWidget(spots_card)
 
         channels_card = NeumorphicFrame()
@@ -1515,11 +1752,11 @@ class MainWindow(QtWidgets.QMainWindow):
         channels_heading.setContentsMargins(0, 0, 0, 0)
         channels_label = QtWidgets.QLabel("Channels")
         channels_label.setObjectName("SectionTitle")
-        channels_help = QtWidgets.QLabel("click: select  ·  double-click: show/hide")
+        channels_help = ElidedLabel("click: select  ·  double-click: show/hide")
         channels_help.setObjectName("InspectorHint")
+        channels_help.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         channels_heading.addWidget(channels_label)
-        channels_heading.addStretch(1)
-        channels_heading.addWidget(channels_help)
+        channels_heading.addWidget(channels_help, 1)
         channels_card_layout.addLayout(channels_heading)
 
         self.channel_list = QtWidgets.QListWidget()
@@ -1539,7 +1776,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.isotope_grid.colorChangeRequested.connect(self._on_isotope_color_change)
         channels_scroll.setWidget(self.isotope_grid)
         channels_card_layout.addWidget(channels_scroll, 1)
-        channels_card.setMinimumHeight(260)
+        channels_card.setMinimumHeight(180)
         self.spot_channel_splitter.addWidget(channels_card)
         self.spot_channel_splitter.setStretchFactor(0, 2)
         self.spot_channel_splitter.setStretchFactor(1, 3)
@@ -1851,7 +2088,10 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow("User reproducibility", self.long_term_uncertainty_spin)
 
         self.export_concentrations_check = QtWidgets.QCheckBox(
-            "Include spot concentrations in publication export"
+            "Spot concentrations in export"
+        )
+        self.export_concentrations_check.setToolTip(
+            "Include spot concentrations in the publication export"
         )
         self.export_concentrations_check.setChecked(True)
         self.export_concentrations_check.toggled.connect(
@@ -1862,7 +2102,10 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow(self.export_concentrations_check)
 
         self.export_depth_concentrations_check = QtWidgets.QCheckBox(
-            "Include sweep concentrations in depth export"
+            "Sweep concentrations in depth export"
+        )
+        self.export_depth_concentrations_check.setToolTip(
+            "Include sweep concentrations in the depth-profile export"
         )
         self.export_depth_concentrations_check.setChecked(True)
         self.export_depth_concentrations_check.toggled.connect(
@@ -1884,7 +2127,15 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow("Age transition", self.age_transition_spin)
         results_layout.addWidget(decision_card, 0)
         results_layout.addStretch(1)
-        self.inspector_tabs.addTab(results_page, "Results")
+        results_scroll = QtWidgets.QScrollArea()
+        results_scroll.setWidgetResizable(True)
+        results_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        results_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        results_scroll.setWidget(results_page)
+        self.inspector_tabs.addTab(results_scroll, "Results")
+        elide_tab_titles(self.inspector_tabs)
         return panel
 
     def _populate_fit_method_combo(self, combo: StyledComboBox, methods: tuple[str, ...]) -> None:
@@ -3130,6 +3381,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_frac_plot.apply_theme(active_theme(app))
         self.results_table.apply_theme(active_theme(app))
         self._update_workflow_hint(self.workflow_step_list.currentRow())
+        self._sync_toolbar_strips()
+        QtCore.QTimer.singleShot(0, self._sync_toolbar_strips)
         # Rebuild channel colours for new background when a session is loaded
         if self.session.loaded:
             self.channel_colors = self._resolve_channel_colors(self.session.channels)
@@ -3291,7 +3544,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _resize_workflow_step_list_to_contents(self) -> None:
         if self.workflow_step_list.objectName() == "WorkflowStepRail":
-            self.workflow_step_list.setMinimumHeight(180)
+            # The rail's step list scrolls; 140 px keeps four steps in view
+            # while the rail still fits a 14-inch laptop's height.
+            self.workflow_step_list.setMinimumHeight(140)
             self.workflow_step_list.setMaximumHeight(16777215)
             return
         count = self.workflow_step_list.count()

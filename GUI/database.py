@@ -466,7 +466,7 @@ def origin_summary(origin: dict | None) -> tuple[str, str]:
     key = origin.get("session_key") or origin.get("session_id", "")[:8]
     text = f"Database: {key} @ {host}"
     if origin.get("run_id"):
-        text += f"\nRun {origin['run_id'][:8]}"
+        text += f" · run {origin['run_id'][:8]}"
     tooltip = "\n".join(
         f"{name}: {origin[name]}"
         for name in ("server", "session_key", "session_id", "exported_at", "export_sha256", "run_id")
