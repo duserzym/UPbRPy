@@ -241,6 +241,53 @@ reviewed GUI selections and recreates the same TOML-first reference-material
 library with legacy CSV fallback, so it can replay the complete GUI reduction
 with the shared Python core.
 
+#### Database mode (optional)
+
+Everything above works without a server and stays unchanged. A lab that runs
+[laicpmsdb](https://github.com/duserzym/laicpmsdb) can also move sessions and
+reductions over HTTP; the cross-repository contract is
+`upbstudio/docs/WORKFLOW.md` v1 and the plan is
+[`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md).
+Install the optional extra (`requests` and `keyring`):
+
+```bash
+pip install -e ".[gui,database]"
+```
+
+- **In.** A session page's *Reduce in UPbRPy Studio* link,
+  `upbr://session/<id>?server=…&code=…`, opens Studio, which trades the
+  one-time code for a token, downloads the *session bundle* (raw CSVs
+  byte-identical, `session_manifest.toml`, a pre-filled `.upbr`) into
+  `~/UPbRPy/sessions/<session_key>/`, verifies every file's SHA-256, and opens
+  it. **File → Database → Open from Database…** does the same from a server
+  address, a password or ORCID sign-in, and a session list. The window title
+  and the workflow rail show the database origin.
+- **Out.** **File → Database → Submit to Database** writes the reduction
+  bundle (with input hashes and the `.upbr`), posts it as a new run of the
+  session, shows the run id and any quarantined items, and records
+  `origin.run_id` in the project. **Mark as Preferred** makes that run the
+  session's preferred run.
+- Tokens are kept per server in the OS keychain (macOS Keychain, Windows
+  Credential Manager), never in files. Without the extra the database
+  actions are disabled with the reason as tooltip.
+- `upbrpy-gui --open` accepts a folder, a `.upbr`, a session-bundle `.zip`
+  (what a database user can email to someone without the database), or a
+  `upbr://session/…`, `upbr://run/…` or `upbr://auth/callback?code=…` link. A
+  second launch with a link hands it to the running Studio. The macOS app
+  declares the `upbr` scheme; on Windows run
+  `"UPbRPy Studio.exe" --register-url-scheme` once (or **File → Database →
+  Register upbr:// Links**) to write `HKCU\Software\Classes\upbr`.
+
+In notebooks, `read_experiment_data` reads a session bundle's folder directly:
+it finds `session_manifest.toml` beside `raw/` and takes the label separator
+and sample aliases from it (explicit arguments still win).
+
+Run the tests as if the extra were absent, in an environment that has it:
+
+```bash
+UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen python -m pytest tests -q
+```
+
 #### Building the desktop application
 
 The checked-in PyInstaller recipe produces a native on-directory application,

@@ -1,8 +1,15 @@
 # UPbRPy Studio in the lab workflow: database mode
 
-**Status:** plan, 2026-11-03. Part of the cross-repository contract
-`upbstudio/docs/WORKFLOW.md` v1 (sections 3.2, 3.3 and 4), which wins where
-the two differ. `GUI/roadmap.md` keeps the architecture of Studio itself.
+**Status:** implemented 2026-11-03 (steps 1 to 5 of section 4: commits
+44f9104, 8fcd4a7, cca3195, 21bf44f), verified end to end on macOS against a
+local laicpmsdb with the full 197-spot `Apatite_20Mar25` session (link with
+handoff code, fetch, auto-pick, reduce, submit, prefer; preferred dates equal
+to laicpmsdb's own script reduction of the same bundle). The Windows
+registration (`--register-url-scheme`) and a frozen-app launch by a real
+`upbr://` click are not yet tried on a machine. Part of the cross-repository
+contract `upbstudio/docs/WORKFLOW.md` v1 (sections 3.2, 3.3 and 4), which wins
+where the two differ; laicpmsdb's `docs/workflow_api.md` gives the server's
+exact shapes. `GUI/roadmap.md` keeps the architecture of Studio itself.
 
 ## 1. What changes and what does not
 
@@ -68,3 +75,19 @@ in. Every request carries `User-Agent: UPbRPy-Studio/<version>`.
 Done when a session page in laicpmsdb launches Studio on a Mac and on
 Windows, the reduction appears in the database, and the standalone test
 suite still passes with the `[database]` extra absent.
+
+## 5. Choices made while implementing
+
+- `origin.export_sha256` is the SHA-256 of `session_manifest.toml` (the
+  server's `X-Export-SHA256`), not of the zip, which is streamed and not
+  reproducible. An equal hash keeps the cached folder, saved project
+  included; a different one moves it aside as `<key>.superseded-<UTC time>`.
+- `origin.server` is replaced by the base URL Studio actually used, since the
+  keychain token belongs to that URL.
+- The reduction zip has its files at the top level and includes
+  `<session_key>.upbr`; a resubmission sends `supersedes=<previous run_id>`.
+- `upbr://run/<id>` opens a cached `.upbr` whose `origin.run_id` matches, else
+  asks `GET /v1/runs/{id}` for the session and fetches it.
+- A session manifest's `sep` and `[samples]` win over a mineral preset's
+  defaults in Studio (explicit project settings still win), and only `raw/*.csv`
+  are hashed as inputs.
