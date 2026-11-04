@@ -14,7 +14,7 @@ session a project was exported from (``upbstudio/docs/WORKFLOW.md`` section
         "server": "https://lab.example.org",
         "session_id": "0192…",           # session UUID
         "session_key": "Apatite_20Mar25",
-        "export_sha256": "…",            # hash of the session bundle zip
+        "export_sha256": "…",            # SHA-256 of session_manifest.toml
         "exported_at": "2026-11-03T…Z",
         "run_id": "0193…"                # after Submit to database
     }
