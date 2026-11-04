@@ -1,5 +1,8 @@
 # UPbRPy Studio architecture
 
+Studio's place in the lab workflow (database mode, the `upbr://` scheme,
+submit and preferred runs) is planned in `docs/lab_workflow_integration.md`.
+
 ## Technology decision
 
 UPbRPy Studio remains a native `PySide6 + pyqtgraph` application. The
