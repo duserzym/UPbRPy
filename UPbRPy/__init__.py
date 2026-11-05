@@ -30,6 +30,7 @@ FOCUSED_SUBMODULES = frozenset(
         "mpl_concordia",
         "pipeline",
         "project",
+        "qtegra",
         "ratios",
         "reduction",
         "reproducibility",
