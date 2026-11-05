@@ -126,10 +126,12 @@ S513 stores the published Th-corrected CA-ID-TIMS age as
 it a concordia age. Its two published U-Pb ratios and Hf concentration cite
 `luo2025`; the archive's 208Pb/232Th ratio has a separate provisional
 compilation record. The initial-Pb notes identify the archive's mislabelled
-ratio rows. LTSE retains the archive's ratios and `concordia_age = 560.928`
-Ma provisionally. Its notes preserve the initial-Pb conversion and explain
-that the archive's `hu2023` attribution does not identify an LTSE material
-or exactly matching values. Both records store only canonical inputs;
+ratio rows. LTSE is the SLZC megacryst of Hu et al. (2023) (alias `SLZC`,
+confirmed 2026-11-05): its reference age is the published
+`206Pb/238U_age = 560.83` Ma (1.29 Ma, `expanded_95`, status `recommended`,
+source `hu2023`); its radiogenic and initial-Pb ratios remain the archive's,
+provisional, under `boise_upbr26plus_2026`, and its notes preserve the
+initial-Pb conversion. Both records store only canonical inputs;
 reciprocal and linked ratios are derived by the library.
 
 ## Derived values and validation limits

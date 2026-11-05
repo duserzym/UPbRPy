@@ -114,7 +114,7 @@ EXPECTED = {
         "206Pb/238U*": 0.090912,
         "207Pb/235U*": 0.73893,
         "208Pb/232Th*": 0.028140699603010466,
-        "concordia_age": 560.928,
+        "206Pb/238U_age": 560.83,
     },
 }
 
@@ -124,8 +124,11 @@ def test_new_materials_load_exact_inputs_and_derive_redundant_ratios(standard):
     measurements = UPbRPy.load_standard_measurements()
     records = measurements.loc[measurements["standard"].eq(standard)]
     assert records.set_index("quantity")["value"].to_dict() == EXPECTED[standard]
-    assert set(records["aliases"]) == {""}
-    assert set(records["status"]) == {"provisional"}
+    assert set(records["aliases"]) == ({"SLZC"} if standard == "LTSE" else {""})
+    published_age = standard == "LTSE"
+    by_quantity = records.set_index("quantity")
+    assert set(by_quantity.drop(index="206Pb/238U_age", errors="ignore")["status"]) == {"provisional"}
+    assert by_quantity.loc["206Pb/238U_age", "status"] == ("recommended" if published_age else "provisional")
     assert set(records["material"]) == {"zircon"}
     archive = UPbRPy.build_standard_archive(measurements)
     documented = UPbRPy.build_standard_archive(measurements, include_derived=False)
@@ -164,9 +167,13 @@ def test_new_material_provenance_separates_published_and_archive_values():
         for quantity in ("29Si", "91Zr"):
             assert rows.set_index("quantity").loc[quantity, "source"] == sources["deer2013"]["display"]
     ltse = measurements.loc[measurements["standard"].eq("LTSE")]
-    assert ltse["notes"].str.contains("none is named LTSE", regex=False).all()
-    archive_values = ltse.loc[~ltse["role"].eq("concentration")]
+    assert ltse["notes"].str.contains("SLZC", regex=False).all()
+    age = ltse.set_index("quantity").loc["206Pb/238U_age"]
+    assert age["source"] == sources["hu2023"]["display"]
+    assert (age["value"], age["uncertainty"], age["uncertainty_type"]) == (560.83, 1.29, "expanded_95")
+    archive_values = ltse.loc[~ltse["role"].isin({"concentration", "reference_age"})]
     assert set(archive_values["source"]) == {sources["boise_upbr26plus_2026"]["display"]}
+    assert set(archive_values["status"]) == {"provisional"}
     assert sources["boise_upbr26plus_2026"]["kind"] == "lab_compilation"
     assert sources["boise_upbr26plus_2026"]["status"] == "provisional"
 
