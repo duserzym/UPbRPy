@@ -348,6 +348,20 @@ def raw_input_files(directory: str | Path | QtegraSession) -> tuple[Path, ...]:
     return tuple(sorted(files))
 
 
+_REDUCTION_CACHE_STAGES = {
+    "baseline_subtracted_total_data": PipelineStage.BASELINE,
+    "normalized_plateau_data": PipelineStage.NORMALIZATION,
+    "concentration_results": PipelineStage.CONCENTRATION,
+    "plateau_data_with_raw_ratios": PipelineStage.RATIOS,
+    "signal_data_with_raw_ratios": PipelineStage.RATIOS,
+    "downhole_results": PipelineStage.DOWNHOLE,
+    "session_correction_results": PipelineStage.SESSION,
+    "spot_mean_results": PipelineStage.SPOT_MEANS,
+    "depth_profile_results": PipelineStage.DEPTH_PROFILE,
+    "finalized_results": PipelineStage.FINALIZE,
+}
+
+
 def ensure_shared_pipeline(
     session: ReductionSession,
     preset: WorkflowPreset,
@@ -385,7 +399,7 @@ def ensure_shared_pipeline(
                     config,
                 ),
             )
-        if pipeline.experiment is not session.experiment:
+        if not pipeline.matches_source_experiment(session.experiment):
             pipeline.update_experiment(session.experiment)
         if pipeline.standard_archive is not current_standard_archive():
             pipeline.standard_archive = current_standard_archive()
@@ -393,6 +407,11 @@ def ensure_shared_pipeline(
                 current_standard_archive_path()
             )
             pipeline.cache.invalidate(PipelineStage.NORMALIZATION)
+    # Widgets still consume these compatibility keys directly. Drop products
+    # invalidated by selection, settings, or reference-library changes.
+    for key, stage in _REDUCTION_CACHE_STAGES.items():
+        if not session.pipeline.cache.has(stage):
+            session.reduction_cache.pop(key, None)
     return session.pipeline
 
 
@@ -945,6 +964,8 @@ def clear_reduction_cache(session: ReductionSession) -> None:
     """Discard calculated products while preserving import and selections."""
     session.reduction_cache.clear()
     if session.pipeline is not None:
+        if not session.pipeline.matches_source_experiment(session.experiment):
+            session.pipeline.update_experiment(session.experiment)
         session.pipeline.cache.invalidate(PipelineStage.BASELINE)
 
 
@@ -1016,8 +1037,6 @@ def update_selection_region(
         )
     if refresh_pipeline:
         clear_reduction_cache(session)
-        if session.pipeline is not None:
-            session.pipeline.update_experiment(session.experiment)
 
 
 def autopick_selection_regions(
@@ -1116,10 +1135,6 @@ def autopick_selection_regions(
     )
     if refresh_pipeline:
         clear_reduction_cache(session)
-    if refresh_pipeline and session.pipeline is not None:
-        # Signal limits are written after the baseline/plateau update above.
-        # Refresh once more so the pipeline sees the complete reviewed pick.
-        session.pipeline.update_experiment(session.experiment)
     return {"baseline": baseline, "plateau": plateau, "signal": signal}
 
 
@@ -1163,8 +1178,6 @@ def autopick_all_selection_regions(
             session.experiment.loc[row_mask, "selection_error"] = message
 
     clear_reduction_cache(session)
-    if session.pipeline is not None:
-        session.pipeline.update_experiment(session.experiment)
     return {"selected_count": selected_count, "failures": failures}
 
 
@@ -1245,9 +1258,6 @@ def selection_quality(session: ReductionSession, spot_name: str | None) -> dict[
 def ensure_baseline_subtracted(session: ReductionSession) -> pd.DataFrame:
     """Return baseline-subtracted sweeps from the shared reduction pipeline."""
     cache_key = "baseline_subtracted_total_data"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     if not session.loaded:
         return pd.DataFrame()
     preset = get_workflow_preset(session.workflow_key)
@@ -1259,9 +1269,6 @@ def ensure_baseline_subtracted(session: ReductionSession) -> pd.DataFrame:
 def ensure_normalized_plateau(session: ReductionSession, preset: WorkflowPreset) -> pd.DataFrame:
     """Return internally normalized plateau data from the shared pipeline."""
     cache_key = "normalized_plateau_data"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     if not session.loaded:
         return pd.DataFrame()
     normalized = ensure_shared_pipeline(session, preset).run_normalization()
@@ -1272,14 +1279,12 @@ def ensure_normalized_plateau(session: ReductionSession, preset: WorkflowPreset)
 def ensure_concentration_results(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
     """Return concentration calibration and result products from the core."""
     cache_key = "concentration_results"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, dict) and cached:
-        return cached
     if not preset.concentration_standards:
         raise ValueError(f"{preset.title} does not yet define concentration standards for the GUI workflow.")
-    results = ensure_shared_pipeline(session, preset).run_concentration()
+    pipeline = ensure_shared_pipeline(session, preset)
+    results = pipeline.run_concentration()
     session.reduction_cache["normalized_plateau_data"] = (
-        ensure_shared_pipeline(session, preset).run_normalization()
+        pipeline.run_normalization()
     )
     session.reduction_cache[cache_key] = results
     return results
@@ -1288,9 +1293,6 @@ def ensure_concentration_results(session: ReductionSession, preset: WorkflowPres
 def ensure_raw_ratios(session: ReductionSession) -> pd.DataFrame:
     """Return plateau ratios calculated by the shared pipeline."""
     cache_key = "plateau_data_with_raw_ratios"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     if not session.loaded:
         return pd.DataFrame()
     preset = get_workflow_preset(session.workflow_key)
@@ -1302,9 +1304,6 @@ def ensure_raw_ratios(session: ReductionSession) -> pd.DataFrame:
 def ensure_signal_raw_ratios(session: ReductionSession) -> pd.DataFrame:
     """Return full-signal ratios aligned to each spot's saved signal start."""
     cache_key = "signal_data_with_raw_ratios"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     if not session.loaded:
         return pd.DataFrame()
     preset = get_workflow_preset(session.workflow_key)
@@ -1316,9 +1315,6 @@ def ensure_signal_raw_ratios(session: ReductionSession) -> pd.DataFrame:
 def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
     """Return shared downhole models and corrected plateau/signal ratios."""
     cache_key = "downhole_results"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, dict) and cached:
-        return cached
     if not preset.primary_standard:
         raise ValueError(f"{preset.title} does not yet define a primary standard for downhole correction.")
     pipeline = ensure_shared_pipeline(session, preset)
@@ -1342,9 +1338,6 @@ def ensure_downhole_results(session: ReductionSession, preset: WorkflowPreset) -
 def ensure_session_corrected(session: ReductionSession, preset: WorkflowPreset) -> dict[str, Any]:
     """Return shared session models and fully corrected ratio products."""
     cache_key = "session_correction_results"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, dict) and cached:
-        return cached
     pipeline = ensure_shared_pipeline(session, preset)
     core_results = pipeline.run_session()
     results = {
@@ -1365,9 +1358,6 @@ def ensure_spot_means(
 ) -> pd.DataFrame:
     """Return final corrected spot means before optional common-Pb decisions."""
     cache_key = "spot_mean_results"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     result = ensure_shared_pipeline(session, preset).run_spot_means()
     ensure_session_corrected(session, preset)
     session.reduction_cache[cache_key] = result
@@ -1380,9 +1370,6 @@ def ensure_depth_profile(
 ) -> pd.DataFrame:
     """Return fully corrected sweep-wise depth-profile results."""
     cache_key = "depth_profile_results"
-    cached = session.reduction_cache.get(cache_key)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
     result = ensure_shared_pipeline(session, preset).run_depth_profile()
     ensure_session_corrected(session, preset)
     session.reduction_cache[cache_key] = result
@@ -1395,9 +1382,6 @@ def ensure_finalized_results(
 ):
     """Return common-Pb calculations, flags, and preferred-age decisions."""
     cache_key = "finalized_results"
-    cached = session.reduction_cache.get(cache_key)
-    if cached is not None:
-        return cached
     result = ensure_shared_pipeline(session, preset).run_finalize()
     ensure_spot_means(session, preset)
     session.reduction_cache[cache_key] = result
@@ -1513,6 +1497,8 @@ def get_downhole_plot_data(
 
     Returns None if the prerequisite cache entries are absent.
     """
+    if session.loaded:
+        ensure_shared_pipeline(session, preset)
     raw_ratios = session.reduction_cache.get("signal_data_with_raw_ratios")
     downhole_results = session.reduction_cache.get("downhole_results")
     if not isinstance(raw_ratios, pd.DataFrame) or raw_ratios.empty:
@@ -1621,6 +1607,8 @@ def get_session_plot_data(
     ratio_name: str = "206Pb/238U",
 ) -> dict | None:
     """Return a dict of arrays for drawing the session fractionation diagnostic."""
+    if session.loaded:
+        ensure_shared_pipeline(session, preset)
     session_results = session.reduction_cache.get("session_correction_results")
     downhole_results = session.reduction_cache.get("downhole_results")
     if not isinstance(session_results, dict) or not isinstance(downhole_results, dict):
@@ -1702,6 +1690,8 @@ def get_calibration_slope_data(
     preset: WorkflowPreset,
 ) -> dict | None:
     """Return a dict of arrays for drawing the concentration calibration slopes."""
+    if session.loaded:
+        ensure_shared_pipeline(session, preset)
     conc_results = session.reduction_cache.get("concentration_results")
     if not isinstance(conc_results, dict):
         return None

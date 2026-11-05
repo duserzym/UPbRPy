@@ -9,6 +9,7 @@ separate reduction algorithms.
 from __future__ import annotations
 
 import hashlib
+import pickle
 import platform
 import sys
 from collections.abc import Callable, Mapping
@@ -452,6 +453,23 @@ def package_version() -> str:
         return "0.1.0+source"
 
 
+def _experiment_fingerprint(experiment: pd.DataFrame) -> bytes:
+    """Hash selection contents, including nested object cells and provenance.
+
+    Serialize values rather than pandas' internal blocks so consolidation does
+    not change the digest. Unlike hash_pandas_object, this accepts list and
+    dict cells as well as arrays containing excluded sweep indices.
+    """
+    contents = (
+        experiment.index.tolist(),
+        experiment.columns.tolist(),
+        tuple(str(dtype) for dtype in experiment.dtypes),
+        experiment.to_numpy(dtype=object).tolist(),
+        experiment.attrs,
+    )
+    return hashlib.sha256(pickle.dumps(contents, protocol=5)).digest()
+
+
 class ReductionPipeline:
     """Execute and cache one complete UPbRPy reduction.
 
@@ -495,6 +513,8 @@ class ReductionPipeline:
             experiment,
             standard_archive,
         )
+        self._source_experiment = experiment
+        self._source_experiment_fingerprint = _experiment_fingerprint(experiment)
         self.total_data = canonicalize_reference_material_samples(
             total_data,
             standard_archive,
@@ -524,6 +544,18 @@ class ReductionPipeline:
         )
         self.cache.set(PipelineStage.SELECTION, self.experiment)
 
+    def matches_source_experiment(self, experiment: pd.DataFrame) -> bool:
+        """Return whether the source frame and its contents match the last sync.
+
+        The canonicalized pipeline frame is a copy. Track its original source
+        separately so both replacements and in-place window edits are detected.
+        """
+        return (
+            experiment is self._source_experiment
+            and _experiment_fingerprint(experiment)
+            == self._source_experiment_fingerprint
+        )
+
     def update_experiment(self, experiment: pd.DataFrame) -> None:
         """Replace selection metadata and invalidate every calculated stage."""
         if not isinstance(experiment, pd.DataFrame):
@@ -532,6 +564,8 @@ class ReductionPipeline:
             experiment,
             self.standard_archive,
         )
+        self._source_experiment = experiment
+        self._source_experiment_fingerprint = _experiment_fingerprint(experiment)
         self.cache.invalidate(PipelineStage.SELECTION)
         self.cache.set(PipelineStage.SELECTION, self.experiment)
 
