@@ -1,0 +1,43 @@
+site_name: UPbRPy data model
+docs_dir: docs
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - content.code.copy
+plugins:
+  - search
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - attr_list
+  - pymdownx.superfences
+exclude_docs: |
+  **
+  !/data-model/
+  !/data-model/index.md
+  !/data-model/rich-csv.md
+  !/data-model/per-spot.md
+  !/data-model/acquisition-model.md
+  !/data-model/reference-materials.md
+  !/data-model/project-and-bundle.md
+  !/qtegra_export_formats.md
+nav:
+  - Data model: data-model/index.md
+  - Rich single CSV: data-model/rich-csv.md
+  - Per-spot CSV and folder: data-model/per-spot.md
+  - Acquisition model: data-model/acquisition-model.md
+  - Reference materials: data-model/reference-materials.md
+  - Projects and bundles: data-model/project-and-bundle.md
+  - 'Decision record: Qtegra exports': qtegra_export_formats.md

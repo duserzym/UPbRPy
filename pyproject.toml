@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
 gui = [
   "PySide6>=6.11.1",
   "pyqtgraph>=0.14.0"

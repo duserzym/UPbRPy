@@ -339,6 +339,18 @@ macOS arm64 and Windows x86-64 on version tags or manual dispatch. Release
 signing and Apple notarization are intentionally separate because they require
 maintainer certificates and repository secrets.
 
+## Data model
+
+The [UPbRPy data model](docs/data-model/index.md) specifies accepted inputs,
+the acquisition model, reference-material TOML, projects and bundles.
+Build the site with `make docs` (override `MKDOCS` and `SITE_DIR` as needed);
+`make docs-serve` serves it locally. Build output defaults to the external
+UPbRPy cache directory.
+
+The site deploys by manual dispatch of the `docs-pages` GitHub Actions
+workflow. Set GitHub Pages to **GitHub Actions** in the repository settings
+once before deploying.
+
 ### Qtegra exports
 
 UPbRPy accepts a Rich single CSV, a per-spot folder or file, a folder with

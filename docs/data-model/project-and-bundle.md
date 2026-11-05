@@ -1,0 +1,322 @@
+# Projects and bundles
+
+Implementation: [project.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/project.py),
+[session_manifest.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/session_manifest.py),
+[session_bundle.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/session_bundle.py),
+[pipeline.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/pipeline.py) and
+[reproducibility.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reproducibility.py).
+
+A `.upbr` project is UTF-8 JSON containing paths, settings and reviewed
+selections. A session bundle supplies original raw input. A reduction bundle
+supplies output tables, provenance and a replay notebook. These are distinct
+formats; `export_reduction_bundle` does not package raw CSVs or a `.upbr`.
+
+## .upbr project
+
+`build_reduction_project` builds the document;
+`write_reduction_project` writes it atomically and supplies a `.upbr` suffix.
+`read_reduction_project` reads and validates it. Writers emit version **2**.
+Version **1** loads with the same core structure; version 2 adds optional
+`origin`. Versions below 1 or above 2 are rejected. An origin, if present,
+is validated even in a version-1 document.
+
+Required below describes the project validator and subsequent path use.
+Writers emit all listed core keys except origin. Unknown project keys are
+not rejected. Raw sweeps and computed tables are not embedded: reopening
+re-imports dependencies and recalculates the saved completed stages.
+
+| Key | Required/optional | Type / unit | Example | Meaning / without it |
+| --- | --- | --- | --- | --- |
+| format | Required | String | `UPbRPy reduction project` | Exact marker; otherwise rejected |
+| format_version | Required | Integer, converted with `int` | `2` | Supported version 1 or 2 |
+| saved_utc | Optional on read | ISO datetime string | `2026-11-05T12:00:00+00:00` | Writer time; not validated on read |
+| paths | Required | Object | See children | Dependency paths; missing/non-object rejected |
+| paths.source_directory | Required to reopen | Path record or string | `{"relative": "raw", "absolute": "/data/session/raw"}` | Source folder or CSV despite the key name; missing/unresolvable fails on restore |
+| paths.reference_library | Optional | Path record, string or null | `null` | Alternate reference library; null uses packaged library; a recorded nonempty missing path fails resolution |
+| paths.*.relative | Optional per path | String | `raw` | Tried relative to project parent first |
+| paths.*.absolute | Optional per path | String | `/data/session/raw` | Original absolute fallback; writer records both where possible |
+| pipeline | Required | Object | See children | Scientific settings and replay state |
+| pipeline.config | Required | Object | See configuration tables | Missing rejected; empty object can reconstruct defaults |
+| pipeline.completed_stages | Optional | Array of stage strings | `["import", "selection"]` | Default empty; identifiers validated, deduplicated and ordered by pipeline stage order |
+| pipeline.resume_stage | Optional | Stage string | `selection` | Default `import`; invalid identifier rejected |
+| selections | Required | Array of objects | One record per spot | Missing/non-array rejected; empty array accepted; row content restored separately |
+| selections[].spot_names | Written when column exists | String | `NIST612_896` | Spot identity for selection restore |
+| selections[].baseline_start_times | Written when column exists | Number/null, session s | `0.00732` | Reviewed baseline start |
+| selections[].baseline_end_times | Written when column exists | Number/null, session s | `3.8` (illustrative) | Reviewed baseline end |
+| selections[].plateau_start_times | Written when column exists | Number/null, session s | `6.0` (illustrative) | Reviewed plateau start |
+| selections[].plateau_end_times | Written when column exists | Number/null, session s | `14.0` (illustrative) | Reviewed plateau end |
+| selections[].signal_start_times | Written when column exists | Number/null, session s | `5.0` (illustrative) | Reviewed signal start |
+| selections[].signal_end_times | Written when column exists | Number/null, session s | `20.0` (illustrative) | Reviewed inclusive signal end |
+| selections[].selection_method | Written when column exists | String | `threshold` | Successful selection method |
+| selections[].selection_channel | Written when column exists | String | `29Si` | Channel used for selection |
+| selections[].plateau_filter_method | Written when column exists | String | `none` | Plateau filtering choice |
+| selections[].plateau_filter_channel | Written when column exists | String | `29Si` | Filtering channel |
+| selections[].selection_* | Optional additional columns | JSON-safe values | Selection diagnostics | All other experiment columns beginning `selection_` are also exported |
+| workspace | Optional | Object | `{}` | Caller-defined GUI state; default empty; non-object rejected; engine imposes no child-key schema |
+| origin | Optional | Object or null | See below | Database provenance; absent/null means no origin |
+
+Stage identifiers are `import`, `selection`, `baseline`, `normalization`,
+`concentration`, `ratios`, `downhole`, `session`, `spot_means`,
+`depth_profile`, `finalize`, `export`. Paths are expanded/resolved on write;
+restore prefers an existing relative path, then absolute fallback. A legacy
+string path is expanded and resolved as given.
+
+### Configuration keys
+
+These are all keys emitted by `PipelineConfig.to_dict()`. They are optional
+within a config object on reconstruction and otherwise use class defaults.
+Unknown constructor keys fail. `selection_options`, model `options`,
+`common_pb_options` and detector settings are extensible mappings whose
+contents depend on the selected algorithm.
+
+| Key within pipeline.config | Type / unit | Default / example | Meaning |
+| --- | --- | --- | --- |
+| workflow_key | String | `zircon` | Workflow preset identity |
+| material | String | `zircon` | Material classification |
+| primary_channel | String | `29Si` | Default signal selection channel |
+| selection_method | String | `threshold` | Selection algorithm |
+| selection_options | Object | `{}` | Selection/import options; Studio restores normalized import settings from here |
+| detector_calibration | Object | `{}` | Mode/options for detector fitting; empty uses Qtegra Y |
+| concentration_standards | Array of strings | `[]` | Concentration calibrators |
+| primary_68_standard | String | Empty | Pb/U primary standard |
+| primary_76_standard | String | Empty | Pb/Pb primary standard |
+| primary_82_standard | String | Empty | Th/Pb primary standard |
+| secondary_standards | Array of strings | `[]` | Validation materials |
+| ratio_names | Nonempty array of strings | `206Pb/238U`, `207Pb/206Pb`, `208Pb/232Th` | Ratios requested |
+| ratio_aggregation | String | `arithmetic` | Normalized ratio averaging convention |
+| common_pb_calibration | String | `radiogenic` | `radiogenic` or `tera_wasserburg` |
+| downhole | Fit-settings object | `mean`, outlier sigma `5.0` | Within-spot fractionation model |
+| session | Fit-settings object | `polynomial`, options `{"degree": 2}` | Session drift model |
+| downhole.method, session.method | String | Method name or importable callable reference | Fit implementation |
+| downhole.options, session.options | Object | `{}` / `{"degree": 2}` | Algorithm kwargs |
+| downhole.outlier_sigma, session.outlier_sigma | Number/null, sigma | `5.0` / `null` | Outlier threshold |
+| decision | Object | See below | Preferred result choices |
+| automatic_flags | Object | See below | Quality thresholds |
+| common_pb_options | Object | `{}` | Common-Pb algorithm kwargs |
+| uncertainty | Object | See below | Explicit uncertainty components |
+| depth_calibration | Object or null | `null` | Optional linear pulse-to-depth calibration |
+
+| Key within decision | Type / unit | Default | Meaning |
+| --- | --- | --- | --- |
+| common_pb_method | String | `none` | `none`, `204`, `207`, `208` |
+| include_calibration_uncertainty | Bool | `true` | Choose calibration-inclusive uncertainty branch |
+| age_transition_ma | Number, Ma | `1000.0` | Nonnegative transition from Pb/U to Pb/Pb preferred age |
+
+| Key within automatic_flags | Type / unit | Default | Meaning |
+| --- | --- | --- | --- |
+| maximum_discordance_percent | Number, % | `20.0` | Discordance ceiling |
+| maximum_u_mean_intercept_difference_percent | Number, % | `25.0` | U mean/intercept disagreement ceiling |
+| maximum_ratio_rsd_percent | Number, % | `20.0` | Ratio scatter ceiling |
+| maximum_primary_signal_rsd_percent | Number, % | `50.0` | Matrix-signal scatter ceiling |
+| maximum_relative_2e_percent | Number, % | `20.0` | Relative uncertainty ceiling |
+| minimum_radiogenic_206_fraction | Number, fraction | `0.05` | Radiogenic fraction floor |
+| minimum_204pb_detection_sigma | Number, sigma | `3.0` | Mass-204 detection threshold |
+| flag_session_extrapolation | Bool | `true` | Flag outside session calibration range |
+
+| Key within uncertainty | Type / unit | Default | Meaning |
+| --- | --- | --- | --- |
+| propagate_baseline | Bool | `true` | Include baseline uncertainty in raw ratios |
+| propagate_decay_constants | Bool | `false` | Include decay-constant uncertainty |
+| propagate_u238_u235 | Bool | `false` | Include natural U ratio uncertainty |
+| long_term_reproducibility_mode | String | `none` | `none`, `secondary`, `user` |
+| long_term_reproducibility_relative_1s | Number, fraction | `0.0` | User external reproducibility, 1 sigma |
+| u238_u235 | Number, ratio | `common_U238_U235` constant | Natural U ratio |
+| u238_u235_1s | Number, ratio | `sigma_common_U238_U235` | Absolute 1-sigma ratio uncertainty |
+| lambda_235_1s | Number, yr^-1 | `sigma_235` | Absolute 1-sigma decay uncertainty |
+| lambda_238_1s | Number, yr^-1 | `sigma_238` | Absolute 1-sigma decay uncertainty |
+| lambda_232_1s | Number, yr^-1 | `sigma_232` | Absolute 1-sigma decay uncertainty |
+
+| Key within non-null depth_calibration | Type / unit | Default / requirement | Meaning |
+| --- | --- | --- | --- |
+| model | String | Writer adds `linear` | Only linear model supported |
+| depth_per_pulse_um | Number, µm/pulse | Required, finite positive | Depth slope |
+| repetition_rate_hz | Number, Hz | Required, finite positive | Laser pulse rate |
+| intercept_um | Number, µm | `0.0` | Depth intercept |
+| coefficient_covariance | 2×2 number array | Zeros, finite | Intercept/slope covariance |
+| residual_1s_um | Number, µm | `0.0` | Residual depth scatter |
+| repetition_rate_1s_hz | Number, Hz | `0.0` | Pulse-rate uncertainty |
+| geometry_1s_um | Number, µm | `0.0` | Geometry uncertainty |
+| pulse_range | Two numbers, pulses | `[0.0, Infinity]` | Ordered calibration range; Python JSON writer can emit Infinity |
+| force_zero | Bool | `false` | Zero-intercept fit flag |
+
+Detector options and the applied fit record are described under
+[detector calibration](acquisition-model.md#detector-calibration). Nested
+configuration validation occurs when rebuilding these settings, rather than
+in the lightweight project structural validator.
+
+### Studio workspace keys
+
+The engine accepts any workspace mapping. Studio currently writes these
+optional display keys; absence uses the current/default display state.
+
+| Key within workspace | Type | Meaning |
+| --- | --- | --- |
+| selected_spot | String | Selected acquisition label |
+| visible_channels | Array of strings | Checked trace channels |
+| selected_stats_channel | String | Statistics panel channel |
+| plot_mode | String | Trace display mode, normally `raw` |
+| ratio_name | String | Selected ratio |
+| workflow_stage | String/null | Active workflow stage |
+| sigma_level | Integer | Display uncertainty multiplier |
+| channel_colors | Object of strings | Channel-to-color mapping |
+| selection_colors | Object of strings | Selection-region colors |
+| spot_folder_overrides | Object of strings | Spot display-folder assignments |
+| include_export_concentrations | Bool | Include concentration columns in publication export |
+| include_export_depth_concentrations | Bool | Include depth concentration columns |
+
+### Origin block
+
+| Key within origin | Required/optional | Type | Example | Meaning / without it |
+| --- | --- | --- | --- | --- |
+| server | Required when origin exists | Scalar converted to string | `https://lab.example.org` | Database base URL; trailing `/` removed |
+| session_id | Required when origin exists | Scalar converted to string | Session UUID | Session identity; UUID syntax not validated |
+| session_key | Optional | Scalar converted to string | `Zircon_04Nov26` | Human session key |
+| export_sha256 | Optional | Scalar converted to string | Hex digest | Hash of `session_manifest.toml`, not the ZIP |
+| exported_at | Optional | Scalar converted to string | ISO timestamp | Database export time; not parsed |
+| run_id | Optional | Scalar converted to string | Run UUID | Submission run identity |
+| Other keys | Optional | Scalar converted to string | Future server fields | Retained; mapping/list/tuple values rejected; empty/null fields dropped |
+
+## Session bundle
+
+The expected directory layout is:
+
+```text
+<session_key>/
+  session_manifest.toml
+  raw/                      original Qtegra exports
+  <session_key>.upbr         optional pre-filled project
+  README.md                 optional explanation
+```
+
+The manifest reader is permissive: the following tables/fields are optional
+unless explicitly marked required. It ignores unknown metadata. Empty
+manifest documents parse; ZIP unpacking separately requires the manifest and
+`raw/` directory. Examples not from Qtegra itself are illustrative.
+
+| Manifest key | Required/optional | Type / unit | Example | Meaning / without it |
+| --- | --- | --- | --- | --- |
+| session | Optional | Table | `[session]` | Defaults empty; if present must be a table |
+| session.id | Optional | Scalar converted to text | Session UUID | Defaults empty; not used to gate raw parsing |
+| session.key | Optional | Scalar converted to text | `Zircon_04Nov26` | Defaults empty; unpacker falls back to folder name |
+| session.sep | Optional | Nonempty string | `_` | Label separator; absent uses explicit import argument or `_` |
+| session.material | Optional | Text | `zircon` | Metadata; defaults empty |
+| session.instrument | Optional | Text | `iCAP RQ` | Metadata; defaults empty |
+| session.method | Optional | Text | `Zircon U-Pb` | Metadata; defaults empty |
+| session.operator | Optional | Text | `Y. Zhang` | Metadata; defaults empty |
+| samples | Optional | Table of alias = nonempty target string | `AFB = "AFB1"` | Case-insensitive sample aliases at import; invalid/blank entries skipped |
+| reference_materials | Optional | Table | `primary_68 = "91500"` | Plan metadata; absent gives empty plan |
+| reference_materials.<role> | Optional | String or array of strings | `concentration = ["NIST612"]` | Names stripped and deduplicated; numeric/bool values ignored |
+| reference_materials.library_version | Optional | Ignored | `"format-2"` | No library version enforcement |
+| reference_materials.plan | Optional alternative/addition | Array of tables | `[[reference_materials.plan]]` | Adds role/name pairs |
+| reference_materials.plan[].role | Needed for row to contribute | Text | `primary_68` | Row ignored if empty |
+| reference_materials.plan[].rm_name | Needed for row to contribute | Text | `91500` | Row ignored if empty |
+| reference_materials.plan[].planned_bracket_every | Optional | Ignored | `10` | Accepted in plan row but not retained |
+| acquisition | Optional | Array of tables | `[[acquisition]]` | Defaults empty; no raw file list restriction |
+| acquisition[].label | Required for each listed row | Nonempty text | `NIST612_896` | Missing/blank row label rejected |
+| acquisition[].acquisition_id | Optional | Text | Acquisition UUID | Defaults empty |
+| acquisition[].spot_id | Optional | Text | Spot UUID | Defaults empty |
+| acquisition[].grain_id | Optional | Text | Grain UUID | Defaults empty |
+| acquisition[].sample_id | Optional | Text | Sample UUID | Defaults empty |
+| acquisition[].started_at | Optional | Text or TOML date/datetime | `2026-11-04T15:55:37` | Dates converted to ISO text; does not replace raw Qtegra start |
+| acquisition[].sha256 | Optional | Text | Raw file SHA-256 | Unpacker verifies only if filename also nonempty |
+| acquisition[].kind | Optional | Text | `primary_standard` | Metadata, not used to select reduction standard |
+| acquisition[].filename | Optional | Text | `Zircon_demo_1.csv` | Relative to raw for hash checks; absent skips that check |
+
+`SessionManifest.standards_config()` maps `primary`/`primary_68`,
+`primary_76`, `primary_82` to the corresponding primary-standard config
+fields; `concentration` to concentration standards and `secondary`/
+`validation` to secondary standards. Scalar fields take the first name.
+The raw importer itself uses only separator and aliases, not the plan to
+configure a reduction or the acquisition rows to select files.
+
+`read_experiment_data` looks inside a directory for
+`session_manifest.toml`; for a directory named `raw`, it also checks its
+parent. A file source starts this search in its parent. An in-memory session
+uses its first source path. Explicit `session_manifest` can be a path or
+SessionManifest; `False` disables discovery. With a manifest, a supplied
+bundle root maps to its `raw/` when present. Explicit `sep` wins; explicit
+aliases override matching manifest aliases case-insensitively.
+
+`unpack_session_bundle` accepts ZIP bytes or a ZIP path, checks ZIP integrity,
+one top-level folder, unsafe paths and symlinks, then verifies each manifest
+raw filename/hash pair. It hashes the manifest and can compare it with
+`expected_export_sha256`. Direct `read_experiment_data` import does not
+perform these manifest hash checks. Project selection prefers
+`<session_key>.upbr`, otherwise the first sorted `.upbr`; none is required.
+Unpacking fills missing origin fields and replaces the server with the
+client's URL when supplied.
+
+The cache defaults to `~/UPbRPy/sessions/`, overridable with
+`UPBRPY_SESSION_CACHE`. Matching manifest hashes reuse the cached directory;
+a changed export renames the previous directory with `.superseded-<UTC>`.
+The local `.upbrpy_bundle.json` cache record contains the following keys.
+
+| Cache key | Type | Meaning |
+| --- | --- | --- |
+| session_id, session_key | Strings | Manifest session identity / folder fallback |
+| server | String | Client server URL, trailing slash removed; empty if absent |
+| export_sha256 | String | Manifest SHA-256 |
+| zip_sha256 | String | Download bytes SHA-256 |
+| fetched_at | String, UTC ISO | Fetch/reuse time |
+
+## Reduction bundle output
+
+`export_reduction_bundle(pipeline, output_directory, *,
+include_depth_profile=True, hash_inputs=True, include_concentrations=True,
+include_depth_concentrations=True) -> ExportBundle` runs finalization and
+optionally depth profiling. The result lists directory, written files and
+nonfatal warnings. It writes into a directory; it does not create a ZIP.
+
+| File / directory | Type | Contents / when absent |
+| --- | --- | --- |
+| UPbRPy_publication_results.xlsx | XLSX workbook | Results, Horstwood Table 4, Secondary standards, QC metrics, Methods, Parallel audit, Table notes; optional nonempty Spot concentrations and Depth profiles |
+| UPbRPy_publication_results/*.csv | CSV per worksheet | Lowercase names, spaces/slashes replaced by underscores; transparent companions |
+| selection_windows.csv | CSV | Same available selection columns and extra `selection_*` columns as project selections |
+| spot_mean_results.csv | CSV | `pipeline.run_spot_means()` output |
+| depth_profile_results.csv | CSV | Written only when `include_depth_profile=True` |
+| reduction_manifest.json | UTF-8 JSON | Pipeline provenance, keys below |
+| UPbRPy_reproducible_workflow.ipynb | Jupyter notebook JSON | Unexecuted code and Markdown cells with settings and reviewed selections embedded; references original input/library paths |
+
+If workbook export raises ImportError, the bundle records a warning and
+writes each table directly in the bundle root using lowercase names with
+spaces replaced by underscores. The function does not copy the reference
+library, raw data or project into the output directory. External submission
+code can add files separately.
+
+### reduction_manifest.json
+
+All top-level keys below are emitted by `pipeline.manifest`; some values
+may be null. `hash_inputs=True` is the bundle default, while the standalone
+`pipeline.manifest()` default is false.
+
+| Key | Type / unit | Meaning / missing value behavior |
+| --- | --- | --- |
+| format_version | Integer, `2` | Pipeline manifest format |
+| created_utc | ISO string | Manifest creation time |
+| upbrpy_version | String | Installed package version or implementation fallback |
+| python_version | String | Runtime version |
+| platform | String | Runtime platform description |
+| source_directory | String/null | Input source path, possibly a CSV |
+| reference_library_path | String/null | Explicit library path; null for packaged default |
+| reference_library_version | String/null | Declared version or `format-2`, suffixed with `+sha256.<12 hex>` |
+| reference_library_sha256 | String/null | Library identity digest |
+| input_files | Array of objects | Pipeline's registered input files; not directory discovery performed during export |
+| input_files[].path | String | Recorded input path, even if now missing |
+| input_files[].size_bytes | Integer, bytes | Only if file exists |
+| input_files[].modified_ns | Integer, Unix ns | Filesystem modification time, only if file exists |
+| input_files[].sha256 | String | Only if file exists and hashing requested |
+| config | Object | PipelineConfig serialized above |
+| detector_calibration | Object | Applied experiment fit record, default `{"mode": "qtegra"}` |
+| completed_stages | Array of strings | Stages cached at manifest creation |
+| spot_count | Integer | Number of experiment rows |
+| sweep_count | Integer | Number of total-data rows |
+| channels | Array of strings | Pipeline channel list |
+| metadata | Object | Caller metadata; pipeline origin added as `metadata.origin` if not overridden |
+| implementation.pipeline_module | String | `UPbRPy.pipeline` |
+| implementation.executable | String | `sys.executable` path |
+
+Library hashing includes manifest filenames and file contents in manifest
+order with CRLF normalized to LF. Raw input hashes use original bytes.
+The reduction manifest does not contain the full `experiment.attrs["qtegra"]`
+record. Hashes document identity; replay still needs the external inputs
+and a compatible runtime.

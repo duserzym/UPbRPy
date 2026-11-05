@@ -9,5 +9,6 @@ __pycache__/
 .venv
 build/
 dist/
+site/
 *.egg-info/
 /examples/Zircon_28Mar25_1

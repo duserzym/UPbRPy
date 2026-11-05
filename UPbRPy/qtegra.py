@@ -217,6 +217,11 @@ def _read_single(path, quantities):
         raise ValueError(f"Not a Qtegra single CSV: {path}")
     columns = np.flatnonzero(frame.iloc[0].to_numpy() != "")
     columns = columns[columns >= 4]
+    if (frame.iloc[1, :4] != "").any() or (frame.iloc[1, columns] == "").all():
+        raise ValueError(
+            f"Missing acquisition label row (header row 2) in {path.name}: "
+            "row 2 must have four empty cells followed by one label per acquisition."
+        )
     labels = frame.iloc[1, columns].tolist()
     main = frame.loc[frame[0] == "MainRuns"]
     if main.empty or not (main[3] == "Y").any():
@@ -602,7 +607,8 @@ def detect_format(path) -> str:
             return "spot"
         if not first.startswith(",,,,Sample 1,"):
             raise ValueError(f"Unrecognized Qtegra format: {path}")
-        handle.readline()  # Acquisition labels.
+        if not handle.readline().startswith(",,,,"):  # Acquisition labels.
+            raise ValueError(f"Missing acquisition label row (header row 2): {path}")
         first_channel = None
         found_y = False
         for line in handle:
