@@ -1103,7 +1103,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 painter.drawEllipse(QtCore.QPointF(x, y), 2, 2)
         painter.drawPath(path)
         painter.end()
-        return QtGui.QIcon(pixmap)
+        # Supply Disabled explicitly: Qt's generated variant can erase the
+        # single-color accent glyphs. Disabled buttons use a neutral surface,
+        # so use the theme text color even for normally accented actions.
+        disabled = pixmap.copy()
+        painter = QtGui.QPainter(disabled)
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceIn)
+        disabled_color = QtGui.QColor(theme.text)
+        disabled_color.setAlphaF(0.4)
+        painter.fillRect(disabled.rect(), disabled_color)
+        painter.end()
+        icon = QtGui.QIcon(pixmap)
+        icon.addPixmap(disabled, QtGui.QIcon.Mode.Disabled)
+        return icon
 
     def _position_compact_panels(self) -> None:
         if getattr(self, "_width_mode", None) != "compact":

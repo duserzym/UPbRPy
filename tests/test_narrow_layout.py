@@ -6,8 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6 import QtCore, QtWidgets
-from GUI.theme import build_application
+from PySide6 import QtCore, QtGui, QtWidgets
+from GUI.theme import active_theme, build_application
 from GUI.widgets import WrappingButton
 
 
@@ -148,6 +148,55 @@ def test_compact_actions_settings_and_remembered_inspector(app, shell):
     assert window.inspector_panel.isVisible()
     window.inspector_toggle.click()
     assert str(window.settings.value("compact_inspector_visible_v1")).lower() == "false"
+
+
+def test_compact_action_icons_remain_visible_when_disabled(app, shell):
+    window = shell.active_reduction
+    shell.resize(796, 720)
+    pump(app)
+    assert not window.repick_all_spots_button.isEnabled()
+    assert not window.export_results_button.isEnabled()
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+
+    for loaded in (False, True):
+        if loaded:
+            window.load_experiment_directory(str(fixture), background=False)
+        # Stage actions are rebuilt when the selected workflow row changes.
+        for row in range(window.workflow_step_list.count()):
+            window.workflow_step_list.setCurrentRow(row)
+            pump(app)
+            buttons = [
+                window.save_project_button, window.export_results_button,
+                window.import_button, window.repick_all_spots_button,
+                window.reference_library_button, window.autopick_settings_toggle,
+                window.step_primary_button, *window.step_secondary_buttons,
+            ]
+            for button in buttons:
+                assert not button.text()
+                assert not button.icon().isNull(), button.toolTip()
+                was_enabled = button.isEnabled()
+                try:
+                    for enabled in (True, False):
+                        button.setEnabled(enabled)
+                        mode = QtGui.QIcon.Mode.Normal if enabled else QtGui.QIcon.Mode.Disabled
+                        for state in (QtGui.QIcon.State.Off, QtGui.QIcon.State.On):
+                            pixmap = button.icon().pixmap(button.iconSize(), mode, state)
+                            assert not pixmap.isNull(), button.toolTip()
+                            image = pixmap.toImage()
+                            color = max(
+                                (image.pixelColor(x, y) for x in range(image.width())
+                                 for y in range(image.height())), key=lambda c: c.alpha(),
+                            )
+                            assert color.alpha() > 0, button.toolTip()
+                            if not enabled:
+                                assert 0.35 <= color.alphaF() <= 0.45
+                                # Disabled accent buttons have a neutral background.
+                                expected = QtGui.QColor(active_theme().text)
+                                assert all(abs(a - b) <= 3 for a, b in zip(
+                                    color.getRgb()[:3], expected.getRgb()[:3],
+                                ))
+                finally:
+                    button.setEnabled(was_enabled)
 
 
 def test_spot_names_keep_suffixes_and_full_tooltips(app, shell):
