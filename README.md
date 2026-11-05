@@ -296,9 +296,9 @@ UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen .venv/bin/python
 
 To regenerate the Qtegra fixture on the laptop, run
 `.venv/bin/python scripts/make_qtegra_fixture.py "/path/to/LAICPMS_data"`
-against the folder containing `Zircon_demo_Rich.csv`,
-`Zircon_demo_UPbR.csv`, and `zircon_04Nov26/`. The defaults
-copy the first 12 acquisitions and 9 of 29 channels into
+against the folder containing `Zircon_demo_Rich.csv`
+and `zircon_04Nov26/`. The defaults copy the first 12 acquisitions and 9 of
+29 channels into
 `tests/fixtures/qtegra/Zircon_04Nov26_slice/`; `-n`, `--channels` (or
 `--channels all`), and `--out` override the slice and destination. Cell text,
 BOMs and CRLF line endings are preserved; the full exports stay off git.
@@ -341,43 +341,43 @@ maintainer certificates and repository secrets.
 
 ### Qtegra exports
 
-UPbRPy accepts a Rich single CSV, a per-spot folder, or a UPbR single CSV.
+UPbRPy accepts a Rich single CSV, a per-spot folder or file, a folder with
+these exports, a session bundle root, or a `QtegraSession`.
 The **Rich CSV is the canonical acquisition record**; the per-spot folder
 supplies companion metadata. Opening a folder holding a Rich file and its
 per-spot files (in the same folder or one immediate subfolder) merges them
-by label after checking Y values and sweep times. A UPbR file beside Rich is
-ignored with a warning.
+by label after checking Y values and sweep times.
 
-| Exported information | Rich single CSV | Per-spot folder | UPbR single CSV |
-| --- | --- | --- | --- |
-| Analog and pulse-counter readings | Yes | No | No |
-| Per-channel sweep time | Yes | First channel's time only | No |
-| Acquisition start / stop times | Both | Start only | Neither |
-| Channel mass | Yes | No | No |
-| Dwell time / xcal factor | No / recoverable on saturated sweeps | Both | Neither |
-| Instrument state (tune settings, readbacks) | Yes | Yes | No |
-| Sample-list fields | Yes | No | No |
+| Exported information | Rich single CSV | Per-spot folder |
+| --- | --- | --- |
+| Analog and pulse-counter readings | Yes | No |
+| Per-channel sweep time | Yes | First channel's time only |
+| Acquisition start / stop times | Both | Start only |
+| Channel mass | Yes | No |
+| Dwell time / xcal factor | No / recoverable on saturated sweeps | Both |
+| Instrument state (tune settings, readbacks) | Yes | Yes |
+| Sample-list fields | Yes | No |
 
-All three contain Y (cps used for reduction). UPbR contains only Y: sweep
-time is reconstructed as sweep index × `cycle_time_s` (default **0.4255 s**,
-the Boise session's median spacing), with acquisitions placed back to back.
-Pass `cycle_time_s` to override it. `QtegraSession.times_reconstructed` and
-`experiment.attrs["qtegra"]["times_reconstructed"]` flag this, and experiment
-import emits a `UserWarning`; calendar start times remain unknown.
+Both contain Y (cps used for reduction). The UPbR single CSV was dropped
+2026-11-05 because it contains only Y and has no time information. Opening
+one raises `UnsupportedQtegraFormat` with instructions to export Rich or
+per-spot data. Folder discovery skips it with a warning when usable exports
+exist; a folder containing only unsupported exports raises the same error.
+Reduced Rich files with partial quantities are reserved for a later milestone.
 
 ```python
 from UPbRPy.io import read_experiment_data
 from UPbRPy.qtegra import open_qtegra
 
-path = "session_Rich.csv"  # or "per_spot/", "session_UPbR.csv", "session/"
+path = "session_Rich.csv"  # or "per_spot/", "spot.csv", "session/"
 experiment, channels, total_data = read_experiment_data(path)
 session = open_qtegra(path)  # acquisition arrays, metadata and source hashes
 ```
 
 In Studio, use **File → Open Experiment Folder** for per-spot or combined
-folders, and **File → Open Qtegra file** for Rich or UPbR CSVs. The session
-badge shows the format, capabilities and warnings; UPbR shows **Sweep times
-reconstructed**. Opening a Rich file directly reads that file alone.
+folders, and **File → Open Qtegra file** for Rich or per-spot CSVs. The
+session badge shows the format, capabilities and warnings. Opening a Rich
+file directly reads that file alone.
 
 ### Detector cross-calibration
 

@@ -105,22 +105,15 @@ def _require_analog_counter(session):
 
 
 def _session_start_offsets(session):
-    """Return start seconds from the earliest recorded start or stored offset."""
+    """Return start seconds from the earliest recorded start."""
     starts = [a.start for a in session.acquisitions if a.start is not None]
     origin = min(starts) if starts else None
-    offset_origin = (
-        min(a.start_offset_s for a in session.acquisitions if a.start_offset_s is not None)
-        if not starts and session.acquisitions
-        and any(a.start_offset_s is not None for a in session.acquisitions) else 0.0
-    )
     offsets = []
     for acquisition in session.acquisitions:
         if acquisition.start is not None:
             offsets.append((acquisition.start - origin).total_seconds())
-        elif acquisition.start_offset_s is not None:
-            offsets.append(float(acquisition.start_offset_s - offset_origin))
         else:
-            raise ValueError(f"{acquisition.label}: no acquisition start or session offset.")
+            raise ValueError(f"{acquisition.label}: no acquisition start.")
     return offsets
 
 

@@ -2,6 +2,14 @@
 
 ## Status
 
+**2026-11-05, Milestone 1:** UPbR CSV dropped because it contains no time
+information. Only Rich and per-spot exports are accepted. Detection raises
+`UnsupportedQtegraFormat` for Y-only exports; discovery skips them with a
+warning when usable inputs exist. Nominal timing fields and
+`DEFAULT_CYCLE_TIME_S` remain reserved for a later milestone supporting
+reduced Rich files. That reader expansion is not part of this milestone.
+The API and consumer notes below reflect this decision.
+
 Milestones 1–6 implemented on **2026-11-04**. The committed work, identified
 by read-only `git log --oneline -8`, is milestone 1 (contract, plan and
 fixture) `ce5d88e`, milestone 2 (readers) `c67f373`, milestone 3 (experiment
@@ -20,19 +28,19 @@ Open questions and fixture limits:
   exports?
 - The fixture keeps 9 of 29 channels; it does not cover the full channel set.
 
-Goal: UPbRPy and UPbRPy Studio open any of the three Qtegra export formats
+Goal: UPbRPy and UPbRPy Studio open Rich and per-spot Qtegra exports
 through one acquisition model, with the Rich single CSV as the canonical
 record (`docs/qtegra_export_formats.md`), and offer a within-session detector
 cross-calibration that only the Rich format makes possible. laicpmsdb's
 ingest will import the readers from here, so the public names below are a
 contract: do not rename them.
 
-## The three formats, as found in the files
+## Accepted formats, as found in the files
 
 Fixture: `tests/fixtures/qtegra/Zircon_04Nov26_slice/` (made by
 `scripts/make_qtegra_fixture.py` from the full 245-acquisition session; first
 12 acquisitions, 9 of the 29 channels: 29Si 91Zr 177Hf 204Hg 206Pb 207Pb
-208Pb 232Th 238U). All files are UTF-8; the single CSVs start with a BOM; all
+208Pb 232Th 238U). All files are UTF-8; the Rich CSV starts with a BOM; all
 use CRLF line endings; no cell is quoted; every row ends with one empty cell.
 
 **Rich single CSV** (`Zircon_04Nov26_slice_Rich.csv`). Columns 0 to 3 are keys,
@@ -62,10 +70,6 @@ Then:
   `BrigidMS,TRQuant,<Evaluate|Sample Type|Standard|Dilution Factor|Amount|Final Quantity>,,...`
 - `PMIAnalyteLaser,<Identifier|Laser Scan Position Number|Laser Output Setting [%]>,,,...`
 
-**UPbR single CSV** (`Zircon_04Nov26_slice_UPbR.csv`): rows 0 and 1 as in Rich,
-then only the `MainRuns,...,Y` rows, byte-identical to the Rich Y rows. No
-times, no metadata.
-
 **Per-spot folder** (`zircon_04Nov26/`, one CSV per acquisition, file name
 suffix = sequence number, but order by time, not by name):
 
@@ -94,6 +98,9 @@ CAPABILITIES = frozenset({"timestamps", "stop_times", "per_channel_time",
     "analog_counter", "mass", "dwell_xcal", "instrument_state",
     "sequence_fields", "user"})
 COUNTER_SATURATED = -33.0
+DEFAULT_CYCLE_TIME_S = 0.4255  # Boise median sweep spacing; reserved
+
+class UnsupportedQtegraFormat(ValueError): ...
 
 @dataclass(frozen=True)
 class Channel:
@@ -129,42 +136,40 @@ class Acquisition:
 class SourceFile:
     path: Path
     sha256: str
-    format: str                    # "rich" | "spot" | "upbr"
+    format: str                    # "rich" | "spot"
 
 @dataclass
 class QtegraSession:
     acquisitions: list[Acquisition]   # in acquisition order (sequence order for single CSVs, time order for folders)
-    format: str                       # "rich" | "spot_folder" | "upbr" | "rich+spot_folder"
+    format: str                       # "rich" | "spot_folder" | "rich+spot_folder"
     capabilities: frozenset[str]
     sources: tuple[SourceFile, ...]
     software: str | None = None       # e.g. "Qtegra 2.10.4345.64"
     machine: str | None = None        # e.g. "iCAP RQ"
     pulse_counting_threshold: float | None = None
     clock_offset_hours: float | None = None   # merged only; folder time minus Rich time
-    times_reconstructed: bool = False         # UPbR only
-    nominal_cycle_time_s: float | None = None # UPbR only
+    times_reconstructed: bool = False         # reserved; always False
+    nominal_cycle_time_s: float | None = None # reserved; always None
     warnings: list[str] = field(default_factory=list)
     # properties/methods: channel_names, labels, acquisition(label), has(capability)
 
 def read_rich_csv(path) -> QtegraSession
 def read_spot_folder(path) -> QtegraSession
 def read_spot_file(path) -> Acquisition        # one per-spot CSV (sequence_index 0 until ordered)
-def read_upbr_csv(path, *, cycle_time_s: float | None = None,
-                  acquisition_gap_s: float = 0.0) -> QtegraSession
 def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSession
 def recover_xcal(session_or_acquisition) -> dict[str, float]
-def detect_format(path) -> str                 # "rich" | "upbr" | "spot" | "spot_folder" | "folder" | raises ValueError
-def open_qtegra(path, **kwargs) -> QtegraSession
+def detect_format(path) -> str                 # "rich" | "spot" | "spot_folder" | "folder" | raises ValueError
+def open_qtegra(path) -> QtegraSession
 ```
 
 Decisions:
 
 - **Capabilities**: Rich = all but `dwell_xcal`; spot folder = `timestamps`,
-  `instrument_state`, `dwell_xcal`; UPbR = none; merged = union.
+  `instrument_state`, `dwell_xcal`; merged = union.
 - **Sweep count**: drop trailing sweeps whose Y is empty for every channel;
   interior empty cells stay NaN.
 - **Rich `time`** is per channel (n_sweeps, n_channels); spot folder `time` is
-  shared (n_sweeps,); UPbR `time` is reconstructed (below).
+  shared (n_sweeps,).
 - **Spot number**: parse the trailing integer after the last `sep` (`_`) of
   the label; when Rich gives `Laser Scan Position Number` and the two differ,
   add a warning naming the label (do not fail).
@@ -189,21 +194,19 @@ Decisions:
   (`counter == -33` and analog finite and nonzero), the factor is
   `median(y / analog)` over those sweeps; channels without saturation are
   absent from the result.
-- **UPbR time reconstruction**: sweep times = sweep index x `cycle_time_s`;
-  acquisition starts are placed back to back in sequence order
-  (start_k = sum over previous of n_sweeps x cycle + gap). `cycle_time_s`
-  default: module constant `DEFAULT_CYCLE_TIME_S = 0.4255` (the median sweep
-  spacing of the Boise session; document it). `start`/`start_text` stay
-  `None`; `times_reconstructed = True`; a warning says so.
+- **Nominal timing**: `times_reconstructed=False` and
+  `nominal_cycle_time_s=None` for current readers. They and
+  `DEFAULT_CYCLE_TIME_S = 0.4255` remain for later reduced-Rich support.
 - **`open_qtegra(path)`**: a file is read by its detected format. A folder:
   collect its CSVs; if it holds a Rich file, read it and, if per-spot files
-  are in the same folder or in exactly one immediate subfolder, merge them;
-  a UPbR file next to a Rich file is ignored with a warning (it is derived);
-  a folder with only per-spot files is a spot folder; only a UPbR file is
-  UPbR. More than one Rich file in a folder is an error. Format detection
-  reads only the first few lines (per-spot line 1 pattern; single CSV row 0
-  starts with `,,,,Sample 1`; Rich if any `MainRuns` row in the first block
-  has quantity other than `Y` or a `StartTime` row exists, else UPbR).
+  are in the same folder or in exactly one immediate subfolder, merge them.
+  A folder with only per-spot files is a spot folder. More than one Rich
+  file is an error. Detection checks the headers, the first channel block
+  for Time, and the footer for StartTime. A single CSV with MainRuns Y but
+  neither Time nor StartTime raises `UnsupportedQtegraFormat`. Discovery
+  skips such files and adds `Ignored <name>: no time information (Y-only
+  export).` to a usable session, or raises the unsupported-file error when
+  there are no usable exports.
 - **Speed**: `read_rich_csv` on the full 36 MB file must take well under 5 s
   (read once with `pandas.read_csv(header=None, dtype=str,
   keep_default_na=False)` or the csv module, then vectorise per quantity).
@@ -213,25 +216,24 @@ Tests (`tests/test_qtegra.py`, on the fixture only): each reader's counts
 (12 acquisitions, 9 channels, sweep counts, labels in order); Rich metadata
 (user, start/stop text kept verbatim, parsed datetimes, masses, sequence
 fields, spot number check, acquisition 1 tune settings empty in Rich);
-spot-folder dwell/xcal/threshold/software/machine; UPbR Y equals Rich Y
-exactly and `times_reconstructed`; `merge` equality, capabilities union,
+spot-folder dwell/xcal/threshold/software/machine; `merge` equality, capabilities union,
 `clock_offset_hours == 7.0`, tune filled for acquisition 1, mismatch raises
 (perturb a copy in memory); the Y rule on Rich (y == counter where counter !=
 -33; y == analog * xcal, xcal from the merged folder, where counter == -33,
 `rtol=1e-9`); `recover_xcal` equals the folder xcal for 29Si, 91Zr and 177Hf
 (`rtol=1e-9`); `open_qtegra` on each file, on the per-spot subfolder, on the
-fixture root (Rich + UPbR + subfolder -> merged, UPbR ignored with warning);
+fixture root (Rich + subfolder -> merged); Y-only copies rejected or ignored
+with a warning beside usable exports;
 `detect_format`; empty sweep 72 handled.
 
 ## Milestone 3: `read_experiment_data` on `QtegraSession`
 
 `read_experiment_data(source, ...)` keeps its signature and return value.
-`source` may be a per-spot folder (today), a Rich file, a UPbR file, a folder
-with any of them (as `open_qtegra`), or an already-built `QtegraSession`. The
-bundle/session-manifest logic stays as it is (a file source looks for a
-manifest beside the file). New keyword-only arguments, all optional:
-`detector_calibration` (milestone 4; accept and ignore until then is not
-needed: add it in milestone 4) and `cycle_time_s` (UPbR only).
+`source` may be a Rich CSV, a per-spot folder or file, a folder containing
+these exports, a session bundle root, or an already-built `QtegraSession`.
+The bundle/session-manifest logic stays as it is (a file source looks for a
+manifest beside the file). The keyword-only `detector_calibration` argument
+is described in milestone 4.
 
 - Add `experiment_from_session(session, sep="_", sample_aliases=None) ->
   (experiment, element_channels, total_data)` before auto-selection, and have
@@ -239,7 +241,7 @@ needed: add it in milestone 4) and `cycle_time_s` (UPbR only).
   seconds, from each acquisition's `sweep_time`), one column per channel
   (Y), `spot_name`, `sample`, exactly as today. `experiment` columns as today;
   `spot_paths` = the per-spot file for folder sessions and the single CSV path
-  for Rich and UPbR sessions.
+  for Rich sessions.
 - **The per-spot path must give identical numbers.** Parse per-spot values
   with the same parser as today (pandas `read_csv` + `to_numeric`), so that
   frames are bit-identical. Prove it with a test that keeps a frozen copy of
@@ -259,8 +261,8 @@ needed: add it in milestone 4) and `cycle_time_s` (UPbR only).
   "sources" [{path, sha256, format}], "times_reconstructed",
   "nominal_cycle_time_s", "clock_offset_hours", "software", "machine",
   "warnings"}`. Only JSON-safe values.
-- UPbR: `experiment.attrs["qtegra"]["times_reconstructed"] is True`; a
-  `UserWarning` is emitted once.
+- Timing provenance keys remain `times_reconstructed=False` and
+  `nominal_cycle_time_s=None`.
 - `GUI/services.raw_input_files(path)` must return the single CSV for a file
   source and, for a folder, the CSVs the session was actually built from
   (use the `sources` of the session). Keep the GUI change to that function
@@ -346,9 +348,8 @@ def apply_cross_calibration(session, calibration) -> QtegraSession
   every use of `session.directory` (project save/restore, recent items,
   window titles, `raw_input_files`, `infer_workflow_preset`, bundle origin).
 - A **capabilities badge** in the session header/status area: the format
-  (`Rich`, `Per-spot folder`, `Rich + per-spot`, `UPbR`) and, in its tooltip,
-  the capability list and warnings; for UPbR a visible amber flag
-  "Sweep times reconstructed" with a tooltip giving the cycle time.
+  (`Rich`, `Per-spot folder`, `Rich + per-spot`) and, in its tooltip,
+  the capability list and warnings.
 - A small **Detector cross-calibration** panel (in the import/selection
   stage controls, or a dock that fits): mode picker (Qtegra factor /
   Session constant / Time drift), basis picker (All acquisitions / Primary

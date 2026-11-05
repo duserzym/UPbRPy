@@ -709,9 +709,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capabilities_badge.setObjectName("QtegraCapabilitiesBadge")
         self.capabilities_badge.hide()
         self.statusBar().addPermanentWidget(self.capabilities_badge)
-        self.reconstructed_times_flag = QtWidgets.QLabel("Sweep times reconstructed")
-        self.reconstructed_times_flag.hide()
-        self.statusBar().addPermanentWidget(self.reconstructed_times_flag)
 
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
@@ -3423,11 +3420,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_qtegra_controls(self) -> None:
         qtegra = self.session.qtegra
         self.capabilities_badge.setVisible(qtegra is not None)
-        self.reconstructed_times_flag.setVisible(bool(qtegra and qtegra.times_reconstructed))
         if qtegra is not None:
             self.capabilities_badge.setText({
                 "rich": "Rich", "rich+spot_folder": "Rich + per-spot",
-                "spot_folder": "Per-spot folder", "upbr": "UPbR",
+                "spot_folder": "Per-spot folder",
             }.get(qtegra.format, qtegra.format))
             lines = ["Capabilities: " + (", ".join(sorted(qtegra.capabilities)) or "none"),
                      "Source files:", *(str(source.path) for source in qtegra.sources)]
@@ -3436,10 +3432,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if qtegra.warnings:
                 lines.extend(["Warnings:", *qtegra.warnings])
             self.capabilities_badge.setToolTip("\n".join(lines))
-            self.reconstructed_times_flag.setToolTip(
-                f"Nominal cycle time: {qtegra.nominal_cycle_time_s} s. "
-                "Session-time drift corrections use reconstructed times."
-            )
         self.detector_calibration_panel.set_session(self.session)
 
     def apply_detector_calibration(self, settings: dict) -> None:
@@ -3499,10 +3491,6 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = active_theme(app)
         self.capabilities_badge.setStyleSheet(
             f"color: {theme.accent_strong}; background: {theme.accent_soft}; padding: 2px 6px; border-radius: 4px;"
-        )
-        amber = build_channel_colors(["55Mn"], theme.name)["55Mn"]
-        self.reconstructed_times_flag.setStyleSheet(
-            f"color: {amber}; background: {theme.surface_soft}; padding: 2px 6px; border-radius: 4px;"
         )
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._sync_toolbar_strips()

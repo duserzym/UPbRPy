@@ -94,14 +94,32 @@ suite still passes with the `[database]` extra absent.
 
 ## 6. Qtegra input layer for laicpmsdb
 
-The UPbRPy input layer is implemented as of 2026-11-04. The laicpmsdb
-`POST /v1/sessions/ingest` endpoint and watcher should import these readers
+The UPbRPy input layer was implemented on 2026-11-04 and updated 2026-11-05.
+The laicpmsdb `POST /v1/sessions/ingest` endpoint and watcher should import
+these readers
 rather than maintain another parser. The Rich single CSV is the canonical
-record; a per-spot folder supplies companion metadata, and a UPbR single CSV
-is an accepted Y-only input. The export and storage contract is
+record; a per-spot folder supplies companion metadata and remains an
+accepted standalone input. Y-only exports are unsupported because they have
+no time information. The export and storage contract is
 [`qtegra_export_formats.md`](qtegra_export_formats.md), especially
 [Where it lands](qtegra_export_formats.md#where-it-lands). The storage changes
 below describe the laicpmsdb integration contract.
+
+### Changed 2026-11-05
+
+For laicpmsdb ingest callers:
+
+- Removed `read_upbr_csv(path, *, cycle_time_s=None, acquisition_gap_s=0.0)`
+  and `Acquisition.start_offset_s`.
+- Changed `open_qtegra(path, **kwargs)` to `open_qtegra(path)`: removed the
+  `cycle_time_s` and `acquisition_gap_s` keywords.
+- Removed the keyword-only `cycle_time_s` from `read_experiment_data` and
+  its reconstructed-times `UserWarning`.
+- Removed the `"upbr"` result from `detect_format`, session formats and
+  source formats. Added exported `UnsupportedQtegraFormat(ValueError)` for
+  single CSVs with MainRuns Y but no Time or StartTime.
+- No public symbols were renamed. `times_reconstructed`,
+  `nominal_cycle_time_s` and `DEFAULT_CYCLE_TIME_S` remain available.
 
 ### Reader API: `UPbRPy.qtegra`
 
@@ -117,6 +135,8 @@ CAPABILITIES = frozenset({
 })
 COUNTER_SATURATED = -33.0
 DEFAULT_CYCLE_TIME_S = 0.4255
+
+class UnsupportedQtegraFormat(ValueError): ...
 
 @dataclass(frozen=True)
 class Channel:
@@ -145,7 +165,6 @@ class Acquisition:
     user: str | None = None
     spot_number: int | None = None
     source_path: Path | None = None
-    start_offset_s: float | None = None
     _data_dtypes: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -189,17 +208,15 @@ class QtegraSession:
 def read_rich_csv(path) -> QtegraSession: ...
 def read_spot_folder(path) -> QtegraSession: ...
 def read_spot_file(path) -> Acquisition: ...
-def read_upbr_csv(path, *, cycle_time_s: float | None = None,
-                  acquisition_gap_s: float = 0.0) -> QtegraSession: ...
 def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSession: ...
 def recover_xcal(session_or_acquisition) -> dict[str, float]: ...
 def detect_format(path) -> str: ...
-def open_qtegra(path, **kwargs) -> QtegraSession: ...
+def open_qtegra(path) -> QtegraSession: ...
 ```
 
 `y`, `analog` and `counter` have shape `(n_sweeps, n_channels)` in instrument
 channel order; missing cells stay NaN, and counter saturation stays `-33`.
-Rich `time` has the same shape; per-spot and UPbR `time` have shape
+Rich `time` has the same shape; per-spot `time` has shape
 `(n_sweeps,)`. `sweep_time` selects the first channel when time is per
 channel. Trailing sweeps with no Y are dropped; interior missing cells stay
 missing. `_data_dtypes` is internal compatibility metadata for experiment
@@ -208,17 +225,22 @@ tables; ingest need not store it.
 Single CSV acquisitions retain sequence order. Per-spot acquisitions are
 sorted by start time, with file-name ties; `sequence_index` is one-based.
 `read_spot_file` returns one acquisition with `sequence_index=0`.
-`SourceFile.format` is `"rich"`, `"spot"` or `"upbr"`; `QtegraSession.format`
-is `"rich"`, `"spot_folder"`, `"upbr"` or `"rich+spot_folder"`. Each source
+`SourceFile.format` is `"rich"` or `"spot"`; `QtegraSession.format`
+is `"rich"`, `"spot_folder"` or `"rich+spot_folder"`. Each source
 has a SHA-256 of the original file bytes.
 
-`detect_format` returns `"rich"`, `"upbr"`, `"spot"`, `"spot_folder"` or
+`detect_format` returns `"rich"`, `"spot"`, `"spot_folder"` or
 `"folder"`, or raises `ValueError`. `open_qtegra` reads a file directly;
 for a folder it discovers Rich in that folder and per-spot files there or
 in one immediate companion subfolder. It merges companions by label,
-ignores derived UPbR beside Rich with a warning, and rejects multiple Rich
-files or ambiguous companions. Its only keyword arguments are
-`cycle_time_s` and `acquisition_gap_s`, forwarded for UPbR input.
+skips Y-only exports with the warning `Ignored <name>: no time information
+(Y-only export).`, and rejects multiple Rich files or ambiguous companions.
+If no usable export exists, it raises the unsupported-file error. Direct
+Y-only file detection and opening raise `UnsupportedQtegraFormat` with a
+message starting `Unsupported Qtegra export: no time information` and export
+instructions. A Time row in the first channel block or StartTime in the
+footer identifies time information; reading reduced Rich files is deferred
+to a later milestone. `open_qtegra` accepts only the path.
 
 `merge` returns a new session, validating channel order, Y, NaN masks and
 first-channel times (`rtol=1e-12`, `atol=0`). Every Rich label must have a
@@ -319,7 +341,6 @@ nonfinite numbers become `None`.
 | --- | --- |
 | Rich | `timestamps`, `stop_times`, `per_channel_time`, `analog_counter`, `mass`, `instrument_state`, `sequence_fields`, `user` |
 | Per-spot folder | `timestamps`, `instrument_state`, `dwell_xcal` |
-| UPbR | Empty set |
 | Rich + per-spot folder | Union: all names in `CAPABILITIES` |
 
 Both recorded clocks are naive. Rich start/stop text is ISO 8601 with seven
@@ -335,14 +356,10 @@ offset rounded to the nearest 0.25 h (7.0 here), and
 original texts and use the session's time-zone setting to resolve aware UTC
 instants; never silently reinterpret the clocks.
 
-UPbR has no calendar times: `start`, `start_text`, `stop` and `stop_text`
-remain `None`. Each acquisition's time starts at zero with
-`sweep_index * cycle_time_s` (default `DEFAULT_CYCLE_TIME_S`, 0.4255 s).
-`start_offset_s` places acquisitions back to back in sequence order, adding
-the preceding sweep count × cycle time plus `acquisition_gap_s` (default
-0). `times_reconstructed=True`, `nominal_cycle_time_s` and a session warning
-record this assumption; the experiment adapter emits a `UserWarning`.
-Reconstructed times do not add a `timestamps` capability.
+`QtegraSession.times_reconstructed` and `nominal_cycle_time_s` remain
+False and None in current readers and in `experiment.attrs["qtegra"]`.
+They and `DEFAULT_CYCLE_TIME_S` (0.4255 s, the Boise median sweep spacing)
+are reserved for future reduced-Rich timing support.
 
 Rich prints Y with 17 significant digits, sufficient to round-trip a
 double; per-spot CSVs print 15. For example, Rich
@@ -353,8 +370,8 @@ and validate companions with the merge tolerance, not bitwise equality.
 
 - Accept a Rich file, a per-spot folder, or both at ingest and in the
   watcher. Preserve the Rich CSV as a `RawAsset`, like each per-spot file,
-  with original bytes and source SHA-256; UPbR is a derived view, not the
-  archive export. Keep full analytical files outside this code repository.
+  with original bytes and source SHA-256. Reject Y-only exports without time
+  information. Keep full analytical files outside this code repository.
 - Extend the Parquet sweep schema with nullable `analog`, `counter` and
   per-channel `time` columns. Preserve missing values and the counter
   saturation sentinel; reduction uses `y`.

@@ -14,11 +14,11 @@ import pytest
 
 import UPbRPy
 from UPbRPy import qtegra as q
+from qtegra_helpers import write_y_only_csv
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "qtegra" / "Zircon_04Nov26_slice"
 RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-UPBR = FIXTURE / "Zircon_04Nov26_slice_UPbR.csv"
 SPOTS = FIXTURE / "zircon_04Nov26"
 SPOT = SPOTS / "Zircon_demo_1.csv"
 NAMES = ("29Si", "91Zr", "177Hf", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U")
@@ -37,11 +37,6 @@ def rich():
 @pytest.fixture(scope="module")
 def spots():
     return q.read_spot_folder(SPOTS)
-
-
-@pytest.fixture(scope="module")
-def upbr():
-    return q.read_upbr_csv(UPBR)
 
 
 @pytest.fixture(scope="module")
@@ -64,8 +59,8 @@ def test_public_api():
     assert "qtegra" in UPbRPy.FOCUSED_SUBMODULES
     assert set(q.__all__) == {
         "CAPABILITIES", "COUNTER_SATURATED", "DEFAULT_CYCLE_TIME_S",
-        "Channel", "Acquisition", "SourceFile", "QtegraSession",
-        "read_rich_csv", "read_spot_folder", "read_spot_file", "read_upbr_csv",
+        "Channel", "Acquisition", "SourceFile", "QtegraSession", "UnsupportedQtegraFormat",
+        "read_rich_csv", "read_spot_folder", "read_spot_file",
         "merge", "recover_xcal", "detect_format", "open_qtegra",
     }
     assert q.COUNTER_SATURATED == -33.0
@@ -77,11 +72,11 @@ def test_public_api():
     with pytest.raises(FrozenInstanceError):
         q.Channel("29Si").mass = 29
     with pytest.raises(FrozenInstanceError):
-        q.SourceFile(RICH, "digest", "rich").format = "upbr"
+        q.SourceFile(RICH, "digest", "rich").format = "spot"
 
 
-def test_reader_counts_and_order(rich, spots, upbr):
-    for session in (rich, spots, upbr):
+def test_reader_counts_and_order(rich, spots):
+    for session in (rich, spots):
         assert len(session.acquisitions) == 12
         assert session.labels == LABELS
         assert session.channel_names == NAMES
@@ -91,8 +86,6 @@ def test_reader_counts_and_order(rich, spots, upbr):
             assert acquisition.channel_names == NAMES
             assert acquisition.y.shape == (72, 9)
             assert acquisition.y.dtype == np.dtype(float)
-            if session is not upbr:
-                assert acquisition.start_offset_s is None
             assert session.acquisition(acquisition.label) is acquisition
             assert acquisition.channel_index("238U") == 8
             with pytest.raises(ValueError):
@@ -101,7 +94,6 @@ def test_reader_counts_and_order(rich, spots, upbr):
             session.acquisition("missing")
     assert rich.capabilities == q.CAPABILITIES - {"dwell_xcal"}
     assert spots.capabilities == {"timestamps", "instrument_state", "dwell_xcal"}
-    assert not upbr.capabilities
     assert rich.has("analog_counter")
     assert not spots.has("analog_counter")
     assert not rich.has("unknown")
@@ -178,9 +170,9 @@ def test_spot_metadata_and_single_file(spots):
     np.testing.assert_array_equal(first.time, expected["Time"].to_numpy(dtype=float))
 
 
-def test_hashes(rich, spots, upbr, merged):
+def test_hashes(rich, spots, merged):
     for session, count, formats in (
-        (rich, 1, {"rich"}), (spots, 12, {"spot"}), (upbr, 1, {"upbr"}),
+        (rich, 1, {"rich"}), (spots, 12, {"spot"}),
         (merged, 13, {"rich", "spot"}),
     ):
         assert len(session.sources) == count
@@ -188,36 +180,6 @@ def test_hashes(rich, spots, upbr, merged):
         for source in session.sources:
             assert isinstance(source.path, Path)
             assert source.sha256 == sha256(source.path.read_bytes()).hexdigest()
-
-
-def test_upbr_y_and_reconstructed_times(rich, upbr):
-    assert upbr.times_reconstructed
-    assert upbr.nominal_cycle_time_s == q.DEFAULT_CYCLE_TIME_S
-    assert any("reconstructed" in warning for warning in upbr.warnings)
-    for i, (original, derived) in enumerate(zip(rich.acquisitions, upbr.acquisitions)):
-        np.testing.assert_array_equal(original.y, derived.y)
-        np.testing.assert_array_equal(derived.time, np.arange(72) * q.DEFAULT_CYCLE_TIME_S)
-        assert derived.time[0] == 0
-        assert derived.start_offset_s == pytest.approx(i * 72 * q.DEFAULT_CYCLE_TIME_S)
-        assert derived.start is None and derived.start_text is None
-        assert derived.stop is None and derived.stop_text is None
-        assert derived.analog is None and derived.counter is None
-        assert not derived.time_per_channel
-        assert all(c.mass is None and c.dwell_s is None and c.xcal is None for c in derived.channels)
-    custom = q.read_upbr_csv(UPBR, cycle_time_s=.5, acquisition_gap_s=2)
-    assert custom.nominal_cycle_time_s == .5
-    for i, acquisition in enumerate(custom.acquisitions):
-        np.testing.assert_array_equal(acquisition.time, np.arange(72) * .5)
-        assert acquisition.start_offset_s == i * 38
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"cycle_time_s": 0}, {"cycle_time_s": -1}, {"cycle_time_s": np.nan},
-    {"cycle_time_s": np.inf}, {"acquisition_gap_s": -1}, {"acquisition_gap_s": np.nan},
-])
-def test_invalid_reconstruction_parameters(kwargs):
-    with pytest.raises(ValueError):
-        q.read_upbr_csv(UPBR, **kwargs)
 
 
 def test_merge_metadata_and_preserved_rich_values(rich, spots, merged):
@@ -319,7 +281,7 @@ def test_rich_y_detector_rule(merged):
     assert saturated_channels == {"29Si", "91Zr", "177Hf"}
 
 
-def test_recover_xcal(rich, spots, upbr):
+def test_recover_xcal(rich, spots):
     factors = q.recover_xcal(rich)
     assert factors.keys() == {"29Si", "91Zr", "177Hf"}
     for name, factor in factors.items():
@@ -327,7 +289,6 @@ def test_recover_xcal(rich, spots, upbr):
     for acquisition in rich.acquisitions:
         for name, factor in q.recover_xcal(acquisition).items():
             assert factor == pytest.approx(factors[name], rel=1e-9)
-    assert q.recover_xcal(upbr) == {}
     changed = deepcopy(rich.acquisitions[0])
     changed.counter[:] = q.COUNTER_SATURATED
     changed.analog[:] = 0
@@ -348,7 +309,7 @@ def test_recover_xcal(rich, spots, upbr):
 
 
 @pytest.mark.parametrize("source, kind", [
-    (RICH, "rich"), (UPBR, "upbr"), (SPOT, "spot"),
+    (RICH, "rich"), (SPOT, "spot"),
     (SPOTS, "spot_folder"), (FIXTURE, "folder"),
 ])
 def test_detect_format(source, kind):
@@ -361,7 +322,7 @@ def test_detection_uses_content_and_start_time(tmp_path):
         rows[:] = [row for row in rows if row[0] != "MainRuns" or row[3] == "Y"]
     source = copy_rows(RICH, tmp_path / "not_named_rich.csv", edit)
     assert q.detect_format(source) == "rich"
-    # A non-Y quantity late in the first channel block also identifies Rich.
+    # Time late in the first channel block also identifies Rich.
     def reorder(rows):
         main = [row for row in rows if row[0] == "MainRuns"]
         metadata = [row for row in rows[2:] if row[0] != "MainRuns"]
@@ -372,7 +333,7 @@ def test_detection_uses_content_and_start_time(tmp_path):
 
 
 @pytest.mark.parametrize("source, kind, count", [
-    (RICH, "rich", 12), (UPBR, "upbr", 12), (SPOT, "spot_folder", 1),
+    (RICH, "rich", 12), (SPOT, "spot_folder", 1),
     (SPOTS, "spot_folder", 12), (FIXTURE, "rich+spot_folder", 12),
 ])
 def test_open_qtegra(source, kind, count):
@@ -382,14 +343,12 @@ def test_open_qtegra(source, kind, count):
     assert session.channel_names == NAMES
     if source == FIXTURE:
         assert session.capabilities == q.CAPABILITIES
-        assert any("UPbR" in warning and "ignored" in warning for warning in session.warnings)
         assert len(session.sources) == 13
-        assert UPBR not in {source.path for source in session.sources}
     elif source == SPOT:
         assert session.acquisitions[0].sequence_index == 1
 
 
-def test_folder_layouts_and_reconstruction_kwargs(tmp_path):
+def test_folder_layouts(tmp_path):
     rich_path = shutil.copy2(RICH, tmp_path / "record.csv")
     assert q.open_qtegra(tmp_path).format == "rich"
     for spot in SPOTS.glob("*.csv"):
@@ -401,19 +360,7 @@ def test_folder_layouts_and_reconstruction_kwargs(tmp_path):
     Path(rich_path).unlink()
     (tmp_path / "duplicate.csv").unlink()
     assert q.open_qtegra(tmp_path).format == "spot_folder"
-    single_folder = tmp_path / "derived"
-    single_folder.mkdir()
-    shutil.copy2(UPBR, single_folder / "derived.csv")
-    session = q.open_qtegra(single_folder, cycle_time_s=.5, acquisition_gap_s=2)
-    assert session.acquisitions[1].time[0] == 0
-    assert session.acquisitions[1].start_offset_s == 38
-    assert q.open_qtegra(UPBR, cycle_time_s=.25).nominal_cycle_time_s == .25
-    shutil.copy2(UPBR, tmp_path / UPBR.name)
-    assert q.open_qtegra(tmp_path).format == "spot_folder"
-    shutil.copy2(UPBR, single_folder / "duplicate.csv")
-    with pytest.raises(ValueError, match="More than one UPbR"):
-        q.open_qtegra(single_folder)
-    with pytest.raises(TypeError, match="Unexpected"):
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
         q.open_qtegra(RICH, typo=True)
 
 
@@ -447,7 +394,7 @@ def test_invalid_files_and_empty_folders(tmp_path):
         q.read_spot_folder(tmp_path)
     invalid = tmp_path / "other.csv"
     invalid.write_text("a,b\n1,2\n")
-    for reader in (q.detect_format, q.open_qtegra, q.read_spot_file, q.read_rich_csv, q.read_upbr_csv):
+    for reader in (q.detect_format, q.open_qtegra, q.read_spot_file, q.read_rich_csv):
         with pytest.raises(ValueError):
             reader(invalid)
 
@@ -473,21 +420,15 @@ def test_empty_sweep_72_interior_missing_and_present_sweep_72(tmp_path, rich):
                 row[4] = ""  # A whole interior sweep must stay present.
             if row[:4] == ["MainRuns", "72", "29Si", "Y"]:
                 row[5] = "0"  # Zero is a present sweep, not a missing value.
-    for original, reader in ((RICH, q.read_rich_csv), (UPBR, q.read_upbr_csv)):
-        source = copy_rows(original, tmp_path / original.name, edit)
-        session = reader(source)
-        first, second = session.acquisitions[:2]
-        assert first.n_sweeps == 72 and second.n_sweeps == 73
-        assert np.isnan(first.y[2, 0])
-        assert np.isnan(first.y[3]).all()
-        assert np.isfinite(first.y[2, 1:]).all()
-        assert second.y[72, 0] == 0
-        assert np.isnan(second.y[72, 1:]).all()
-        if reader is q.read_upbr_csv:
-            assert second.start_offset_s == 72 * q.DEFAULT_CYCLE_TIME_S
-            assert session.acquisitions[2].start_offset_s == pytest.approx(
-                (72 + 73) * q.DEFAULT_CYCLE_TIME_S,
-            )
+    source = copy_rows(RICH, tmp_path / RICH.name, edit)
+    session = q.read_rich_csv(source)
+    first, second = session.acquisitions[:2]
+    assert first.n_sweeps == 72 and second.n_sweeps == 73
+    assert np.isnan(first.y[2, 0])
+    assert np.isnan(first.y[3]).all()
+    assert np.isfinite(first.y[2, 1:]).all()
+    assert second.y[72, 0] == 0
+    assert np.isnan(second.y[72, 1:]).all()
 
 
 def test_spot_empty_cells_stay_nan(tmp_path):
@@ -501,3 +442,69 @@ def test_spot_empty_cells_stay_nan(tmp_path):
     assert np.isnan(acquisition.y[1, 0])
     assert np.isnan(acquisition.y[2]).all()
     assert acquisition.y[0, 1] == 0
+
+
+@pytest.mark.parametrize("reader", [q.detect_format, q.open_qtegra, q.read_rich_csv])
+def test_y_only_export_reports_missing_time(tmp_path, reader):
+    source = write_y_only_csv(RICH, tmp_path / "Y_only.csv")
+    with pytest.raises(q.UnsupportedQtegraFormat, match="^Unsupported Qtegra export: no time information") as error:
+        reader(source)
+    message = str(error.value)
+    assert source.name in message
+    assert "MainRuns Y rows but no Time rows and no StartTime row" in message
+    assert "Export the Rich single CSV" in message
+    assert "or the per-spot folder" in message
+
+
+def test_folder_with_only_y_only_export_raises_its_error(tmp_path):
+    source = write_y_only_csv(RICH, tmp_path / "Y_only.csv")
+    assert q._csv_formats(tmp_path) == {}
+    with pytest.raises(q.UnsupportedQtegraFormat, match="^Unsupported Qtegra export: no time information") as error:
+        q.open_qtegra(tmp_path)
+    assert source.name in str(error.value)
+
+
+@pytest.mark.parametrize("usable", ["rich", "spots", "companion"])
+def test_folder_skips_y_only_export_with_warning(tmp_path, usable):
+    if usable in {"rich", "companion"}:
+        shutil.copy2(RICH, tmp_path / RICH.name)
+    if usable == "spots":
+        shutil.copy2(SPOT, tmp_path / SPOT.name)
+    ignored_folder = tmp_path
+    if usable == "companion":
+        ignored_folder = tmp_path / "companion"
+        shutil.copytree(SPOTS, ignored_folder)
+    source = write_y_only_csv(RICH, ignored_folder / "Y_only.csv")
+    session = q.open_qtegra(tmp_path)
+    assert session.format == {"rich": "rich", "spots": "spot_folder", "companion": "rich+spot_folder"}[usable]
+    warning = "Ignored Y_only.csv: no time information (Y-only export)."
+    assert warning in session.warnings
+    assert source not in {item.path for item in session.sources}
+    if usable in {"spots", "companion"}:
+        assert warning in q.read_spot_folder(ignored_folder).warnings
+    assert not session.times_reconstructed
+    assert session.nominal_cycle_time_s is None
+
+
+@pytest.mark.parametrize("time_kind", ["Time", "StartTime"])
+def test_detection_recognizes_reduced_rich_time_information(tmp_path, time_kind):
+    # Detection recognizes time, but reading reduced Rich files is a later milestone.
+    def edit(rows):
+        rows[2:] = [row for row in rows[2:] if
+                    (row[0] == "MainRuns" and row[3] in {"Y", time_kind})
+                    or row[0] == time_kind]
+        if time_kind == "StartTime":
+            rows.extend([["ExtraMetadata", "", "", ""] + [""] * 13 for _ in range(25)])
+    source = copy_rows(RICH, tmp_path / "reduced.csv", edit)
+    assert q.detect_format(source) == "rich"
+    with pytest.raises(ValueError, match="Missing Rich quantity"):
+        q.read_rich_csv(source)
+
+
+def test_non_time_quantities_do_not_make_export_supported(tmp_path):
+    def edit(rows):
+        rows[2:] = [row for row in rows[2:]
+                    if row[0] == "MainRuns" and row[3] in {"Y", "Analog", "Counter", "X [u]"}]
+    source = copy_rows(RICH, tmp_path / "no_time.csv", edit)
+    with pytest.raises(q.UnsupportedQtegraFormat):
+        q.detect_format(source)

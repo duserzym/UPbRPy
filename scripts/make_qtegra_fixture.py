@@ -1,20 +1,18 @@
-"""Cut a small test fixture from the three Qtegra exports of one session.
+"""Cut a small test fixture from the accepted Qtegra exports of one session.
 
 The Zircon_demo session (Boise iCAP RQ, Qtegra
-2.10.4345.64) was exported three ways: the Rich single CSV, the UPbR single
-CSV, and a folder of per-spot CSV files. This script copies the first ``n``
-acquisitions of all three, restricted to a subset of channels so the fixture
-stays under 1 MB, into ``tests/fixtures/qtegra/<name>/``:
+2.10.4345.64) provides a Rich single CSV and a folder of per-spot CSV files.
+This script copies the first ``n`` acquisitions of both, restricted to a
+subset of channels so the fixture stays under 1 MB, into
+``tests/fixtures/qtegra/<name>/``:
 
     Zircon_04Nov26_slice_Rich.csv     Rich single CSV, n sample columns
-    Zircon_04Nov26_slice_UPbR.csv     UPbR single CSV, n sample columns
     zircon_04Nov26/                   the n matching per-spot CSV files
 
 Cells are copied as text, byte for byte (BOM and CRLF line endings kept), so
-the UPbR slice stays exactly the Y rows of the Rich slice and the per-spot
-values stay equal to the Rich Y values. Only whole columns (acquisitions and
-channels) are dropped; no value is reformatted. The source files are read
-only; the full exports never go into git.
+the per-spot values stay equal to the Rich Y values at exported precision.
+Only whole columns (acquisitions and channels) are dropped; no value is
+reformatted. The source files are read only; the full exports never go into git.
 
 Usage::
 
@@ -30,7 +28,6 @@ import sys
 from pathlib import Path
 
 RICH_NAME = "Zircon_demo_Rich.csv"
-UPBR_NAME = "Zircon_demo_UPbR.csv"
 FOLDER_NAME = "zircon_04Nov26"
 SLICE_PREFIX = "Zircon_04Nov26_slice"
 
@@ -128,9 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     channels_arg = args.channels.strip()
 
     rich = source / RICH_NAME
-    upbr = source / UPBR_NAME
     folder = source / FOLDER_NAME
-    for path in (rich, upbr, folder):
+    for path in (rich, folder):
         if not path.exists():
             parser.error(f"missing source: {path}")
     if channels_arg == "all":
@@ -145,10 +141,6 @@ def main(argv: list[str] | None = None) -> int:
         stale.unlink()
 
     labels = slice_single_csv(rich, out / f"{SLICE_PREFIX}_Rich.csv", args.n, channels)
-    upbr_labels = slice_single_csv(upbr, out / f"{SLICE_PREFIX}_UPbR.csv", args.n, channels)
-    if labels != upbr_labels:
-        raise SystemExit(f"Rich and UPbR labels differ: {labels} vs {upbr_labels}")
-
     spots = spot_files_by_label(folder)
     for label in labels:
         if label not in spots:

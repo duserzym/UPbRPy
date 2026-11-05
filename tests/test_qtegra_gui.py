@@ -17,6 +17,7 @@ pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
+from qtegra_helpers import write_y_only_csv
 from GUI import services
 from GUI.launch import parse_open_target
 from GUI.main_window import MainWindow
@@ -28,9 +29,8 @@ from UPbRPy.reproducibility import build_reproducibility_notebook, selection_exp
 
 FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
 RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-UPBR = FIXTURE / "Zircon_04Nov26_slice_UPbR.csv"
 FORMATS = [(RICH, "rich", "Rich"), (FIXTURE / "zircon_04Nov26", "spot_folder", "Per-spot folder"),
-           (UPBR, "upbr", "UPbR"), (FIXTURE, "rich+spot_folder", "Rich + per-spot")]
+           (FIXTURE, "rich+spot_folder", "Rich + per-spot")]
 
 
 @pytest.fixture(scope="module")
@@ -97,14 +97,8 @@ def test_window_formats_and_capabilities(window, app, source, format_name, badge
     for warning in window.session.qtegra.warnings:
         assert warning in tooltip
     assert all(capability in tooltip for capability in window.session.qtegra.capabilities)
-    assert window.reconstructed_times_flag.isVisible() == (format_name == "upbr")
-    if format_name == "upbr":
-        assert window.reconstructed_times_flag.text() == "Sweep times reconstructed"
-        assert "0.4255" in window.reconstructed_times_flag.toolTip()
-        assert "Session-time drift corrections use reconstructed times" in window.reconstructed_times_flag.toolTip()
     if format_name == "rich+spot_folder":
         assert "+7 h" in tooltip
-        assert UPBR not in window.session.pipeline.input_files
     panel = window.detector_calibration_panel
     capable = format_name.startswith("rich")
     assert panel.isEnabled() == capable
@@ -302,3 +296,21 @@ def test_notebook_replays_exact_file_provenance(source):
             exec("".join(cell["source"]), namespace)
     assert namespace["pipeline"].input_files == session.pipeline.input_files
     assert namespace["pipeline"].config.detector_calibration == session.pipeline.config.detector_calibration
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_open_qtegra_file_shows_missing_time_error(window, app, monkeypatch, tmp_path, background):
+    source = write_y_only_csv(RICH, tmp_path / "Y_only.csv")
+    messages = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args: messages.append(args[1:]))
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName", lambda *args: (str(source), ""))
+    if not background:
+        loader = window.load_experiment_directory
+        monkeypatch.setattr(window, "load_experiment_directory", lambda path: loader(path, background=False))
+    window.choose_qtegra_file()
+    assert wait_for(app, lambda: window._active_worker is None)
+    assert len(messages) == 1
+    assert messages[0][1].startswith("Unsupported Qtegra export: no time information")
+    assert source.name in messages[0][1]
+    assert "Export the Rich single CSV" in messages[0][1]
+    assert not window.session.loaded

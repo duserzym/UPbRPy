@@ -344,8 +344,6 @@ def raw_input_files(directory: str | Path | QtegraSession) -> tuple[Path, ...]:
                 files.extend(
                     path for path, kind in csv_formats(child).items() if kind == "spot"
                 )
-    elif not files:
-        files = [path for path, kind in formats.items() if kind == "upbr"]
     return tuple(sorted(files))
 
 
@@ -688,7 +686,6 @@ def load_session(
         read_kwargs["selection_method"] = selection_method
     qtegra = open_qtegra(
         raw_directory_for(directory) if manifest is not None else directory,
-        cycle_time_s=read_kwargs.get("cycle_time_s"),
     )
     experiment, channels, total_data = read_experiment_data(
         qtegra,

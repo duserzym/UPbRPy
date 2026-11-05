@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 from pathlib import Path
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -930,7 +929,6 @@ def read_experiment_data(
     signal_duration_limit_seconds=None,
     session_manifest=None,
     *,
-    cycle_time_s=None,
     detector_calibration=None,
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
@@ -943,8 +941,8 @@ def read_experiment_data(
     Parameters
     ----------
     directory : str, path-like or QtegraSession
-        Per-spot folder, Rich or UPbR CSV, folder containing these exports,
-        session bundle root, or an already-read session.
+        Rich CSV, per-spot folder or file, folder containing these exports,
+        session bundle root, or a QtegraSession.
     primary_channel : str
         Default matrix-sensitive channel used to detect ablation signals.
     baseline_sweep_n, peak_sweep_n : int
@@ -987,10 +985,6 @@ def read_experiment_data(
         in its parent folder with the same rules; an in-memory session uses
         its first source path. ``False`` ignores any manifest. A manifest
         supplies ``sep`` and ``sample_aliases``; explicit arguments still win.
-    cycle_time_s : float or None, keyword-only
-        Nominal UPbR sweep cycle in seconds, forwarded to ``open_qtegra``.
-        None uses the reader's default of 0.4255 s. UPbR times are reconstructed
-        and emit one UserWarning. Recorded times in other formats are retained.
     detector_calibration : str, mapping or None, keyword-only
         None or 'qtegra' retains exported Y. 'constant', 'drift', or a mapping
         with mode, on, window, primary_standard, channels and smoothing_s fits
@@ -1028,7 +1022,7 @@ def read_experiment_data(
 
     session = (
         directory if isinstance(directory, QtegraSession)
-        else open_qtegra(Path(directory).expanduser(), cycle_time_s=cycle_time_s)
+        else open_qtegra(Path(directory).expanduser())
     )
     calibration_options = (
         dict(detector_calibration) if isinstance(detector_calibration, Mapping)
@@ -1094,21 +1088,13 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
 
     Return ``(experiment, element_channels, total_data)`` in the historical
     column order and dtypes. Session seconds use each acquisition's first
-    channel time and recorded start, or its reconstructed ``start_offset_s``.
+    channel time and recorded start.
     Relative seconds pass through pandas nanosecond timedeltas and absolute
     timestamps before subtraction, matching the original per-spot reader.
-    Source paths and JSON-safe session provenance are retained. UPbR input
-    emits one UserWarning about reconstructed times.
+    Source paths and JSON-safe session provenance are retained.
     """
     if not session.acquisitions:
         raise ValueError("Cannot build an experiment from an empty QtegraSession.")
-    if session.times_reconstructed:
-        warnings.warn(
-            "UPbR sweep times reconstructed with "
-            f"cycle_time_s={session.nominal_cycle_time_s}; acquisition starts "
-            "are placed back to back in sequence order.",
-            UserWarning, stacklevel=2,
-        )
     aliases = {
         str(source).strip().casefold(): str(target).strip()
         for source, target in (sample_aliases or {}).items()
@@ -1119,12 +1105,8 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
     for acquisition in session.acquisitions:
         if acquisition.start is not None:
             start = acquisition.start
-        elif acquisition.start_offset_s is not None:
-            start = pd.Timestamp("1970-01-01") + pd.to_timedelta(
-                acquisition.start_offset_s, unit="s",
-            )
         else:
-            raise ValueError(f"{acquisition.label}: no acquisition start or session offset.")
+            raise ValueError(f"{acquisition.label}: no acquisition start.")
         if acquisition.sweep_time is None:
             raise ValueError(f"{acquisition.label}: no sweep times.")
         starts.append(start)

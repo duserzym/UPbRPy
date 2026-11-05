@@ -7,7 +7,7 @@ laicpmsdb, upbstudio, grainatlas and bracketeer, each in its own repository).
 
 ## Current work
 
-The input-layer restructure for Qtegra exports. Read these two first:
+The input-layer restructure for Qtegra exports. UPbR CSV dropped 2026-11-05. Read these two first:
 
 - `docs/qtegra_export_formats.md`: the decision and the contract (which export
   is canonical, the in-memory model, the readers, the rules every consumer

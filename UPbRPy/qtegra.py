@@ -1,7 +1,7 @@
 """Read Qtegra exports into one acquisition model without changing their clocks.
 
 Rich CSVs are the acquisition record; per-spot CSVs supply dwell and detector
-calibration metadata. UPbR CSVs contain only Y and need reconstructed times.
+calibration metadata.
 Instrument state dictionaries use setting/readback names as keys; sample-list
 fields use the original field names (for example, ``Duration [s]`` and
 ``Evaluate``). Empty instrument-state values are omitted, while sample-list
@@ -24,8 +24,8 @@ import pandas as pd
 
 __all__ = [
     "CAPABILITIES", "COUNTER_SATURATED", "DEFAULT_CYCLE_TIME_S",
-    "Channel", "Acquisition", "SourceFile", "QtegraSession",
-    "read_rich_csv", "read_spot_folder", "read_spot_file", "read_upbr_csv",
+    "Channel", "Acquisition", "SourceFile", "QtegraSession", "UnsupportedQtegraFormat",
+    "read_rich_csv", "read_spot_folder", "read_spot_file",
     "merge", "recover_xcal", "detect_format", "open_qtegra",
 ]
 
@@ -43,6 +43,26 @@ _SPOT_FIRST_LINE = re.compile(
 )
 
 
+class UnsupportedQtegraFormat(ValueError):
+    """A Qtegra export lacks the time information required for reduction."""
+
+
+def _no_time_error(path):
+    return UnsupportedQtegraFormat(
+        f"Unsupported Qtegra export: no time information: {path.name} has "
+        "MainRuns Y rows but no Time rows and no StartTime row. Export the "
+        "Rich single CSV (Y, Time, Analog, Counter, X [u] and the metadata "
+        "rows) or the per-spot folder."
+    )
+
+
+def _ignored_time_warnings(unsupported):
+    return [
+        f"Ignored {path.name}: no time information (Y-only export)."
+        for path, _error in unsupported
+    ]
+
+
 @dataclass(frozen=True)
 class Channel:
     """One channel in instrument order, with metadata when exported."""
@@ -57,9 +77,7 @@ class Channel:
 class Acquisition:
     """One acquisition; sweep arrays retain missing values as NaN.
 
-    ``time`` always contains seconds since this acquisition's start. UPbR
-    stores its reconstructed session placement separately in ``start_offset_s``;
-    formats with recorded calendar starts leave that field None.
+    ``time`` contains seconds since this acquisition's recorded start.
     """
 
     label: str
@@ -80,7 +98,6 @@ class Acquisition:
     user: str | None = None
     spot_number: int | None = None
     source_path: Path | None = None
-    start_offset_s: float | None = None
     # Native pandas column dtypes preserve the historical experiment tables.
     # Y stays a float array; consumers may change it without rereading a file.
     _data_dtypes: dict[str, str] = field(default_factory=dict, repr=False)
@@ -123,7 +140,11 @@ class SourceFile:
 
 @dataclass
 class QtegraSession:
-    """Acquisitions in sequence order, or chronological order for spot files."""
+    """Acquisitions in sequence order, or chronological order for spot files.
+
+    ``times_reconstructed`` and ``nominal_cycle_time_s`` are reserved for
+    nominal sweep timing; current readers leave them False and None.
+    """
 
     acquisitions: list[Acquisition]
     format: str
@@ -241,6 +262,8 @@ def read_rich_csv(path) -> QtegraSession:
     path, raw, frame, columns, labels, names, cubes, data_dtypes = _read_single(
         path, ("Y", "Time", "Analog", "Counter", "X [u]"),
     )
+    if "Time" not in cubes and not (frame[0] == "StartTime").any():
+        raise _no_time_error(path)
     for quantity in ("Time", "Analog", "Counter", "X [u]"):
         if quantity not in cubes:
             raise ValueError(f"Missing Rich quantity {quantity!r} in {path}")
@@ -359,12 +382,15 @@ def read_spot_file(path) -> Acquisition:
     return _read_spot(path)[0]
 
 
-def _csv_formats(path):
+def _csv_formats(path, *, unsupported=None):
     found = {}
     for child in sorted(Path(path).iterdir()):
         if child.is_file() and child.suffix.lower() == ".csv":
             try:
                 found[child] = detect_format(child)
+            except UnsupportedQtegraFormat as error:
+                if unsupported is not None:
+                    unsupported.append((child, error))
             except ValueError:
                 pass
     return found
@@ -388,45 +414,14 @@ def _spot_session(paths):
 def read_spot_folder(path) -> QtegraSession:
     """Read per-spot CSVs ordered by start time, breaking ties by file name.
 
-    Non-CSV files and CSVs with other layouts are ignored.
+    Non-CSV files and CSVs with other layouts are ignored. Y-only exports
+    without time information add a session warning.
     """
-    return _spot_session([file for file, kind in _csv_formats(path).items() if kind == "spot"])
-
-
-def read_upbr_csv(path, *, cycle_time_s: float | None = None,
-                  acquisition_gap_s: float = 0.0) -> QtegraSession:
-    """Read Y-only UPbR data with reconstructed acquisition-relative times.
-
-    The default cycle is 0.4255 s, the Boise session's median sweep spacing.
-    Each acquisition starts after the previous one's sweep count times cycle
-    plus gap, recorded in ``start_offset_s``. Each time array starts at zero.
-    Calendar starts stay None.
-    """
-    cycle = DEFAULT_CYCLE_TIME_S if cycle_time_s is None else float(cycle_time_s)
-    gap = float(acquisition_gap_s)
-    if not np.isfinite(cycle) or cycle <= 0:
-        raise ValueError("cycle_time_s must be finite and positive.")
-    if not np.isfinite(gap) or gap < 0:
-        raise ValueError("acquisition_gap_s must be finite and nonnegative.")
-    path, raw, _frame, _columns, labels, names, cubes, data_dtypes = _read_single(path, ("Y",))
-    acquisitions = []
-    offset = 0.0
-    for i, label in enumerate(labels):
-        count = _sweep_count(cubes["Y"][i])
-        acquisitions.append(Acquisition(
-            label, i + 1, tuple(Channel(name) for name in names),
-            cubes["Y"][i, :count].copy(), np.arange(count) * cycle,
-            spot_number=_spot_number(label), source_path=path,
-            start_offset_s=offset,
-            _data_dtypes={"Time": "float64", **data_dtypes[i]},
-        ))
-        offset += count * cycle + gap
-    return QtegraSession(
-        acquisitions, "upbr", frozenset(),
-        (SourceFile(path, sha256(raw).hexdigest(), "upbr"),),
-        times_reconstructed=True, nominal_cycle_time_s=cycle,
-        warnings=[f"UPbR sweep times reconstructed with cycle_time_s={cycle} and acquisition_gap_s={gap}."],
-    )
+    unsupported = []
+    formats = _csv_formats(path, unsupported=unsupported)
+    session = _spot_session([file for file, kind in formats.items() if kind == "spot"])
+    session.warnings.extend(_ignored_time_warnings(unsupported))
+    return session
 
 
 def _check_pair(rich, spot, rtol):
@@ -522,18 +517,23 @@ def recover_xcal(session_or_acquisition) -> dict[str, float]:
 
 
 def _has_start_time_footer(path):
-    # StartTime precedes StopTime and the twelve sample-list rows. Read just
-    # that footer, including arbitrarily wide acquisition columns, rather
-    # than scanning a Y-only table to distinguish it from a Rich export.
+    # Scan metadata backwards to the last MainRuns row. Complete rows are
+    # assembled across chunks so wide acquisition columns remain supported.
     with path.open("rb") as handle:
         position = handle.seek(0, 2)
-        tail = b""
-        while position and tail.count(b"\n") < 16:
+        pending = b""
+        while position:
             size = min(position, 4096)
             position -= size
             handle.seek(position)
-            tail = handle.read(size) + tail
-    return any(line.startswith(b"StartTime,,,,") for line in tail.splitlines()[-16:])
+            lines = (handle.read(size) + pending).split(b"\n")
+            pending = lines[0]
+            for line in reversed(lines[1:]):
+                if line.startswith(b"StartTime,,,,"):
+                    return True
+                if line.startswith(b"MainRuns,"):
+                    return False
+        return pending.startswith(b"StartTime,,,,")
 
 
 def detect_format(path) -> str:
@@ -541,6 +541,7 @@ def detect_format(path) -> str:
 
     Directories containing only per-spot exports return ``spot_folder``;
     other directories return ``folder`` for discovery by :func:`open_qtegra`.
+    Single CSVs with Y but no Time or StartTime raise UnsupportedQtegraFormat.
     File detection does not load the acquisition table.
     """
     path = Path(path)
@@ -561,49 +562,46 @@ def detect_format(path) -> str:
             if keys[0] == "StartTime":
                 return "rich"
             if len(keys) >= 4 and keys[0] == "MainRuns":
-                if keys[3] != "Y":
-                    return "rich"
                 if first_channel is not None and keys[2] != first_channel:
                     break
                 first_channel = keys[2]
-                found_y = True
+                if keys[3] == "Time":
+                    return "rich"
+                if keys[3] == "Y":
+                    found_y = True
             elif found_y:
                 break
         if found_y:
-            return "rich" if _has_start_time_footer(path) else "upbr"
+            if _has_start_time_footer(path):
+                return "rich"
+            raise _no_time_error(path)
     raise ValueError(f"No Qtegra MainRuns data: {path}")
 
 
-def open_qtegra(path, **kwargs) -> QtegraSession:
+def open_qtegra(path) -> QtegraSession:
     """Open a file or discover a session and its immediate companion folder.
 
-    ``cycle_time_s`` and ``acquisition_gap_s`` are forwarded for UPbR input.
-    Rich takes precedence over derived UPbR files, which produce a warning.
+    Exports without time information are skipped during folder discovery,
+    with a warning if usable exports exist, otherwise their error is raised.
     Ambiguous Rich or companion candidates raise ValueError.
     """
-    unexpected = set(kwargs) - {"cycle_time_s", "acquisition_gap_s"}
-    if unexpected:
-        raise TypeError(f"Unexpected open_qtegra arguments: {', '.join(sorted(unexpected))}")
     path = Path(path)
     kind = detect_format(path)
     if kind == "rich":
         return read_rich_csv(path)
-    if kind == "upbr":
-        return read_upbr_csv(path, **kwargs)
     if kind == "spot":
         return _spot_session([path])
-    if kind == "spot_folder":
-        return read_spot_folder(path)
-    formats = _csv_formats(path)
+    unsupported = []
+    formats = _csv_formats(path, unsupported=unsupported)
     rich_files = [file for file, kind in formats.items() if kind == "rich"]
-    upbr_files = [file for file, kind in formats.items() if kind == "upbr"]
     spot_paths = [file for file, kind in formats.items() if kind == "spot"]
     if len(rich_files) > 1:
         raise ValueError(f"More than one Rich CSV in {path}")
     if rich_files:
         session = read_rich_csv(rich_files[0])
         companions = [
-            [file for file, kind in _csv_formats(child).items() if kind == "spot"]
+            [file for file, kind in _csv_formats(child, unsupported=unsupported).items()
+             if kind == "spot"]
             for child in sorted(path.iterdir()) if child.is_dir()
         ]
         companions = [files for files in companions if files]
@@ -611,18 +609,11 @@ def open_qtegra(path, **kwargs) -> QtegraSession:
             raise ValueError(f"Ambiguous per-spot companion folders in {path}")
         if spot_paths or companions:
             session = merge(session, _spot_session(spot_paths or companions[0]))
-        if upbr_files:
-            session.warnings.append(
-                f"Derived UPbR CSV ignored beside Rich: {', '.join(file.name for file in upbr_files)}"
-            )
-        return session
-    if spot_paths:
+    elif spot_paths:
         session = _spot_session(spot_paths)
-        if upbr_files:
-            session.warnings.append("Derived UPbR CSV ignored beside per-spot exports.")
-        return session
-    if len(upbr_files) == 1:
-        return read_upbr_csv(upbr_files[0], **kwargs)
-    if len(upbr_files) > 1:
-        raise ValueError(f"More than one UPbR CSV in {path}")
-    raise ValueError(f"No Qtegra exports found in {path}")
+    elif unsupported:
+        raise unsupported[0][1]
+    else:
+        raise ValueError(f"No Qtegra exports found in {path}")
+    session.warnings.extend(_ignored_time_warnings(unsupported))
+    return session

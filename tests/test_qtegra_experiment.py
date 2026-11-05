@@ -14,12 +14,12 @@ from pandas.testing import assert_frame_equal
 import pytest
 
 from UPbRPy import io, qtegra
+from qtegra_helpers import write_y_only_csv
 from synthetic_bundles import write_raw_directory, write_session_bundle
 
 
 FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
 RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-UPBR = FIXTURE / "Zircon_04Nov26_slice_UPbR.csv"
 FOLDER = FIXTURE / "zircon_04Nov26"
 
 
@@ -242,36 +242,14 @@ def test_fixture_root_builds_from_merged_session():
     assert experiment.attrs == direct.attrs
 
 
-@pytest.mark.parametrize("as_session", [False, True])
-def test_upbr_preserves_y_and_warns_once(as_session):
-    session = qtegra.read_upbr_csv(UPBR, cycle_time_s=0.5)
-    source = session if as_session else UPBR
-    with pytest.warns(UserWarning, match="reconstructed") as caught:
-        experiment, channels, data = io.read_experiment_data(source, cycle_time_s=0.5)
-    assert len(caught) == 1
-    rich, rich_channels, rich_data = io.read_experiment_data(RICH)
-    assert channels == rich_channels
-    assert_frame_equal(data[channels], rich_data[channels], check_exact=True)
-    assert experiment.attrs["qtegra"]["times_reconstructed"] is True
-    assert experiment["spot_paths"].tolist() == [str(UPBR)] * len(experiment)
-    assert_provenance(experiment, session)
-    starts = experiment.set_index("spot_names")["spot_starting_times"]
-    for acquisition in session.acquisitions:
-        assert starts[acquisition.label] == acquisition.start_offset_s
-        np.testing.assert_array_equal(
-            data.loc[data["spot_name"] == acquisition.label, "Time"].to_numpy(),
-            acquisition.start_offset_s + np.arange(acquisition.n_sweeps) * 0.5,
-        )
-
-
-@pytest.mark.parametrize("filename", [RICH.name, UPBR.name])
+@pytest.mark.parametrize("filename", [RICH.name])
 def test_folder_with_single_export(tmp_path, filename):
     source = tmp_path / filename
     source.write_bytes((FIXTURE / filename).read_bytes())
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         experiment, _, _ = io.read_experiment_data(tmp_path)
-    assert len(caught) == (1 if filename == UPBR.name else 0)
+    assert len(caught) == 0
     assert experiment["spot_paths"].tolist() == [str(source)] * len(experiment)
 
 
@@ -330,13 +308,11 @@ def test_raw_input_files_detects_sources_without_loading_sweeps(tmp_path, monkey
     monkeypatch.setattr(qtegra, "read_rich_csv", no_loading)
     monkeypatch.setattr(qtegra, "read_spot_folder", no_loading)
     assert raw_input_files(RICH) == (RICH,)
-    assert raw_input_files(UPBR) == (UPBR,)
     spots = tuple(sorted(FOLDER.glob("*.csv")))
     assert raw_input_files(FOLDER) == spots
     assert raw_input_files(FIXTURE) == tuple(sorted((RICH, *spots)))
-    source = tmp_path / UPBR.name
-    source.write_bytes(UPBR.read_bytes())
-    assert raw_input_files(tmp_path) == (source,)
+    write_y_only_csv(RICH, tmp_path / "Y_only.csv")
+    assert raw_input_files(tmp_path) == ()
     unrelated = tmp_path / "notes.csv"
     unrelated.write_text("note,value\nhello,1\n")
     rich = tmp_path / RICH.name
@@ -345,3 +321,10 @@ def test_raw_input_files_detects_sources_without_loading_sweeps(tmp_path, monkey
     spot = tmp_path / "spot.csv"
     spot.write_bytes(spots[0].read_bytes())
     assert raw_input_files(tmp_path) == tuple(sorted((rich, spot)))
+
+
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_experiment_rejects_y_only_export(tmp_path, as_folder):
+    source = write_y_only_csv(RICH, tmp_path / "Y_only.csv")
+    with pytest.raises(qtegra.UnsupportedQtegraFormat, match="^Unsupported Qtegra export: no time information"):
+        io.read_experiment_data(tmp_path if as_folder else source)

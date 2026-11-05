@@ -25,7 +25,6 @@ from UPbRPy.results import FinalizedReduction, ReductionDecision, build_publicat
 
 FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
 RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-UPBR = FIXTURE / "Zircon_04Nov26_slice_UPbR.csv"
 FOLDER = FIXTURE / "zircon_04Nov26"
 WINDOW = (1e5, 2.4e6)
 
@@ -181,15 +180,6 @@ def test_synthetically_constant_slopes_remain_constant_and_finite(intercept):
     assert np.isfinite(fit.factors_se).all()
 
 
-def test_drift_uses_start_offsets_and_shared_times_when_starts_are_missing():
-    session = synthetic_session()
-    for i, acquisition in enumerate(session.acquisitions):
-        acquisition.start = None
-        acquisition.start_offset_s = 100 + 150 * i
-    fit = fit_cross_calibration(session, mode="drift").channels["29Si"]
-    np.testing.assert_allclose(fit.times_s, np.arange(3) * 150 + 5.25)
-
-
 def test_drift_skips_short_acquisitions_and_falls_back_to_constant():
     session = synthetic_session()
     for acquisition in session.acquisitions:
@@ -282,7 +272,7 @@ def test_qtegra_mode_is_an_unchanged_deep_copy_and_factors_prefer_exported_xcal(
     assert fit_cross_calibration(merged, "29Si").channels["29Si"].qtegra_factor == 12345
 
 
-@pytest.mark.parametrize("source,format_name", [(UPBR, "upbr"), (FOLDER, "spot_folder")])
+@pytest.mark.parametrize("source,format_name", [(FOLDER, "spot_folder")])
 @pytest.mark.parametrize("mode", ["constant", "drift"])
 def test_degraded_formats_reject_non_qtegra_calibration(source, format_name, mode):
     session = qtegra.open_qtegra(source)
