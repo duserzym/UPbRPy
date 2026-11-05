@@ -111,10 +111,8 @@ EXPECTED = {
         "206Pb/204Pb_i": 18.076074416,
         "207Pb/204Pb_i": 18.076074416 / 1.1606485235997472,
         "208Pb/204Pb_i": 18.076074416 / 0.47745654851370506,
-        "206Pb/238U*": 0.090912,
-        "207Pb/235U*": 0.73893,
-        "208Pb/232Th*": 0.028140699603010466,
         "206Pb/238U_age": 560.83,
+        "concordia_age": 560.83,
     },
 }
 
@@ -171,7 +169,13 @@ def test_new_material_provenance_separates_published_and_archive_values():
     age = ltse.set_index("quantity").loc["206Pb/238U_age"]
     assert age["source"] == sources["hu2023"]["display"]
     assert (age["value"], age["uncertainty"], age["uncertainty_type"]) == (560.83, 1.29, "expanded_95")
-    archive_values = ltse.loc[~ltse["role"].isin({"concentration", "reference_age"})]
+    assert set(ltse.loc[ltse["role"].eq("reference_age"), "source"]) == {sources["hu2023"]["display"]}
+    # Radiogenic ratios are derived as concordant values from the published age.
+    assert not ltse["role"].eq("radiogenic_ratio").any()
+    row = UPbRPy.build_standard_archive(measurements).loc["LTSE"]
+    assert row["206Pb/238U*"] == pytest.approx(np.expm1(1.55125e-10 * 560.83e6), rel=1e-6)
+    assert row["208Pb/232Th*"] == pytest.approx(np.expm1(4.9475e-11 * 560.83e6), rel=1e-3)
+    archive_values = ltse.loc[ltse["role"].eq("initial_ratio")]
     assert set(archive_values["source"]) == {sources["boise_upbr26plus_2026"]["display"]}
     assert set(archive_values["status"]) == {"provisional"}
     assert sources["boise_upbr26plus_2026"]["kind"] == "lab_compilation"

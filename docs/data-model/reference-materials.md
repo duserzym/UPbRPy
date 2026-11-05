@@ -129,9 +129,13 @@ compilation record. The initial-Pb notes identify the archive's mislabelled
 ratio rows. LTSE is the SLZC megacryst of Hu et al. (2023) (alias `SLZC`,
 confirmed 2026-11-05): its reference age is the published
 `206Pb/238U_age = 560.83` Ma (1.29 Ma, `expanded_95`, status `recommended`,
-source `hu2023`); its radiogenic and initial-Pb ratios remain the archive's,
-provisional, under `boise_upbr26plus_2026`, and its notes preserve the
-initial-Pb conversion. Both records store only canonical inputs;
+source `hu2023`). A provisional `concordia_age = 560.83` record (same
+source, concordance assumed) lets the library derive concordant
+206Pb/238U*, 207Pb/235U*, 208Pb/232Th* and 207Pb/206Pb*; no radiogenic
+ratios are stored until SLZC ratios from the paper's supporting information
+replace them. Only the initial-Pb ratios remain the archive's, provisional,
+under `boise_upbr26plus_2026`, with notes preserving their conversion. Both
+records store only canonical inputs;
 reciprocal and linked ratios are derived by the library.
 
 ## Derived values and validation limits
