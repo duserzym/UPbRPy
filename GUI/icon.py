@@ -22,16 +22,17 @@ ICONSET_EXPORT_SPECS = [
 ]
 
 ICON_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "icons"
-LAB_ICON_SVG_PATH = ICON_ASSET_DIR / "upbrpy_isotope_geology.svg"
+LAB_ICON_SVG_PATH = ICON_ASSET_DIR / "upbrpy_studio.svg"
 LAB_ICON_RENDERER: QtSvg.QSvgRenderer | None = None
 
 
 def render_icon_image(size: int = 256) -> QtGui.QImage:
-    """Render the scalable isotope-geology laboratory application mark.
+    """Render the scalable UPbRPy Studio application mark.
 
-    The primary source is an SVG that combines the laboratory mark's isotope
-    orbits and mountain relief with an idealized tetragonal zircon. The
-    programmatic crystal renderer remains as a packaging fallback.
+    The primary SVG combines time-resolved ablation signals, an integration
+    window and a Pupin S8 zircon with a laser spot on a gridded paper panel
+    and light rounded tile. The programmatic crystal renderer remains as a
+    packaging fallback.
     """
     image = QtGui.QImage(
         size,
@@ -271,17 +272,28 @@ def export_iconset(output_dir: Path) -> list[Path]:
     return written
 
 
+def _packaged_icon_pixmap(size: int) -> QtGui.QPixmap:
+    """Use pre-rendered artwork at runtime; keep detailed SVG work for export."""
+    asset_size = next((n for n in PNG_ICON_SIZES if n >= size), PNG_ICON_SIZES[-1])
+    path = ICON_ASSET_DIR / "png" / f"upbrpy_zircon_{asset_size}.png"
+    pixmap = QtGui.QPixmap(str(path)) if path.exists() else QtGui.QPixmap()
+    if pixmap.isNull():
+        return render_icon_pixmap(size)
+    return pixmap.scaled(size, size, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                         QtCore.Qt.TransformationMode.SmoothTransformation)
+
+
 def build_app_icon() -> QtGui.QIcon:
     """Build a multi-resolution Qt application icon."""
     icon = QtGui.QIcon()
     for size in [16, 24, 32, 48, 64, 96, 128, 256, 512]:
-        icon.addPixmap(render_icon_pixmap(size))
+        icon.addPixmap(_packaged_icon_pixmap(size))
     return icon
 
 
 def build_brand_pixmap(size: int = 56) -> QtGui.QPixmap:
     """Return the in-app brand image at the requested pixel size."""
-    return render_icon_pixmap(size)
+    return _packaged_icon_pixmap(size)
 
 
 def build_workflow_stage_icon(
