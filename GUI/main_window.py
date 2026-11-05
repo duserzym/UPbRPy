@@ -53,7 +53,7 @@ from GUI.services import (
     update_selection_region,
 )
 from GUI.state import ReductionSession
-from GUI.theme import NeumorphicFrame, active_theme, apply_theme
+from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
@@ -67,6 +67,8 @@ from GUI.widgets import (
     SpotTree,
     StyledComboBox,
     TracePlotWidget,
+    SegmentButton,
+    SegmentedBar,
     make_list_item,
 )
 from GUI.workers import FunctionWorker
@@ -199,6 +201,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
         self.setMinimumSize(760, 620)
+        self.setProperty("wallpaperRoot", True)
         self.resize(self.default_window_size())
         self._initial_size = self.size()
 
@@ -673,8 +676,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         event.ignore()
 
+    def paintEvent(self, event):
+        if self.isWindow():
+            paint_wallpaper(self)
+
     def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
+        central = WallpaperWidget()
         outer = QtWidgets.QHBoxLayout(central)
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
@@ -783,9 +790,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def apply_default_layout(self) -> None:
         """Panel widths and the notes/log strip chosen for this window size."""
         width = max(self.width(), 760)
-        compact = width < 1500
-        rail = 240 if compact else 260
-        inspector = 340 if compact else 430
+        compact = width < 1400
+        rail = 195 if compact else 205 if width < 1500 else 240
+        inspector = 335 if compact else 340 if width < 1500 else 380
         self.workspace_splitter.setSizes([rail, max(400, width - rail - inspector - 40), inspector])
         self.set_notes_log_visible(self.window().height() >= 950)
         self.spot_channel_splitter.setSizes([3, 2])
@@ -843,31 +850,15 @@ class MainWindow(QtWidgets.QMainWindow):
             control.blockSignals(False)
 
     def _sync_toolbar_strips(self) -> None:
-        """Size the scrolling button strips from their themed size hints.
-
-        The strips are built before the theme's padding is applied, so the
-        heights measured at construction would clip the buttons.
-        """
+        """Fit compact button rows without reserving horizontal scrollbar space."""
         for scroll, bar in getattr(self, "_toolbar_strips", ()):
-            # The buttons' cached size hints predate the stylesheet padding.
-            for child in bar.findChildren(QtWidgets.QWidget):
-                child.updateGeometry()
             bar.layout().invalidate()
-            bar.layout().activate()
-            hint = bar.sizeHint()
-            margins = bar.layout().contentsMargins()
-            height = max(
-                [hint.height()]
-                + [
-                    child.sizeHint().height() + margins.top() + margins.bottom()
-                    for child in bar.findChildren(QtWidgets.QWidget)
-                    if child.parentWidget() is bar and not child.isHidden()
-                ]
-            )
-            bar.setMinimumWidth(hint.width())
+            height = max(36, bar.sizeHint().height())
+            minimum_width = bar.layout().minimumSize().width()
+            bar.setMinimumWidth(minimum_width)
             bar.setFixedHeight(height)
-            bar.resize(max(hint.width(), bar.width()), height)
-            scroll.setFixedHeight(height + 18)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setFixedHeight(height + (8 if minimum_width > scroll.width() else 0))
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt API
         super().showEvent(event)
@@ -908,7 +899,7 @@ class MainWindow(QtWidgets.QMainWindow):
         action.blockSignals(False)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        """Adapt vertical density without overriding user panel widths."""
+        """Adapt panel widths and vertical density for laptop viewports."""
         super().resizeEvent(event)
         if not hasattr(self, "workspace_splitter"):
             return
@@ -917,10 +908,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # made the handles appear to jump and collapse whole columns.
         # The notes/log strip is a collapsible splitter pane (View menu)
         # rather than something hidden below a fixed window height.
+        self._sync_toolbar_strips()
         if hasattr(self, "header_card"):
             self.apply_header_density(event.size().height())
         if hasattr(self, "workflow_step_list"):
             self.adapt_workflow_rail_height(event.size().height())
+        if hasattr(self, "workflow_context_bar"):
+            # Keep the previous compact fallback below the supported laptop
+            # widths; the full explanation remains in the card's tooltip.
+            compact_context = event.size().width() < 1280
+            self.workflow_hint_body.setVisible(not compact_context)
+            self.workflow_context_bar.setFixedHeight(66 if compact_context else 116)
+            context_layout = self.workflow_context_bar.layout()
+            inset = 0 if compact_context else 14
+            context_layout.setContentsMargins(20, inset, 20, inset)
+            context_layout.setSpacing(0 if compact_context else 8)
+        # Keep the nine stage labels readable on laptops, including when a
+        # wider inspector was restored or the shell shrinks from 1440 px.
+        # Below laptop size retain user widths and allow the existing scrolls.
+        if 1280 <= event.size().width() < 1400:
+            sizes = self.workspace_splitter.sizes()
+            rail, inspector = min(sizes[0], 195), min(sizes[2], 335)
+            if (rail, inspector) != (sizes[0], sizes[2]):
+                self.workspace_splitter.setSizes(
+                    [rail, sum(sizes) - rail - inspector, inspector]
+                )
 
     def apply_header_density(self, height: int) -> None:
         """A one-line header on short screens leaves the height to the plot."""
@@ -929,7 +941,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # The theme buttons repeat View > Theme; the engine label is static.
         for widget in (self.project_engine_label, self._header_separator, *self.theme_mode_buttons.values()):
             widget.setVisible(not compact)
-        self.header_card.layout().setContentsMargins(20, 4 if compact else 10, 20, 4 if compact else 10)
+        self.header_card.layout().setContentsMargins(16, 6, 16, 6)
         self.header_card.setMinimumHeight(68 if compact else 84)
         self.header_card.setMaximumHeight(68 if compact else 96)
 
@@ -952,9 +964,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_parameter_stack.setVisible(show_autopick)
         self.plateau_width_control.setVisible(show_autopick)
         self.plateau_filter_combo.setVisible(show_autopick)
+        self.autopick_controls_scroll.setVisible(show_autopick)
         self.reference_library_button.setVisible(not compact)
         self.workflow_combo.setVisible(not very_compact)
-        item_height = 37 if compact else 45
+        item_height = 31 if compact else 40
         for index in range(self.workflow_step_list.count()):
             item = self.workflow_step_list.item(index)
             if item is not None:
@@ -971,7 +984,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout = QtWidgets.QVBoxLayout(frame)
         layout.setContentsMargins(10, 12, 10, 12)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         brand_row = QtWidgets.QHBoxLayout()
         brand_row.setSpacing(8)
@@ -997,6 +1010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # toggle so every workflow stage stays in view; one click opens them.
         self.autopick_settings_toggle = QtWidgets.QToolButton()
         self.autopick_settings_toggle.setObjectName("AutopickSettingsToggle")
+        self.autopick_settings_toggle.setProperty("modeToggle", True)
         self.autopick_settings_toggle.setText("Auto-pick settings")
         self.autopick_settings_toggle.setCheckable(True)
         self.autopick_settings_toggle.setToolButtonStyle(
@@ -1026,7 +1040,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_selection_method_changed
         )
         for combo in (self.workflow_combo, self.selection_method_combo):
-            combo.setMinimumContentsLength(10)
+            combo.setMinimumContentsLength(8)
             combo.setSizeAdjustPolicy(
                 QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
@@ -1141,6 +1155,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_plateau_filter_method_changed
         )
         layout.addWidget(self.plateau_filter_combo)
+        settings_body = QtWidgets.QWidget()
+        settings_layout = QtWidgets.QVBoxLayout(settings_body)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(6)
+        for control in (self.selection_method_combo, self.selection_parameter_stack,
+                        self.plateau_width_control, self.plateau_filter_combo):
+            layout.removeWidget(control)
+            settings_layout.addWidget(control)
+        self.autopick_controls_scroll = QtWidgets.QScrollArea()
+        self.autopick_controls_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.autopick_controls_scroll.setWidgetResizable(True)
+        self.autopick_controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.autopick_controls_scroll.setMaximumHeight(180)
+        for form in settings_body.findChildren(QtWidgets.QWidget):
+            if isinstance(form.layout(), QtWidgets.QFormLayout):
+                form.layout().setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapAllRows)
+        for spin in settings_body.findChildren(QtWidgets.QAbstractSpinBox):
+            spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.autopick_controls_scroll.setWidget(settings_body)
+        layout.addWidget(self.autopick_controls_scroll)
 
         self.repick_all_spots_button = QtWidgets.QPushButton(
             "Re-pick all spots"
@@ -1163,7 +1197,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.workflow_step_list = QtWidgets.QListWidget()
         self.workflow_step_list.setObjectName("WorkflowStepRail")
-        self.workflow_step_list.setIconSize(QtCore.QSize(28, 28))
+        self.workflow_step_list.setIconSize(QtCore.QSize(24, 24))
         self.workflow_step_list.setWordWrap(False)
         self.workflow_step_list.setTextElideMode(
             QtCore.Qt.TextElideMode.ElideRight
@@ -1236,35 +1270,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_workflow_context_bar(self) -> QtWidgets.QWidget:
         """Show the selected stage explanation and actions beside the plot."""
-        card = QtWidgets.QFrame()
+        card = NeumorphicFrame()
         card.setObjectName("WorkflowContextBar")
         self.workflow_context_bar = card
-        card.setMinimumHeight(56)
-        card.setMaximumHeight(66)
-        card_layout = QtWidgets.QHBoxLayout(card)
-        card_layout.setContentsMargins(12, 6, 12, 6)
-        card_layout.setSpacing(10)
+        card.setFixedHeight(116)
+        card_layout = QtWidgets.QVBoxLayout(card)
+        # The painted glass starts 7 px inside the shadow bounds.
+        card_layout.setContentsMargins(20, 14, 20, 14)
+        card_layout.setSpacing(8)
+        heading_row = QtWidgets.QHBoxLayout()
+        heading_row.setSpacing(8)
+        card_layout.addLayout(heading_row)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setSpacing(10)
+        card_layout.addLayout(action_row)
 
         self.workflow_context_icon = QtWidgets.QLabel()
-        self.workflow_context_icon.setFixedSize(32, 32)
+        self.workflow_context_icon.setFixedSize(20, 20)
         self.workflow_context_icon.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
-        card_layout.addWidget(self.workflow_context_icon)
+        heading_row.addWidget(self.workflow_context_icon)
 
         copy_layout = QtWidgets.QVBoxLayout()
         copy_layout.setSpacing(2)
-        self.workflow_hint_title = QtWidgets.QLabel()
+        self.workflow_hint_title = ElidedLabel()
         self.workflow_hint_title.setObjectName("WorkflowContextTitle")
         self.workflow_hint_title.setMinimumWidth(0)
         self.workflow_hint_title.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        self.workflow_hint_body = QtWidgets.QLabel()
+        self.workflow_hint_body = ElidedLabel()
         self.workflow_hint_body.setObjectName("PanelBody")
         self.workflow_hint_body.setWordWrap(False)
-        self.workflow_hint_body.setMaximumHeight(18)
         self.workflow_hint_body.setMinimumWidth(0)
         self.workflow_hint_body.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -1272,29 +1311,35 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         copy_layout.addWidget(self.workflow_hint_title)
         copy_layout.addWidget(self.workflow_hint_body)
-        card_layout.addLayout(copy_layout, 1)
+        heading_row.addLayout(copy_layout, 1)
 
         actions_card = QtWidgets.QFrame()
         actions_card.setObjectName("WorkflowActionsInline")
+        actions_card.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Maximum,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         self.workflow_actions_card = actions_card
         self.workflow_actions_layout = QtWidgets.QHBoxLayout(actions_card)
         self.workflow_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.workflow_actions_layout.setSpacing(6)
-        card_layout.addWidget(actions_card)
+        self.workflow_actions_layout.setSpacing(8)
+        action_row.addWidget(actions_card)
 
-        self.workflow_status_label = QtWidgets.QLabel()
+        self.workflow_status_label = ElidedLabel()
         self.workflow_status_label.setObjectName("WorkflowStatusCompact")
         self.workflow_status_label.setWordWrap(False)
+        self.workflow_status_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.workflow_status_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.workflow_status_label.setMinimumWidth(0)
-        self.workflow_status_label.setMaximumWidth(240)
         self.workflow_status_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        card_layout.addWidget(self.workflow_status_label)
+        action_row.addWidget(self.workflow_status_label, 1)
         return card
 
     def _build_main_column(self) -> QtWidgets.QWidget:
@@ -1310,7 +1355,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header_card = header
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(20, 10, 20, 10)
-        header_layout.setSpacing(18)
+        header_layout.setSpacing(10)
         title_box = QtWidgets.QVBoxLayout()
         title_box.setSpacing(2)
         title = ElidedLabel("U-Pb reduction workspace")
@@ -1334,8 +1379,8 @@ class MainWindow(QtWidgets.QMainWindow):
         workspace_label.setObjectName("SectionTitle")
         self.project_name_label = ElidedLabel("No experiment loaded")
         self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_name_label.setStyleSheet("font-size: 16px; font-weight: 700;")
-        workspace_row.addWidget(workspace_label)
+        self.project_name_label.setStyleSheet("font-size: 12px; font-weight: 600;")
+        workspace_label.hide()
         workspace_row.addWidget(self.project_name_label, 4)
 
         metadata_row = QtWidgets.QHBoxLayout()
@@ -1383,47 +1428,49 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_card.setObjectName("PlotCard")
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(12, 12, 12, 12)
-        plot_layout.setSpacing(12)
-        mode_bar = QtWidgets.QWidget()
+        plot_layout.setSpacing(8)
+        mode_bar = SegmentedBar()
+        self.stage_segment_bar = mode_bar
+        mode_bar.setObjectName("StageSegmentBar")
         mode_row = QtWidgets.QHBoxLayout(mode_bar)
-        mode_row.setContentsMargins(0, 0, 0, 0)
-        mode_row.setSpacing(8)
+        mode_row.setContentsMargins(4, 4, 4, 4)
+        mode_row.setSpacing(1)
         self.plot_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.plot_mode_group = QtWidgets.QButtonGroup(self)
         self.plot_mode_group.setExclusive(True)
         for key, label in PLOT_MODE_LABELS.items():
-            button = QtWidgets.QToolButton()
+            button = SegmentButton()
             button.setText(label)
+            button.setToolTip(label)
             button.setCheckable(True)
             button.setProperty("modeToggle", True)
             button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
             button.setSizePolicy(
                 QtWidgets.QSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Fixed,
+                    QtWidgets.QSizePolicy.Policy.Preferred,
                     QtWidgets.QSizePolicy.Policy.Fixed,
                 )
             )
-            label_lines = label.split("\n")
-            button.setMinimumWidth(max(self.fontMetrics().horizontalAdvance(line) for line in label_lines) + 34)
-            button.setMinimumHeight(58 if len(label_lines) > 1 else 42)
+            button.setMinimumHeight(28)
             button.clicked.connect(lambda _checked=False, plot_mode=key: self.set_plot_mode(plot_mode, refresh=True))
             self.plot_mode_group.addButton(button)
             self.plot_mode_buttons[key] = button
             mode_row.addWidget(button)
-        mode_row.addStretch(1)
+            mode_bar.add_segment(button)
         ratio_row_lbl = QtWidgets.QLabel("Ratio")
+        self.ratio_toolbar_label = ratio_row_lbl
         ratio_row_lbl.setObjectName("ControlBarLabel")
-        mode_row.addWidget(ratio_row_lbl)
+
         self.ratio_combo = StyledComboBox()
         for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
             self.ratio_combo.addItem(ratio_name, ratio_name)
         self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
-        mode_row.addWidget(self.ratio_combo)
-        mode_bar.setMinimumWidth(mode_row.sizeHint().width())
+
+        mode_bar.setMinimumWidth(0)
         mode_scroll = QtWidgets.QScrollArea()
         mode_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        mode_scroll.setWidgetResizable(False)
-        mode_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        mode_scroll.setWidgetResizable(True)
+        mode_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         mode_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         mode_scroll.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -1440,7 +1487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plots_page0.setContentsMargins(0, 0, 0, 0)
         plots_vbox = QtWidgets.QVBoxLayout(plots_page0)
         plots_vbox.setContentsMargins(0, 0, 0, 0)
-        plots_vbox.setSpacing(0)
+        plots_vbox.setSpacing(8)
         self.trace_plot = TracePlotWidget()
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
@@ -1480,8 +1527,8 @@ class MainWindow(QtWidgets.QMainWindow):
         control_bar.setObjectName("PlotControlBar")
         self.plot_control_bar = control_bar
         cb_layout = QtWidgets.QHBoxLayout(control_bar)
-        cb_layout.setContentsMargins(8, 6, 8, 6)
-        cb_layout.setSpacing(8)
+        cb_layout.setContentsMargins(6, 4, 6, 4)
+        cb_layout.setSpacing(3)
 
         drag_lbl = QtWidgets.QLabel("Drag")
         drag_lbl.setObjectName("ControlBarLabel")
@@ -1517,7 +1564,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.zoom_mode_group = QtWidgets.QButtonGroup(self)
         self.zoom_mode_group.setExclusive(True)
-        for mode, mode_label in [("xy", "XY"), ("x", "X only"), ("y", "Y only")]:
+        for mode, mode_label in [("xy", "XY"), ("x", "X"), ("y", "Y")]:
             btn = QtWidgets.QToolButton()
             btn.setText(mode_label)
             btn.setCheckable(True)
@@ -1539,8 +1586,8 @@ class MainWindow(QtWidgets.QMainWindow):
         _vsep1.setObjectName("ControlBarDivider")
         cb_layout.addWidget(_vsep1)
 
-        self.reset_scale_button = QtWidgets.QPushButton("Reset scale")
-        self.reset_scale_button.setMinimumWidth(110)
+        self.reset_scale_button = QtWidgets.QPushButton("Reset")
+        self.reset_scale_button.setToolTip("Reset plot scale")
         self.reset_scale_button.clicked.connect(self.restore_default_main_view)
         cb_layout.addWidget(self.reset_scale_button)
 
@@ -1561,12 +1608,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_sigma_button_text()
         cb_layout.addWidget(self.sigma_toggle_button)
 
-        # Wrap control bar in a centering row so buttons stay centred under the plots
-        control_bar.setMinimumWidth(control_bar.sizeHint().width())
+        cb_layout.addStretch(1)
+        cb_layout.addWidget(ratio_row_lbl)
+        self.ratio_combo.setFixedWidth(153)
+        cb_layout.addWidget(self.ratio_combo)
+        for label in (drag_lbl, zoom_lbl, ratio_row_lbl):
+            label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
+        for divider in (_vsep_drag, _vsep1, _vsep2):
+            divider.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            divider.setFixedWidth(1)
+        control_bar.setMinimumWidth(0)
         control_scroll = QtWidgets.QScrollArea()
         control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        control_scroll.setWidgetResizable(False)
-        control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         control_scroll.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -1708,8 +1763,8 @@ class MainWindow(QtWidgets.QMainWindow):
         spots_toolbar.addWidget(spots_label)
         spots_toolbar.addStretch(1)
         _add_folder_btn = QtWidgets.QPushButton("+ Folder")
-        _add_folder_btn.setMinimumWidth(80)
-        _add_folder_btn.setStyleSheet("QPushButton { padding: 2px 10px; border-radius: 8px; font-size: 11px; }")
+        _add_folder_btn.setMinimumWidth(66)
+        _add_folder_btn.setProperty("tertiary", True)
         _add_folder_btn.setToolTip("Add a new custom folder under Unknowns")
         _add_folder_btn.clicked.connect(self._on_spot_add_folder)
         spots_toolbar.addWidget(_add_folder_btn)
@@ -1738,7 +1793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         channels_heading.setContentsMargins(0, 0, 0, 0)
         channels_label = QtWidgets.QLabel("Channels")
         channels_label.setObjectName("SectionTitle")
-        channels_help = ElidedLabel("click: select  ·  double-click: show/hide")
+        channels_help = ElidedLabel("click: select · double-click: show/hide")
         channels_help.setObjectName("InspectorHint")
         channels_help.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         channels_heading.addWidget(channels_label)
@@ -1816,10 +1871,10 @@ class MainWindow(QtWidgets.QMainWindow):
         standards_card.setObjectName("SessionCard")
         self.standards_card = standards_card
         standards_layout = QtWidgets.QFormLayout(standards_card)
-        standards_layout.setContentsMargins(16, 16, 16, 16)
+        standards_layout.setContentsMargins(10, 10, 10, 10)
         standards_layout.setSpacing(9)
         standards_layout.setRowWrapPolicy(
-            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapAllRows
         )
         standards_layout.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
@@ -1869,7 +1924,7 @@ class MainWindow(QtWidgets.QMainWindow):
         fit_card.setObjectName("SessionCard")
         self.fit_card = fit_card
         fit_layout = QtWidgets.QVBoxLayout(fit_card)
-        fit_layout.setContentsMargins(16, 16, 16, 16)
+        fit_layout.setContentsMargins(10, 10, 10, 10)
         fit_layout.setSpacing(10)
 
         fit_label = QtWidgets.QLabel("Fractionation fit settings")
@@ -1911,9 +1966,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         fit_layout.addWidget(self.downhole_fit_stack)
 
-        outlier_row = QtWidgets.QHBoxLayout()
+        outlier_row = QtWidgets.QVBoxLayout()
         self.downhole_outlier_check = QtWidgets.QCheckBox(
-            "Filter primary-sweep anomalies"
+            "Filter primary-sweep\nanomalies"
         )
         self.downhole_outlier_check.setChecked(
             self.session.downhole_outlier_sigma is not None
@@ -1933,7 +1988,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_downhole_outlier_sigma_changed
         )
         outlier_row.addWidget(self.downhole_outlier_check)
-        outlier_row.addStretch(1)
         outlier_row.addWidget(self.downhole_outlier_sigma_spin)
         fit_layout.addLayout(outlier_row)
 
@@ -1987,10 +2041,10 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_card.setObjectName("SessionCard")
         self.decision_card = decision_card
         decision_layout = QtWidgets.QFormLayout(decision_card)
-        decision_layout.setContentsMargins(16, 16, 16, 16)
+        decision_layout.setContentsMargins(10, 10, 10, 10)
         decision_layout.setSpacing(10)
         decision_layout.setRowWrapPolicy(
-            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapAllRows
         )
         decision_layout.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
@@ -2034,7 +2088,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.calibration_uncertainty_check = QtWidgets.QCheckBox(
-            "Include calibration uncertainty"
+            "Include calibration\nuncertainty"
         )
         self.calibration_uncertainty_check.setChecked(
             self.session.include_calibration_uncertainty
@@ -2045,7 +2099,7 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow(self.calibration_uncertainty_check)
 
         self.decay_uncertainty_check = QtWidgets.QCheckBox(
-            "Propagate decay-constant uncertainty"
+            "Propagate decay-constant\nuncertainty"
         )
         self.decay_uncertainty_check.toggled.connect(
             self.on_systematic_uncertainty_changed
@@ -2053,7 +2107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow(self.decay_uncertainty_check)
 
         self.u_ratio_uncertainty_check = QtWidgets.QCheckBox(
-            "Propagate 238U/235U uncertainty"
+            "Propagate 238U/235U\nuncertainty"
         )
         self.u_ratio_uncertainty_check.toggled.connect(
             self.on_systematic_uncertainty_changed
@@ -2088,7 +2142,7 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow("User reproducibility", self.long_term_uncertainty_spin)
 
         self.export_concentrations_check = QtWidgets.QCheckBox(
-            "Spot concentrations in export"
+            "Spot concentrations\nin export"
         )
         self.export_concentrations_check.setToolTip(
             "Include spot concentrations in the publication export"
@@ -2102,7 +2156,7 @@ class MainWindow(QtWidgets.QMainWindow):
         decision_layout.addRow(self.export_concentrations_check)
 
         self.export_depth_concentrations_check = QtWidgets.QCheckBox(
-            "Sweep concentrations in depth export"
+            "Sweep concentrations\nin depth export"
         )
         self.export_depth_concentrations_check.setToolTip(
             "Include sweep concentrations in the depth-profile export"
@@ -2135,6 +2189,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         results_scroll.setWidget(results_page)
         self.inspector_tabs.addTab(results_scroll, "Results")
+        for page in (calibration_frame, results_page):
+            for field in page.findChildren(QtWidgets.QLineEdit):
+                field.setMinimumWidth(0)
+                field.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         elide_tab_titles(self.inspector_tabs)
         return panel
 
@@ -2172,7 +2230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pages["none"] = stack.addWidget(summary_page)
 
         poly_page = QtWidgets.QWidget()
-        poly_layout = QtWidgets.QHBoxLayout(poly_page)
+        poly_layout = QtWidgets.QVBoxLayout(poly_page)
         poly_layout.setContentsMargins(0, 0, 0, 0)
         poly_layout.setSpacing(8)
         poly_label = QtWidgets.QLabel("Polynomial degree")
@@ -2185,12 +2243,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         setattr(self, f"{prefix}_polynomial_degree_spin", poly_spin)
         poly_layout.addWidget(poly_label)
-        poly_layout.addStretch(1)
         poly_layout.addWidget(poly_spin)
         pages["polynomial"] = stack.addWidget(poly_page)
 
         running_page = QtWidgets.QWidget()
-        running_layout = QtWidgets.QHBoxLayout(running_page)
+        running_layout = QtWidgets.QVBoxLayout(running_page)
         running_layout.setContentsMargins(0, 0, 0, 0)
         running_layout.setSpacing(8)
         running_label = QtWidgets.QLabel("Running-mean window")
@@ -2204,7 +2261,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         setattr(self, f"{prefix}_running_mean_window_spin", running_spin)
         running_layout.addWidget(running_label)
-        running_layout.addStretch(1)
         running_layout.addWidget(running_spin)
         pages["running_mean"] = stack.addWidget(running_page)
 
@@ -2215,7 +2271,7 @@ class MainWindow(QtWidgets.QMainWindow):
         exp_formula = QtWidgets.QLabel("Exponential form: y = a + b.exp(-c x)")
         exp_formula.setObjectName("PanelBody")
         exp_formula.setWordWrap(True)
-        exp_row = QtWidgets.QHBoxLayout()
+        exp_row = QtWidgets.QVBoxLayout()
         exp_row.setContentsMargins(0, 0, 0, 0)
         exp_row.setSpacing(8)
         exp_label = QtWidgets.QLabel("Initial c guess")
@@ -2230,7 +2286,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         setattr(self, f"{prefix}_exponential_decay_spin", exp_spin)
         exp_row.addWidget(exp_label)
-        exp_row.addStretch(1)
         exp_row.addWidget(exp_spin)
         exp_layout.addWidget(exp_formula)
         exp_layout.addLayout(exp_row)
@@ -3468,7 +3523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detector_calibration_panel.apply_theme(active_theme(app))
         theme = active_theme(app)
         self.capabilities_badge.setStyleSheet(
-            f"color: {theme.accent_strong}; background: {theme.accent_soft}; padding: 2px 6px; border-radius: 4px;"
+            f"color: {theme.accent_strong}; background: {theme.accent_soft}; padding: 3px 10px; border-radius: 10px;"
         )
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._sync_toolbar_strips()
@@ -3677,16 +3732,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.workflow_hint_body.setText(step.hint)
         self.workflow_hint_body.setToolTip(step.hint)
+        self.workflow_hint_title.setToolTip(step.hint)
+        self.workflow_context_bar.setToolTip(step.hint)
         theme = active_theme(QtWidgets.QApplication.instance())
         self.workflow_context_icon.setPixmap(
             build_workflow_stage_icon(
                 stage.value,
                 state="current",
-                size=34,
+                size=20,
                 accent=theme.accent,
                 muted=theme.muted,
                 success=theme.success,
-            ).pixmap(34, 34)
+            ).pixmap(20, 20)
         )
 
     def on_workflow_preset_changed(self, index: int) -> None:
@@ -3868,11 +3925,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.loaded or "sample" not in self.session.total_data.columns:
             return {}
         td = self.session.total_data
-        if "spot_names" not in td.columns:
+        spot_column = "spot_name" if "spot_name" in td.columns else "spot_names"
+        if spot_column not in td.columns:
             return {}
         return (
-            td.drop_duplicates("spot_names")
-            .set_index("spot_names")["sample"]
+            td.drop_duplicates(spot_column)
+            .set_index(spot_column)["sample"]
             .astype(str)
             .to_dict()
         )
@@ -3925,6 +3983,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         sample_map = self._spot_sample_map()  # {spot_name: sample_name}
+        sample_overrides = self.session.experiment.attrs.get("sample_overrides", {})
 
         # Categorise each spot into RM or unknown folders
         rm_folders: dict[str, list[str]] = {}    # {folder_label: [spot_names]}
@@ -3962,6 +4021,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             for sn in spots:
                 spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
+                if override := sample_overrides.get(sn):
+                    spot_item.setText(0, f"{sn} · DB")
+                    spot_item.setToolTip(
+                        0, f"Sample {sample_map.get(sn, override['sample'])} from laicpmsdb "
+                        f"(label sample {override['label_sample']})",
+                    )
                 spot_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, sn)
                 spot_item.setFlags(
                     spot_item.flags()
@@ -4159,6 +4224,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         role_data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         new_text = item.text(0).strip()
+        if role_data in self.session.experiment.attrs.get("sample_overrides", {}):
+            new_text = new_text.removesuffix(" · DB").strip()
         if not new_text:
             return
         if role_data and not str(role_data).startswith("__"):
@@ -4517,6 +4584,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 button.setEnabled(cache_key is not None and cache_key in cache)
             button.blockSignals(False)
+        self.stage_segment_bar.select_checked()
         self.ratio_combo.setEnabled(
             self.session.plot_mode
             in {"raw_ratios", "downhole_ratios", "session_ratios"}
@@ -4780,7 +4848,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         for index, (label, handler, accent) in enumerate(self._workflow_action_specs()):
             button = QtWidgets.QPushButton(label)
-            button.setMinimumHeight(36)
+            button.setMinimumHeight(30)
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
             if accent:
                 button.setProperty("accent", True)
             button.clicked.connect(handler)

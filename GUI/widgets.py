@@ -14,7 +14,7 @@ import pyqtgraph as pg
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
 from GUI.state import ReductionSession
-from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme
+from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.ratios import (
@@ -31,12 +31,176 @@ def _parse_channel(name: str) -> tuple[str, str] | None:
     return _parse_channel_name(name)
 
 
+class _RoundedCanvas:
+    """Clip only the outer canvas corners; plot items retain normal rendering."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(self.rect()), 11, 11)
+        self.setMask(QtGui.QRegion(path.toFillPolygon().toPolygon()))
+
+
+class RoundedPlotWidget(_RoundedCanvas, pg.PlotWidget):
+    """An opaque scientific plot with rounded outer corners."""
+
+
+class RoundedGraphicsLayoutWidget(_RoundedCanvas, pg.GraphicsLayoutWidget):
+    """A rounded canvas for multi-panel scientific plots."""
+
+
+class RoundedLegendItem(pg.LegendItem):
+    """Paint a compact rounded legend without a graphics effect."""
+
+    def paint(self, painter, *args):
+        theme = active_theme()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        fill = theme_color(theme.glass_strong)
+        painter.setBrush(fill)
+        painter.setPen(QtGui.QPen(theme_color(theme.input_border), 1))
+        painter.drawRoundedRect(self.boundingRect().adjusted(0.5, 0.5, -0.5, -0.5), 9, 9)
+
+
+def _rounded_legend(plot, **options):
+    legend = RoundedLegendItem(**options)
+    legend.setParentItem(plot.vb)
+    plot.legend = legend
+    return legend
+
+
+class _PillLineLabel(pg.InfLineLabel):
+    def paint(self, painter, *args):
+        # Keep pyqtgraph's transform and drag handling; paint only the background.
+        super().paint(painter, *args)
+        theme = active_theme()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setBrush(theme_color(theme.glass_strong))
+        painter.setPen(QtGui.QPen(theme_color(theme.input_border), 1))
+        rect = self.textItem.mapRectToParent(self.textItem.boundingRect())
+        painter.drawRoundedRect(rect, rect.height()/2, rect.height()/2)
+
+
+class SegmentButton(QtWidgets.QToolButton):
+    """A segment whose full title stays in its tooltip when space is tight."""
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(24, self.sizeHint().height())
+
+    def paintEvent(self, event):
+        option = QtWidgets.QStyleOptionToolButton()
+        self.initStyleOption(option)
+        option.text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, max(8, self.width()-8))
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ToolButton, option)
+
+
+class SegmentedBar(QtWidgets.QFrame):
+    """A stage bar with a short, painted selection transition."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pill = QtCore.QRectF()
+        self._selected = None
+        self._motion = QtCore.QVariantAnimation(self)
+        self._motion.setDuration(180)
+        self._motion.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._motion.valueChanged.connect(self._move_pill)
+
+    def add_segment(self, button):
+        button.setProperty("segmentChild", True)
+        button.toggled.connect(lambda checked: self._select(button, checked))
+
+    def select_checked(self):
+        for button in self.findChildren(SegmentButton):
+            if button.isChecked():
+                self._select(button, True)
+                break
+
+    def _move_pill(self, rect):
+        self._pill = rect
+        self.update()
+
+    def _select(self, button, checked):
+        if not checked:
+            return
+        self._selected = button
+        target = QtCore.QRectF(button.geometry())
+        self._motion.stop()
+        if self._pill.isEmpty() or not self.isVisible():
+            self._move_pill(target)
+        else:
+            self._motion.setStartValue(self._pill)
+            self._motion.setEndValue(target)
+            self._motion.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._motion.stop()
+        QtCore.QTimer.singleShot(0, self, self._sync_pill)
+
+    def _sync_pill(self):
+        if self._selected is not None:
+            self._move_pill(QtCore.QRectF(self._selected.geometry()))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._pill.isEmpty():
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(theme_color(active_theme().accent_soft))
+        painter.drawRoundedRect(self._pill, 9, 9)
+
+
 # -- SpotTree --------------------------------------------------------------
 
 class SpotTree(QtWidgets.QTreeWidget):
     """QTreeWidget with F2-rename and Delete-key support for spot management."""
 
     deleteRequested = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setAllColumnsShowFocus(False)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def drawBranches(self, painter, rect, index):
+        # Draw only the disclosure; Fusion's branch selection fills the indent.
+        if not self.model().hasChildren(index):
+            return
+        option = QtWidgets.QStyleOption()
+        option.rect = QtCore.QRect(rect.right()-self.indentation()+4, rect.y(), self.indentation()-8, rect.height())
+        option.state = QtWidgets.QStyle.StateFlag.State_Enabled
+        primitive = (QtWidgets.QStyle.PrimitiveElement.PE_IndicatorArrowDown if self.isExpanded(index)
+                     else QtWidgets.QStyle.PrimitiveElement.PE_IndicatorArrowRight)
+        self.style().drawPrimitive(primitive, option, painter, self)
+
+    def drawRow(self, painter, option, index):
+        clean = QtWidgets.QStyleOptionViewItem(option)
+        selected = bool(clean.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = bool(clean.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        clean.state &= ~(QtWidgets.QStyle.StateFlag.State_Selected | QtWidgets.QStyle.StateFlag.State_MouseOver)
+        if selected or hovered:
+            theme = active_theme()
+            rect = QtCore.QRectF(self.visualRect(index)).adjusted(1, 1, -2, -1)
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color(theme.accent_soft if selected else theme.row_hover))
+            painter.drawRoundedRect(rect, 8, 8)
+            painter.restore()
+            if selected:
+                clean.palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(theme.accent))
+        painter.save()
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(self.visualRect(index)), 8, 8)
+        painter.setClipPath(path, QtCore.Qt.ClipOperation.IntersectClip)
+        super().drawRow(painter, clean, index)
+        painter.restore()
+        branches = QtCore.QRect(0, option.rect.top(), self.visualRect(index).left(), option.rect.height())
+        self.drawBranches(painter, branches, index)
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # type: ignore[override]
         key = event.key()
@@ -83,6 +247,26 @@ class StyledComboBox(QtWidgets.QComboBox):
         popup_view.viewport().setAutoFillBackground(False)
         self.setView(popup_view)
 
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(80, hint.height())
+
+    def paintEvent(self, event):
+        if self.isEditable():
+            return super().paintEvent(event)
+        option = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(option)
+        field = self.style().subControlRect(
+            QtWidgets.QStyle.ComplexControl.CC_ComboBox, option,
+            QtWidgets.QStyle.SubControl.SC_ComboBoxEditField, self,
+        )
+        option.currentText = self.fontMetrics().elidedText(
+            self.currentText(), QtCore.Qt.TextElideMode.ElideRight, max(0, field.width()-2),
+        )
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, option)
+
     def showPopup(self) -> None:
         super().showPopup()
         self._sync_popup_current_index()
@@ -126,17 +310,13 @@ class StyledComboBox(QtWidgets.QComboBox):
         popup.setObjectName("ComboPopupContainer")
         popup.setContentsMargins(0, 0, 0, 0)
         popup.setAutoFillBackground(False)
-        popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         popup.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
-
-        base_color = view.palette().base().color().name()
-        border_color = view.palette().mid().color().name()
+        theme = active_theme()
         popup.setStyleSheet(
             "QFrame#ComboPopupContainer {"
-            f"background: {base_color};"
-            f"border: 1px solid {border_color};"
-            "border-radius: 12px;"
-            "}"
+            f"background: {theme.surface}; border: 1px solid {theme.input_border};"
+            "border-radius: 12px; }"
         )
 
         rect = popup.rect()
@@ -360,8 +540,12 @@ class IsotopeGridWidget(QtWidgets.QWidget):
     def _rebuild(self) -> None:
         while self._layout.count():
             item = self._layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # Removed rows must stop painting before deferred deletion runs.
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         self._buttons.clear()
 
         element_groups: dict[str, list[str]] = {}
@@ -576,7 +760,7 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         return str(section + 1)
 
 
-class ConcordiaReviewWidget(pg.GraphicsLayoutWidget):
+class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     """Lightweight native concordia review with two-sigma ratio ellipses.
 
     The widget consumes already reduced ratio columns.  It deliberately does
@@ -1090,7 +1274,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         for combo in (self.mode_combo, self.basis_combo, self.channel_combo):
             combo.setMinimumContentsLength(6)
             combo.setStyleSheet(
-                "QComboBox { min-height: 18px; padding: 0px 4px; border-width: 6px; }"
+                "QComboBox { min-height: 18px; padding: 4px 26px 4px 7px; border-width: 1px; }"
             )
             combo.setSizeAdjustPolicy(
                 QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
@@ -1103,7 +1287,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         self.apply_button.setToolTip("Re-import detector signals and keep reviewed selection windows.")
         self.apply_button.clicked.connect(lambda: self.apply_requested.emit(self.settings()))
         layout.addWidget(self.apply_button)
-        self.plot = pg.PlotWidget()
+        self.plot = RoundedPlotWidget()
         self.plot.setMinimumSize(0, 220)
         self.plot.setMaximumHeight(220)
         self.plot.setLabel("bottom", "Session time", units="min")
@@ -1723,14 +1907,14 @@ def _make_diag_axis(plot_item: pg.PlotItem, theme: ThemeSpec) -> None:
     tick_font.setPointSizeF(9.0)
     for axis_name in ("left", "bottom"):
         ax = plot_item.getAxis(axis_name)
-        ax.setTextPen(theme.axis_text)
         ax.setPen(theme.axis_line)
+        ax.setTextPen(theme.axis_text)
         ax.setStyle(tickFont=tick_font, tickTextOffset=4)
     plot_item.showGrid(x=True, y=True, alpha=theme.grid_alpha)
     plot_item.setContentsMargins(4, 4, 4, 4)
 
 
-class DownholeFractionationWidget(pg.GraphicsLayoutWidget):
+class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
     """Primary-RM downhole factors with an adjustable uncertainty envelope.
 
     Data is supplied via :meth:`show_data`.  Accepts the dict returned by
@@ -1894,7 +2078,7 @@ class DownholeFractionationWidget(pg.GraphicsLayoutWidget):
             self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
 
 
-class SessionFractionationWidget(pg.GraphicsLayoutWidget):
+class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
     """Session factors and fitted correction with adjustable uncertainty.
 
     Data is supplied via :meth:`show_data`.  Accepts the dict returned by
@@ -2054,7 +2238,7 @@ class SessionFractionationWidget(pg.GraphicsLayoutWidget):
             self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
 
 
-class CalibrationSlopesWidget(pg.GraphicsLayoutWidget):
+class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
     """Grid of origin-anchored calibration slope plots (cps vs. known ppm).
 
     Data is supplied via :meth:`show_data`.  Accepts the dict returned by
@@ -2117,7 +2301,7 @@ class CalibrationSlopesWidget(pg.GraphicsLayoutWidget):
         p.setTitle("Calibration slopes by element", color=theme.axis_text, size="10pt")
         p.setLabel("left", "cps", color=theme.axis_text, size="9px")
         p.setLabel("bottom", "ppm", color=theme.axis_text, size="9px")
-        legend = p.addLegend(offset=(12, 12), labelTextColor=theme.axis_text, labelTextSize="9pt")
+        legend = _rounded_legend(p, offset=(12, 12), labelTextColor=theme.axis_text, labelTextSize="9pt")
         if legend is not None:
             legend.setColumnCount(self._legend_column_count(len(channels)))
 
@@ -2224,7 +2408,7 @@ class CalibrationSlopesWidget(pg.GraphicsLayoutWidget):
             self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
 
 
-class TracePlotWidget(pg.PlotWidget):
+class TracePlotWidget(RoundedPlotWidget):
     regionChanged = QtCore.Signal(str, tuple)
     xWindowChanged = QtCore.Signal(tuple)
 
@@ -2270,7 +2454,7 @@ class TracePlotWidget(pg.PlotWidget):
         self._spot_name_label = QtWidgets.QLabel("", self)
         self._spot_name_label.setObjectName("SpotOverlayLabel")
         self._spot_name_label.setStyleSheet(
-            "color: rgba(180,200,220,0.55); font-size: 13px; font-weight: 600;"
+            f"color: {self._theme.muted}; font-size: 11px; font-weight: 600;"
             " background: transparent; padding: 2px 6px;"
         )
         self._spot_name_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -2312,6 +2496,8 @@ class TracePlotWidget(pg.PlotWidget):
         self._theme = theme
         self.setBackground(theme.plot_background)
         self._configure_plot()
+        if hasattr(self, "_spot_name_label"):
+            self._spot_name_label.setStyleSheet(f"color: {theme.muted}; background: transparent; padding: 2px 6px; font-size: 11px;")
 
     def _configure_plot(self) -> None:
         self.setBackground(self._theme.plot_background)
@@ -2330,10 +2516,10 @@ class TracePlotWidget(pg.PlotWidget):
         tick_font.setPointSizeF(11.5)
         left_axis = self.plot_item.getAxis("left")
         bottom_axis = self.plot_item.getAxis("bottom")
+        left_axis.setPen(self._theme.plot_grid)
+        bottom_axis.setPen(self._theme.plot_grid)
         left_axis.setTextPen(self._theme.axis_text)
         bottom_axis.setTextPen(self._theme.axis_text)
-        left_axis.setPen(self._theme.axis_line)
-        bottom_axis.setPen(self._theme.axis_line)
         left_axis.setStyle(tickFont=tick_font, tickTextOffset=10, autoExpandTextSpace=False)
         bottom_axis.setStyle(tickFont=tick_font, tickTextOffset=6, autoExpandTextSpace=True)
         left_axis.setWidth(88)
@@ -2354,7 +2540,7 @@ class TracePlotWidget(pg.PlotWidget):
         self._selection_times = np.array([], dtype=float)
         self._selection_channel = None
         self._configure_plot()
-        self.plot_item.addLegend(offset=(16, 8), labelTextColor=self._theme.axis_text, labelTextSize="14pt", colCount=2)
+        _rounded_legend(self.plot_item, offset=(12, 8), labelTextColor=self._theme.axis_text, labelTextSize="10pt", colCount=2)
 
     def show_preview(self, region_colors: dict[str, str] | None = None) -> None:
         self._reset_items()
@@ -2856,14 +3042,9 @@ class TracePlotWidget(pg.PlotWidget):
             movable=movable,
             pen=pg.mkPen(color, width=2.6),
             hoverPen=pg.mkPen(color, width=4.0),
-            label=label,
-            labelOpts={
-                "position": 0.93,
-                "color": color,
-                "fill": pg.mkBrush(0, 0, 0, 125),
-                "movable": movable,
-            },
         )
+        line.label = _PillLineLabel(line, text=label, position=0.93, color=self._theme.axis_text, movable=movable)
+        line.label.textItem.document().setDocumentMargin(6)
         line.setBounds(tuple(sorted(float(item) for item in bounds)))
         line.setZValue(12)
         self.plot_item.addItem(line)
@@ -3204,7 +3385,7 @@ class TracePlotWidget(pg.PlotWidget):
         QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), "\n".join(tooltip_lines), self)
 
 
-class SessionOverviewWidget(pg.PlotWidget):
+class SessionOverviewWidget(RoundedPlotWidget):
     windowChanged = QtCore.Signal(tuple)
 
     def __init__(self) -> None:
@@ -3242,10 +3423,10 @@ class SessionOverviewWidget(pg.PlotWidget):
         tick_font.setPointSizeF(9.5)
         left_axis = self.plot_item.getAxis("left")
         bottom_axis = self.plot_item.getAxis("bottom")
+        left_axis.setPen(self._theme.plot_grid)
+        bottom_axis.setPen(self._theme.plot_grid)
         left_axis.setTextPen(self._theme.axis_text)
         bottom_axis.setTextPen(self._theme.axis_text)
-        left_axis.setPen(self._theme.axis_line)
-        bottom_axis.setPen(self._theme.axis_line)
         left_axis.setStyle(tickFont=tick_font, tickTextOffset=8, autoExpandTextSpace=False)
         bottom_axis.setStyle(tickFont=tick_font, tickTextOffset=4, autoExpandTextSpace=True)
         left_axis.setWidth(68)

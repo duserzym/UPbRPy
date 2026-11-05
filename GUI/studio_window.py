@@ -9,6 +9,29 @@ import sys
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from GUI.main_window import MainWindow
+from GUI.theme import WallpaperWidget, active_theme, theme_color, paint_wallpaper
+
+
+class _DocumentCloseButton(QtWidgets.QAbstractButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(20, 20)
+        self.setToolTip("Close tab")
+        self.setAccessibleName("Close tab")
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        theme = active_theme()
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        if self.underMouse() or self.hasFocus():
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color(theme.accent_soft))
+            painter.drawEllipse(QtCore.QRectF(1, 1, 18, 18))
+        painter.setPen(QtGui.QPen(QtGui.QColor(theme.muted), 1.5,
+                                 QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QtCore.QPointF(7, 7), QtCore.QPointF(13, 13))
+        painter.drawLine(QtCore.QPointF(7, 13), QtCore.QPointF(13, 7))
 
 
 class StudioWindow(QtWidgets.QMainWindow):
@@ -37,14 +60,22 @@ class StudioWindow(QtWidgets.QMainWindow):
         self._shortcuts: dict[MainWindow, dict[QtGui.QAction, list[QtGui.QKeySequence]]] = {}
         self._shown_menus: list[QtGui.QAction] = []
         self.setMinimumSize(760, 620)
+        self.setProperty("wallpaperRoot", True)
         if app_icon is not None:
             self.setWindowIcon(app_icon)
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
+        self.tabs.setObjectName("DocumentTabs")
+        self.tabs.tabBar().setDrawBase(False)
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
-        self.setCentralWidget(self.tabs)
+        wallpaper = WallpaperWidget()
+        layout = QtWidgets.QVBoxLayout(wallpaper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.tabs)
+        self.setCentralWidget(wallpaper)
         self.tabs.currentChanged.connect(self._activate_tab)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         saved = self.settings.value(self.GEOMETRY_KEY)
@@ -59,6 +90,9 @@ class StudioWindow(QtWidgets.QMainWindow):
             app.installEventFilter(self)
         if create_empty:
             self.add_tab()
+
+    def paintEvent(self, event):
+        paint_wallpaper(self)
 
     @property
     def active_reduction(self) -> MainWindow | None:
@@ -110,6 +144,9 @@ class StudioWindow(QtWidgets.QMainWindow):
             signal.connect(slot)
         self._connections[reduction] = connections
         index = self.tabs.addTab(reduction, "Untitled")
+        close = _DocumentCloseButton(self.tabs.tabBar())
+        close.clicked.connect(lambda: self.close_tab(self.tabs.indexOf(reduction)))
+        self.tabs.tabBar().setTabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide, close)
         self.tabs.setCurrentIndex(index)
         reduction.update_project_window_title()
         self._activate_tab(index)
