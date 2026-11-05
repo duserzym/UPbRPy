@@ -128,7 +128,12 @@ Rules every consumer follows:
   Store the original text of both and resolve to an aware UTC instant with the
   session's time zone setting; never silently reinterpret.
 - Labels are the join key to samples and spots (`sep='_'`, aliases as today);
-  the Rich file's `Laser Scan Position Number` is stored as the spot number
+  a session manifest's optional per-acquisition `sample_label` can correct
+  the sample independently of the raw label. Both names use the same alias
+  map; a case-insensitive match to the prefix or derived sample preserves
+  the derived name. Actual overrides are recorded in experiment attrs and
+  the reduction manifest as `sample_overrides`.
+  The Rich file's `Laser Scan Position Number` is stored as the spot number
   and checked against the number parsed from the label.
 - Sweep index 72 is empty for acquisitions with 72 sweeps and present for
   those with 73: empty cells are missing values, not zeros.

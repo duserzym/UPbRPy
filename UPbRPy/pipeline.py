@@ -1027,6 +1027,7 @@ class ReductionPipeline:
             "detector_calibration": self.experiment.attrs.get(
                 "detector_calibration", {"mode": "qtegra"}
             ),
+            "sample_overrides": self.experiment.attrs.get("sample_overrides", {}),
             "completed_stages": [stage.value for stage in self.cache.stages()],
             "spot_count": int(len(self.experiment)),
             "sweep_count": int(len(self.total_data)),

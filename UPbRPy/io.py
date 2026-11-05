@@ -986,7 +986,8 @@ def read_experiment_data(
         beside it (``directory`` is the bundle's ``raw/``). A CSV source looks
         in its parent folder with the same rules; an in-memory session uses
         its first source path. ``False`` ignores any manifest. A manifest
-        supplies ``sep`` and ``sample_aliases``; explicit arguments still win.
+        supplies ``sep``, ``sample_aliases`` and per-acquisition samples;
+        explicit separator and alias arguments still win.
     detector_calibration : str, mapping or None, keyword-only
         None or 'qtegra' retains exported Y. 'constant', 'drift', or a mapping
         with mode, on, window, primary_standard, channels and smoothing_s fits
@@ -1053,6 +1054,7 @@ def read_experiment_data(
         calibration_record = calibration.to_dict()
     experiment, element_channels, total_data = experiment_from_session(
         session, sep=sep, sample_aliases=sample_aliases,
+        acquisition_samples=manifest.acquisition_samples() if manifest is not None else None,
     )
     experiment.attrs["detector_calibration"] = calibration_record
 
@@ -1095,7 +1097,7 @@ def read_experiment_data(
     return experiment, element_channels, total_data
 
 
-def experiment_from_session(session, sep="_", sample_aliases=None):
+def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_samples=None):
     """Build experiment and sweep tables from a QtegraSession before selection.
 
     Return ``(experiment, element_channels, total_data)`` in the historical
@@ -1107,6 +1109,11 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
     Relative seconds pass through pandas nanosecond timedeltas and absolute
     timestamps before subtraction, matching the original per-spot reader.
     Source paths and JSON-safe session provenance are retained.
+    ``acquisition_samples`` maps spot labels to manifest sample names. Both
+    label prefixes and supplied samples use ``sample_aliases``. A supplied
+    sample equivalent to the prefix or its alias preserves the derived name;
+    other non-empty samples override it in both tables and are recorded in
+    ``experiment.attrs["sample_overrides"]``.
     """
     if not session.acquisitions:
         raise ValueError("Cannot build an experiment from an empty QtegraSession.")
@@ -1116,6 +1123,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
     }
     starts = []
     samples = []
+    sample_overrides = {}
     spot_frames = []
     next_start = min(
         (a.start for a in session.acquisitions if a.start is not None),
@@ -1135,8 +1143,19 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
         duration = float(finite_times[-1]) + spacing if finite_times.size else 0.0
         next_start = start + pd.to_timedelta(duration, unit="s")
         starts.append(start)
-        sample = acquisition.label.split(sep)[0]
-        sample = aliases.get(sample.casefold(), sample)
+        prefix = acquisition.label.split(sep)[0]
+        derived = aliases.get(prefix.casefold(), prefix)
+        sample = derived
+        given = (acquisition_samples or {}).get(acquisition.label)
+        if given:
+            resolved = aliases.get(given.casefold(), given)
+            if resolved.casefold() not in {prefix.casefold(), derived.casefold()}:
+                sample = resolved
+                sample_overrides[acquisition.label] = {
+                    "label_sample": derived,
+                    "sample": sample,
+                    "source": "session_manifest",
+                }
         samples.append(sample)
         values = {"Time": acquisition.sweep_time}
         values.update({
@@ -1184,6 +1203,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
         "baseline_end_times", "signal_start_times", "signal_end_times",
     ):
         experiment[column] = None
+    experiment.attrs["sample_overrides"] = sample_overrides
     experiment.attrs["qtegra"] = {
         "format": session.format,
         "capabilities": sorted(session.capabilities),

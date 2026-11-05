@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 import hashlib
 import io
@@ -54,6 +55,7 @@ def manifest_toml(
     labels=LABELS,
     sep: str = "_",
     aliases: dict[str, str] | None = None,
+    sample_labels: Mapping[str, str] | None = None,
 ) -> str:
     """Return a session_manifest.toml in the WORKFLOW.md 3.2 layout."""
     aliases = {"MAD": "MADUCSB", "AFB": "AFB1"} if aliases is None else aliases
@@ -80,9 +82,14 @@ def manifest_toml(
     ]
     for index, (label, path) in enumerate(zip(labels, raw_paths)):
         kind = "sample" if label.startswith("KD") else "primary_standard"
+        sample_fields = (
+            [f"sample_label = {json.dumps(sample_labels[label])}"]
+            if sample_labels is not None and label in sample_labels else []
+        )
         out += [
             "[[acquisition]]",
             f'label = "{label}"',
+            *sample_fields,
             f'acquisition_id = "acq-{index}"',
             f'spot_id = "spot-{index}"',
             f'grain_id = "grain-{index}"',
@@ -103,6 +110,7 @@ def write_session_bundle(
     session_key: str = "Synthetic_20Mar25",
     server: str = "http://127.0.0.1:1",
     upbr: bool = True,
+    sample_labels: Mapping[str, str] | None = None,
 ) -> Path:
     """Write a session bundle folder ``root/<session_key>/`` and return it."""
     bundle = root / session_key
@@ -112,6 +120,7 @@ def write_session_bundle(
             session_id=session_id,
             session_key=session_key,
             raw_paths=raw_paths,
+            sample_labels=sample_labels,
         ),
         encoding="utf-8",
     )

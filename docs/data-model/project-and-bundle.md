@@ -217,6 +217,7 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 | acquisition[].spot_id | Optional | Text | Spot UUID | Defaults empty |
 | acquisition[].grain_id | Optional | Text | Grain UUID | Defaults empty |
 | acquisition[].sample_id | Optional | Text | Sample UUID | Defaults empty |
+| acquisition[].sample_label | Optional | Text | `SMP2` | Per-acquisition sample; absent/empty keeps the sample derived from the label |
 | acquisition[].started_at | Optional | Text or TOML date/datetime | `2026-11-04T15:55:37` | Dates converted to ISO text; does not replace raw Qtegra start |
 | acquisition[].sha256 | Optional | Text | Raw file SHA-256 | Unpacker verifies only if filename also nonempty |
 | acquisition[].kind | Optional | Text | `primary_standard` | Metadata, not used to select reduction standard |
@@ -226,8 +227,23 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 `primary_76`, `primary_82` to the corresponding primary-standard config
 fields; `concentration` to concentration standards and `secondary`/
 `validation` to secondary standards. Scalar fields take the first name.
-The raw importer itself uses only separator and aliases, not the plan to
-configure a reduction or the acquisition rows to select files.
+The raw importer uses separator, aliases and per-acquisition sample labels,
+not the plan to configure a reduction or the acquisition rows to select files.
+
+For each acquisition, import derives a sample from the label prefix split at
+`sep`, then applies the case-insensitive `[samples]` alias map. A non-empty
+`sample_label` is resolved through the same map. If that resolved name equals
+the prefix or derived sample ignoring case, the derived name and casing stay
+unchanged. Otherwise the resolved name replaces the sample in both experiment
+and sweep tables. This corrects individual labelling errors without moving
+other acquisitions with the same prefix. `SessionManifest.acquisition_samples()`
+returns label-to-sample mappings for non-empty entries.
+
+Import always sets `experiment.attrs["sample_overrides"]` to a JSON-safe
+mapping, empty when there are no corrections. Each corrected label maps to
+`{"label_sample": <derived>, "sample": <chosen>, "source": "session_manifest"}`.
+Studio groups by the imported sample and marks these spots with `· DB` and a
+tooltip naming the reassignment.
 
 `read_experiment_data` looks inside a directory for
 `session_manifest.toml`; for a directory named `raw`, it also checks its
@@ -307,6 +323,7 @@ may be null. `hash_inputs=True` is the bundle default, while the standalone
 | input_files[].sha256 | String | Only if file exists and hashing requested |
 | config | Object | PipelineConfig serialized above |
 | detector_calibration | Object | Applied experiment fit record, default `{"mode": "qtegra"}` |
+| sample_overrides | Object | Per-acquisition sample corrections from experiment attrs, keyed by label with `label_sample`, `sample`, `source`; empty when none |
 | completed_stages | Array of strings | Stages cached at manifest creation |
 | spot_count | Integer | Number of experiment rows |
 | sweep_count | Integer | Number of total-data rows |

@@ -100,16 +100,20 @@ P has a fixed set even with empty optional metadata. M takes the union.
 
 ## Experiment tables
 
-`experiment_from_session(session, sep="_", sample_aliases=None)` returns
+`experiment_from_session(session, sep="_", sample_aliases=None, acquisition_samples=None)` returns
 tables before selection; `read_experiment_data` then initializes the
 baseline, plateau and signal windows. Samples are the first part of the
 label split at `sep`, with exact case-insensitive aliases applied afterward.
+The optional `acquisition_samples` mapping supplies per-label sample names
+from a session manifest using the [override rule](project-and-bundle.md#session-bundle).
+Actual corrections are recorded in `experiment.attrs["sample_overrides"]`;
+this mapping is always present, empty when none apply. Table columns do not change.
 Spot numbers always use a trailing underscore integer, independently of `sep`.
 
 | Table / field | Type / unit | Meaning |
 | --- | --- | --- |
 | `experiment.spot_names` | Text | One row per acquisition, sorted by label |
-| `experiment.sample` | Text | Split and aliased sample name |
+| `experiment.sample` | Text | Split and aliased sample name, or per-acquisition override |
 | `experiment.spot_paths` | Text or `None` | Original CSV path; merged acquisitions point to Rich |
 | `experiment.spot_starting_times` | Float, s | Start relative to earliest experiment start |
 | `baseline_start_times`, `baseline_end_times`, `plateau_start_times`, `plateau_end_times`, `signal_start_times`, `signal_end_times` | Session s; initially `None` | Reviewed/automatic selection windows |

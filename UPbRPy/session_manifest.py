@@ -36,6 +36,7 @@ records every acquisition belongs to (``[[acquisition]]``)::
     spot_id = "…"
     grain_id = "…"
     sample_id = "…"
+    sample_label = "MADUCSB"   # optional per-acquisition sample correction
     started_at = 2025-03-20T21:17:18
     sha256 = "…"
     kind = "primary_standard"
@@ -93,6 +94,7 @@ class SessionAcquisition:
     sha256: str = ""
     kind: str = ""
     filename: str = ""
+    sample_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,14 @@ class SessionManifest:
             else:
                 values.setdefault(target, names[0])
         return values
+
+    def acquisition_samples(self) -> dict[str, str]:
+        """Return spot labels mapped to non-empty per-acquisition samples."""
+        return {
+            row.label: row.sample_label
+            for row in self.acquisitions
+            if row.sample_label
+        }
 
 
 def _text(value: object) -> str:
