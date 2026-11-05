@@ -412,6 +412,13 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QCheckBox::indicator:indeterminate {{ image: {icon("minus")}; background: {theme.accent}; }}
     QRadioButton::indicator:checked {{ image: {icon("dot")}; border-color: {theme.accent}; }}
     QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {theme.accent}; }}
+    QAbstractItemView::indicator, QListView::indicator, QTreeView::indicator, QTableView::indicator {{ width: 16px; height: 16px; border: 1px solid {theme.input_border}; border-radius: 5px; background: {theme.glass_strong}; }}
+    QAbstractItemView::indicator:unchecked, QListView::indicator:unchecked, QTreeView::indicator:unchecked, QTableView::indicator:unchecked {{ image: none; background: {theme.glass_strong}; }}
+    QAbstractItemView::indicator:checked, QListView::indicator:checked, QTreeView::indicator:checked, QTableView::indicator:checked {{ image: {icon("check")}; background: {theme.accent}; border-color: {theme.accent}; }}
+    QAbstractItemView::indicator:indeterminate, QListView::indicator:indeterminate, QTreeView::indicator:indeterminate, QTableView::indicator:indeterminate {{ image: {icon("minus")}; background: {theme.accent}; border-color: {theme.accent}; }}
+    QAbstractItemView::indicator:hover, QListView::indicator:hover, QTreeView::indicator:hover, QTableView::indicator:hover {{ border-color: {theme.accent}; }}
+    QAbstractItemView::indicator:disabled, QListView::indicator:disabled, QTreeView::indicator:disabled, QTableView::indicator:disabled {{ border-color: {theme.muted}; }}
+    QAbstractItemView::indicator:unchecked:disabled, QListView::indicator:unchecked:disabled, QTreeView::indicator:unchecked:disabled, QTableView::indicator:unchecked:disabled {{ background: {theme.surface_soft}; }}
     QCheckBox:disabled, QRadioButton:disabled {{ color: {theme.faint}; }}
     QSlider::groove:horizontal {{ height: 5px; border-radius: 2px; background: {theme.input_border}; }}
     QSlider::sub-page:horizontal {{ background: {theme.accent}; border-radius: 2px; }}

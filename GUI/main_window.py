@@ -1856,7 +1856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interact_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.interact_mode_group = QtWidgets.QButtonGroup(self)
         self.interact_mode_group.setExclusive(True)
-        for imode, imode_label in [("zoom", "Box"), ("pan", "Pan")]:
+        for imode, imode_label in [("zoom", "Box"), ("pan", "Pan"), ("select", "Select")]:
             ibtn = QtWidgets.QToolButton()
             ibtn.setText(imode_label)
             ibtn.setCheckable(True)
@@ -1872,6 +1872,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.interact_mode_buttons[imode] = ibtn
             cb_layout.addWidget(ibtn)
         self.interact_mode_buttons["zoom"].setChecked(True)
+        self.interact_mode_buttons["select"].setEnabled(False)
+        self.interact_mode_buttons["select"].hide()
 
         _vsep_drag = QtWidgets.QFrame()
         _vsep_drag.setFrameShape(QtWidgets.QFrame.Shape.VLine)
@@ -4863,13 +4865,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_interaction_controls_to_current_plot(self) -> None:
         target = self._current_plot_interaction_target()
+        supports_select = hasattr(target, "supports_select_mode") and target.supports_select_mode()
+        visibility_changed = self.interact_mode_buttons["select"].isHidden() == supports_select
+        self.interact_mode_buttons["select"].setEnabled(supports_select)
+        self.interact_mode_buttons["select"].setVisible(supports_select)
+        if self._selected_interaction_mode() == "select" and not supports_select:
+            self.set_interaction_mode("zoom")
         if hasattr(target, "set_interaction_mode"):
             target.set_interaction_mode(self._selected_interaction_mode())
         if hasattr(target, "set_zoom_mode"):
             target.set_zoom_mode(self._selected_zoom_mode())
+        if visibility_changed:
+            self._sync_toolbar_strips()
 
     def set_interaction_mode(self, mode: str) -> None:
         target = self._current_plot_interaction_target()
+        if mode == "select" and not (hasattr(target, "supports_select_mode") and target.supports_select_mode()):
+            mode = "zoom"
         if hasattr(target, "set_interaction_mode"):
             target.set_interaction_mode(mode)
         current_mode = target.interaction_mode() if hasattr(target, "interaction_mode") else mode

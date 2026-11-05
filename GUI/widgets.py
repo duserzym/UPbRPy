@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import weakref
 
 import numpy as np
 import pandas as pd
@@ -787,15 +788,43 @@ class IsotopeGridWidget(QtWidgets.QWidget):
 
 
 class DataFrameTableModel(QtCore.QAbstractTableModel):
-    """Memory-efficient, read-only Qt view of a pandas DataFrame."""
+    """A pandas view with an optional, separate review include column."""
+
+    includeChanged = QtCore.Signal(str, bool)
 
     def __init__(
         self,
         frame: pd.DataFrame | None = None,
         parent: QtCore.QObject | None = None,
+        *,
+        include_flags: dict[str, bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.frame = pd.DataFrame() if frame is None else frame.copy()
+        self.include_flags = include_flags
+
+    def spot_name(self, row: int) -> str:
+        """Return the stable spot key for a source-model row."""
+        return str(self.frame.iloc[row]["spot_name"]) if "spot_name" in self.frame else ""
+
+    def flags(self, index):
+        """Allow checking only the optional include column."""
+        flags = super().flags(index)
+        if index.isValid() and self.include_flags is not None and index.column() == 0:
+            flags |= QtCore.Qt.ItemFlag.ItemIsUserCheckable
+        return flags
+
+    def setData(self, index, value, role=QtCore.Qt.ItemDataRole.EditRole):
+        """Request a review include change without editing the frame."""
+        if (index.isValid() and self.include_flags is not None and index.column() == 0
+                and role == QtCore.Qt.ItemDataRole.CheckStateRole):
+            included = value == QtCore.Qt.CheckState.Checked or value == QtCore.Qt.CheckState.Checked.value
+            self.include_flags[self.spot_name(index.row())] = included
+            self.dataChanged.emit(index, index, [QtCore.Qt.ItemDataRole.CheckStateRole,
+                                                QtCore.Qt.ItemDataRole.UserRole])
+            self.includeChanged.emit(self.spot_name(index.row()), included)
+            return True
+        return False
 
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         """Replace the displayed frame with one model reset notification."""
@@ -813,7 +842,9 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         self,
         parent: QtCore.QModelIndex = QtCore.QModelIndex(),
     ) -> int:
-        return 0 if parent.isValid() else len(self.frame.columns)
+        if parent.isValid() or not len(self.frame.columns):
+            return 0
+        return len(self.frame.columns) + int(self.include_flags is not None)
 
     def data(
         self,
@@ -822,7 +853,15 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
     ) -> object:
         if not index.isValid():
             return None
-        value = self.frame.iat[index.row(), index.column()]
+        offset = int(self.include_flags is not None)
+        if offset and index.column() == 0:
+            included = self.include_flags.get(self.spot_name(index.row()), True)
+            if role == QtCore.Qt.ItemDataRole.CheckStateRole:
+                return QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked
+            if role == QtCore.Qt.ItemDataRole.UserRole:
+                return included
+            return None
+        value = self.frame.iat[index.row(), index.column() - offset]
         if role == int(QtCore.Qt.ItemDataRole.DisplayRole):
             if pd.isna(value):
                 return ""
@@ -850,8 +889,40 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         if role != int(QtCore.Qt.ItemDataRole.DisplayRole):
             return None
         if orientation == QtCore.Qt.Orientation.Horizontal:
-            return str(self.frame.columns[section])
+            if self.include_flags is not None and section == 0:
+                return "Include"
+            return str(self.frame.columns[section - int(self.include_flags is not None)])
         return str(section + 1)
+
+
+class _ConcordiaViewBox(pg.ViewBox):
+    """Route spot clicks and selection rectangles to the review widget."""
+
+    def __init__(self, review):
+        super().__init__()
+        self.review = weakref.proxy(review)
+
+    def mouseClickEvent(self, event):
+        if self.review.supports_select_mode() and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.review._select_at(event.scenePos(), event.modifiers())
+            event.accept()
+        else:
+            super().mouseClickEvent(event)
+
+    def mouseDragEvent(self, event, axis=None):
+        if (self.review.interaction_mode() == "select" and axis is None
+                and event.button() == QtCore.Qt.MouseButton.LeftButton):
+            event.accept()
+            if event.isFinish():
+                self.rbScaleBox.hide()
+                rect = QtCore.QRectF(self.mapToView(event.buttonDownPos()), self.mapToView(event.pos()))
+                extend = bool(event.modifiers() & (QtCore.Qt.KeyboardModifier.ShiftModifier
+                                                   | QtCore.Qt.KeyboardModifier.ControlModifier))
+                self.review.select_rectangle(rect, extend=extend)
+            else:
+                self.updateScaleBox(event.buttonDownPos(), event.pos())
+        else:
+            super().mouseDragEvent(event, axis=axis)
 
 
 class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
@@ -863,6 +934,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     implementation.
     """
 
+    selectionChanged = QtCore.Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self._theme: ThemeSpec | None = None
@@ -873,6 +946,64 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._plot_item: pg.PlotItem | None = None
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
+        self.selected_spots: set[str] = set()
+        self._scatter = None
+        self._ellipses = []
+        self._points = []
+
+    def supports_select_mode(self) -> bool:
+        """Return whether this canvas shows selectable spot means."""
+        return self._kind == "spot"
+
+    def select_spots(self, spot_names, *, extend: bool = False, toggle: bool = False) -> None:
+        """Select spot keys, optionally extending or toggling the selection."""
+        names = set(spot_names)
+        selected = (self.selected_spots ^ names if toggle else
+                    self.selected_spots | names if extend else names)
+        if selected != self.selected_spots:
+            self.selected_spots = selected
+            self._update_selection_style()
+            self.selectionChanged.emit(set(selected))
+
+    def select_rectangle(self, rect: QtCore.QRectF, *, extend: bool = False) -> None:
+        """Select plotted spot centres inside a rectangle in data coordinates."""
+        rect = rect.normalized()
+        self.select_spots({name for name, x, y, _color in self._points
+                           if rect.contains(QtCore.QPointF(x, y))}, extend=extend)
+
+    def _select_at(self, scene_pos, modifiers):
+        hits = []
+        for name, x, y, _color in self._points:
+            delta = self._plot_item.vb.mapViewToScene(QtCore.QPointF(x, y)) - scene_pos
+            distance = delta.x() ** 2 + delta.y() ** 2
+            if distance <= 100:
+                hits.append((distance, name))
+        names = {min(hits)[1]} if hits else set()
+        control = bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier)
+        shift = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if names or not (control or shift):
+            self.select_spots(names, extend=shift, toggle=control)
+
+    def _update_selection_style(self):
+        if self._scatter is None or self._kind != "spot":
+            return
+        theme = self._theme
+        brushes, pens, sizes = [], [], []
+        for name, _x, _y, color in self._points:
+            selected = name in self.selected_spots
+            fill = QtGui.QColor(color)
+            fill.setAlpha(100 if self.selected_spots and not selected else 255)
+            brushes.append(pg.mkBrush(fill))
+            pens.append(pg.mkPen(theme.accent if selected else theme.axis_text, width=2 if selected else 0.7))
+            sizes.append(11 if selected else 8)
+        self._scatter.setBrush(brushes)
+        self._scatter.setPen(pens)
+        self._scatter.setSize(sizes)
+        for name, ellipse, color in self._ellipses:
+            selected = name in self.selected_spots
+            line = QtGui.QColor(theme.accent if selected else color)
+            line.setAlpha(70 if self.selected_spots and not selected else 190 if selected else 155)
+            ellipse.setPen(pg.mkPen(line, width=2.2 if selected else 1.0))
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Apply a theme and redraw the retained concordia data."""
@@ -982,10 +1113,13 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     def _draw(self) -> None:
         self.clear()
         self._plot_item = None
+        self._scatter = None
+        self._ellipses = []
+        self._points = []
         theme = self._theme
         if theme is None:
             return
-        plot = self.addPlot(0, 0)
+        plot = self.addPlot(0, 0, viewBox=_ConcordiaViewBox(self))
         self._plot_item = plot
         _make_diag_axis(plot, theme)
         plot.setAspectLocked(False)
@@ -1116,21 +1250,25 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             if ellipse_x.size:
                 ellipse_color = QtGui.QColor(brushes[index])
                 ellipse_color.setAlpha(155)
-                plot.plot(
+                ellipse = plot.plot(
                     ellipse_x,
                     ellipse_y,
                     pen=pg.mkPen(ellipse_color, width=1.0),
                 )
-        plot.addItem(
-            pg.ScatterPlotItem(
-                x=x_values[finite],
-                y=y_values[finite],
-                symbol="o",
-                size=6 if self._kind == "depth" else 8,
-                pen=pg.mkPen(theme.axis_text, width=0.7),
-                brush=[brushes[index] for index in np.flatnonzero(finite)],
-            )
+                self._ellipses.append((str(frame.iloc[index].get("spot_name", "")), ellipse, brushes[index]))
+        self._points = [(str(frame.iloc[index].get("spot_name", "")), float(x_values[index]),
+                         float(y_values[index]), brushes[index]) for index in np.flatnonzero(finite)]
+        self._scatter = pg.ScatterPlotItem(
+            x=x_values[finite],
+            y=y_values[finite],
+            symbol="o",
+            size=6 if self._kind == "depth" else 8,
+            pen=pg.mkPen(theme.axis_text, width=0.7),
+            brush=[brushes[index] for index in np.flatnonzero(finite)],
         )
+        plot.addItem(self._scatter)
+        self._scatter.sigClicked.connect(self._spot_clicked)
+        self._update_selection_style()
 
         # Age labels remain sparse enough for a quick-look panel, while the
         # full 0--4.5 Ga curve remains available when users pan or zoom.
@@ -1143,6 +1281,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                 x=[float(age_x)], y=[float(age_y)], size=4,
                 pen=pg.mkPen(theme.muted), brush=pg.mkBrush(theme.muted),
             )
+            marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             plot.addItem(marker)
             label = pg.TextItem(str(age), color=theme.muted, anchor=(0, 0.5))
             age_font = QtGui.QFont()
@@ -1173,9 +1312,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         return self._zoom_mode
 
     def set_interaction_mode(self, mode: str) -> None:
-        """Choose rectangle zoom or panning for the concordia view."""
-        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        """Choose box zoom, pan, or spot rectangle selection."""
+        allowed = {"pan", "zoom", "select"} if self.supports_select_mode() else {"pan", "zoom"}
+        self._interaction_mode = mode if mode in allowed else "zoom"
         self._apply_interaction_mode()
+
+    def _spot_clicked(self, _scatter, _points, event):
+        if self.supports_select_mode():
+            self._select_at(event.scenePos(), event.modifiers())
 
     def interaction_mode(self) -> str:
         """Return the current concordia mouse interaction."""
@@ -1563,8 +1707,13 @@ class DetectorCalibrationPanel(NeumorphicFrame):
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
+    selectedSpotsChanged = QtCore.Signal(object)
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self.include_flags: dict[str, bool] = {}
+        self.selected_spots: set[str] = set()
+        self._syncing_selection = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
@@ -1576,7 +1725,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         layout.addWidget(self.summary_label)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.results_table, self.results_model = self.create_table()
+        self.results_table, self.results_model = self.create_table(include_flags=self.include_flags)
+        self.results_model.includeChanged.connect(self._table_include_changed)
+        self.results_table.selectionModel().selectionChanged.connect(self._table_selection_changed)
         self.secondary_table, self.secondary_model = self.create_table()
         self.depth_table, self.depth_model = self.create_table()
         self.tabs.addTab(self.results_table, "Final results")
@@ -1595,6 +1746,147 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._spot_frame = pd.DataFrame()
         self._depth_frame = pd.DataFrame()
         self._include_calibration_uncertainty = True
+        for view in (self.results_table, self.spot_choice_list):
+            view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+            view.installEventFilter(self)
+            view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            view.customContextMenuRequested.connect(self._show_spot_menu)
+        self.spot_choice_list.itemSelectionChanged.connect(self._chooser_selection_changed)
+        self.spot_concordia.selectionChanged.connect(
+            lambda names: self.set_selected_spots(names, origin=self.spot_concordia)
+        )
+
+    def _table_include_changed(self, name, included):
+        self.set_spot_included({name}, included)
+
+    def _chooser_include_changed(self, item):
+        self.set_spot_included({item.text()}, item.checkState() == QtCore.Qt.CheckState.Checked)
+
+    def set_spot_included(self, spot_names, included: bool) -> None:
+        """Set review inclusion for spot keys and update both views once."""
+        for name in spot_names:
+            self.include_flags[name] = bool(included)
+        blocker = QtCore.QSignalBlocker(self.spot_choice_list)
+        for index in range(self.spot_choice_list.count()):
+            item = self.spot_choice_list.item(index)
+            item.setCheckState(QtCore.Qt.CheckState.Checked if self.include_flags.get(item.text(), True)
+                               else QtCore.Qt.CheckState.Unchecked)
+        del blocker
+        if self.results_model.rowCount():
+            self.results_model.dataChanged.emit(self.results_model.index(0, 0),
+                                               self.results_model.index(self.results_model.rowCount()-1, 0),
+                                               [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
+        self.refresh_spot_concordia()
+
+    def set_selected_spots(self, spot_names, *, origin=None) -> None:
+        """Share spot selection, keeping the origin view's scroll position."""
+        if self._syncing_selection:
+            return
+        self.selected_spots = set(spot_names) & self.include_flags.keys()
+        self._syncing_selection = True
+        try:
+            selection = QtCore.QItemSelection()
+            proxy = self.results_table.model()
+            table_rows = []
+            for row in range(proxy.rowCount()):
+                source = proxy.mapToSource(proxy.index(row, 0))
+                if self.results_model.spot_name(source.row()) in self.selected_spots:
+                    selection.select(proxy.index(row, 0), proxy.index(row, proxy.columnCount()-1))
+                    if not self.results_table.isRowHidden(row):
+                        table_rows.append(proxy.index(row, 0))
+            self.results_table.selectionModel().select(selection, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            chooser_rows = []
+            for index in range(self.spot_choice_list.count()):
+                item = self.spot_choice_list.item(index)
+                item.setSelected(item.text() in self.selected_spots)
+                if item.isSelected() and not item.isHidden():
+                    chooser_rows.append(self.spot_choice_list.indexFromItem(item))
+            for view, rows in ((self.results_table, table_rows),
+                               (self.spot_choice_list, chooser_rows)):
+                if view is not origin:
+                    self._scroll_selection_into_view(view, rows)
+            self.spot_concordia.select_spots(self.selected_spots)
+        finally:
+            self._syncing_selection = False
+        self.selectedSpotsChanged.emit(set(self.selected_spots))
+
+    @staticmethod
+    def _scroll_selection_into_view(view, rows) -> None:
+        """Reveal the first selected row only when all are outside the viewport."""
+        for index in rows:
+            rect = view.visualRect(index)
+            if rect.height() > 0 and rect.bottom() >= 0 and rect.top() < view.viewport().height():
+                return
+        if rows:
+            view.scrollTo(rows[0])
+
+    def _table_selection_changed(self, *_args):
+        if not self._syncing_selection:
+            proxy = self.results_table.model()
+            self.set_selected_spots({self.results_model.spot_name(proxy.mapToSource(index).row())
+                                     for index in self.results_table.selectionModel().selectedRows()},
+                                    origin=self.results_table)
+
+    def _chooser_selection_changed(self):
+        if not self._syncing_selection:
+            hidden = {self.spot_choice_list.item(i).text() for i in range(self.spot_choice_list.count())
+                      if self.spot_choice_list.item(i).isHidden()}
+            self.set_selected_spots({item.text() for item in self.spot_choice_list.selectedItems()}
+                                    | (self.selected_spots & hidden), origin=self.spot_choice_list)
+
+    def _visible_spot_names(self, view):
+        if view is self.spot_choice_list:
+            return {view.item(i).text() for i in range(view.count()) if not view.item(i).isHidden()}
+        proxy = self.results_table.model()
+        return {self.results_model.spot_name(proxy.mapToSource(proxy.index(row, 0)).row())
+                for row in range(proxy.rowCount()) if not self.results_table.isRowHidden(row)}
+
+    def toggle_selected_inclusion(self) -> None:
+        """Exclude an entirely included selection; otherwise include it."""
+        if self.selected_spots:
+            self.set_spot_included(self.selected_spots, not all(self.include_flags.get(name, True)
+                                                             for name in self.selected_spots))
+
+    def include_selected(self) -> None:
+        """Include all selected spots in the review plot."""
+        self.set_spot_included(self.selected_spots, True)
+
+    def exclude_selected(self) -> None:
+        """Exclude all selected spots from the review plot."""
+        self.set_spot_included(self.selected_spots, False)
+
+    def invert_selection(self, view=None) -> None:
+        """Invert selection within the invoking view's visible spots."""
+        visible = self._visible_spot_names(self.results_table if view is None else view)
+        self.set_selected_spots(self.selected_spots ^ visible, origin=view)
+
+    def select_same_sample(self) -> None:
+        """Select all spots belonging to any currently selected sample."""
+        frame = self.results_model.frame
+        if {"sample", "spot_name"}.issubset(frame.columns):
+            samples = frame.loc[frame.spot_name.astype(str).isin(self.selected_spots), "sample"]
+            self.set_selected_spots(set(frame.loc[frame["sample"].isin(samples), "spot_name"].astype(str)))
+
+    def _show_spot_menu(self, pos):
+        view = self.sender()
+        menu = QtWidgets.QMenu(view)
+        for text, callback in (("Include selected", self.include_selected),
+                               ("Exclude selected", self.exclude_selected),
+                               ("Invert selection", lambda: self.invert_selection(view)),
+                               ("Select same sample", self.select_same_sample)):
+            menu.addAction(text, callback)
+        menu.exec(view.viewport().mapToGlobal(pos))
+
+    def eventFilter(self, watched, event):
+        """Handle review inclusion and native Select All keyboard commands."""
+        if event.type() == QtCore.QEvent.Type.KeyPress and watched in (self.results_table, self.spot_choice_list):
+            if event.key() == QtCore.Qt.Key.Key_Space:
+                self.toggle_selected_inclusion()
+                return True
+            if event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
+                self.set_selected_spots(self._visible_spot_names(watched), origin=watched)
+                return True
+        return super().eventFilter(watched, event)
 
     def create_diagram_buttons(
         self,
@@ -1641,9 +1933,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         controls_layout.addWidget(self.spot_filter)
         self.spot_choice_list = QtWidgets.QListWidget()
         self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
-        self.spot_choice_list.itemChanged.connect(
-            lambda _item: self.refresh_spot_concordia()
-        )
+        self.spot_choice_list.itemChanged.connect(self._chooser_include_changed)
         controls_layout.addWidget(self.spot_choice_list, 1)
         select_row = QtWidgets.QHBoxLayout()
         select_all = QtWidgets.QPushButton("All")
@@ -1739,6 +2029,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
         target = self.active_concordia()
         return target.interaction_mode() if target is not None else "zoom"
 
+    def supports_select_mode(self) -> bool:
+        """Return whether the active result canvas supports spot selection."""
+        target = self.active_concordia()
+        return target is not None and target.supports_select_mode()
+
     def restore_default_view(self) -> None:
         """Restore the current concordia view without changing table state."""
         target = self.active_concordia()
@@ -1748,34 +2043,21 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def filter_spot_choices(self, text: str) -> None:
         """Hide non-matching spot selectors without changing selections."""
         query = text.strip().casefold()
+        blocker = QtCore.QSignalBlocker(self.spot_choice_list)
         for index in range(self.spot_choice_list.count()):
             item = self.spot_choice_list.item(index)
             item.setHidden(query not in item.text().casefold())
+        del blocker
 
     def set_all_spot_choices(self, checked: bool) -> None:
         """Check or clear every currently visible spot in one redraw."""
-        self.spot_choice_list.blockSignals(True)
-        for index in range(self.spot_choice_list.count()):
-            item = self.spot_choice_list.item(index)
-            if not item.isHidden():
-                item.setCheckState(
-                    QtCore.Qt.CheckState.Checked
-                    if checked
-                    else QtCore.Qt.CheckState.Unchecked
-                )
-        self.spot_choice_list.blockSignals(False)
-        self.refresh_spot_concordia()
+        self.set_spot_included(self._visible_spot_names(self.spot_choice_list), checked)
 
     def refresh_spot_concordia(self) -> None:
         """Redraw only the checked final spot means."""
         if self._theme is None:
             return
-        selected_names = {
-            self.spot_choice_list.item(index).text()
-            for index in range(self.spot_choice_list.count())
-            if self.spot_choice_list.item(index).checkState()
-            == QtCore.Qt.CheckState.Checked
-        }
+        selected_names = {name for name, included in self.include_flags.items() if included}
         selected = self._spot_frame
         if selected_names and "spot_name" in selected.columns:
             selected = selected[selected["spot_name"].astype(str).isin(selected_names)]
@@ -1811,15 +2093,19 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def create_table(
         self,
+        *,
+        include_flags: dict[str, bool] | None = None,
     ) -> tuple[QtWidgets.QTableView, DataFrameTableModel]:
         """Create one sortable table backed by a Qt proxy."""
         view = QtWidgets.QTableView()
-        model = DataFrameTableModel(parent=view)
+        model = DataFrameTableModel(parent=view, include_flags=include_flags)
         proxy = QtCore.QSortFilterProxyModel(view)
         proxy.setSourceModel(model)
         proxy.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
         view.setModel(proxy)
         view.setSortingEnabled(True)
+        if include_flags is not None:
+            view.sortByColumn(-1, QtCore.Qt.SortOrder.AscendingOrder)
         view.setAlternatingRowColors(True)
         view.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -1843,7 +2129,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
             "secondary_standard_summary",
             pd.DataFrame(),
         )
+        retained_selection = set(self.selected_spots)
+        self._syncing_selection = True
         self.results_model.set_frame(final_frame)
+        sort_column = next((final_frame.columns.get_loc(name) + 1
+                            for name in ("sample", "spot_name") if name in final_frame), -1)
+        self.results_table.sortByColumn(sort_column, QtCore.Qt.SortOrder.AscendingOrder)
         self.secondary_model.set_frame(secondary)
         self._spot_frame = getattr(
             finalized, "parallel_results", pd.DataFrame()
@@ -1860,17 +2151,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
             f"{len(final_frame):,} spots · common-Pb method {method} · "
             f"calibration uncertainty {'included' if uncertainty else 'excluded'}"
         )
-        existing_names = {
-            self.spot_choice_list.item(index).text(): (
-                self.spot_choice_list.item(index).checkState()
-            )
-            for index in range(self.spot_choice_list.count())
-        }
-        spot_names = (
-            self._spot_frame["spot_name"].dropna().astype(str).tolist()
-            if "spot_name" in self._spot_frame.columns
-            else []
-        )
+        spot_names = list(dict.fromkeys(name for frame in (final_frame, self._spot_frame)
+                                      if "spot_name" in frame
+                                      for name in frame["spot_name"].dropna().astype(str)))
+        retained_flags = {name: self.include_flags.get(name, True) for name in spot_names}
+        self.include_flags.clear()
+        self.include_flags.update(retained_flags)
         self.spot_choice_list.blockSignals(True)
         self.spot_choice_list.clear()
         for spot_name in dict.fromkeys(spot_names):
@@ -1878,10 +2164,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
             item.setToolTip(spot_name)
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
-                existing_names.get(spot_name, QtCore.Qt.CheckState.Checked)
+                QtCore.Qt.CheckState.Checked if self.include_flags[spot_name] else QtCore.Qt.CheckState.Unchecked
             )
             self.spot_choice_list.addItem(item)
         self.spot_choice_list.blockSignals(False)
+        self._syncing_selection = False
+        self.filter_spot_choices(self.spot_filter.text())
+        self.set_selected_spots(retained_selection)
         self.refresh_spot_concordia()
         if self.tabs.currentWidget() not in (
             self.results_table,
