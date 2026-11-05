@@ -1355,7 +1355,23 @@ def build_publication_tables(
         for key, value in asdict(finalized.decision).items()
     ]
     for key, value in (metadata or {}).items():
+        if key == "detector_calibration":
+            continue
         decision_rows.append({"setting": key, "value": value})
+    detector_calibration = (metadata or {}).get(
+        "detector_calibration",
+        finalized.parallel_results.attrs.get("detector_calibration", {"mode": "qtegra"}),
+    )
+    decision_rows.append({
+        "setting": "detector_calibration.mode",
+        "value": detector_calibration.get("mode", "qtegra"),
+    })
+    for channel, calibration in detector_calibration.get("channels", {}).items():
+        for key in ("factor", "factor_se", "qtegra_factor"):
+            decision_rows.append({
+                "setting": f"detector_calibration.{channel}.{key}",
+                "value": calibration.get(key),
+            })
     flag_settings = finalized.parallel_results.attrs.get(
         "automatic_flag_settings", {}
     )

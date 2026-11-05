@@ -1,11 +1,308 @@
-"""Reusable calibration-curve models for fractionation corrections."""
+"""Calibration models for fractionation and detector cross-calibration."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
+
+from .qtegra import COUNTER_SATURATED, QtegraSession, recover_xcal
+
+
+@dataclass
+class ChannelCrossCalibration:
+    """Detector factors and one-sigma fit errors for one channel.
+
+    Drift arrays and acquisition labels share chronological order. The
+    intercept describes the overlap fit; saturated Y uses only the factor.
+    """
+
+    channel: str
+    qtegra_factor: float | None
+    factor: float
+    factor_se: float
+    intercept: float
+    intercept_se: float
+    n_points: int
+    n_acquisitions: int
+    times_s: np.ndarray | None = None
+    factors: np.ndarray | None = None
+    factors_se: np.ndarray | None = None
+    raw_factors: np.ndarray | None = None
+    acquisition_labels: list[str] = field(default_factory=list)
+
+    def factor_at(self, t_s) -> np.ndarray:
+        """Evaluate a constant factor or drift with endpoint-holding interpolation."""
+        times = np.asarray(t_s, dtype=float)
+        if self.times_s is None or self.factors is None:
+            return np.full_like(times, self.factor, dtype=float)
+        return np.asarray(np.interp(times, self.times_s, self.factors), dtype=float)
+
+
+@dataclass
+class CrossCalibration:
+    """Session detector calibration and the settings used to fit it."""
+
+    mode: str
+    on: str
+    window: tuple[float, float]
+    channels: dict[str, ChannelCrossCalibration]
+    primary_standard: str | None = None
+    smoothing_s: float = 1800.0
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Return JSON-safe fit settings, diagnostics and per-channel factors.
+
+        Unknown or nonfinite numeric values are represented by None.
+        """
+        def number(value):
+            return float(value) if value is not None and np.isfinite(value) else None
+
+        channels = {}
+        for name, fit in self.channels.items():
+            record = {
+                key: number(getattr(fit, key))
+                for key in (
+                    "qtegra_factor", "factor", "factor_se", "intercept", "intercept_se",
+                )
+            }
+            record.update({
+                "n_points": int(fit.n_points),
+                "n_acquisitions": int(fit.n_acquisitions),
+                "relative_difference_from_qtegra": (
+                    number(fit.factor / fit.qtegra_factor - 1)
+                    if fit.qtegra_factor is not None and fit.qtegra_factor != 0 else None
+                ),
+                "acquisition_labels": [str(label) for label in fit.acquisition_labels],
+            })
+            if self.mode == "drift":
+                for key in ("times_s", "factors", "factors_se", "raw_factors"):
+                    values = getattr(fit, key)
+                    record[key] = None if values is None else [number(v) for v in values]
+            channels[str(name)] = record
+        return {
+            "mode": str(self.mode),
+            "on": str(self.on),
+            "window": [number(v) for v in self.window],
+            "primary_standard": (
+                None if self.primary_standard is None else str(self.primary_standard)
+            ),
+            "smoothing_s": number(self.smoothing_s),
+            "warnings": [str(warning) for warning in self.warnings],
+            "channels": channels,
+        }
+
+
+def _require_analog_counter(session):
+    if not session.has("analog_counter"):
+        raise ValueError(
+            f"Qtegra format {session.format!r} lacks the analog_counter capability "
+            "required for detector cross-calibration."
+        )
+
+
+def _session_start_offsets(session):
+    """Return start seconds from the earliest recorded start or stored offset."""
+    starts = [a.start for a in session.acquisitions if a.start is not None]
+    origin = min(starts) if starts else None
+    offset_origin = (
+        min(a.start_offset_s for a in session.acquisitions if a.start_offset_s is not None)
+        if not starts and session.acquisitions
+        and any(a.start_offset_s is not None for a in session.acquisitions) else 0.0
+    )
+    offsets = []
+    for acquisition in session.acquisitions:
+        if acquisition.start is not None:
+            offsets.append((acquisition.start - origin).total_seconds())
+        elif acquisition.start_offset_s is not None:
+            offsets.append(float(acquisition.start_offset_s - offset_origin))
+        else:
+            raise ValueError(f"{acquisition.label}: no acquisition start or session offset.")
+    return offsets
+
+
+def _channel_session_time(acquisition, index, offset):
+    if acquisition.time is None:
+        raise ValueError(f"{acquisition.label}: no sweep times.")
+    times = acquisition.time[:, index] if acquisition.time_per_channel else acquisition.time
+    return offset + times
+
+
+def _inverse_variance_weights(errors, factors):
+    # A precision-scaled floor handles exact synthetic fits without infinite
+    # weights. Scaling all inverse variances by their maximum avoids overflow.
+    floor = np.finfo(float).eps * max(1.0, float(np.max(np.abs(factors))))
+    guarded = np.maximum(errors, floor)
+    return (np.min(guarded) / guarded) ** 2
+
+
+def fit_cross_calibration(session, channel=None, window=(1e5, 2.4e6),
+                          on="all", mode="constant", *, primary_standard=None,
+                          sep="_", smoothing_s=1800.0) -> CrossCalibration:
+    """Fit counter on analog in the overlap window, optionally with time drift.
+
+    Constant fits use OLS with an intercept and RSS/(n-2) covariance. Drift
+    slopes hold that intercept fixed and use RSS/(n-1) for each acquisition.
+    Gaussian smoothing uses inverse slope variances. Channels with fewer than
+    three points are omitted with a warning, or raise when explicitly requested.
+    Qtegra mode records exported/recovered factors without fitting.
+    """
+    if mode not in {"qtegra", "constant", "drift"}:
+        raise ValueError("mode must be 'qtegra', 'constant', or 'drift'.")
+    if on not in {"all", "primary_standard"}:
+        raise ValueError("on must be 'all' or 'primary_standard'.")
+    if on == "primary_standard" and not primary_standard:
+        raise ValueError("primary_standard is required for on='primary_standard'.")
+    window = tuple(float(value) for value in window)
+    if len(window) != 2 or not np.isfinite(window).all() or window[0] > window[1]:
+        raise ValueError("window must contain two finite, increasing bounds.")
+    smoothing_s = float(smoothing_s)
+    if not np.isfinite(smoothing_s) or smoothing_s <= 0:
+        raise ValueError("smoothing_s must be finite and positive.")
+    if mode != "qtegra":
+        _require_analog_counter(session)
+    names = list(session.channel_names) if channel is None else (
+        [channel] if isinstance(channel, str) else list(channel)
+    )
+    unknown = [name for name in names if name not in session.channel_names]
+    if unknown:
+        raise ValueError(f"Unknown detector channel(s): {', '.join(unknown)}")
+    result = CrossCalibration(mode, on, window, {}, primary_standard, smoothing_s)
+    qtegra_factors = recover_xcal(session)
+    for acquisition in session.acquisitions:
+        for metadata in acquisition.channels:
+            if metadata.xcal is not None:
+                qtegra_factors[metadata.name] = float(metadata.xcal)
+
+    offsets = _session_start_offsets(session) if mode == "drift" else None
+    for name in dict.fromkeys(names):
+        qtegra_factor = qtegra_factors.get(name)
+        if mode == "qtegra":
+            if qtegra_factor is not None:
+                result.channels[name] = ChannelCrossCalibration(
+                    name, qtegra_factor, qtegra_factor, np.nan, 0.0, np.nan, 0, 0,
+                )
+            continue
+        points = []
+        for position, acquisition in enumerate(session.acquisitions):
+            if (on == "primary_standard"
+                    and acquisition.label.split(sep)[0].casefold()
+                    != str(primary_standard).casefold()):
+                continue
+            if acquisition.analog is None or acquisition.counter is None:
+                continue
+            if name not in acquisition.channel_names:
+                continue
+            index = acquisition.channel_index(name)
+            analog = acquisition.analog[:, index]
+            counter = acquisition.counter[:, index]
+            mask = (np.isfinite(counter) & (counter != COUNTER_SATURATED)
+                    & (counter >= window[0]) & (counter <= window[1])
+                    & np.isfinite(analog) & (analog > 0))
+            if mask.any():
+                points.append((position, acquisition, index, mask, analog[mask], counter[mask]))
+        n = sum(len(point[4]) for point in points)
+        problem = None
+        if n < 3:
+            problem = f"{name}: fewer than 3 points in the counter overlap window ({n})."
+        else:
+            analog = np.concatenate([point[4] for point in points])
+            counter = np.concatenate([point[5] for point in points])
+            design = np.column_stack((analog, np.ones(n)))
+            coefficients, _, rank, _ = np.linalg.lstsq(design, counter, rcond=None)
+            if rank < 2:
+                problem = f"{name}: analog values do not span a full-rank overlap fit."
+        if problem:
+            if channel is not None:
+                raise ValueError(problem)
+            result.warnings.append(problem)
+            continue
+        factor, intercept = coefficients
+        residuals = counter - design @ coefficients
+        covariance = (residuals @ residuals / (n - 2)) * np.linalg.inv(design.T @ design)
+        factor_se, intercept_se = np.sqrt(np.diag(covariance))
+        fit = ChannelCrossCalibration(
+            name, qtegra_factor, float(factor), float(factor_se),
+            float(intercept), float(intercept_se), n, len(points),
+            acquisition_labels=[point[1].label for point in points],
+        )
+        result.channels[name] = fit
+        if mode == "constant":
+            continue
+        raw_factors, errors, mid_times, labels = [], [], [], []
+        for position, acquisition, index, mask, analog, counter in points:
+            if len(analog) < 5:
+                continue
+            sum_squares = analog @ analog
+            slope = (analog @ (counter - intercept)) / sum_squares
+            residuals = counter - intercept - slope * analog
+            error = np.sqrt((residuals @ residuals) / (len(analog) - 1) / sum_squares)
+            times = _channel_session_time(acquisition, index, offsets[position])[mask]
+            if not (np.isfinite(slope) and np.isfinite(error) and np.isfinite(times).all()):
+                result.warnings.append(f"{name}: skipped nonfinite drift fit for {acquisition.label}.")
+                continue
+            raw_factors.append(slope)
+            errors.append(error)
+            mid_times.append(float(np.mean(times)))
+            labels.append(acquisition.label)
+        if not raw_factors:
+            result.warnings.append(
+                f"{name}: no acquisition qualifies for drift; using the constant fit."
+            )
+            continue
+        order = np.argsort(mid_times, kind="stable")
+        fit.times_s = np.asarray(mid_times)[order]
+        fit.raw_factors = np.asarray(raw_factors)[order]
+        errors = np.asarray(errors)[order]
+        fit.acquisition_labels = [labels[i] for i in order]
+        fit.n_acquisitions = len(order)
+        weights = _inverse_variance_weights(errors, fit.raw_factors)
+        normalized = weights / weights.sum()
+        fit.factor = float(normalized @ fit.raw_factors)
+        fit.factor_se = float(np.sqrt(np.sum((normalized * errors) ** 2)))
+        kernel = np.exp(-0.5 * ((fit.times_s[:, None] - fit.times_s) / smoothing_s) ** 2)
+        smoothed_weights = kernel * weights
+        smoothed_weights /= smoothed_weights.sum(axis=1, keepdims=True)
+        fit.factors = smoothed_weights @ fit.raw_factors
+        fit.factors_se = np.sqrt(np.sum((smoothed_weights * errors) ** 2, axis=1))
+    return result
+
+
+def apply_cross_calibration(session, calibration) -> QtegraSession:
+    """Deep-copy a session and replace only calibrated, saturated finite-analog Y.
+
+    Qtegra mode returns an unchanged copy. Other modes append one warning
+    naming the calibrated channels and mode; all source measurements remain.
+    """
+    result = deepcopy(session)
+    if calibration.mode == "qtegra":
+        return result
+    _require_analog_counter(session)
+    offsets = _session_start_offsets(session) if calibration.mode == "drift" else None
+    for position, acquisition in enumerate(result.acquisitions):
+        if acquisition.analog is None or acquisition.counter is None:
+            continue
+        for name, fit in calibration.channels.items():
+            if name not in acquisition.channel_names:
+                continue
+            index = acquisition.channel_index(name)
+            analog = acquisition.analog[:, index]
+            mask = (acquisition.counter[:, index] == COUNTER_SATURATED) & np.isfinite(analog)
+            if not mask.any():
+                continue
+            times = (
+                _channel_session_time(acquisition, index, offsets[position])[mask]
+                if offsets is not None else np.zeros(mask.sum())
+            )
+            acquisition.y[mask, index] = analog[mask] * fit.factor_at(times)
+    result.warnings.append(
+        f"Detector cross-calibration recalibrated channels "
+        f"{', '.join(calibration.channels) or '(none)'} with mode {calibration.mode}."
+    )
+    return result
 
 
 ArrayFunction = Callable[[np.ndarray], np.ndarray]
@@ -425,6 +722,10 @@ def evaluate_correction_result(result, values):
 
 
 __all__ = [
+    "CrossCalibration",
+    "ChannelCrossCalibration",
+    "fit_cross_calibration",
+    "apply_cross_calibration",
     "CalibrationModel",
     "fit_calibration_model",
     "fit_multiplicative_calibration_model",

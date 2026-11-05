@@ -265,6 +265,7 @@ class PipelineConfig:
     common_pb_options: dict[str, object] = field(default_factory=dict)
     uncertainty: UncertaintySettings = field(default_factory=UncertaintySettings)
     depth_calibration: LinearDepthCalibration | None = None
+    detector_calibration: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate calibration mode and required configuration invariants."""
@@ -320,6 +321,7 @@ class PipelineConfig:
             "primary_channel": self.primary_channel,
             "selection_method": self.selection_method,
             "selection_options": dict(self.selection_options),
+            "detector_calibration": dict(self.detector_calibration),
             "concentration_standards": list(self.concentration_standards),
             "primary_68_standard": self.primary_68_standard,
             "primary_76_standard": self.primary_76_standard,
@@ -345,6 +347,7 @@ class PipelineConfig:
 def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
     """Reconstruct immutable pipeline settings from a saved manifest."""
     data = dict(values)
+    data["detector_calibration"] = dict(data.get("detector_calibration", {}))
     data["concentration_standards"] = tuple(
         data.get("concentration_standards", ())
     )
@@ -944,6 +947,9 @@ class ReductionPipeline:
             accepted_secondary_ages=accepted_secondary_ages,
             uncertainty_settings=self.config.uncertainty,
         )
+        result.parallel_results.attrs["detector_calibration"] = (
+            self.experiment.attrs.get("detector_calibration", {"mode": "qtegra"})
+        )
         return self.cache.set(PipelineStage.FINALIZE, result)
 
     def run_to(self, stage: PipelineStage | str):
@@ -1018,6 +1024,9 @@ class ReductionPipeline:
             "reference_library_sha256": library.get("sha256"),
             "input_files": files,
             "config": self.config.to_dict(),
+            "detector_calibration": self.experiment.attrs.get(
+                "detector_calibration", {"mode": "qtegra"}
+            ),
             "completed_stages": [stage.value for stage in self.cache.stages()],
             "spot_count": int(len(self.experiment)),
             "sweep_count": int(len(self.total_data)),

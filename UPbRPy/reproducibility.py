@@ -142,6 +142,7 @@ def build_reproducibility_notebook(
             "read_options = dict(config.selection_options)\n"
             "read_options.pop('primary_channel', None)\n"
             "read_options.setdefault('selection_method', config.selection_method)\n"
+            "read_options['detector_calibration'] = config.detector_calibration\n"
             "experiment, channels, total_data = read_experiment_data(\n"
             "    source_directory,\n"
             "    primary_channel=config.primary_channel,\n"
@@ -228,6 +229,7 @@ def build_reproducibility_notebook(
             "        'workflow_key': config.workflow_key,\n"
             "        'package_version': manifest['upbrpy_version'],\n"
             "        'pipeline_format_version': manifest['format_version'],\n"
+            "        'detector_calibration': manifest['detector_calibration'],\n"
             "        'source_directory': str(source_directory),\n"
             "        'reference_library_path': str(reference_library_path or ''),\n"
             "    },\n"
@@ -321,6 +323,7 @@ def export_reduction_bundle(
             "workflow_key": pipeline.config.workflow_key,
             "package_version": manifest["upbrpy_version"],
             "pipeline_format_version": manifest["format_version"],
+            "detector_calibration": manifest["detector_calibration"],
             "source_directory": str(pipeline.source_directory or ""),
             "reference_library_path": str(
                 pipeline.reference_library_path or ""

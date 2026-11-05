@@ -188,6 +188,11 @@ def pipeline_config_from_session(
     # duplicated inside method-specific keyword arguments.
     selection_options.pop("primary_channel", None)
     selection_options.pop("selection_method", None)
+    detector_calibration = selection_options.pop(
+        "detector_calibration", retained_config.detector_calibration,
+    )
+    if isinstance(detector_calibration, str):
+        detector_calibration = {"mode": detector_calibration}
     common_pb_options = dict(retained_config.common_pb_options)
     if session.common_pb_uncertainty_preset_name == "none":
         common_pb_options.pop("common_pb_uncertainty_preset_name", None)
@@ -206,6 +211,7 @@ def pipeline_config_from_session(
             )
         ),
         selection_options=selection_options,
+        detector_calibration=dict(detector_calibration or {}),
         concentration_standards=(
             session.concentration_standards
             or preset.concentration_standards
@@ -776,6 +782,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
     )
     restored_import_settings.pop("primary_channel", None)
     restored_import_settings.pop("selection_method", None)
+    restored_import_settings["detector_calibration"] = config.detector_calibration
     session = load_session(
         str(source_directory),
         primary_channel=config.primary_channel,

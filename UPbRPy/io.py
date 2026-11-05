@@ -931,6 +931,7 @@ def read_experiment_data(
     session_manifest=None,
     *,
     cycle_time_s=None,
+    detector_calibration=None,
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
 
@@ -990,6 +991,10 @@ def read_experiment_data(
         Nominal UPbR sweep cycle in seconds, forwarded to ``open_qtegra``.
         None uses the reader's default of 0.4255 s. UPbR times are reconstructed
         and emit one UserWarning. Recorded times in other formats are retained.
+    detector_calibration : str, mapping or None, keyword-only
+        None or 'qtegra' retains exported Y. 'constant', 'drift', or a mapping
+        with mode, on, window, primary_standard, channels and smoothing_s fits
+        and applies detector factors before building tables and selections.
 
     Returns
     -------
@@ -1025,9 +1030,25 @@ def read_experiment_data(
         directory if isinstance(directory, QtegraSession)
         else open_qtegra(Path(directory).expanduser(), cycle_time_s=cycle_time_s)
     )
+    calibration_options = (
+        dict(detector_calibration) if isinstance(detector_calibration, Mapping)
+        else {"mode": "qtegra" if detector_calibration is None else detector_calibration}
+    )
+    mode = calibration_options.pop("mode", "qtegra")
+    calibration_record = {"mode": "qtegra"}
+    if mode != "qtegra":
+        from .calibration import apply_cross_calibration, fit_cross_calibration
+
+        calibration = fit_cross_calibration(
+            session, channel=calibration_options.pop("channels", None),
+            mode=mode, sep=sep, **calibration_options,
+        )
+        session = apply_cross_calibration(session, calibration)
+        calibration_record = calibration.to_dict()
     experiment, element_channels, total_data = experiment_from_session(
         session, sep=sep, sample_aliases=sample_aliases,
     )
+    experiment.attrs["detector_calibration"] = calibration_record
 
     experiment = auto_select_baseline_peak(
         experiment,
