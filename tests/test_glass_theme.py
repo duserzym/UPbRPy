@@ -110,25 +110,27 @@ def test_step_card_spacing_and_full_stage_labels_on_resize(app, mode):
                 shell.resize(width, height)
                 pump(app)
                 card = reduction.workflow_context_bar
-                buttons = card.findChildren(QtWidgets.QPushButton)
-                assert len(buttons) == (2 if loaded else 1)
+                assert not card.findChildren(QtWidgets.QPushButton)
+                title = reduction.workflow_hint_title
+                status = reduction.workflow_status_label
+                icon = reduction.workflow_context_icon
+                margins = card.layout().contentsMargins()
+                assert margins.top() == margins.bottom()
+                assert card.height() <= max(20, title.sizeHint().height()) + 42
                 previous_right = None
-                for button in buttons:
-                    origin = button.mapTo(card, QtCore.QPoint())
-                    assert origin.x() >= 19  # 7 px shadow + 12 px inner padding
-                    assert button.width() <= button.sizeHint().width() + 1
-                    assert origin.y() + button.height() <= card.height() - 19
+                for widget in (icon, title, status):
+                    origin = widget.mapTo(card, QtCore.QPoint())
+                    assert origin.x() >= 19
+                    assert origin.y() >= 14
+                    assert origin.y() + widget.height() <= card.height() - 14
+                    assert origin.x() + widget.width() <= card.width() - 19
                     if previous_right is not None:
                         assert origin.x() - previous_right >= 8
-                    previous_right = origin.x() + button.width()
-                status = reduction.workflow_status_label
-                status_origin = status.mapTo(card, QtCore.QPoint())
-                assert status_origin.x() - previous_right >= 10
-                assert status_origin.x() + status.width() <= card.width() - 19
+                    previous_right = origin.x() + widget.width()
                 assert status.alignment() & QtCore.Qt.AlignmentFlag.AlignRight
-                body = reduction.workflow_hint_body
-                assert body.isVisibleTo(shell) and body.text()
-                assert body.height() >= body.minimumSizeHint().height()
+                assert reduction.workflow_hint_body.parentWidget() is reduction.step_actions_block
+                assert reduction.workflow_hint_body.toolTip() == card.toolTip()
+                assert reduction.workflow_hint_body.text()
                 for button in reduction.plot_mode_buttons.values():
                     assert button.fontMetrics().horizontalAdvance(button.text()) <= button.width() - 8
                 if width == 1280:

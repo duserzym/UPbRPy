@@ -51,6 +51,7 @@ from GUI.services import (
     selection_quality,
     spot_base_name,
     update_selection_region,
+    unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
@@ -67,6 +68,7 @@ from GUI.widgets import (
     SpotTree,
     StyledComboBox,
     TracePlotWidget,
+    WrappingButton,
     SegmentButton,
     SegmentedBar,
     make_list_item,
@@ -343,12 +345,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         workflow_menu.addSeparator()
         previous_step = workflow_menu.addAction("Previous Step")
-        previous_step.setShortcut(QtGui.QKeySequence("Ctrl+["))
+        previous_step.setShortcuts([
+            QtGui.QKeySequence("Ctrl+["), QtGui.QKeySequence("Ctrl+Left"),
+        ])
+        self.step_back_action = previous_step
         previous_step.triggered.connect(
             lambda: self.go_to_workflow_step(-1)
         )
         next_step = workflow_menu.addAction("Next Step")
-        next_step.setShortcut(QtGui.QKeySequence("Ctrl+]"))
+        next_step.setShortcuts([
+            QtGui.QKeySequence("Ctrl+]"), QtGui.QKeySequence("Ctrl+Right"),
+        ])
+        self.step_next_action = next_step
         next_step.triggered.connect(lambda: self.go_to_workflow_step(1))
         run_step = workflow_menu.addAction("Run Primary Action for This Step")
         run_step.setShortcut(QtGui.QKeySequence("Ctrl+Return"))
@@ -504,29 +512,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_workspace_panel_visible("inspector", True)
 
     def go_to_workflow_step(self, offset: int) -> None:
-        """Move to the next selectable workflow stage."""
-        if not hasattr(self, "workflow_step_list"):
+        """Move by one row when the destination stage is unlocked."""
+        if not hasattr(self, "workflow_step_list") or self._active_worker is not None:
             return
+        self._sync_workflow_step_locks()
         row = self.workflow_step_list.currentRow()
-        candidate = max(
-            0,
-            min(self.workflow_step_list.count() - 1, row + offset),
-        )
-        while candidate != row:
+        candidate = row + offset
+        if 0 <= candidate < self.workflow_step_list.count():
             item = self.workflow_step_list.item(candidate)
-            if item is not None and (
-                item.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled
-            ):
+            if item.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled:
                 self.workflow_step_list.setCurrentRow(candidate)
-                return
-            candidate += 1 if offset > 0 else -1
-            if candidate < 0 or candidate >= self.workflow_step_list.count():
-                return
 
     def run_current_workflow_action(self) -> None:
         """Run the primary action attached to the selected workflow stage."""
         actions = self._workflow_action_specs()
-        if actions:
+        if actions and self._active_worker is None:
             actions[0][1]()
 
     def show_pipeline_guide(self) -> None:
@@ -696,6 +696,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # when the mouse was released.
         self.workspace_splitter.setOpaqueResize(True)
         self.sidebar_panel = self._build_workflow_rail()
+        self.sidebar_panel.installEventFilter(self)
         self.main_panel = self._build_main_column()
         self.inspector_panel = self._build_inspector()
         self.workspace_splitter.addWidget(self.sidebar_panel)
@@ -898,6 +899,13 @@ class MainWindow(QtWidgets.QMainWindow):
         action.setChecked(visible)
         action.blockSignals(False)
 
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is getattr(self, "sidebar_panel", None) and event.type() == QtCore.QEvent.Type.Resize:
+            QtCore.QTimer.singleShot(
+                0, self, lambda: self.adapt_workflow_rail_height(self.height()),
+            )
+        return super().eventFilter(watched, event)
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         """Adapt panel widths and vertical density for laptop viewports."""
         super().resizeEvent(event)
@@ -913,16 +921,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.apply_header_density(event.size().height())
         if hasattr(self, "workflow_step_list"):
             self.adapt_workflow_rail_height(event.size().height())
-        if hasattr(self, "workflow_context_bar"):
-            # Keep the previous compact fallback below the supported laptop
-            # widths; the full explanation remains in the card's tooltip.
-            compact_context = event.size().width() < 1280
-            self.workflow_hint_body.setVisible(not compact_context)
-            self.workflow_context_bar.setFixedHeight(66 if compact_context else 116)
-            context_layout = self.workflow_context_bar.layout()
-            inset = 0 if compact_context else 14
-            context_layout.setContentsMargins(20, inset, 20, inset)
-            context_layout.setSpacing(0 if compact_context else 8)
         # Keep the nine stage labels readable on laptops, including when a
         # wider inspector was restored or the shell shrinks from 1440 px.
         # Below laptop size retain user widths and allow the existing scrolls.
@@ -946,12 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header_card.setMaximumHeight(68 if compact else 96)
 
     def adapt_workflow_rail_height(self, height: int) -> None:
-        """Keep every workflow stage visible on short displays.
-
-        Below 940 px (a 14-inch laptop) the auto-pick controls fold behind
-        the "Auto-pick settings" toggle instead of pushing the stage list
-        into a scroll area; the reference library stays in the File menu.
-        """
+        """Fold optional rail content before reducing the ten stage rows."""
         compact = height < 940
         very_compact = height < 700
         toggle = self.autopick_settings_toggle
@@ -965,13 +958,97 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plateau_width_control.setVisible(show_autopick)
         self.plateau_filter_combo.setVisible(show_autopick)
         self.autopick_controls_scroll.setVisible(show_autopick)
-        self.reference_library_button.setVisible(not compact)
         self.workflow_combo.setVisible(not very_compact)
-        item_height = 31 if compact else 40
-        for index in range(self.workflow_step_list.count()):
-            item = self.workflow_step_list.item(index)
-            if item is not None:
-                item.setSizeHint(QtCore.QSize(0, item_height))
+        # Collapse optional copy before tightening rows. The rail may live in
+        # a tabbed Studio shell, so use its actual height rather than the screen.
+        rail = self.workflow_step_list.parentWidget()
+        layout = rail.layout()
+        available = rail.height()
+        count = self.workflow_step_list.count()
+        self.workflow_hint_body.setVisible(True)
+        self.reference_library_button.setVisible(True)
+        self.workflow_section_label.setVisible(True)
+        self.workflow_step_list.setSpacing(1)
+        layout.setSpacing(6)
+
+        margins = layout.contentsMargins()
+        width = max(80, rail.contentsRect().width() - margins.left() - margins.right())
+        for button in (self.step_primary_button, *self.step_secondary_buttons):
+            if button is not None:
+                button.ensurePolished()
+                button.setFixedHeight(button.heightForWidth(width))
+        self.step_buttons_layout.invalidate()
+        hint = self.workflow_hint_body
+        hint.ensurePolished()
+        metrics = hint.fontMetrics()
+        max_hint_height = 2 * metrics.lineSpacing()  # the full hint is in the tooltip
+        hint.setMaximumHeight(max_hint_height)
+        words = hint.toolTip().split()
+        shortened = False
+        while words:
+            text = " ".join(words) + ("…" if shortened else "")
+            bounds = metrics.boundingRect(
+                QtCore.QRect(0, 0, width, 1000), QtCore.Qt.TextFlag.TextWordWrap, text,
+            )
+            if bounds.height() <= max_hint_height:
+                break
+            words.pop()
+            shortened = True
+        hint.setText(" ".join(words) + ("…" if shortened else ""))
+
+        def required(item_height):
+            # Measure each visible item so the list's previous minimum does
+            # not affect the budget for the new row density.
+            self.step_actions_block.layout().invalidate()
+            self.step_actions_block.updateGeometry()
+            layout.invalidate()
+            margins = layout.contentsMargins()
+            shadow = rail.contentsMargins()
+            total = margins.top() + margins.bottom() + shadow.top() + shadow.bottom()
+            visible = 0
+            for index in range(layout.count()):
+                item = layout.itemAt(index)
+                if item.isEmpty():
+                    continue
+                visible += 1
+                if item.widget() is self.workflow_step_list:
+                    total += count * (item_height + 2 * self.workflow_step_list.spacing())
+                elif item.hasHeightForWidth():
+                    # Wrapped labels (the step hint) are taller at the rail's
+                    # real width than their width-free size hint suggests.
+                    total += max(item.sizeHint().height(), item.heightForWidth(width))
+                else:
+                    total += item.sizeHint().height()
+            return total + max(0, visible - 1) * layout.spacing()
+
+        # Order of folding on short rails: the Reference library button (also
+        # in the File menu), the roomy 40 px rows, the step hint (also in the
+        # band's tooltip), denser rows, then the section label. The stage
+        # actions, Back/Next and the project buttons always stay.
+        item_height = 40
+        if required(item_height) > available:
+            self.reference_library_button.hide()
+        if required(item_height) > available:
+            item_height = 31
+        if required(item_height) > available:
+            self.workflow_hint_body.hide()
+        for density in (27, 24, 22):
+            if required(item_height) <= available:
+                break
+            item_height = density
+            self.workflow_step_list.setSpacing(0)
+            layout.setSpacing(4)
+        if required(item_height) > available:
+            self.workflow_section_label.hide()
+        icon_size = 20 if item_height < 31 else 24
+        self.workflow_step_list.setIconSize(QtCore.QSize(icon_size, icon_size))
+        for index in range(count):
+            self.workflow_step_list.item(index).setSizeHint(QtCore.QSize(0, item_height))
+        # Exactly the rows' height: spare rail height goes below the
+        # "This step" block, which stays directly under step 10.
+        list_height = count * (item_height + 2 * self.workflow_step_list.spacing())
+        self.workflow_step_list.setMinimumHeight(list_height)
+        self.workflow_step_list.setMaximumHeight(list_height)
 
     def _build_workflow_rail(self) -> QtWidgets.QWidget:
         """Build the always-readable icon rail for ordered reduction stages."""
@@ -1192,6 +1269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.repick_all_spots_button)
 
         section_label = QtWidgets.QLabel("Reduction workflow")
+        self.workflow_section_label = section_label
         section_label.setObjectName("SectionTitle")
         layout.addWidget(section_label)
 
@@ -1212,7 +1290,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_step_list.currentRowChanged.connect(
             self.on_workflow_step_changed
         )
-        layout.addWidget(self.workflow_step_list, 1)
+        layout.addWidget(self.workflow_step_list)
+
+        layout.addWidget(self._build_step_actions_block())
+        layout.addStretch(1)
 
         self.database_origin_label = ElidedLabel()
         self.database_origin_label.setObjectName("DatabaseOrigin")
@@ -1268,78 +1349,65 @@ class MainWindow(QtWidgets.QMainWindow):
         self._workflow_info_btn.setVisible(False)
         return frame
 
+    def _build_step_actions_block(self) -> QtWidgets.QWidget:
+        """Keep stage actions and sequential navigation below the stage list."""
+        self.step_actions_block = QtWidgets.QWidget()
+        self.step_actions_block.setObjectName("StepActionsBlock")
+        layout = QtWidgets.QVBoxLayout(self.step_actions_block)
+        # A little air before the project buttons keeps the two groups apart.
+        layout.setContentsMargins(0, 4, 0, 6)
+        layout.setSpacing(4)
+        title = QtWidgets.QLabel("This step")
+        title.setObjectName("SectionTitle")
+        layout.addWidget(title)
+        self.workflow_hint_body = QtWidgets.QLabel()
+        self.workflow_hint_body.setObjectName("PanelBody")
+        self.workflow_hint_body.setWordWrap(True)
+        self.workflow_hint_body.setMinimumWidth(0)
+        self.workflow_hint_body.setMaximumHeight(2 * self.workflow_hint_body.fontMetrics().lineSpacing())
+        layout.addWidget(self.workflow_hint_body)
+        self.step_buttons_layout = QtWidgets.QVBoxLayout()
+        self.step_buttons_layout.setSpacing(3)
+        layout.addLayout(self.step_buttons_layout)
+        self.step_primary_button = None
+        self.step_secondary_buttons = []
+        navigation = QtWidgets.QHBoxLayout()
+        navigation.setSpacing(4)
+        self.step_back_button = QtWidgets.QPushButton("‹ Back")
+        self.step_next_button = QtWidgets.QPushButton("Next ›")
+        for button, offset in ((self.step_back_button, -1), (self.step_next_button, 1)):
+            button.setStyleSheet("padding: 4px 6px;")
+            button.clicked.connect(lambda _checked=False, delta=offset: self.go_to_workflow_step(delta))
+            navigation.addWidget(button, 1)
+        layout.addLayout(navigation)
+        return self.step_actions_block
+
     def _build_workflow_context_bar(self) -> QtWidgets.QWidget:
-        """Show the selected stage explanation and actions beside the plot."""
+        """Show a single-line stage title and compact selection status."""
         card = NeumorphicFrame()
         card.setObjectName("WorkflowContextBar")
         self.workflow_context_bar = card
-        card.setFixedHeight(116)
-        card_layout = QtWidgets.QVBoxLayout(card)
-        # The painted glass starts 7 px inside the shadow bounds.
-        card_layout.setContentsMargins(20, 14, 20, 14)
-        card_layout.setSpacing(8)
-        heading_row = QtWidgets.QHBoxLayout()
-        heading_row.setSpacing(8)
-        card_layout.addLayout(heading_row)
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.setSpacing(10)
-        card_layout.addLayout(action_row)
-
+        card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        layout = QtWidgets.QHBoxLayout(card)
+        # Seven pixels of shadow, then the same inner inset as other cards.
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(8)
         self.workflow_context_icon = QtWidgets.QLabel()
         self.workflow_context_icon.setFixedSize(20, 20)
-        self.workflow_context_icon.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignCenter
-        )
-        heading_row.addWidget(self.workflow_context_icon)
-
-        copy_layout = QtWidgets.QVBoxLayout()
-        copy_layout.setSpacing(2)
+        self.workflow_context_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.workflow_context_icon)
         self.workflow_hint_title = ElidedLabel()
         self.workflow_hint_title.setObjectName("WorkflowContextTitle")
         self.workflow_hint_title.setMinimumWidth(0)
-        self.workflow_hint_title.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        self.workflow_hint_body = ElidedLabel()
-        self.workflow_hint_body.setObjectName("PanelBody")
-        self.workflow_hint_body.setWordWrap(False)
-        self.workflow_hint_body.setMinimumWidth(0)
-        self.workflow_hint_body.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        copy_layout.addWidget(self.workflow_hint_title)
-        copy_layout.addWidget(self.workflow_hint_body)
-        heading_row.addLayout(copy_layout, 1)
-
-        actions_card = QtWidgets.QFrame()
-        actions_card.setObjectName("WorkflowActionsInline")
-        actions_card.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Maximum,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        self.workflow_actions_card = actions_card
-        self.workflow_actions_layout = QtWidgets.QHBoxLayout(actions_card)
-        self.workflow_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.workflow_actions_layout.setSpacing(8)
-        action_row.addWidget(actions_card)
-
+        layout.addWidget(self.workflow_hint_title, 3)
         self.workflow_status_label = ElidedLabel()
         self.workflow_status_label.setObjectName("WorkflowStatusCompact")
-        self.workflow_status_label.setWordWrap(False)
         self.workflow_status_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        self.workflow_status_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        self.workflow_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.workflow_status_label.setMinimumWidth(0)
-        self.workflow_status_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        action_row.addWidget(self.workflow_status_label, 1)
+        layout.addWidget(self.workflow_status_label, 2)
         return card
 
     def _build_main_column(self) -> QtWidgets.QWidget:
@@ -2818,7 +2886,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reference_library_path = current_standard_archive_path()
         self.settings.setValue("reference_library_path", self.reference_library_path)
         self._update_reference_library_labels()
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self.append_log(f"Loaded reference material library: {self.reference_library_path}")
         self.statusBar().showMessage(f"Reference material library loaded from {Path(self.reference_library_path).name}")
         self.refresh_view()
@@ -2933,6 +3001,7 @@ class MainWindow(QtWidgets.QMainWindow):
             signal=regions.get("signal"),
         )
         self.pending_region_updates.clear()
+        self._refresh_workflow_status()
         self.append_log(
             f"Applied pending selection edits for {spot_name} before save."
         )
@@ -3689,8 +3758,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _resize_workflow_step_list_to_contents(self) -> None:
         if self.workflow_step_list.objectName() == "WorkflowStepRail":
-            # The rail's step list scrolls; 140 px keeps four steps in view
-            # while the rail still fits a 14-inch laptop's height.
+            # The responsive rail assigns the height of all ten rows after
+            # measuring the current stage's actions and optional controls.
             self.workflow_step_list.setMinimumHeight(140)
             self.workflow_step_list.setMaximumHeight(16777215)
             return
@@ -3777,7 +3846,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.secondary_standards = (
                 self.workflow_preset.secondary_standards
             )
-            clear_reduction_cache(self.session)
+            self._clear_reduction_cache()
             ensure_shared_pipeline(self.session, self.workflow_preset)
             self._sync_fit_controls()
             self.detector_calibration_panel.set_session(self.session)
@@ -3800,7 +3869,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     if self.selection_method == "excel_expanding_sigma"
                     else 5.0,
                 )
-            clear_reduction_cache(self.session)
+            self._clear_reduction_cache()
         self._sync_selection_parameter_controls()
         label = selection_method_label(self.selection_method)
         self.statusBar().showMessage(f"Baseline / peak auto-pick set to {label}.")
@@ -3812,7 +3881,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_populating or not self.session.loaded:
             return
         self.session.import_settings["threshold"] = float(value) / 100.0
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self.statusBar().showMessage(
             "Signal threshold updated; use Re-pick all spots to apply it."
         )
@@ -3823,7 +3892,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_populating or not self.session.loaded:
             return
         self.session.import_settings["filter_percentile"] = float(value)
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self.statusBar().showMessage(
             "Signal reference percentile updated; use Re-pick all spots to apply it."
         )
@@ -3840,7 +3909,7 @@ class MainWindow(QtWidgets.QMainWindow):
             selection_options = {}
             self.session.import_settings["selection_options"] = selection_options
         selection_options["sigma_threshold"] = float(value)
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self.statusBar().showMessage(
             "Onset sigma updated; use Re-pick all spots to apply it."
         )
@@ -3879,7 +3948,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Plateau width restored to the workflow auto rule for the "
                 "next session-wide re-pick."
             )
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self.statusBar().showMessage(message)
         self.append_log(message)
         self.update_project_window_title()
@@ -3899,7 +3968,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session.experiment.loc[row_mask, "plateau_filter_channel"] = (
             self.current_stats_channel()
         )
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         if self.session.pipeline is not None:
             self.session.pipeline.update_experiment(self.session.experiment)
         self.append_log(
@@ -4212,7 +4281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if spot_name in self.session.spot_names:
             self.session.spot_names = [s for s in self.session.spot_names if s != spot_name]
         self._spot_folder_overrides.pop(spot_name, None)
-        clear_reduction_cache(self.session)
+        self._clear_reduction_cache()
         self._populate_spot_tree()
         self.refresh_view()
 
@@ -4836,29 +4905,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_engine_label.setText(summary["engine"])
 
     def _rebuild_workflow_actions(self) -> None:
-        while self.workflow_actions_layout.count():
-            item = self.workflow_actions_layout.takeAt(0)
-            widget = item.widget()
+        while self.step_buttons_layout.count():
+            widget = self.step_buttons_layout.takeAt(0).widget()
             if widget is not None:
-                # Hide and detach now: deleteLater alone left the previous
-                # stage's button painted behind the new ones.
                 widget.hide()
                 widget.setParent(None)
                 widget.deleteLater()
-
-        for index, (label, handler, accent) in enumerate(self._workflow_action_specs()):
-            button = QtWidgets.QPushButton(label)
-            button.setMinimumHeight(30)
-            button.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Fixed,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            if accent:
-                button.setProperty("accent", True)
+        self.step_primary_button = None
+        self.step_secondary_buttons = []
+        for index, (label, handler, _accent) in enumerate(self._workflow_action_specs()):
+            button = WrappingButton(label)
+            if index == 0:
+                button.setStyleSheet("padding: 6px; font-size: 11px;")
+                self.step_primary_button = button
+                button.setObjectName("StepPrimaryButton")
+            else:
+                # A plain small pill: the borderless tertiary style read as a
+                # caption rather than a button in the narrow rail.
+                button.setStyleSheet("padding: 3px 6px; font-size: 11px;")
+                self.step_secondary_buttons.append(button)
             button.clicked.connect(handler)
-            self.workflow_actions_layout.addWidget(button)
-            if index >= 1:
-                break
+            self.step_buttons_layout.addWidget(button)
+            button.show()
+        self._sync_workflow_step_locks()
+        self.adapt_workflow_rail_height(self.height())
+
+    def _sync_step_navigation(self, unlocked: list[bool]) -> None:
+        row = self.workflow_step_list.currentRow()
+        next_row = row + 1
+        has_next = 0 <= row and next_row < len(unlocked)
+        ready = has_next and unlocked[next_row]
+        self.step_back_button.setEnabled(row > 0)
+        self.step_back_action.setEnabled(row > 0 and self._active_worker is None)
+        self.step_next_button.setEnabled(ready)
+        self.step_next_action.setEnabled(ready and self._active_worker is None)
+        if not has_next:
+            tooltip = "This is the last step."
+        elif ready:
+            tooltip = f"Go to {next_row + 1} {WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]}"
+        else:
+            label = self._workflow_action_specs()[0][0]
+            target = WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]
+            tooltip = f"Run '{label}' first to unlock {next_row + 1} {target}"
+        self.step_next_button.setToolTip(tooltip)
+        self.step_back_button.setToolTip("Go to the previous step" if row > 0 else "This is the first step.")
+        for button, accent in ((self.step_primary_button, not ready), (self.step_next_button, ready)):
+            if button is not None and button.property("accent") != accent:
+                button.setProperty("accent", accent)
+                button.style().unpolish(button)
+                button.style().polish(button)
+                button.update()
 
     def _workflow_action_specs(self) -> list[tuple[str, object, bool]]:
         if not self.session.loaded:
@@ -4967,17 +5063,16 @@ class MainWindow(QtWidgets.QMainWindow):
         done_color = QtGui.QColor(theme.success) if (theme and hasattr(theme, "success")) else QtGui.QColor("#19a188")
         accent_color = QtGui.QColor(theme.accent) if (theme and hasattr(theme, "accent")) else QtGui.QColor("#69e2ff")
 
+        unlocked_rows = unlocked_workflow_rows(
+            self.workflow_preset.stage_sequence, completed, self.session.loaded,
+        )
         for index in range(self.workflow_step_list.count()):
             item = self.workflow_step_list.item(index)
             if index >= len(self.workflow_preset.stage_sequence):
                 continue
             stage = self.workflow_preset.stage_sequence[index]
             is_done = stage in completed
-            if index == 0:
-                unlocked = True
-            else:
-                previous_stage = self.workflow_preset.stage_sequence[index - 1]
-                unlocked = self.session.loaded and previous_stage in completed
+            unlocked = unlocked_rows[index]
 
             if not unlocked:
                 color = muted_color
@@ -5014,8 +5109,12 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
             item.setForeground(color)
+        self._sync_step_navigation(unlocked_rows)
 
-
+    def _clear_reduction_cache(self) -> None:
+        """Invalidate calculated stages and immediately refresh navigation."""
+        clear_reduction_cache(self.session)
+        self._sync_workflow_step_locks()
 
     def _compose_notes(self, selected_spot: str | None) -> str:
         notes = build_notes(self.session, selected_spot, self.workflow_preset, self.current_workflow_step_title())
@@ -5077,7 +5176,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_worker = worker
         self._busy_label = label
         self.busy_progress.setVisible(True)
-        self.workflow_actions_card.setEnabled(False)
+        self.step_actions_block.setEnabled(False)
+        self.step_back_action.setEnabled(False)
+        self.step_next_action.setEnabled(False)
         self.workflow_step_list.setEnabled(False)
         self.fit_card.setEnabled(False)
         self.standards_card.setEnabled(False)
@@ -5091,9 +5192,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.export_results_button.setEnabled(False)
         self.statusBar().showMessage(f"{label}…")
 
+        succeeded = False
+
         def report_success(result: object) -> None:
+            nonlocal succeeded
             try:
                 on_success(result)
+                succeeded = True
             except Exception as exc:
                 self._handle_action_error(f"{label} display failed", exc)
 
@@ -5106,7 +5211,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_worker = None
             self._busy_label = ""
             self.busy_progress.setVisible(False)
-            self.workflow_actions_card.setEnabled(True)
+            self.step_actions_block.setEnabled(True)
             self.workflow_step_list.setEnabled(True)
             self.fit_card.setEnabled(True)
             self.standards_card.setEnabled(True)
@@ -5120,6 +5225,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.repick_all_spots_button.setEnabled(self.session.loaded)
             self.save_project_button.setEnabled(self.session.loaded)
             self.export_results_button.setEnabled(self.session.loaded)
+            self._refresh_workflow_status()
+            if not succeeded:
+                self.statusBar().showMessage(f"{label} failed")
+            elif self.statusBar().currentMessage() in ("", f"{label}…") or self.statusBar().currentMessage().startswith("Please wait for "):
+                self.statusBar().showMessage(f"{label} done")
 
         worker.signals.succeeded.connect(report_success)
         worker.signals.failed.connect(report_failure)

@@ -226,14 +226,31 @@ and concentration-export conventions.
 
 The interface shows a compact icon-and-label workflow rail, plots, and the
 spot/isotope inspector together on large displays. The complete ordered
-sequence fits without scrolling on normal screens, while the selected step's
-explanation and actions appear above the plot. Side panels collapse on smaller
+sequence fits without scrolling on normal screens. The line above the plot
+names the selected step and the compact selection status. Below step 10 in
+the rail, **This step** holds the step's primary action (for example
+*Calibrate and calculate concentrations*), its secondary actions, and a
+**Back / Next** pair. A step unlocks once the previous step's stage has run;
+until then **Next** is disabled and its tooltip names the action to run first.
+After the primary action finishes, **Next** becomes the highlighted button.
+**Ctrl+→** and **Ctrl+←** (also **Ctrl+]** and **Ctrl+[**; ⌘ on macOS) move
+between steps, and **Ctrl+Return** runs the primary action. The status bar
+reports when a background stage is done or has failed.
+
+<img src="./docs/screenshots/studio_steps_05_concentrations_1280x800.png" alt="Studio at 1280 × 800 after calibrating concentrations: This step block in the left rail with Next highlighted" width="640">
+
+Screenshots of the steps on the Boise zircon_04Nov26 session (245 spots; a
+time-drift detector calibration at 1280 × 800) are in
+`docs/screenshots/studio_steps_*.png`.
+
+Side panels collapse on smaller
 monitors and can be restored from the View menu. File, Workflow, Calibration,
 Results, View, and Help menus expose the same operations without depending on
 panel visibility.
 On a laptop (tested at 1440 × 900 and 1280 × 800 points) the header becomes
 one line, the auto-pick settings fold behind a toggle in the workflow rail,
-the notes and activity log start hidden (**View → Reduction Notes and
+the step hint under **This step** folds before any button does (it stays in
+the tooltip), the notes and activity log start hidden (**View → Reduction Notes and
 Activity Log**, Ctrl+Shift+L), and long labels shorten with "…" rather than
 widening the window. The window size and every panel width are remembered;
 **View → Reset Layout** fits the default layout to the current screen.

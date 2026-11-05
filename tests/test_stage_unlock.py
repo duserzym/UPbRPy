@@ -18,10 +18,9 @@ PRESET = get_workflow_preset("zircon")
 def step_unlocked(session, stage):
     """Apply Studio's previous-stage rule using the preset's actual order."""
     index = PRESET.stage_sequence.index(stage)
-    return index == 0 or (
-        session.loaded
-        and PRESET.stage_sequence[index - 1] in session.pipeline.cache.stages()
-    )
+    return services.unlocked_workflow_rows(
+        PRESET.stage_sequence, session.pipeline.cache.stages(), session.loaded,
+    )[index]
 
 
 def assert_retained(pipeline, before):

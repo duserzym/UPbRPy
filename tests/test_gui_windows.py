@@ -106,7 +106,12 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
     assert window.spot_channel_splitter.count() == 2
     assert min(window.spot_channel_splitter.sizes()) >= 180
     assert window.header_card.height() <= 96
-    assert window.workflow_context_bar.height() <= 66
+    assert window.workflow_context_bar.height() <= max(
+        20, window.workflow_hint_title.sizeHint().height()
+    ) + 42
+    assert not window.workflow_context_bar.findChildren(QtWidgets.QPushButton)
+    assert window.step_actions_block.isVisible()
+    assert window.step_primary_button.isVisible()
     assert window.session_overview_plot.height() == 115
     assert window.save_project_button.text() == "Save project"
     assert window.export_results_button.text() == "Export results…"

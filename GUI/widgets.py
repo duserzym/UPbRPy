@@ -80,6 +80,58 @@ class _PillLineLabel(pg.InfLineLabel):
         painter.drawRoundedRect(rect, rect.height()/2, rect.height()/2)
 
 
+class WrappingButton(QtWidgets.QPushButton):
+    """A native push button that paints its full label on wrapped lines."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.setToolTip(text)
+        self.setAccessibleName(text)
+
+    def _text_rect(self, width: int, height: int) -> QtCore.QRect:
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        option.rect = QtCore.QRect(0, 0, width, height)
+        return self.style().subElementRect(
+            QtWidgets.QStyle.SubElement.SE_PushButtonContents, option, self,
+        )
+
+    def heightForWidth(self, width: int) -> int:
+        rect = self._text_rect(max(width, 40), 1000)
+        text_height = self.fontMetrics().boundingRect(
+            QtCore.QRect(0, 0, max(1, rect.width()), 1000),
+            QtCore.Qt.TextFlag.TextWordWrap, self.text(),
+        ).height()
+        return text_height + 1000 - rect.height() + 2
+
+    def sizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(160, self.heightForWidth(max(160, self.width())))
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(80, self.heightForWidth(max(80, self.width())))
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.setFixedHeight(self.heightForWidth(event.size().width()))
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        option = QtWidgets.QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, option)
+        painter.drawItemText(
+            self._text_rect(self.width(), self.height()),
+            QtCore.Qt.AlignmentFlag.AlignCenter | QtCore.Qt.TextFlag.TextWordWrap,
+            option.palette, self.isEnabled(), self.text(),
+            QtGui.QPalette.ColorRole.ButtonText,
+        )
+
+
 class SegmentButton(QtWidgets.QToolButton):
     """A segment whose full title stays in its tooltip when space is tight."""
 

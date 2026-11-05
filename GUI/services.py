@@ -960,6 +960,15 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
     )
 
 
+def unlocked_workflow_rows(stage_sequence, completed, loaded) -> list[bool]:
+    """Unlock the first row and rows whose preceding stage is complete."""
+    completed = set(completed)
+    return [
+        index == 0 or bool(loaded and stage_sequence[index - 1] in completed)
+        for index in range(len(stage_sequence))
+    ]
+
+
 def clear_reduction_cache(session: ReductionSession) -> None:
     """Discard calculated products while preserving import and selections."""
     session.reduction_cache.clear()
