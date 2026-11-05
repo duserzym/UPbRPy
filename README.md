@@ -291,8 +291,17 @@ and sample aliases from it (explicit arguments still win).
 Run the tests as if the extra were absent, in an environment that has it:
 
 ```bash
-UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen python -m pytest tests -q
+UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -q -p no:cacheprovider
 ```
+
+To regenerate the Qtegra fixture on the laptop, run
+`.venv/bin/python scripts/make_qtegra_fixture.py "/path/to/LAICPMS_data"`
+against the folder containing `Zircon_demo_Rich.csv`,
+`Zircon_demo_UPbR.csv`, and `zircon_04Nov26/`. The defaults
+copy the first 12 acquisitions and 9 of 29 channels into
+`tests/fixtures/qtegra/Zircon_04Nov26_slice/`; `-n`, `--channels` (or
+`--channels all`), and `--out` override the slice and destination. Cell text,
+BOMs and CRLF line endings are preserved; the full exports stay off git.
 
 #### Building the desktop application
 
@@ -330,8 +339,88 @@ macOS arm64 and Windows x86-64 on version tags or manual dispatch. Release
 signing and Apple notarization are intentionally separate because they require
 maintainer certificates and repository secrets.
 
-### Input file format
-This data reduction engine takes individual laser spot analysis file from a single experiment session exported from Qtegra software. Go to `Export data` -> Select exprter: `Laser Data Reduction Export` -> Select all available analytes -> Export.
+### Qtegra exports
+
+UPbRPy accepts a Rich single CSV, a per-spot folder, or a UPbR single CSV.
+The **Rich CSV is the canonical acquisition record**; the per-spot folder
+supplies companion metadata. Opening a folder holding a Rich file and its
+per-spot files (in the same folder or one immediate subfolder) merges them
+by label after checking Y values and sweep times. A UPbR file beside Rich is
+ignored with a warning.
+
+| Exported information | Rich single CSV | Per-spot folder | UPbR single CSV |
+| --- | --- | --- | --- |
+| Analog and pulse-counter readings | Yes | No | No |
+| Per-channel sweep time | Yes | First channel's time only | No |
+| Acquisition start / stop times | Both | Start only | Neither |
+| Channel mass | Yes | No | No |
+| Dwell time / xcal factor | No / recoverable on saturated sweeps | Both | Neither |
+| Instrument state (tune settings, readbacks) | Yes | Yes | No |
+| Sample-list fields | Yes | No | No |
+
+All three contain Y (cps used for reduction). UPbR contains only Y: sweep
+time is reconstructed as sweep index × `cycle_time_s` (default **0.4255 s**,
+the Boise session's median spacing), with acquisitions placed back to back.
+Pass `cycle_time_s` to override it. `QtegraSession.times_reconstructed` and
+`experiment.attrs["qtegra"]["times_reconstructed"]` flag this, and experiment
+import emits a `UserWarning`; calendar start times remain unknown.
+
+```python
+from UPbRPy.io import read_experiment_data
+from UPbRPy.qtegra import open_qtegra
+
+path = "session_Rich.csv"  # or "per_spot/", "session_UPbR.csv", "session/"
+experiment, channels, total_data = read_experiment_data(path)
+session = open_qtegra(path)  # acquisition arrays, metadata and source hashes
+```
+
+In Studio, use **File → Open Experiment Folder** for per-spot or combined
+folders, and **File → Open Qtegra file** for Rich or UPbR CSVs. The session
+badge shows the format, capabilities and warnings; UPbR shows **Sweep times
+reconstructed**. Opening a Rich file directly reads that file alone.
+
+### Detector cross-calibration
+
+Qtegra exports `Y = counter` where the pulse counter is valid, and
+`Y = analog × xcal` where the counter reads `-33` (saturated). Its xcal is
+one tuning-time constant per channel. With Rich analog/counter readings,
+UPbRPy offers three modes through `read_experiment_data(...,
+detector_calibration=...)` or Studio's **Calibration → Detector** panel:
+
+- `qtegra` (default): keep exported Y.
+- `constant`: fit one factor per channel for the session.
+- `drift`: fit per-acquisition slopes at the constant fit's intercept,
+  then smooth over session time with a Gaussian kernel, bandwidth
+  `smoothing_s=1800.0` s and inverse-variance weights.
+
+Both fitted modes use an inclusive overlap window of **1e5 to 2.4e6 counter
+cps** and ordinary least squares of counter on analog with an intercept.
+The basis is `on="all"` (default) or `on="primary_standard"`, with
+`primary_standard` naming the sample. For example,
+`detector_calibration={"mode": "drift", "on": "primary_standard",
+"primary_standard": "S513"}` selects S513. Corrected saturated Y uses
+**analog × factor only**; the intercept is reported but not applied.
+
+Measured on the full `Zircon_demo` session (Boise iCAP RQ,
+245 acquisitions; errors below are one standard error):
+
+| Channel / basis | Session constant | Qtegra factor |
+| --- | --- | --- |
+| 238U, all (4,982 sweeps, 212 acquisitions) | 103,809 ± 136 | 109,642 |
+| 238U, S513 only | 104,178 ± 552 | 109,642 |
+| 29Si, all | 65,044 ± 65 | 65,696 |
+
+The smoothed 238U drift on all acquisitions falls from 103,992 at the start
+to 103,291 after 2.5 h. The applied mode and fit results are recorded in
+`experiment.attrs["detector_calibration"]`, `reduction_manifest.json`, and
+publication-table settings; the choice is kept in
+`PipelineConfig.detector_calibration` and the `.upbr` project.
+
+<img src="./docs/screenshots/studio_rich_detector_drift_1280x800.png" alt="Studio Rich export with detector drift calibration at 1280 × 800" width="800">
+
+See [`docs/qtegra_export_formats.md`](docs/qtegra_export_formats.md) for the
+export contract and [`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md#6-qtegra-input-layer-for-laicpmsdb)
+for the ingest API and storage rules.
 
 ### Bug reports and issue discussions
 I write bugs. And the only way to deal with this is to keep thinking about the functions and keep fixing them. If you find any issues with the code, please let me know. You can do this by submitting an issue on the [Issues](https://github.com/duserzym/UPbRPy/issues) page of this repository. It'd be lovely if you can provide a minimal example that reproduces the bug.

@@ -1,5 +1,25 @@
 # Qtegra input layer: plan and API (2026-11-04)
 
+## Status
+
+Milestones 1–6 implemented on **2026-11-04**. The committed work, identified
+by read-only `git log --oneline -8`, is milestone 1 (contract, plan and
+fixture) `ce5d88e`, milestone 2 (readers) `c67f373`, milestone 3 (experiment
+import) `c211ef1`, milestone 4 (detector calibration) `91afcbe`, and milestone
+5 (Studio) `169878c`. Milestone 6 is this documentation update, not yet
+committed; it has no commit hash.
+
+Open questions and fixture limits:
+
+- Should the applied correction include the fitted intercept, or should the
+  fit pass through the origin? For full-session 238U, the through-origin
+  slope is 105,047 versus 103,809 with an intercept. The implementation
+  currently fits an intercept but applies only the slope.
+- Can the Rich export be configured to include dwell time and xcal?
+- Can the lab keep the LabBook file as the raw archive alongside its CSV
+  exports?
+- The fixture keeps 9 of 29 channels; it does not cover the full channel set.
+
 Goal: UPbRPy and UPbRPy Studio open any of the three Qtegra export formats
 through one acquisition model, with the Rich single CSV as the canonical
 record (`docs/qtegra_export_formats.md`), and offer a within-session detector

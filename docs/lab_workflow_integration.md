@@ -91,3 +91,292 @@ suite still passes with the `[database]` extra absent.
 - A session manifest's `sep` and `[samples]` win over a mineral preset's
   defaults in Studio (explicit project settings still win), and only `raw/*.csv`
   are hashed as inputs.
+
+## 6. Qtegra input layer for laicpmsdb
+
+The UPbRPy input layer is implemented as of 2026-11-04. The laicpmsdb
+`POST /v1/sessions/ingest` endpoint and watcher should import these readers
+rather than maintain another parser. The Rich single CSV is the canonical
+record; a per-spot folder supplies companion metadata, and a UPbR single CSV
+is an accepted Y-only input. The export and storage contract is
+[`qtegra_export_formats.md`](qtegra_export_formats.md), especially
+[Where it lands](qtegra_export_formats.md#where-it-lands). The storage changes
+below describe the laicpmsdb integration contract.
+
+### Reader API: `UPbRPy.qtegra`
+
+These declarations give the current constants, dataclass fields and public
+signatures; method bodies are omitted. `np` is numpy, `Path` is
+`pathlib.Path`, `datetime` is `datetime.datetime`, and `dataclass` and `field`
+come from `dataclasses`.
+
+```python
+CAPABILITIES = frozenset({
+    "timestamps", "stop_times", "per_channel_time", "analog_counter", "mass",
+    "dwell_xcal", "instrument_state", "sequence_fields", "user",
+})
+COUNTER_SATURATED = -33.0
+DEFAULT_CYCLE_TIME_S = 0.4255
+
+@dataclass(frozen=True)
+class Channel:
+    name: str
+    mass: float | None = None
+    dwell_s: float | None = None
+    xcal: float | None = None
+
+@dataclass
+class Acquisition:
+    label: str
+    sequence_index: int
+    channels: tuple[Channel, ...]
+    y: np.ndarray
+    time: np.ndarray | None
+    analog: np.ndarray | None = None
+    counter: np.ndarray | None = None
+    start_text: str | None = None
+    start: datetime | None = None
+    stop_text: str | None = None
+    stop: datetime | None = None
+    tune_name: str | None = None
+    tune_settings: dict[str, float | str] = field(default_factory=dict)
+    readbacks: dict[str, float | str] = field(default_factory=dict)
+    sequence_fields: dict[str, str] = field(default_factory=dict)
+    user: str | None = None
+    spot_number: int | None = None
+    source_path: Path | None = None
+    start_offset_s: float | None = None
+    _data_dtypes: dict[str, str] = field(default_factory=dict, repr=False)
+
+    @property
+    def channel_names(self) -> tuple[str, ...]: ...
+    @property
+    def n_sweeps(self) -> int: ...
+    @property
+    def sweep_time(self) -> np.ndarray | None: ...
+    @property
+    def time_per_channel(self) -> bool: ...
+    def channel_index(self, name) -> int: ...
+
+@dataclass(frozen=True)
+class SourceFile:
+    path: Path
+    sha256: str
+    format: str
+
+@dataclass
+class QtegraSession:
+    acquisitions: list[Acquisition]
+    format: str
+    capabilities: frozenset[str]
+    sources: tuple[SourceFile, ...]
+    software: str | None = None
+    machine: str | None = None
+    pulse_counting_threshold: float | None = None
+    clock_offset_hours: float | None = None
+    clock_offset_seconds_median: float | None = None
+    times_reconstructed: bool = False
+    nominal_cycle_time_s: float | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def channel_names(self) -> tuple[str, ...]: ...
+    @property
+    def labels(self) -> list[str]: ...
+    def acquisition(self, label) -> Acquisition: ...
+    def has(self, capability) -> bool: ...
+
+def read_rich_csv(path) -> QtegraSession: ...
+def read_spot_folder(path) -> QtegraSession: ...
+def read_spot_file(path) -> Acquisition: ...
+def read_upbr_csv(path, *, cycle_time_s: float | None = None,
+                  acquisition_gap_s: float = 0.0) -> QtegraSession: ...
+def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSession: ...
+def recover_xcal(session_or_acquisition) -> dict[str, float]: ...
+def detect_format(path) -> str: ...
+def open_qtegra(path, **kwargs) -> QtegraSession: ...
+```
+
+`y`, `analog` and `counter` have shape `(n_sweeps, n_channels)` in instrument
+channel order; missing cells stay NaN, and counter saturation stays `-33`.
+Rich `time` has the same shape; per-spot and UPbR `time` have shape
+`(n_sweeps,)`. `sweep_time` selects the first channel when time is per
+channel. Trailing sweeps with no Y are dropped; interior missing cells stay
+missing. `_data_dtypes` is internal compatibility metadata for experiment
+tables; ingest need not store it.
+
+Single CSV acquisitions retain sequence order. Per-spot acquisitions are
+sorted by start time, with file-name ties; `sequence_index` is one-based.
+`read_spot_file` returns one acquisition with `sequence_index=0`.
+`SourceFile.format` is `"rich"`, `"spot"` or `"upbr"`; `QtegraSession.format`
+is `"rich"`, `"spot_folder"`, `"upbr"` or `"rich+spot_folder"`. Each source
+has a SHA-256 of the original file bytes.
+
+`detect_format` returns `"rich"`, `"upbr"`, `"spot"`, `"spot_folder"` or
+`"folder"`, or raises `ValueError`. `open_qtegra` reads a file directly;
+for a folder it discovers Rich in that folder and per-spot files there or
+in one immediate companion subfolder. It merges companions by label,
+ignores derived UPbR beside Rich with a warning, and rejects multiple Rich
+files or ambiguous companions. Its only keyword arguments are
+`cycle_time_s` and `acquisition_gap_s`, forwarded for UPbR input.
+
+`merge` returns a new session, validating channel order, Y, NaN masks and
+first-channel times (`rtol=1e-12`, `atol=0`). Every Rich label must have a
+companion; extras produce a warning. It takes dwell/xcal, software, machine
+and pulse-counting threshold from the folder, fills empty Rich instrument
+state dictionaries, and retains both sources. `recover_xcal` returns each
+channel's median `y / analog` on saturated sweeps with finite Y and finite,
+nonzero analog; channels without such sweeps are absent.
+
+### Experiment adapter and detector calibration
+
+Import the adapter from `UPbRPy.io`:
+
+```python
+def experiment_from_session(session, sep="_", sample_aliases=None): ...
+```
+
+It returns `(experiment, element_channels, total_data)` before automatic
+window selection. `experiment` contains `spot_names`, `sample`, `spot_paths`,
+`spot_starting_times` in session seconds, and the six initially empty
+baseline/plateau/signal start/end columns. `total_data` contains `Time` in
+session seconds (using each acquisition's first-channel sweep time), Y
+columns, `spot_name` and `sample`. Samples are the first label component
+split at `sep`, with case-insensitive aliases applied. JSON-safe input
+provenance is in `experiment.attrs["qtegra"]`: `format`, `capabilities`,
+`sources`, `times_reconstructed`, `nominal_cycle_time_s`,
+`clock_offset_hours`, `software`, `machine`, `warnings`.
+
+Import detector calibration from `UPbRPy.calibration`:
+
+```python
+@dataclass
+class ChannelCrossCalibration:
+    channel: str
+    qtegra_factor: float | None
+    factor: float
+    factor_se: float
+    intercept: float
+    intercept_se: float
+    n_points: int
+    n_acquisitions: int
+    times_s: np.ndarray | None = None
+    factors: np.ndarray | None = None
+    factors_se: np.ndarray | None = None
+    raw_factors: np.ndarray | None = None
+    acquisition_labels: list[str] = field(default_factory=list)
+
+    def factor_at(self, t_s) -> np.ndarray: ...
+
+@dataclass
+class CrossCalibration:
+    mode: str
+    on: str
+    window: tuple[float, float]
+    channels: dict[str, ChannelCrossCalibration]
+    primary_standard: str | None = None
+    smoothing_s: float = 1800.0
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict: ...
+
+def fit_cross_calibration(session, channel=None, window=(1e5, 2.4e6),
+                          on="all", mode="constant", *, primary_standard=None,
+                          sep="_", smoothing_s=1800.0) -> CrossCalibration: ...
+def apply_cross_calibration(session, calibration) -> QtegraSession: ...
+```
+
+`channel` is a name, a list of names, or `None` for all eligible channels.
+`mode` is `"qtegra"`, `"constant"` or `"drift"`; `on` is `"all"` or
+`"primary_standard"`. The latter requires `primary_standard` and matches
+the first label component case-insensitively. Constant and drift require
+`analog_counter`; Qtegra mode records exported/recovered factors without
+fitting and applies an unchanged copy.
+
+The constant fit is OLS `counter = factor * analog + intercept`, with
+finite, positive analog and valid counter inside the inclusive window.
+Standard errors use residual variance with `n-2` degrees of freedom. Drift
+fits per-acquisition slopes with at least five overlap points, holding the
+constant fit's intercept fixed (`n-1` degrees of freedom). It smooths them
+with a Gaussian kernel in session seconds, bandwidth `smoothing_s` and
+inverse slope-variance weights. `times_s` are mean overlap-point times;
+drift arrays and `acquisition_labels` are chronological. In drift mode
+`factor` is the inverse-variance weighted mean of the raw slopes;
+`factor_at` interpolates the smoothed factors linearly and holds endpoint
+values outside their time range. Without qualifying drift fits it retains
+the constant fit and records a warning. Errors are one standard error.
+
+`apply_cross_calibration` returns a deep copy, replacing saturated Y with
+`analog * factor_at(session_time)` only for calibrated channels with finite
+analog. The intercept is reported but not applied; other Y cells and source
+measurements are retained. `to_dict()` returns JSON-safe settings, warnings
+and channel diagnostics (including drift arrays in drift mode); unknown or
+nonfinite numbers become `None`.
+
+### Capabilities, clocks and precision
+
+| Session | Capabilities |
+| --- | --- |
+| Rich | `timestamps`, `stop_times`, `per_channel_time`, `analog_counter`, `mass`, `instrument_state`, `sequence_fields`, `user` |
+| Per-spot folder | `timestamps`, `instrument_state`, `dwell_xcal` |
+| UPbR | Empty set |
+| Rich + per-spot folder | Union: all names in `CAPABILITIES` |
+
+Both recorded clocks are naive. Rich start/stop text is ISO 8601 with seven
+fractional digits; parsing truncates to six fractional digits (microseconds)
+while `start_text` and `stop_text` keep the original strings. Per-spot
+`start_text` keeps its `MM/DD/YYYY hh:mm:ss AM/PM` timestamp and
+`sequence_fields["spot_file_start_text"]` keeps the complete first line
+without its terminator, also retained after merge. In this session the
+per-spot clock is 7 h ahead of Rich and has only whole seconds. Merge never
+shifts either clock: `clock_offset_hours` is the median folder-minus-Rich
+offset rounded to the nearest 0.25 h (7.0 here), and
+`clock_offset_seconds_median` stores the unrounded median. Store both
+original texts and use the session's time-zone setting to resolve aware UTC
+instants; never silently reinterpret the clocks.
+
+UPbR has no calendar times: `start`, `start_text`, `stop` and `stop_text`
+remain `None`. Each acquisition's time starts at zero with
+`sweep_index * cycle_time_s` (default `DEFAULT_CYCLE_TIME_S`, 0.4255 s).
+`start_offset_s` places acquisitions back to back in sequence order, adding
+the preceding sweep count × cycle time plus `acquisition_gap_s` (default
+0). `times_reconstructed=True`, `nominal_cycle_time_s` and a session warning
+record this assumption; the experiment adapter emits a `UserWarning`.
+Reconstructed times do not add a `timestamps` capability.
+
+Rich prints Y with 17 significant digits, sufficient to round-trip a
+double; per-spot CSVs print 15. For example, Rich
+`449124.38355127671` becomes `449124.383551277` per spot. Keep Rich precision
+and validate companions with the merge tolerance, not bitwise equality.
+
+### What laicpmsdb should store
+
+- Accept a Rich file, a per-spot folder, or both at ingest and in the
+  watcher. Preserve the Rich CSV as a `RawAsset`, like each per-spot file,
+  with original bytes and source SHA-256; UPbR is a derived view, not the
+  archive export. Keep full analytical files outside this code repository.
+- Extend the Parquet sweep schema with nullable `analog`, `counter` and
+  per-channel `time` columns. Preserve missing values and the counter
+  saturation sentinel; reduction uses `y`.
+- Store `Acquisition.channels` in instrument order with mass, dwell and
+  xcal when known. Keep the session software, machine and pulse-counting
+  threshold, and the two flat dictionaries `tune_settings` and `readbacks`
+  in `instrument_state` (plus the tune name). Empty state values are
+  omitted by the readers.
+- Add acquisition `sequence_fields` JSON (original strings, including
+  empty values) and a session-level `capabilities` list. Retain user,
+  sequence index, original start/stop texts, clock-offset metadata,
+  reconstruction flags and warnings. Labels join acquisitions to samples
+  and spots using the session separator/aliases. Store Rich's
+  `Laser Scan Position Number` as `spot_number` and check it against the
+  trailing label number; the reader warns on a mismatch.
+- Keep detector calibration as reduction provenance alongside raw Y. In
+  UPbRPy the applied record is `experiment.attrs["detector_calibration"]`
+  and the top-level `detector_calibration` in `reduction_manifest.json`;
+  `PipelineConfig.detector_calibration` and the `.upbr` retain the choice,
+  and publication-table settings report the mode and per-channel factors.
+  Store each calibration choice with its reduction run and preserve raw assets.
+
+UPb Studio needs only the file types its shell opens. Bracketeer's
+sample-list columns correspond to Rich's `BrigidMS`/`PMIAnalyteLaser` rows,
+which reconcile the planned sequence with acquired labels.
