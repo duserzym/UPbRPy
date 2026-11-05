@@ -107,7 +107,8 @@ def test_gui_notebook_export_respects_concentration_choices(tmp_path, monkeypatc
     import GUI.main_window as main_window
     app = build_application([], theme_mode='light')
     controller = StudioWindowController(theme_mode='light', app_icon=build_app_icon())
-    window = controller.create_window(show=False)
+    shell = controller.create_window(show=False)
+    window = shell.active_reduction
     pipeline = example_pipeline(tmp_path)
     window.session.pipeline = pipeline
     window.session.directory = str(tmp_path)
@@ -123,7 +124,7 @@ def test_gui_notebook_export_respects_concentration_choices(tmp_path, monkeypatc
         assert 'include_concentrations=False' in source
         assert 'include_depth_concentrations=False' in source
     finally:
-        window.close()
+        shell.close()
         app.processEvents()
 
 

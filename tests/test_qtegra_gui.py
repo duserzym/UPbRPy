@@ -260,10 +260,7 @@ def test_csv_dialog_and_launch_route_to_existing_loader(window, monkeypatch):
     opened = []
     monkeypatch.setattr(window, "load_experiment_directory", lambda path: opened.append(path))
     window.choose_qtegra_file()
-    emitted = []
-    window.open_experiment_in_new_window_requested.connect(emitted.append)
-    window.choose_qtegra_file_in_new_window()
-    assert opened == emitted == [str(RICH)]
+    assert opened == [str(RICH)]
     assert calls[0][-1] == "Qtegra exports (*.csv);;All files (*)"
     target = parse_open_target(RICH)
     assert target.kind == "directory" and target.path == RICH.resolve()

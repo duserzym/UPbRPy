@@ -1,4 +1,4 @@
-"""Optional GUI tests for independent multi-session window management."""
+"""Optional GUI tests for independent reductions within Studio windows."""
 
 from __future__ import annotations
 
@@ -26,14 +26,15 @@ from GUI.widgets import (  # noqa: E402
 
 
 def test_window_controller_keeps_reduction_sessions_independent():
-    """Changing one open reduction must not mutate another window's state."""
+    """Changing one tab must not mutate another reduction's state."""
     application = build_application([], theme_mode="light")
     controller = StudioWindowController(
         theme_mode="light",
         app_icon=build_app_icon(),
     )
-    first = controller.create_window(show=False)
-    second = controller.create_window(show=False)
+    shell = controller.create_window(show=False)
+    first = shell.active_reduction
+    second = shell.add_tab()
 
     first.session.primary_channel = "29Si"
     second.session.primary_channel = "44Ca"
@@ -41,21 +42,23 @@ def test_window_controller_keeps_reduction_sessions_independent():
     assert first.session is not second.session
     assert first.session.primary_channel == "29Si"
     assert second.session.primary_channel == "44Ca"
-    assert len(controller.windows) == 2
+    assert len(controller.windows) == 1
+    assert shell.tabs.count() == 2
 
     action_texts = {
         action.text()
         for action in first.findChildren(QtGui.QAction)
     }
     assert {
-        "New Reduction Window",
-        "Open Project in New Window…",
-        "Open Experiment Folder in New Window…",
-        "Next Reduction Window",
+        "New Tab",
+        "New Window",
+        "Next Tab",
+        "Previous Tab",
+        "Move Tab to New Window",
+        "Close Tab",
     } <= action_texts
 
-    first.close()
-    second.close()
+    shell.close()
     application.sendPostedEvents()
     application.processEvents()
 
@@ -67,9 +70,10 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
         theme_mode="light",
         app_icon=build_app_icon(),
     )
-    window = controller.create_window(show=False)
-    window.resize(1780, 1050)
-    window.show()
+    shell = controller.create_window(show=False)
+    window = shell.active_reduction
+    shell.resize(1780, 1050)
+    shell.show()
     application.processEvents()
 
     assert window.inspector_tabs.count() == 3
@@ -95,7 +99,7 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
     assert wider_right[2] >= 450
     assert all(size > 0 for size in wider_right)
 
-    window.resize(1250, 900)
+    shell.resize(1250, 900)
     application.processEvents()
     assert window.sidebar_panel.isVisible()
     assert window.inspector_panel.isVisible()
@@ -123,7 +127,7 @@ def test_inspector_prioritizes_spot_and_channel_browsing():
     assert channels_view is not None
     assert channels_view.height() >= 250
 
-    window.close()
+    shell.close()
     application.sendPostedEvents()
     application.processEvents()
 
@@ -135,7 +139,8 @@ def test_ratio_estimator_selector_invalidates_fractionation_results():
         theme_mode="light",
         app_icon=build_app_icon(),
     )
-    window = controller.create_window(show=False)
+    shell = controller.create_window(show=False)
+    window = shell.active_reduction
     retained = object()
     window.session.reduction_cache = {
         "baseline_subtracted_total_data": retained,
@@ -156,7 +161,7 @@ def test_ratio_estimator_selector_invalidates_fractionation_results():
     }
     assert "log-ratio" in window.fit_settings_note_label.text().lower()
 
-    window.close()
+    shell.close()
     application.sendPostedEvents()
     application.processEvents()
 

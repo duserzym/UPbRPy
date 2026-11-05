@@ -86,7 +86,7 @@ def clipped_widgets(window) -> list[tuple]:
 
 @pytest.fixture()
 def loaded_window(app, settings_reset, tmp_path, monkeypatch):
-    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
 
     monkeypatch.setattr("UPbRPy.io.auto_select_baseline_peak", lambda experiment, *a, **k: experiment.assign(
         baseline_start_times=0.0, baseline_end_times=4.0,
@@ -95,25 +95,28 @@ def loaded_window(app, settings_reset, tmp_path, monkeypatch):
     ))
     raw = tmp_path / "Apatite_synthetic"
     write_raw_directory(raw)
-    window = MainWindow()
-    window.show()
+    shell = StudioWindow()
+    shell.add_tab()
+    window = shell.active_reduction
+    shell.show()
     window.load_experiment_directory(str(raw), background=False)
     process(app)
-    yield window
+    yield shell
     window.has_unsaved_changes = lambda: False
-    window.close()
+    shell.close()
     process(app)
 
 
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 def test_every_page_fits_laptop_sizes(app, loaded_window, size):
-    window = loaded_window
+    shell = loaded_window
+    window = shell.active_reduction
     assert window.session.loaded
-    window.resize(*size)
+    shell.resize(*size)
     window.apply_default_layout()
     process(app)
-    assert (window.width(), window.height()) == size
-    hint = window.minimumSizeHint()
+    assert (shell.width(), shell.height()) == size
+    hint = shell.minimumSizeHint()
     assert hint.width() <= size[0] and hint.height() <= size[1], hint
     problems = {}
     for page in range(window.plots_stack.count()):
@@ -121,15 +124,16 @@ def test_every_page_fits_laptop_sizes(app, loaded_window, size):
         for tab in range(window.inspector_tabs.count()):
             window.inspector_tabs.setCurrentIndex(tab)
             process(app, 3)
-            for item in clipped_widgets(window):
+            for item in clipped_widgets(shell):
                 problems.setdefault(item, (page, tab))
     assert not problems, problems
 
 
 @pytest.mark.parametrize("size, trace_height", [((1440, 900), 300), ((1280, 800), 240)])
 def test_trace_editor_and_results_keep_working_room(app, loaded_window, size, trace_height):
-    window = loaded_window
-    window.resize(*size)
+    shell = loaded_window
+    window = shell.active_reduction
+    shell.resize(*size)
     window.apply_default_layout()
     window.plots_stack.setCurrentIndex(0)
     process(app)
@@ -143,8 +147,9 @@ def test_trace_editor_and_results_keep_working_room(app, loaded_window, size, tr
 
 
 def test_notes_log_collapses_on_short_screens_and_toggles(app, loaded_window):
-    window = loaded_window
-    window.resize(1280, 800)
+    shell = loaded_window
+    window = shell.active_reduction
+    shell.resize(1280, 800)
     window.apply_default_layout()
     process(app)
     assert not window.notes_log_visible()
@@ -155,64 +160,62 @@ def test_notes_log_collapses_on_short_screens_and_toggles(app, loaded_window):
     window.notes_log_action.trigger()
     process(app)
     assert not window.lower_container.isVisible()
-    window.resize(1600, 1000)
+    shell.resize(1600, 1000)
     window.apply_default_layout()
     process(app)
     assert window.notes_log_visible()
 
 
 def test_geometry_and_splitters_are_remembered_and_reset(app, settings_reset):
-    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
 
-    first = MainWindow()
+    first = StudioWindow()
     first.show()
-    first.resize(700 + 60, 640)
     first.resize(780, 660)
     process(app)
-    first.workspace_splitter.setSizes([250, 300, 210])
-    first.set_notes_log_visible(True)
+    reduction = first.active_reduction
+    reduction.workspace_splitter.setSizes([250, 300, 210])
+    reduction.set_notes_log_visible(True)
     process(app)
-    saved_sizes = first.workspace_splitter.sizes()
+    saved_sizes = reduction.workspace_splitter.sizes()
+    reduction.persist_layout_state()
     first.persist_layout_state()
-    first.has_unsaved_changes = lambda: False
     first.close()
     process(app)
 
-    second = MainWindow()
+    second = StudioWindow()
     second.show()
     process(app)
+    reduction = second.active_reduction
     assert (second.width(), second.height()) == (780, 660)
-    assert second.workspace_splitter.sizes() == saved_sizes
-    assert second.notes_log_visible()
+    assert reduction.workspace_splitter.sizes() == saved_sizes
+    assert reduction.notes_log_visible()
 
-    second.set_workspace_panel_visible("inspector", False)
-    second.reset_layout()
+    reduction.set_workspace_panel_visible("inspector", False)
+    reduction.reset_layout()
     process(app)
-    assert second.inspector_panel.isVisible() and second.sidebar_panel.isVisible()
+    assert reduction.inspector_panel.isVisible() and reduction.sidebar_panel.isVisible()
     assert not settings_reset.contains("window_geometry_v1")
-    # The offscreen screen is 800 x 800: the reset window fits on it.
     screen = second.screen().availableGeometry()
     assert second.width() <= screen.width() and second.height() <= screen.height()
-    second.has_unsaved_changes = lambda: False
     second.close()
     process(app)
 
 
 def test_saved_geometry_larger_than_the_screen_is_clamped(app, settings_reset):
-    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
 
-    big = MainWindow()  # e.g. last used on a large external monitor
+    big = StudioWindow()
     big.resize(2400, 1600)
     big.persist_layout_state()
     big.deleteLater()
     process(app)
 
-    window = MainWindow()  # Qt fits restored geometry to this screen
+    window = StudioWindow()
     window.show()
     process(app)
     screen = window.screen().availableGeometry()
     assert window.width() <= screen.width() and window.height() <= screen.height()
-    window.has_unsaved_changes = lambda: False
     window.close()
     process(app)
 
@@ -220,15 +223,17 @@ def test_saved_geometry_larger_than_the_screen_is_clamped(app, settings_reset):
 @pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
 def test_rich_detector_panel_fits_laptop_sizes(app, settings_reset, size):
     from pathlib import Path
-    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
 
     source = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
-    window = MainWindow()
-    window.show()
+    shell = StudioWindow()
+    shell.add_tab()
+    window = shell.active_reduction
+    shell.show()
     try:
         window.load_experiment_directory(str(source), background=False)
         assert window.session.loaded
-        window.resize(*size)
+        shell.resize(*size)
         window.apply_default_layout()
         window.inspector_tabs.setCurrentIndex(1)
         window.calibration_tabs.setCurrentIndex(1)  # Fractionation is the default; inspect Detector.
@@ -237,16 +242,16 @@ def test_rich_detector_panel_fits_laptop_sizes(app, settings_reset, size):
         scroll = window.calibration_tabs.currentWidget()
         scroll.ensureWidgetVisible(panel)
         process(app)
-        assert (window.width(), window.height()) == size
-        assert window.minimumSizeHint().width() <= size[0]
-        assert window.minimumSizeHint().height() <= size[1]
+        assert (shell.width(), shell.height()) == size
+        assert shell.minimumSizeHint().width() <= size[0]
+        assert shell.minimumSizeHint().height() <= size[1]
         assert panel.isVisible() and panel.isEnabled()
         top_left = panel.mapTo(scroll.viewport(), QtCore.QPoint(0, 0))
         assert top_left.y() >= 0
         assert top_left.y() + panel.height() <= scroll.viewport().height()
         assert panel.width() <= scroll.viewport().width()
-        assert not clipped_widgets(window)
+        assert not clipped_widgets(shell)
     finally:
         window.has_unsaved_changes = lambda: False
-        window.close()
+        shell.close()
         process(app)

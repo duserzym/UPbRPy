@@ -185,6 +185,24 @@ UPbRPy Studio lives in `GUI/` and uses `PySide6 + pyqtgraph`. The native
 application and notebooks call the same `ReductionPipeline`; the GUI does not
 maintain a second implementation of the scientific calculations.
 
+Projects open as tabs in one Studio window. Each tab keeps its own reduction,
+Detector settings, and Database origin. **File → Open Project**, **Open
+Experiment Folder**, and **Open Qtegra file** use a new tab, reusing the active
+tab when it is empty and idle. A `•` before the tab title marks unsaved changes;
+hover over it to see the full project or source path.
+
+Use **Ctrl+T** (or the platform New shortcut) for a new tab, **Ctrl+Tab** and
+**Ctrl+Shift+Tab** to cycle tabs, and **Ctrl+W** (or the platform Close shortcut)
+to close a tab. **Ctrl+S** saves the active project. **Window → Move Tab to New
+Window** moves the current reduction with its state intact; **Ctrl+Shift+N**
+opens an empty Studio window. Closing the last tab leaves an empty tab.
+
+<img src="./docs/screenshots/studio_tabs_rich_1280x800.png" alt="Studio with two sessions open as tabs at 1280 × 800" width="640">
+
+Screenshots of two tabs (the Boise per-spot folder, merged with its Rich file,
+and the Rich file alone) at 1280 × 800 and 1440 × 900 are in
+`docs/screenshots/studio_tabs_*.png`.
+
 The zircon, apatite, rutile, and titanite presets expose an explicit processing
 sequence from import and window review through downhole/session calibration,
 depth profiles, common-Pb decisions, automatic flags, and final results.

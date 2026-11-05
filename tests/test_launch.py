@@ -244,8 +244,9 @@ def test_open_target_dispatch(controller, tmp_path, monkeypatch):
         ("project", str(bundle.resolve() / "Synthetic_20Mar25.upbr")),
     ]
     assert [t.kind for t in handled] == ["session"]
-    # The empty first window was reused while it stayed empty (stubs load nothing).
+    # The active empty tab was reused while it stayed empty (stubs load nothing).
     assert len(controller.windows) == 1
+    assert controller.active_window().tabs.count() == 1
 
 
 def test_open_bundle_zip_unpacks_into_cache(controller, tmp_path):

@@ -151,12 +151,17 @@ WORKFLOW_STAGE_LABELS = {
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    """One independent reduction session presented in a native window."""
+    """One reduction, usable alone or embedded in a Studio tab."""
 
     new_window_requested = QtCore.Signal()
-    next_window_requested = QtCore.Signal()
-    open_project_in_new_window_requested = QtCore.Signal(str)
-    open_experiment_in_new_window_requested = QtCore.Signal(str)
+    new_tab_requested = QtCore.Signal()
+    next_tab_requested = QtCore.Signal()
+    previous_tab_requested = QtCore.Signal()
+    move_to_new_window_requested = QtCore.Signal()
+    close_tab_requested = QtCore.Signal()
+    open_project_requested = QtCore.Signal(str)
+    open_source_requested = QtCore.Signal(str)
+    title_changed = QtCore.Signal(str)
 
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None) -> None:
         super().__init__()
@@ -186,7 +191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_worker: FunctionWorker | None = None
         self._busy_label = ""
         # Database-mode flows; the window controller shares one instance
-        # between windows, a lone window creates its own on first use.
+        # between reductions; a standalone reduction creates one on first use.
         self.database_links = None
         self.selection_colors = self._resolve_selection_colors()
         self.session.session_fit_options["polynomial_degree"] = self.workflow_preset.session_polynomial_degree
@@ -194,7 +199,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("UPbRPy Studio")
         self.setWindowIcon(self.app_icon)
         self.setMinimumSize(760, 620)
-        self._apply_initial_window_geometry()
+        self.resize(self.default_window_size())
+        self._initial_size = self.size()
 
         self._build_menu()
         self._build_ui()
@@ -205,20 +211,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        new_window_action = file_menu.addAction("New Reduction Window")
-        new_window_action.setShortcut(QtGui.QKeySequence.StandardKey.New)
-        new_window_action.triggered.connect(self.new_window_requested.emit)
+        new_tab_action = file_menu.addAction("New Tab")
+        new_tab_action.setShortcuts([
+            QtGui.QKeySequence("Ctrl+T"),
+            *QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.New),
+        ])
+        new_tab_action.triggered.connect(self.new_tab_requested.emit)
 
         file_menu.addSeparator()
         open_project_action = file_menu.addAction("Open Project…")
         open_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_project_action.triggered.connect(self.choose_project_file)
-        open_project_new_window_action = file_menu.addAction(
-            "Open Project in New Window…"
-        )
-        open_project_new_window_action.triggered.connect(
-            self.choose_project_file_in_new_window
-        )
 
         save_project_action = file_menu.addAction("Save Project")
         save_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
@@ -242,16 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
         open_experiment_action.triggered.connect(
             self.choose_experiment_directory
         )
-        open_experiment_new_window_action = file_menu.addAction(
-            "Open Experiment Folder in New Window…"
-        )
-        open_experiment_new_window_action.triggered.connect(
-            self.choose_experiment_directory_in_new_window
-        )
         open_qtegra_action = file_menu.addAction("Open Qtegra file…")
         open_qtegra_action.triggered.connect(self.choose_qtegra_file)
-        open_qtegra_new_window_action = file_menu.addAction("Open Qtegra file in New Window…")
-        open_qtegra_new_window_action.triggered.connect(self.choose_qtegra_file_in_new_window)
 
         reload_action = file_menu.addAction("Reload Current Source")
         reload_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
@@ -312,7 +307,7 @@ class MainWindow(QtWidgets.QMainWindow):
         exit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
         application = QtWidgets.QApplication.instance()
         if application is not None:
-            exit_action.triggered.connect(application.quit)
+            exit_action.triggered.connect(application.closeAllWindows)
 
         workflow_menu = self.menuBar().addMenu("Workflow")
         mineral_menu = workflow_menu.addMenu("Mineral Preset")
@@ -450,18 +445,26 @@ class MainWindow(QtWidgets.QMainWindow):
         reset_layout_action.triggered.connect(self.reset_layout)
 
         window_menu = self.menuBar().addMenu("Window")
-        window_new_action = window_menu.addAction("New Reduction Window")
+        next_tab_action = window_menu.addAction("Next Tab")
+        next_tab_action.setShortcut(QtGui.QKeySequence("Meta+Tab" if sys.platform == "darwin" else "Ctrl+Tab"))
+        next_tab_action.triggered.connect(self.next_tab_requested.emit)
+        previous_tab_action = window_menu.addAction("Previous Tab")
+        previous_tab_action.setShortcut(QtGui.QKeySequence("Meta+Shift+Tab" if sys.platform == "darwin" else "Ctrl+Shift+Tab"))
+        previous_tab_action.triggered.connect(self.previous_tab_requested.emit)
+        self.move_tab_action = window_menu.addAction("Move Tab to New Window")
+        self.move_tab_action.setEnabled(False)
+        self.move_tab_action.triggered.connect(self.move_to_new_window_requested.emit)
+        close_tab_action = window_menu.addAction("Close Tab")
+        close_shortcuts = QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.Close)
+        close_tab_key = QtGui.QKeySequence("Ctrl+W")
+        if close_tab_key not in close_shortcuts:
+            close_shortcuts.append(close_tab_key)
+        close_tab_action.setShortcuts(close_shortcuts)
+        close_tab_action.triggered.connect(self.close_tab_requested.emit)
+        window_menu.addSeparator()
+        window_new_action = window_menu.addAction("New Window")
         window_new_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+N"))
         window_new_action.triggered.connect(self.new_window_requested.emit)
-        next_window_action = window_menu.addAction("Next Reduction Window")
-        next_window_action.setShortcut(QtGui.QKeySequence("Ctrl+Tab"))
-        next_window_action.triggered.connect(self.next_window_requested.emit)
-        window_menu.addSeparator()
-        close_window_action = window_menu.addAction("Close Window")
-        close_window_action.setShortcut(
-            QtGui.QKeySequence.StandardKey.Close
-        )
-        close_window_action.triggered.connect(self.close)
 
         help_menu = self.menuBar().addMenu("Help")
         guide_action = help_menu.addAction("Reduction Workflow Guide")
@@ -622,6 +625,12 @@ class MainWindow(QtWidgets.QMainWindow):
             != self._saved_project_fingerprint
         )
 
+    def request_close(self) -> bool:
+        """Run the close guard without hiding or deleting this reduction."""
+        event = QtGui.QCloseEvent()
+        self.closeEvent(event)
+        return event.isAccepted()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Prevent accidental loss of an imported or edited reduction."""
         if self._active_worker is not None:
@@ -629,7 +638,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self,
                 "Reduction still running",
                 f"Please wait for {self._busy_label.lower()} to finish before "
-                "closing this reduction window.",
+                "closing this reduction tab.",
             )
             event.ignore()
             return
@@ -724,7 +733,6 @@ class MainWindow(QtWidgets.QMainWindow):
     # ── Layout: small screens, remembered geometry, reset ─────────────────
     LAYOUT_SETTINGS = {
         "notes_log": "notes_log_visible_v1",
-        "geometry": "window_geometry_v1",
         "workspace": "workspace_splitter_state_v4",
         "content": "content_splitter_state_v1",
         "spot_channel": "spot_channel_splitter_state_v1",
@@ -751,9 +759,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return restored
 
     def persist_layout_state(self) -> None:
-        """Remember the window geometry and every splitter position."""
+        """Remember this reduction's splitter positions and notes visibility."""
         try:
-            self.settings.setValue(self.LAYOUT_SETTINGS["geometry"], self.saveGeometry())
             for name, splitter in self._layout_splitters().items():
                 self.settings.setValue(self.LAYOUT_SETTINGS[name], splitter.saveState())
             self.settings.setValue(self.LAYOUT_SETTINGS["notes_log"], self.notes_log_visible())
@@ -762,33 +769,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_notes_log_action()
 
     def default_window_size(self) -> QtCore.QSize:
-        """A window that fits the available screen (a 14-inch laptop too)."""
-        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
-        if screen is None:
-            return QtCore.QSize(1600, 1000)
-        available = screen.availableGeometry()
-        width = min(1800, max(960, int(available.width() * 0.92)), available.width())
-        height = min(1150, max(680, int(available.height() * 0.90)), available.height())
-        return QtCore.QSize(width, height)
+        """Return the shell's default size for compatibility with callers."""
+        from GUI.studio_window import StudioWindow
+
+        return StudioWindow.default_window_size(self)
 
     def fit_window_to_screen(self) -> None:
-        """Shrink and move the window so all of it is on its screen."""
-        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        frame = self.frameGeometry()
-        extra_w = max(0, frame.width() - self.width())
-        extra_h = max(0, frame.height() - self.height())
-        width = min(self.width(), available.width() - extra_w)
-        height = min(self.height(), available.height() - extra_h)
-        if (width, height) != (self.width(), self.height()):
-            self.resize(max(width, self.minimumWidth()), max(height, self.minimumHeight()))
-        frame = self.frameGeometry()
-        x = min(max(frame.x(), available.left()), available.right() - frame.width() + 1)
-        y = min(max(frame.y(), available.top()), available.bottom() - frame.height() + 1)
-        if (x, y) != (frame.x(), frame.y()):
-            self.move(x, y)
+        """Fit the containing Studio window, or this standalone widget."""
+        from GUI.studio_window import StudioWindow
+
+        StudioWindow.fit_window_to_screen(self.window())
 
     def apply_default_layout(self) -> None:
         """Panel widths and the notes/log strip chosen for this window size."""
@@ -797,7 +787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rail = 240 if compact else 260
         inspector = 340 if compact else 430
         self.workspace_splitter.setSizes([rail, max(400, width - rail - inspector - 40), inspector])
-        self.set_notes_log_visible(self.height() >= 950)
+        self.set_notes_log_visible(self.window().height() >= 950)
         self.spot_channel_splitter.setSizes([3, 2])
 
     def reset_layout(self) -> None:
@@ -806,10 +796,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.remove(key)
         self.set_workspace_panel_visible("sidebar", True)
         self.set_workspace_panel_visible("inspector", True)
-        if self.isMaximized() or self.isFullScreen():
-            self.showNormal()
-        self.resize(self.default_window_size())
-        self.fit_window_to_screen()
+        shell = self.window()
+        if shell is not self:
+            shell.reset_layout()
+        else:
+            self.resize(self.default_window_size())
+            self.fit_window_to_screen()
         QtWidgets.QApplication.processEvents()
         self.apply_default_layout()
         self.statusBar().showMessage("Layout reset to fit this screen.")
@@ -882,10 +874,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_toolbar_strips()
         # Children inside the strips are polished after this event; size
         # the strips again once they carry the stylesheet's padding.
-        QtCore.QTimer.singleShot(0, self._sync_toolbar_strips)
+        QtCore.QTimer.singleShot(0, self, self._sync_toolbar_strips)
         if not getattr(self, "_first_show_done", False):
             self._first_show_done = True
-            if self.size() == getattr(self, "_initial_size", None):
+            if self.isWindow() and self.size() == getattr(self, "_initial_size", None):
                 self.fit_window_to_screen()
             if not self._layout_restored:
                 self.apply_default_layout()
@@ -967,22 +959,6 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.workflow_step_list.item(index)
             if item is not None:
                 item.setSizeHint(QtCore.QSize(0, item_height))
-
-    def _apply_initial_window_geometry(self) -> None:
-        """Restore the saved window geometry, else fit a default to the screen.
-
-        Saved geometry from a larger monitor is clamped on first show
-        (:meth:`fit_window_to_screen`).
-        """
-        saved = self.settings.value(self.LAYOUT_SETTINGS["geometry"])
-        if not (
-            isinstance(saved, QtCore.QByteArray)
-            and not saved.isEmpty()
-            and self.restoreGeometry(saved)
-        ):
-            self.resize(self.default_window_size())
-        # Clamped to the screen on first show unless a caller resizes first.
-        self._initial_size = self.size()
 
     def _build_workflow_rail(self) -> QtWidgets.QWidget:
         """Build the always-readable icon rail for ordered reduction stages."""
@@ -2795,13 +2771,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def choose_experiment_directory(self) -> None:
         directory = self.select_experiment_directory()
         if directory:
-            self.load_experiment_directory(directory)
-
-    def choose_experiment_directory_in_new_window(self) -> None:
-        """Select raw data and request loading it in an independent window."""
-        directory = self.select_experiment_directory()
-        if directory:
-            self.open_experiment_in_new_window_requested.emit(directory)
+            if self.isWindow():
+                self.load_experiment_directory(directory)
+            else:
+                self.open_source_requested.emit(directory)
 
     def select_experiment_directory(self) -> str:
         """Return a user-selected experiment directory or an empty string."""
@@ -2826,12 +2799,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def choose_qtegra_file(self) -> None:
         path = self.select_qtegra_file()
         if path:
-            self.load_experiment_directory(path)
+            if self.isWindow():
+                self.load_experiment_directory(path)
+            else:
+                self.open_source_requested.emit(path)
+
+    def choose_experiment_directory_in_new_window(self) -> None:
+        """Compatibility entry point: choose a source for a Studio tab."""
+        self.choose_experiment_directory()
 
     def choose_qtegra_file_in_new_window(self) -> None:
-        path = self.select_qtegra_file()
-        if path:
-            self.open_experiment_in_new_window_requested.emit(path)
+        """Compatibility entry point: choose a Qtegra file for a Studio tab."""
+        self.choose_qtegra_file()
+
+    def choose_project_file_in_new_window(self) -> None:
+        """Compatibility entry point: choose a project for a Studio tab."""
+        self.choose_project_file()
 
     def project_workspace_state(self) -> dict[str, object]:
         """Return compact display context worth restoring with a reduction."""
@@ -2900,22 +2883,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def choose_project_file(self) -> None:
-        """Choose a lightweight project and recalculate its saved stages."""
-        if self._active_worker is not None:
-            self.statusBar().showMessage(
-                f"Please wait for {self._busy_label.lower()} to finish."
-            )
-            return
-        project_file = self.select_project_file()
-        if not project_file:
-            return
-        self.load_project_file(project_file)
-
-    def choose_project_file_in_new_window(self) -> None:
-        """Select a project and request recalculation in another window."""
+        """Choose a lightweight project to open in a Studio tab."""
         project_file = self.select_project_file()
         if project_file:
-            self.open_project_in_new_window_requested.emit(project_file)
+            if self.isWindow():
+                self.load_project_file(project_file)
+            else:
+                self.open_project_requested.emit(project_file)
 
     def select_project_file(self) -> str:
         """Return a user-selected UPbRPy project path or an empty string."""
@@ -3139,6 +3113,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_reference_library_labels()
         self.refresh_view()
         self._saved_project_fingerprint = self.scientific_project_fingerprint()
+        self.update_project_window_title()
         stage_count = len(
             [
                 stage
@@ -3159,12 +3134,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_project_window_title(self) -> None:
         """Show the active project name without exposing a long path."""
         if self.project_path is not None:
-            label = self.project_path.name
+            label = self.project_path.stem
         elif self.session.directory:
             label = Path(self.session.directory).name
         else:
-            label = ""
-        suffix = "" if not label else f" — {label}"
+            label = "Untitled"
+        if self.has_unsaved_changes():
+            label = f"• {label}"
+        suffix = f" — {label}"
         origin = self.session.origin or {}
         if origin:
             from urllib.parse import urlsplit
@@ -3180,6 +3157,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.database_origin_label.setToolTip(tooltip)
             self.database_origin_label.setVisible(bool(text))
         self._update_database_actions()
+        self.title_changed.emit(label)
 
     def database(self):
         """The database-mode flows serving this window."""
@@ -3494,7 +3472,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._sync_toolbar_strips()
-        QtCore.QTimer.singleShot(0, self._sync_toolbar_strips)
+        QtCore.QTimer.singleShot(0, self, self._sync_toolbar_strips)
         # Rebuild channel colours for new background when a session is loaded
         if self.session.loaded:
             self.channel_colors = self._resolve_channel_colors(self.session.channels)
@@ -3770,6 +3748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         label = selection_method_label(self.selection_method)
         self.statusBar().showMessage(f"Baseline / peak auto-pick set to {label}.")
         self.append_log(f"Auto-pick method set to {label}; re-pick spots to apply it.")
+        self.update_project_window_title()
 
     def on_selection_threshold_percent_changed(self, value: float) -> None:
         """Update the fractional signal threshold used by threshold picking."""
@@ -3780,6 +3759,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Signal threshold updated; use Re-pick all spots to apply it."
         )
+        self.update_project_window_title()
 
     def on_selection_reference_percentile_changed(self, value: float) -> None:
         """Update the percentile used to form the high-signal reference."""
@@ -3790,6 +3770,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Signal reference percentile updated; use Re-pick all spots to apply it."
         )
+        self.update_project_window_title()
 
     def on_selection_sigma_changed(self, value: float) -> None:
         """Update the onset sigma for either sigma-based picker."""
@@ -3806,6 +3787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Onset sigma updated; use Re-pick all spots to apply it."
         )
+        self.update_project_window_title()
 
     def on_plateau_duration_changed(self, value: float) -> None:
         """Set a session-wide plateau duration or restore workflow auto."""
@@ -3843,6 +3825,7 @@ class MainWindow(QtWidgets.QMainWindow):
         clear_reduction_cache(self.session)
         self.statusBar().showMessage(message)
         self.append_log(message)
+        self.update_project_window_title()
 
     def on_plateau_filter_method_changed(self, index: int) -> None:
         """Set the current spot's plateau outlier rule and display channel."""
@@ -4297,6 +4280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._workflow_step_allows_region_edits():
             return
         self.pending_region_updates[region_name] = bounds
+        self.update_project_window_title()
         self._refresh_workflow_status()
         self.statusBar().showMessage("Selection windows edited. Apply them to update the reduction stages.")
 
@@ -4788,6 +4772,10 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.workflow_actions_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Hide and detach now: deleteLater alone left the previous
+                # stage's button painted behind the new ones.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         for index, (label, handler, accent) in enumerate(self._workflow_action_specs()):
@@ -4863,6 +4851,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _refresh_workflow_status(self) -> None:
+        self.update_project_window_title()
         self._sync_workflow_step_locks()
         if not self.session.loaded:
             message = "Open an experiment to begin"

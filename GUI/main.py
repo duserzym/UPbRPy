@@ -22,17 +22,12 @@ from GUI.launch import (
     unregister_url_scheme,
 )
 from GUI.main_window import MainWindow
+from GUI.studio_window import StudioWindow
 from GUI.theme import build_application
 
 
 class StudioWindowController(QtCore.QObject):
-    """Own independent reduction windows for one application process.
-
-    Scientific data, selections, and pipeline caches live on each
-    :class:`MainWindow`. Shared Python and Qt libraries remain in one process,
-    making multiple sessions much lighter than launching several complete app
-    processes.
-    """
+    """Own Studio windows and route new content into their document tabs."""
 
     def __init__(
         self,
@@ -43,52 +38,60 @@ class StudioWindowController(QtCore.QObject):
         super().__init__()
         self.theme_mode = theme_mode
         self.app_icon = app_icon
-        self.windows: dict[int, MainWindow] = {}
+        self.windows: dict[int, StudioWindow] = {}
+        self._last_active: StudioWindow | None = None
         self._database = None
 
-    def create_window(
-        self,
-        *,
-        show: bool = True,
-    ) -> MainWindow:
-        """Create, register, and optionally show an empty reduction window."""
-        window = MainWindow(
+    def _create_reduction(self) -> MainWindow:
+        reduction = MainWindow(theme_mode=self.theme_mode, app_icon=self.app_icon)
+        reduction.database_links = self.database
+        return reduction
+
+    def create_window(self, *, show: bool = True, create_empty: bool = True) -> StudioWindow:
+        """Create, register, and optionally show a Studio window."""
+        window = StudioWindow(
             theme_mode=self.theme_mode,
             app_icon=self.app_icon,
+            reduction_factory=self._create_reduction,
+            create_empty=create_empty,
         )
-        window.database_links = self.database
         identity = id(window)
         self.windows[identity] = window
+        self._last_active = window
         window.new_window_requested.connect(self.create_window)
-        window.next_window_requested.connect(
-            lambda source=window: self.activate_next_window(source)
-        )
-        window.open_project_in_new_window_requested.connect(
-            self.open_project_window
-        )
-        window.open_experiment_in_new_window_requested.connect(
-            self.open_experiment_window
-        )
-        window.destroyed.connect(
-            lambda _object=None, key=identity: self.release_window(key)
-        )
+        window.move_tab_requested.connect(lambda reduction: self.move_tab_to_new_window(window, reduction))
+        window.activated.connect(lambda: self._remember_active(window))
+        window.destroyed.connect(lambda _object=None: self.release_window(identity))
         if show:
-            window.show()
-            window.raise_()
-            window.activateWindow()
+            self._show_window(window)
         return window
+
+    def _remember_active(self, window: StudioWindow) -> None:
+        self._last_active = window
+
+    @staticmethod
+    def _show_window(window: StudioWindow) -> None:
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def move_tab_to_new_window(self, source: StudioWindow, reduction: MainWindow) -> StudioWindow:
+        """Move the existing reduction and its running work into another shell."""
+        if source.tabs.count() < 2:
+            return source
+        moved = source.take_tab(reduction)
+        target = self.create_window(show=False, create_empty=False)
+        target.add_tab(moved)
+        self._show_window(target)
+        return target
 
     def open_project_window(self, project_file: str) -> MainWindow:
-        """Open and recalculate a lightweight project in a new window."""
-        window = self.create_window()
-        window.load_project_file(project_file)
-        return window
+        """Compatibility entry point: open a project in a document tab."""
+        return self.open_project_in_window(project_file)
 
     def open_experiment_window(self, directory: str) -> MainWindow:
-        """Import one experiment directory in a new window."""
-        window = self.create_window()
-        window.load_experiment_directory(directory)
-        return window
+        """Compatibility entry point: open raw data in a document tab."""
+        return self.open_directory_in_window(directory)
 
     # ------------------------------------------------------------ --open
     @property
@@ -104,27 +107,21 @@ class StudioWindowController(QtCore.QObject):
             )
         return self._database
 
-    def active_window(self) -> MainWindow | None:
-        """The window dialogs should attach to."""
+    def active_window(self) -> StudioWindow | None:
+        """The most recently active Studio shell; dialogs attach here."""
         active = QtWidgets.QApplication.activeWindow()
-        if isinstance(active, MainWindow):
-            return active
-        visible = [w for w in self.windows.values() if w.isVisible()]
-        return visible[-1] if visible else next(iter(self.windows.values()), None)
+        if isinstance(active, StudioWindow) and id(active) in self.windows:
+            self._last_active = active
+        if self._last_active is not None and id(self._last_active) in self.windows:
+            return self._last_active
+        return next(reversed(self.windows.values()), None)
 
     def window_for_new_content(self) -> MainWindow:
-        """Reuse an empty, idle window; otherwise open a new one."""
-        for window in self.windows.values():
-            if (
-                not window.session.directory
-                and window.project_path is None
-                and window._active_worker is None
-            ):
-                window.show()
-                window.raise_()
-                window.activateWindow()
-                return window
-        return self.create_window()
+        """Get an empty tab in the most recently active Studio window."""
+        shell = self.active_window() or self.create_window(show=False)
+        reduction = shell.reduction_for_new_content()
+        self._show_window(shell)
+        return reduction
 
     def open_project_in_window(self, project_file: str) -> MainWindow:
         window = self.window_for_new_content()
@@ -189,27 +186,17 @@ class StudioWindowController(QtCore.QObject):
             title="Open session bundle",
         )
 
-    def activate_next_window(self, source: MainWindow) -> None:
-        """Cycle keyboard focus through the currently open reductions."""
-        ordered = [
-            window
-            for window in self.windows.values()
-            if window.isVisible()
-        ]
-        if len(ordered) < 2:
-            return
-        try:
-            index = ordered.index(source)
-        except ValueError:
-            index = -1
-        target = ordered[(index + 1) % len(ordered)]
-        target.showNormal()
-        target.raise_()
-        target.activateWindow()
+    def activate_next_window(self, source: StudioWindow | MainWindow) -> None:
+        """Compatibility entry point: cycle tabs in the containing shell."""
+        shell = source if isinstance(source, StudioWindow) else source.window()
+        if isinstance(shell, StudioWindow):
+            shell.next_tab()
 
     def release_window(self, identity: int) -> None:
         """Forget a destroyed window so its reduction data can be reclaimed."""
-        self.windows.pop(identity, None)
+        window = self.windows.pop(identity, None)
+        if self._last_active is window:
+            self._last_active = None
 
 
 def export_window(window: QtWidgets.QMainWindow, output_path: str) -> None:
@@ -273,8 +260,8 @@ def main(argv: list[str] | None = None) -> int:
 
     interactive = not (args.export or args.verify_reduction)
     instance = SingleInstance() if interactive else None
-    if instance is not None and target is not None and target.is_url:
-        # A link while Studio runs: hand it over and leave.
+    if instance is not None and target is not None:
+        # A file or link while Studio runs: hand it over and leave.
         if instance.send(args.open):
             return 0
 
@@ -309,9 +296,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.export:
         if target is not None and target.kind == "directory":
-            window.load_experiment_directory(args.open, background=False)
+            window.active_reduction.load_experiment_directory(args.open, background=False)
         elif target is not None and target.kind == "project":
-            window.load_project_file(target.path, background=False)
+            window.active_reduction.load_project_file(target.path, background=False)
         export_window(window, args.export)
         return 0
 

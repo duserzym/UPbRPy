@@ -74,7 +74,8 @@ def controller(app, tmp_path):
     controller.database.cache_root = tmp_path / "cache"
     yield controller
     for window in list(controller.windows.values()):
-        window.has_unsaved_changes = lambda: False  # no save prompt on close
+        for index in range(window.tabs.count()):
+            window.tabs.widget(index).has_unsaved_changes = lambda: False  # no save prompt
         window.close()
     QtWidgets.QApplication.processEvents()
 
@@ -83,7 +84,7 @@ def test_actions_disabled_with_reason_without_extra(controller, monkeypatch):
     gui_database.database_availability.cache_clear()
     monkeypatch.setattr(db, "availability", lambda: (False, "Database mode needs the optional [database] extra."))
     try:
-        window = controller.create_window(show=False)
+        window = controller.create_window(show=False).active_reduction
         for action in (
             window.open_from_database_action,
             window.submit_to_database_action,
@@ -97,8 +98,8 @@ def test_actions_disabled_with_reason_without_extra(controller, monkeypatch):
 
 def test_standalone_window_has_no_origin_and_submit_disabled(controller):
     gui_database.database_availability.cache_clear()
-    window = controller.create_window(show=False)
-    assert window.windowTitle() == "UPbRPy Studio"
+    window = controller.create_window(show=False).active_reduction
+    assert window.windowTitle() == "UPbRPy Studio — Untitled"
     assert not window.database_origin_label.isVisible()
     assert not window.submit_to_database_action.isEnabled()
     if gui_database.database_availability()[0]:
@@ -129,7 +130,7 @@ def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monke
     state = FakeState(sessions={SESSION_ID: bundle})
     try:
         with FakeLaicpmsdb(state) as fake:
-            window = controller.create_window(show=False)
+            window = controller.create_window(show=False).active_reduction
             code = state.issue_code()
             controller.open_target(f"upbr://session/{SESSION_ID}?server={fake.url}&code={code}")
             assert wait_for(lambda: window.session.loaded and window._active_worker is None), dialogs
