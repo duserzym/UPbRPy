@@ -39,11 +39,22 @@ notes = "SLZC: Th-corrected weighted mean 206Pb/238U CA-ID-TIMS age, 95% confide
 "206Pb/238U_age" = { value = 560.83, uncertainty = 1.29, uncertainty_type = "expanded_95" }
 
 [[standards."LTSE".measurements]]
+role = "radiogenic_ratio"
+unit = "ratio"
+status = "recommended"
+source = "hu2023"
+notes = "SLZC CA-ID-TIMS, Hu et al. (2023) supporting information, Appendix S4 (single grains z1-z7, Th-corrected, Jaffey decay constants). Inverse-variance weighted means of the seven grain ratios computed here (the paper publishes the mean date, not mean ratios); uncertainty is 2s internal times sqrt(MSWD) (206Pb/238U MSWD 10.3, 207Pb/235U MSWD 8.9). The 206Pb/238U mean corresponds to 560.835 Ma, matching the published 560.83 Ma. SLZC is slightly discordant (207Pb/235U date about 561.7 Ma), so 207Pb/235U is stored as measured. Supersedes the UPbR26plus archive ratios 0.090912 and 0.73893."
+
+[standards."LTSE".measurements.values]
+"206Pb/238U*" = { value = 0.0908962, uncertainty = 3.1e-05, uncertainty_type = "expanded_95" }
+"207Pb/235U*" = { value = 0.738832, uncertainty = 0.00035, uncertainty_type = "expanded_95" }
+
+[[standards."LTSE".measurements]]
 role = "reference_age"
 unit = "Ma"
 status = "provisional"
 source = "hu2023"
-notes = "The published SLZC 206Pb/238U age, used as a concordia age so that 207Pb/235U*, 208Pb/232Th* and 207Pb/206Pb* are derived as concordant values (concordance is an assumption, not a published result). The UPbR26plus archive's ratios (206Pb/238U* 0.090912, 207Pb/235U* 0.73893, 208Pb/232Th* 0.028140699603010466; 560.93 Ma) are superseded. Replace with SLZC ratios from the Hu et al. (2023) supporting information when available."
+notes = "The published SLZC 206Pb/238U age, used as a concordia age only so that 208Pb/232Th* is derived (concordant Th-Pb is an assumption: Hu et al. (2023) give model Th/U from 208Pb/206Pb, not a measured 208Pb/232Th). The UPbR26plus archive's 208Pb/232Th* 0.028140699603010466 is superseded."
 
 [standards."LTSE".measurements.values]
 "concordia_age" = 560.83

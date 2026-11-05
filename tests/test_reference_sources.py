@@ -111,6 +111,8 @@ EXPECTED = {
         "206Pb/204Pb_i": 18.076074416,
         "207Pb/204Pb_i": 18.076074416 / 1.1606485235997472,
         "208Pb/204Pb_i": 18.076074416 / 0.47745654851370506,
+        "206Pb/238U*": 0.0908962,
+        "207Pb/235U*": 0.738832,
         "206Pb/238U_age": 560.83,
         "concordia_age": 560.83,
     },
@@ -123,10 +125,10 @@ def test_new_materials_load_exact_inputs_and_derive_redundant_ratios(standard):
     records = measurements.loc[measurements["standard"].eq(standard)]
     assert records.set_index("quantity")["value"].to_dict() == EXPECTED[standard]
     assert set(records["aliases"]) == ({"SLZC"} if standard == "LTSE" else {""})
-    published_age = standard == "LTSE"
+    published = {"206Pb/238U_age", "206Pb/238U*", "207Pb/235U*"} if standard == "LTSE" else set()
     by_quantity = records.set_index("quantity")
-    assert set(by_quantity.drop(index="206Pb/238U_age", errors="ignore")["status"]) == {"provisional"}
-    assert by_quantity.loc["206Pb/238U_age", "status"] == ("recommended" if published_age else "provisional")
+    for quantity, status in by_quantity["status"].items():
+        assert status == ("recommended" if quantity in published else "provisional"), quantity
     assert set(records["material"]) == {"zircon"}
     archive = UPbRPy.build_standard_archive(measurements)
     documented = UPbRPy.build_standard_archive(measurements, include_derived=False)
@@ -170,11 +172,15 @@ def test_new_material_provenance_separates_published_and_archive_values():
     assert age["source"] == sources["hu2023"]["display"]
     assert (age["value"], age["uncertainty"], age["uncertainty_type"]) == (560.83, 1.29, "expanded_95")
     assert set(ltse.loc[ltse["role"].eq("reference_age"), "source"]) == {sources["hu2023"]["display"]}
-    # Radiogenic ratios are derived as concordant values from the published age.
-    assert not ltse["role"].eq("radiogenic_ratio").any()
+    # U-Pb ratios are SLZC CA-ID-TIMS means from the paper's Appendix S4;
+    # only 208Pb/232Th* is derived from the published age as concordant.
+    ratios = ltse.loc[ltse["role"].eq("radiogenic_ratio")].set_index("quantity")
+    assert set(ratios.index) == {"206Pb/238U*", "207Pb/235U*"}
+    assert set(ratios["source"]) == {sources["hu2023"]["display"]}
     row = UPbRPy.build_standard_archive(measurements).loc["LTSE"]
-    assert row["206Pb/238U*"] == pytest.approx(np.expm1(1.55125e-10 * 560.83e6), rel=1e-6)
+    assert np.log1p(row["206Pb/238U*"]) / 1.55125e-10 / 1e6 == pytest.approx(560.83, abs=0.01)
     assert row["208Pb/232Th*"] == pytest.approx(np.expm1(4.9475e-11 * 560.83e6), rel=1e-3)
+    assert row["207Pb/206Pb*"] == pytest.approx(0.738832 / 0.0908962 / common_U238_U235)
     archive_values = ltse.loc[ltse["role"].eq("initial_ratio")]
     assert set(archive_values["source"]) == {sources["boise_upbr26plus_2026"]["display"]}
     assert set(archive_values["status"]) == {"provisional"}
