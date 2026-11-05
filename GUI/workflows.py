@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,9 @@ class WorkflowPreset:
     primary_standard: str = ""
     pb_ratio_standard: str = ""
     th_ratio_standard: str = ""
+    # Primary standards to prefer, in order, when the session measured them;
+    # ``primary_standard`` applies when none of them was measured.
+    preferred_primary_standards: tuple[str, ...] = ()
     common_pb_calibration: str = "radiogenic"
     secondary_standards: tuple[str, ...] = ()
     session_polynomial_degree: int = 2
@@ -64,7 +68,9 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         primary_standard="PL",
         pb_ratio_standard="PL",
         th_ratio_standard="PL",
-        secondary_standards=("FC1", "91500", "Seiland"),
+        # S513 (Luo et al. 2025) is the lab's zircon primary whenever measured.
+        preferred_primary_standards=("S513", "PL"),
+        secondary_standards=("FC1", "91500", "Seiland", "LTSE"),
         default_ratio="206Pb/238U",
         plateau_filter_method="excel_2sigma",
         steps=(
@@ -410,6 +416,35 @@ def infer_workflow_preset(directory: str) -> WorkflowPreset:
             if key in lowered:
                 return WORKFLOW_PRESETS[key]
     return WORKFLOW_PRESETS["zircon"]
+
+
+def resolve_reference_standards(preset: WorkflowPreset, measured: Iterable[str]) -> dict[str, object]:
+    """Primary and secondary standards for a session that measured ``measured``.
+
+    The first of ``preset.preferred_primary_standards`` found among the
+    measured sample names (case-insensitive) replaces the preset primary,
+    including the Pb and Th ratio standards that default to it; the displaced
+    preset primary becomes a secondary when it was measured.
+    """
+    names = {str(name).casefold(): str(name) for name in measured}
+    primary = preset.primary_standard
+    for candidate in preset.preferred_primary_standards:
+        if candidate.casefold() in names:
+            primary = candidate
+            break
+
+    def swap(name: str) -> str:
+        return primary if not name or name == preset.primary_standard else name
+
+    secondaries = [s for s in preset.secondary_standards if s != primary]
+    if primary != preset.primary_standard and preset.primary_standard.casefold() in names:
+        secondaries.append(preset.primary_standard)
+    return {
+        "primary_68_standard": primary,
+        "primary_76_standard": swap(preset.pb_ratio_standard),
+        "primary_82_standard": swap(preset.th_ratio_standard or preset.pb_ratio_standard),
+        "secondary_standards": tuple(dict.fromkeys(secondaries)),
+    }
 
 
 def format_import_defaults(preset: WorkflowPreset) -> str:

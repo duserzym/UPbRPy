@@ -17,6 +17,7 @@ from GUI.workflows import (
     format_import_defaults,
     get_workflow_preset,
     infer_workflow_preset,
+    resolve_reference_standards,
 )
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.constants import standard_archive_legacy
@@ -701,6 +702,17 @@ def load_session(
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
+    # Reference materials: the session manifest's plan (laicpmsdb) wins, else
+    # the preset, preferring its preferred primaries that this session measured.
+    standards: dict[str, object] = {
+        "concentration_standards": workflow_preset.concentration_standards,
+        **resolve_reference_standards(
+            workflow_preset,
+            experiment["sample"].astype(str).unique() if "sample" in experiment else (),
+        ),
+    }
+    if manifest is not None:
+        standards.update(manifest.standards_config())
     session = ReductionSession(
         directory=str(directory),
         qtegra=qtegra,
@@ -710,18 +722,7 @@ def load_session(
         primary_channel=resolved_primary,
         workflow_key=workflow_preset.key,
         workflow_title=workflow_preset.title,
-        concentration_standards=workflow_preset.concentration_standards,
-        primary_68_standard=workflow_preset.primary_standard,
-        primary_76_standard=(
-            workflow_preset.pb_ratio_standard
-            or workflow_preset.primary_standard
-        ),
-        primary_82_standard=(
-            workflow_preset.th_ratio_standard
-            or workflow_preset.pb_ratio_standard
-            or workflow_preset.primary_standard
-        ),
-        secondary_standards=workflow_preset.secondary_standards,
+        **standards,
         selected_spot=selected_spot,
         visible_channels=default_visible_channels(clean_channels, resolved_primary),
         import_settings={"primary_channel": resolved_primary, **read_kwargs},
