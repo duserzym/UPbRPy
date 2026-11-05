@@ -3,7 +3,9 @@
 Implementation: [standards.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/standards.py).
 Packaged examples: [library.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/library.toml),
 [sources.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/sources.toml),
-[zircon/91500.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/zircon/91500.toml).
+[zircon/91500.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/zircon/91500.toml),
+[zircon/S513.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/zircon/S513.toml),
+[zircon/LTSE.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/zircon/LTSE.toml).
 
 `UPbRPy.standards.load_standard_measurements(path=None)` loads the packaged
 `UPbRPy/reference_materials/` by default. `path` can be another library
@@ -90,21 +92,45 @@ nonempty quantity names can load without gaining those derived links.
 | format_version | Required | Integer equal to 2 | — | `2` | Version check fails otherwise |
 | sources | Required | Nonempty table of source-ID tables | — | `[sources."deer2013"]` | Shared registry; a source ID must resolve for each measurement |
 | sources.ID.display | Required | Nonblank string, unique after stripping | — | `Deer, Howie & Zussman (2013), An Introduction to the Rock-Forming Minerals, 3rd ed.` | Citation stored in normalized `source`; missing/duplicate fails |
-| sources.ID.kind | Optional | Metadata, conventionally string | — | `"book"`, `"journal_article"` | Retained in registry; loader does not enumerate kinds or enforce its type |
-| sources.ID.doi | Optional | Metadata, conventionally string | — | `"10.1111/j.1751-908X.2005.tb00904.x"` | Retained without DOI validation or lookup; absent is allowed |
+| sources.ID.kind | Required | Nonblank string | — | `"book"`, `"journal_article"`, `"lab_compilation"` | Missing/blank/nonstring fails; kinds are not enumerated |
+| sources.ID.doi | Optional | Nonblank string | — | `"10.1111/ggr.12603"` | Retained without DOI validation or lookup; provide this or `no_doi_reason` |
+| sources.ID.no_doi_reason | Optional | Nonblank string | — | `"Unpublished laboratory compilation; no DOI."` | Explains absence of a DOI; missing both fields produces an audit warning |
+| sources.ID.status | Optional | `recommended` or `provisional` | — | `"provisional"` | Source-level status; does not override required measurement statuses |
 | sources.ID.url | Optional | Metadata, conventionally string | — | `"https://doi.org/10.1111/j.1751-908X.2005.tb00904.x"` | Retained; no fetching or URL validation |
 | sources.ID.file | Optional | Metadata, conventionally string | — | `"Deer2013An introduction to the rock-forming minerals.pdf"` | Citation file label only; file existence is not checked |
 | sources.ID.notes | Optional | Metadata, conventionally string | — | `"Publication describing the GeoReM compilation used for USGS glass reference values."` | Retained; absence allowed |
 
-These are all source keys currently accepted. Except for display, their
-types and contents are not validated. The registry is attached as
+These are all source keys currently accepted. Display, kind, DOI,
+no_doi_reason and status are validated as described above; the other fields
+are retained without type or content validation. The registry is attached as
 `measurements.attrs["sources"]`; normalized rows store display citations,
 not source IDs.
 
-**Planned:** source keys `no_doi_reason` and `status`, and an additional
-source-ID check, belong to a later milestone. These two keys are currently
-rejected as unsupported. Resolution of measurement source IDs against the
-registry is already enforced; no further source-ID naming rule is imposed.
+`check_reference_sources(path=None)` audits every registered material in the
+packaged library or another TOML library directory/manifest. It rejects
+malformed source entries and reports all unknown measurement source IDs
+together, including value-level overrides. It returns a sorted list of source
+IDs with neither `doi` nor `no_doi_reason`, emitting a `UserWarning` listing
+them; that warning does not prevent loading or fail the audit test. The
+packaged registry documents one of these fields for every source. The normal
+measurement loader also rejects unknown resolved source IDs. No source-ID
+naming convention or online DOI lookup is enforced.
+
+`lab_compilation` denotes an unpublished laboratory compilation. The
+`boise_upbr26plus_2026` entry names the UPbR26plus spreadsheet dated
+2026-11-04 and carries `status = "provisional"` and a `no_doi_reason`.
+Its file label records provenance; the workbook is not bundled.
+
+S513 stores the published Th-corrected CA-ID-TIMS age as
+`206Pb/238U_age = 561.18` Ma (0.63 Ma, `expanded_95`), rather than labelling
+it a concordia age. Its two published U-Pb ratios and Hf concentration cite
+`luo2025`; the archive's 208Pb/232Th ratio has a separate provisional
+compilation record. The initial-Pb notes identify the archive's mislabelled
+ratio rows. LTSE retains the archive's ratios and `concordia_age = 560.928`
+Ma provisionally. Its notes preserve the initial-Pb conversion and explain
+that the archive's `hu2023` attribution does not identify an LTSE material
+or exactly matching values. Both records store only canonical inputs;
+reciprocal and linked ratios are derived by the library.
 
 ## Derived values and validation limits
 

@@ -93,10 +93,16 @@ def test_packaged_toml_contains_publication_provenance_not_excel_locations():
     source_root = Path(__file__).parents[1] / "UPbRPy" / "reference_materials"
     library_text = "\n".join(
         path.read_text(encoding="utf-8") for path in source_root.rglob("*.toml")
+        if path.name != "sources.toml"
     )
     for legacy_marker in ("Instructions!", ".xlsm", "reduction_workbook"):
         assert legacy_marker not in library_text
     assert "locator =" not in library_text
+    # Lab compilations may name their workbook in the shared source registry.
+    for source in standard_sources.values():
+        if ".xlsm" in str(source):
+            assert source["kind"] == "lab_compilation"
+            assert source["status"] == "provisional"
 
 
 def test_former_long_csv_layout_remains_an_explicit_migration_input(tmp_path):
@@ -248,7 +254,7 @@ def test_every_manifest_record_has_its_own_editable_toml_file():
     manifest = tomllib.loads(
         source_root.joinpath("library.toml").read_text(encoding="utf-8")
     )
-    assert len(manifest["material_files"]) == 49
+    assert len(manifest["material_files"]) == 51
     actual_files = {
         path.relative_to(source_root).as_posix()
         for path in source_root.glob("*/*.toml")

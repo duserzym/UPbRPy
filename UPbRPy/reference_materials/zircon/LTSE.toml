@@ -1,0 +1,51 @@
+# Only documented inputs are stored; redundant ratios are derived in Python.
+format_version = 2
+material = "zircon"
+
+[standards."LTSE"]
+aliases = []
+
+[[standards."LTSE".measurements]]
+role = "concentration"
+unit = "ug/g"
+status = "provisional"
+source = "deer2013"
+notes = "Elemental mass fraction assigned to the {quantity} measurement channel; value is not multiplied by the isotope abundance. Average zircon composition. The UPbR26plus archive cites Hu et al. (2023) (source hu2023) for LTSE at 560.9 Ma. That paper characterises three Sri Lankan megacrysts named SLZA, SLZB and SLZC (CA-ID-TIMS 206Pb/238U 556.94, 552.90 and 560.83 Ma, each ± 1.29 Ma); none is named LTSE, and the archive values do not match any of them exactly. Values are the archive's until the Boise lab confirms the source."
+
+[standards."LTSE".measurements.values]
+"29Si" = 151443.22960004435
+"91Zr" = 487760.24454904505
+
+[[standards."LTSE".measurements]]
+role = "initial_ratio"
+unit = "ratio"
+status = "provisional"
+source = "boise_upbr26plus_2026"
+notes = "Instructions sheet, Analyte & Standards Archive, column T: 206Pb/204Pb = 18.076074416, 206Pb/207Pb = 1.1606485235997472, 206Pb/208Pb = 0.47745654851370506. Canonical 207Pb/204Pb = 18.076074416 / 1.1606485235997472 = 15.574115719319678; canonical 208Pb/204Pb = 18.076074416 / 0.47745654851370506 = 37.8590983248 (Python float repr). The UPbR26plus archive cites Hu et al. (2023) (source hu2023) for LTSE at 560.9 Ma. That paper characterises three Sri Lankan megacrysts named SLZA, SLZB and SLZC (CA-ID-TIMS 206Pb/238U 556.94, 552.90 and 560.83 Ma, each ± 1.29 Ma); none is named LTSE, and the archive values do not match any of them exactly. Values are the archive's until the Boise lab confirms the source."
+
+[standards."LTSE".measurements.values]
+"206Pb/204Pb_i" = 18.076074416
+"207Pb/204Pb_i" = 15.574115719319678
+"208Pb/204Pb_i" = 37.8590983248
+
+[[standards."LTSE".measurements]]
+role = "radiogenic_ratio"
+unit = "ratio"
+status = "provisional"
+source = "boise_upbr26plus_2026"
+notes = "Instructions sheet, Analyte & Standards Archive, column T. The UPbR26plus archive cites Hu et al. (2023) (source hu2023) for LTSE at 560.9 Ma. That paper characterises three Sri Lankan megacrysts named SLZA, SLZB and SLZC (CA-ID-TIMS 206Pb/238U 556.94, 552.90 and 560.83 Ma, each ± 1.29 Ma); none is named LTSE, and the archive values do not match any of them exactly. Values are the archive's until the Boise lab confirms the source."
+
+[standards."LTSE".measurements.values]
+"206Pb/238U*" = 0.090912
+"207Pb/235U*" = 0.73893
+"208Pb/232Th*" = 0.028140699603010466
+
+[[standards."LTSE".measurements]]
+role = "reference_age"
+unit = "Ma"
+status = "provisional"
+source = "boise_upbr26plus_2026"
+notes = "Instructions sheet, Analyte & Standards Archive, column T. The UPbR26plus archive cites Hu et al. (2023) (source hu2023) for LTSE at 560.9 Ma. That paper characterises three Sri Lankan megacrysts named SLZA, SLZB and SLZC (CA-ID-TIMS 206Pb/238U 556.94, 552.90 and 560.83 Ma, each ± 1.29 Ma); none is named LTSE, and the archive values do not match any of them exactly. Values are the archive's until the Boise lab confirms the source."
+
+[standards."LTSE".measurements.values]
+"concordia_age" = 560.928

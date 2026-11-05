@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from importlib.resources import files
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -101,7 +102,9 @@ _VALUE_KEYS = {
     "locator",
     "notes",
 }
-_SOURCE_KEYS = {"display", "kind", "doi", "file", "url", "notes"}
+_SOURCE_KEYS = {
+    "display", "kind", "doi", "no_doi_reason", "status", "file", "url", "notes"
+}
 
 
 def _read_toml(resource) -> dict:
@@ -176,10 +179,69 @@ def _load_source_registry(root, filename: str) -> dict[str, dict]:
         display = metadata.get("display")
         if not isinstance(display, str) or not display.strip():
             raise ValueError(f"Source {source_id!r} requires a display citation.")
+        kind = metadata.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError(f"Source {source_id!r} requires a kind.")
+        for field in ("doi", "no_doi_reason"):
+            if field in metadata and (
+                not isinstance(metadata[field], str) or not metadata[field].strip()
+            ):
+                raise ValueError(f"Source {source_id!r} {field} must be nonblank text.")
+        if "status" in metadata and (
+            not isinstance(metadata["status"], str)
+            or metadata["status"] not in VALID_STATUSES
+        ):
+            raise ValueError(f"Source {source_id!r} has an unsupported status.")
         displays.append(display.strip())
     if len(displays) != len(set(displays)):
         raise ValueError("Source display citations must be unique.")
     return registry
+
+
+def check_reference_sources(path: str | Path | None = None) -> list[str]:
+    """Audit source references in a TOML library directory or manifest.
+
+    Raise ValueError for malformed source metadata or unknown measurement
+    source IDs, reporting all unresolved measurements together. Return the
+    sorted IDs lacking both a DOI and a no_doi_reason, and emit a UserWarning
+    when that list is nonempty. The default is the packaged library. This
+    audit does not look up DOIs or validate measurement values.
+    """
+    if path is None:
+        root = files(__package__) / REFERENCE_MATERIALS_DIRECTORY
+    else:
+        source_path = Path(path)
+        root = source_path.parent if source_path.name == MANIFEST_FILENAME else source_path
+    manifest = _read_toml(_resolve_resource_case_insensitive(root, MANIFEST_FILENAME))
+    _validate_format_version(manifest, MANIFEST_FILENAME)
+    sources = _load_source_registry(root, manifest["sources"])
+    unknown = []
+    for filename in manifest["material_files"]:
+        document = _read_toml(_resolve_resource_case_insensitive(root, filename))
+        for standard, definition in document.get("standards", {}).items():
+            for group in definition.get("measurements", []):
+                for quantity, value in group.get("values", {}).items():
+                    source_id = (
+                        value.get("source", group.get("source"))
+                        if isinstance(value, dict) else group.get("source")
+                    )
+                    if source_id not in sources:
+                        unknown.append(
+                            f"{filename}: {standard}/{quantity} -> {source_id!r}"
+                        )
+    if unknown:
+        raise ValueError("Measurements cite unknown source IDs:\n" + "\n".join(unknown))
+    missing = sorted(
+        source_id for source_id, metadata in sources.items()
+        if not metadata.get("doi") and not metadata.get("no_doi_reason")
+    )
+    if missing:
+        warnings.warn(
+            "Sources without doi or no_doi_reason: " + ", ".join(missing),
+            UserWarning,
+            stacklevel=2,
+        )
+    return missing
 
 
 def _measurement_record(
@@ -862,6 +924,7 @@ __all__ = [
     "VALID_UNCERTAINTY_TYPES",
     "build_standard_archive",
     "canonicalize_reference_material_samples",
+    "check_reference_sources",
     "load_standard_measurements",
     "standard_archive",
     "standard_archive_v2",

@@ -47,9 +47,11 @@ material_files = [
   "zircon/iolite_OG1.toml",
   "zircon/iolite_Plesovice.toml",
   "zircon/iolite_Temora2.toml",
+  "zircon/LTSE.toml",
   "zircon/OG1.toml",
   "zircon/PL.toml",
   "zircon/R33.toml",
+  "zircon/S513.toml",
   "zircon/Seiland.toml",
   "zircon/Temora.toml",
 ]

@@ -5,6 +5,7 @@ format_version = 2
 [sources."deer2013"]
 display = "Deer, Howie & Zussman (2013), An Introduction to the Rock-Forming Minerals, 3rd ed."
 kind = "book"
+no_doi_reason = "Book; DOI not yet looked up."
 file = "Deer2013An introduction to the rock-forming minerals.pdf"
 
 [sources."georem2005"]
@@ -88,6 +89,7 @@ url = "https://doi.org/10.3749/canmin.48.5.1423"
 [sources."price2014"]
 display = "Price (2014), The Mount Scott Intrusive Suite, Oklahoma Geological Survey Guidebook 38, 299-318"
 kind = "book_chapter"
+no_doi_reason = "Geological survey guidebook chapter; DOI not yet looked up."
 file = "Price2014aThe Mount Scott Intrusive Suita.pdf"
 
 [sources."black2004"]
@@ -162,34 +164,63 @@ url = "https://doi.org/10.1111/j.1751-908X.2005.tb00891.x"
 [sources."iolite_91500_compilation"]
 display = "Iolite 91500 compilation: Wiedenbeck et al. (1995), GeoReM, and Woodhead & Hergt (2005)"
 kind = "publication_compilation"
+no_doi_reason = "Software compilation of multiple publications; no single DOI represents the record."
 notes = "U-Pb and trace-element values cite Wiedenbeck et al. (1995) and GeoReM; Hf values cite Woodhead & Hergt (2005)."
 
 [sources."iolite_gj1_compilation"]
 display = "Iolite GJ-1 compilation: Condon ID-TIMS data; Jackson et al. (2004); Morel et al. (2008); Liu et al. (2010)"
 kind = "publication_compilation"
+no_doi_reason = "Software compilation of unpublished ID-TIMS data and multiple publications; no single DOI represents the record."
 notes = "The iolite record combines unpublished NIGL ID-TIMS values with published U-Th-Pb, Hf-isotope, and trace-element datasets."
 
 [sources."iolite_temora2_compilation"]
 display = "Iolite Temora-2 compilation: Black et al. (2004) and Woodhead & Hergt (2005)"
 kind = "publication_compilation"
+no_doi_reason = "Software compilation of multiple publications; no single DOI represents the record."
 notes = "U-Pb values cite Black et al. (2004); Hf values cite Woodhead & Hergt (2005)."
 
 [sources."iolite_maniitsoq_personal_communication"]
 display = "Iolite Maniitsoq record: Jeffrey Marsh (Laurentian University), personal communication"
 kind = "personal_communication"
+no_doi_reason = "Unpublished personal communication; no DOI identified in the source record."
 notes = "No publication was identified in the source JSON; retain as provisional."
 
 [sources."iolite_hfo_liam"]
 display = "Iolite HFO record attributed only as 'HFO Liam'"
 kind = "unpublished_compilation"
+no_doi_reason = "Unpublished software compilation attributed only as 'HFO Liam'; no publication identified."
 notes = "No publication was identified in the source JSON; retain as provisional."
 
 [sources."iolite_local_shells"]
 display = "Iolite C_MMC local-shell working value (unpublished)"
 kind = "unpublished_working_value"
+no_doi_reason = "Unpublished local-shell working value; no publication identified."
 notes = "The source JSON describes local beach shells and gives no publication; retain as provisional."
 
 [sources."iolite_unattributed"]
 display = "Unattributed iolite reference-material record"
 kind = "unattributed_import"
+no_doi_reason = "Unattributed software import; no publication identified."
 notes = "The source JSON supplies no publication; values are retained verbatim as provisional records pending review."
+
+[sources."luo2025"]
+display = "Luo et al. (2025), Geostandards and Geoanalytical Research 49, 403-423, doi:10.1111/ggr.12603"
+kind = "journal_article"
+doi = "10.1111/ggr.12603"
+url = "https://doi.org/10.1111/ggr.12603"
+notes = "Zircon S513 - A New Gem-Quality Reference Material for In Situ Microbeam U-Th-Pb, (U-Th)/He Geochronology and Hf-O Isotope Measurement."
+
+[sources."hu2023"]
+display = "Hu et al. (2023), Geostandards and Geoanalytical Research 47, 509-533, doi:10.1111/ggr.12495"
+kind = "journal_article"
+doi = "10.1111/ggr.12495"
+url = "https://doi.org/10.1111/ggr.12495"
+notes = "Characterisation of Three Sri Lankan Zircon Megacrysts as Potential Reference Materials for Microbeam U-Pb Geochronology and Hf-O-Zr Isotope Measurements. The materials are SLZA, SLZB and SLZC; none is named LTSE."
+
+[sources."boise_upbr26plus_2026"]
+display = "Boise State Isotope Geology Laboratory, UPbR26plus spreadsheet, Analyte & Standards Archive (Zircon_demo-i193-LA-UPbR26plus.xlsm, 2026-11-04)"
+kind = "lab_compilation"
+status = "provisional"
+file = "Zircon_demo-i193-LA-UPbR26plus.xlsm"
+no_doi_reason = "Unpublished laboratory compilation; no DOI."
+notes = "No DOI: an unpublished laboratory compilation; values to be confirmed by the Boise lab."
