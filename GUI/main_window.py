@@ -46,6 +46,7 @@ from GUI.services import (
     load_session,
     project_summary,
     reference_material_summary,
+    reimport_detector_calibration,
     restore_session_from_project,
     selection_quality,
     spot_base_name,
@@ -56,6 +57,7 @@ from GUI.theme import NeumorphicFrame, active_theme, apply_theme
 from GUI.widgets import (
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
+    DetectorCalibrationPanel,
     ElidedLabel,
     elide_tab_titles,
     IsotopeGridWidget,
@@ -246,8 +248,12 @@ class MainWindow(QtWidgets.QMainWindow):
         open_experiment_new_window_action.triggered.connect(
             self.choose_experiment_directory_in_new_window
         )
+        open_qtegra_action = file_menu.addAction("Open Qtegra file…")
+        open_qtegra_action.triggered.connect(self.choose_qtegra_file)
+        open_qtegra_new_window_action = file_menu.addAction("Open Qtegra file in New Window…")
+        open_qtegra_new_window_action.triggered.connect(self.choose_qtegra_file_in_new_window)
 
-        reload_action = file_menu.addAction("Reload Current Folder")
+        reload_action = file_menu.addAction("Reload Current Source")
         reload_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
         reload_action.triggered.connect(self.reload_current_directory)
 
@@ -699,6 +705,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.busy_progress.setFixedWidth(150)
         self.busy_progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.busy_progress)
+        self.capabilities_badge = QtWidgets.QLabel()
+        self.capabilities_badge.setObjectName("QtegraCapabilitiesBadge")
+        self.capabilities_badge.hide()
+        self.statusBar().addPermanentWidget(self.capabilities_badge)
+        self.reconstructed_times_flag = QtWidgets.QLabel("Sweep times reconstructed")
+        self.reconstructed_times_flag.hide()
+        self.statusBar().addPermanentWidget(self.reconstructed_times_flag)
 
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()
@@ -1976,7 +1989,21 @@ class MainWindow(QtWidgets.QMainWindow):
         calibration_layout.addWidget(fit_card, 0)
         calibration_layout.addStretch(1)
         calibration_scroll.setWidget(calibration_frame)
-        self.inspector_tabs.addTab(calibration_scroll, "Calibration")
+        # Separate scroll viewports keep the detector plot within the current
+        # inspector width even when fractionation forms need a wider page.
+        self.detector_calibration_panel = DetectorCalibrationPanel()
+        self.detector_calibration_panel.apply_requested.connect(self.apply_detector_calibration)
+        detector_scroll = QtWidgets.QScrollArea()
+        detector_scroll.setWidgetResizable(True)
+        detector_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        detector_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        detector_scroll.setWidget(self.detector_calibration_panel)
+        self.calibration_tabs = QtWidgets.QTabWidget()
+        self.calibration_tabs.setDocumentMode(True)
+        self.calibration_tabs.tabBar().setDrawBase(False)
+        self.calibration_tabs.addTab(calibration_scroll, "Fractionation")
+        self.calibration_tabs.addTab(detector_scroll, "Detector")
+        self.inspector_tabs.addTab(self.calibration_tabs, "Calibration")
 
         results_page = QtWidgets.QWidget()
         results_layout = QtWidgets.QVBoxLayout(results_page)
@@ -2500,6 +2527,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._is_populating or not value:
             return
         self.session.primary_68_standard = value
+        self.detector_calibration_panel.set_session(self.session)
         self._invalidate_downhole_fit_cache()
         self._refresh_workflow_status()
 
@@ -2783,8 +2811,30 @@ class MainWindow(QtWidgets.QMainWindow):
         return QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select experiment directory",
-            self.session.directory or str(Path.home()),
+            self.source_dialog_directory(),
         )
+
+    def source_dialog_directory(self) -> str:
+        """Start file and directory dialogs beside a file source."""
+        source = Path(self.session.directory) if self.session.directory else Path.home()
+        return str(source.parent if source.is_file() else source)
+
+    def select_qtegra_file(self) -> str:
+        """Return a user-selected Qtegra CSV or an empty string."""
+        return QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open Qtegra file", self.source_dialog_directory(),
+            "Qtegra exports (*.csv);;All files (*)",
+        )[0]
+
+    def choose_qtegra_file(self) -> None:
+        path = self.select_qtegra_file()
+        if path:
+            self.load_experiment_directory(path)
+
+    def choose_qtegra_file_in_new_window(self) -> None:
+        path = self.select_qtegra_file()
+        if path:
+            self.open_experiment_in_new_window_requested.emit(path)
 
     def project_workspace_state(self) -> dict[str, object]:
         """Return compact display context worth restoring with a reduction."""
@@ -2875,7 +2925,7 @@ class MainWindow(QtWidgets.QMainWindow):
         start_directory = (
             str(self.project_path.parent)
             if self.project_path is not None
-            else self.session.directory or str(Path.home())
+            else self.source_dialog_directory()
         )
         project_file, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -2915,7 +2965,7 @@ class MainWindow(QtWidgets.QMainWindow):
             suggested = self.project_path
         else:
             source = Path(self.session.directory)
-            suggested = source.parent / f"{source.name}.upbr"
+            suggested = source.with_suffix(".upbr") if source.is_file() else source.parent / f"{source.name}.upbr"
         project_file, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save UPbRPy project",
@@ -3299,11 +3349,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.append_log(f"Inferred {self.workflow_preset.title.lower()} workflow from folder name.")
 
         chosen_primary = primary_channel or self.primary_channel_combo.currentText() or self.workflow_preset.primary_channel or self.session.primary_channel or "238U"
+        detector_settings = (
+            {"detector_calibration": self.session.import_settings["detector_calibration"]}
+            if str(directory) == self.session.directory and "detector_calibration" in self.session.import_settings
+            else None
+        )
         calculation = lambda: load_session(
                 directory,
                 primary_channel=chosen_primary,
                 preset=self.workflow_preset,
                 selection_method=self.selection_method,
+                import_settings=detector_settings,
             )
 
         if background:
@@ -3332,6 +3388,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
         self.session = loaded_session
+        self._sync_qtegra_controls()
         self.project_path = (
             None
             if project_path is None
@@ -3352,7 +3409,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.repick_all_spots_button.setEnabled(True)
         self.set_plot_mode("raw", refresh=False)
         self.refresh_view()
-        self.append_log(f"Loaded experiment directory: {directory}")
+        self.append_log(f"Loaded experiment source: {directory}")
         materials = reference_material_summary(self.session, self.workflow_preset)
         if materials:
             self.append_log(f"Detected reference materials: {materials}")
@@ -3362,6 +3419,64 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         self.statusBar().showMessage(f"Loaded {len(self.session.spot_names)} spots from {Path(directory).name}")
+
+    def _sync_qtegra_controls(self) -> None:
+        qtegra = self.session.qtegra
+        self.capabilities_badge.setVisible(qtegra is not None)
+        self.reconstructed_times_flag.setVisible(bool(qtegra and qtegra.times_reconstructed))
+        if qtegra is not None:
+            self.capabilities_badge.setText({
+                "rich": "Rich", "rich+spot_folder": "Rich + per-spot",
+                "spot_folder": "Per-spot folder", "upbr": "UPbR",
+            }.get(qtegra.format, qtegra.format))
+            lines = ["Capabilities: " + (", ".join(sorted(qtegra.capabilities)) or "none"),
+                     "Source files:", *(str(source.path) for source in qtegra.sources)]
+            if qtegra.clock_offset_hours is not None:
+                lines.append(f"Per-spot clock offset from Rich: {qtegra.clock_offset_hours:+g} h")
+            if qtegra.warnings:
+                lines.extend(["Warnings:", *qtegra.warnings])
+            self.capabilities_badge.setToolTip("\n".join(lines))
+            self.reconstructed_times_flag.setToolTip(
+                f"Nominal cycle time: {qtegra.nominal_cycle_time_s} s. "
+                "Session-time drift corrections use reconstructed times."
+            )
+        self.detector_calibration_panel.set_session(self.session)
+
+    def apply_detector_calibration(self, settings: dict) -> None:
+        """Re-import in a worker and install the result without resetting the workspace."""
+        if not self.session.loaded or self._active_worker is not None:
+            return
+        self.apply_pending_project_edits()
+        current = self.session
+
+        def install(result: ReductionSession) -> None:
+            self.session = result
+            self._sync_qtegra_controls()
+            self.set_plot_mode("raw", refresh=False)
+            self.refresh_view()
+            self.append_log(f"Applied detector cross-calibration: {settings.get('mode', 'qtegra')}")
+            applied = result.experiment.attrs.get("detector_calibration", {})
+            mode = applied.get("mode", "qtegra")
+            if mode == "qtegra":
+                message = "Detector calibration: Qtegra factors"
+            else:
+                label = {"constant": "Session constant", "drift": "Time drift"}[mode]
+                message = f"Applied detector cross-calibration ({label})"
+                channel = self.detector_calibration_panel.channel_combo.currentText()
+                fit = applied.get("channels", {}).get(channel)
+                if fit is not None:
+                    factor = fit["factor"]
+                    formatted = f"{factor:,.0f}" if abs(factor) >= 1000 else f"{factor:.4g}"
+                    message += f": {channel} {formatted}"
+                    difference = fit.get("relative_difference_from_qtegra")
+                    if difference is not None:
+                        message += f", {100 * difference:+.1f} % vs Qtegra"
+            self.statusBar().showMessage(message)
+
+        self.run_background(
+            "Applying detector cross-calibration",
+            lambda: reimport_detector_calibration(current, settings), install,
+        )
 
     def apply_theme_mode(self, theme_mode: str, *, persist: bool) -> None:
         app = QtWidgets.QApplication.instance()
@@ -3380,6 +3495,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.downhole_frac_plot.apply_theme(active_theme(app))
         self.session_frac_plot.apply_theme(active_theme(app))
         self.results_table.apply_theme(active_theme(app))
+        self.detector_calibration_panel.apply_theme(active_theme(app))
+        theme = active_theme(app)
+        self.capabilities_badge.setStyleSheet(
+            f"color: {theme.accent_strong}; background: {theme.accent_soft}; padding: 2px 6px; border-radius: 4px;"
+        )
+        amber = build_channel_colors(["55Mn"], theme.name)["55Mn"]
+        self.reconstructed_times_flag.setStyleSheet(
+            f"color: {amber}; background: {theme.surface_soft}; padding: 2px 6px; border-radius: 4px;"
+        )
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._sync_toolbar_strips()
         QtCore.QTimer.singleShot(0, self._sync_toolbar_strips)
@@ -3633,6 +3757,7 @@ class MainWindow(QtWidgets.QMainWindow):
             clear_reduction_cache(self.session)
             ensure_shared_pipeline(self.session, self.workflow_preset)
             self._sync_fit_controls()
+            self.detector_calibration_panel.set_session(self.session)
             self.append_log(f"Workflow preset changed to {self.workflow_preset.title}; reload to apply notebook defaults.")
             self.refresh_view()
 
@@ -4907,6 +5032,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_step_list.setEnabled(False)
         self.fit_card.setEnabled(False)
         self.standards_card.setEnabled(False)
+        self.detector_calibration_panel.setEnabled(False)
         self.decision_card.setEnabled(False)
         self.primary_channel_combo.setEnabled(False)
         self.workflow_combo.setEnabled(False)
@@ -4935,6 +5061,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workflow_step_list.setEnabled(True)
             self.fit_card.setEnabled(True)
             self.standards_card.setEnabled(True)
+            self.detector_calibration_panel.setEnabled(bool(
+                self.session.qtegra and self.session.qtegra.has("analog_counter")
+            ))
             self.decision_card.setEnabled(True)
             self.primary_channel_combo.setEnabled(True)
             self.workflow_combo.setEnabled(True)

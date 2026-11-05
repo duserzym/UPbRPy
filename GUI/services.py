@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,8 +20,10 @@ from GUI.workflows import (
 )
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.constants import standard_archive_legacy
-from UPbRPy.io import read_experiment_data, select_signal_regions
-from UPbRPy.session_manifest import find_session_manifest
+from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
+from UPbRPy.qtegra import QtegraSession, open_qtegra
+from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
+from UPbRPy.reproducibility import selection_export_frame
 from UPbRPy.pipeline import (
     FitSettings,
     PipelineConfig,
@@ -274,6 +276,8 @@ def config_invalidation_stage(
     current: PipelineConfig,
 ) -> PipelineStage:
     """Return the earliest stage affected by a configuration change."""
+    if previous.detector_calibration != current.detector_calibration:
+        return PipelineStage.BASELINE
     if (
         previous.material != current.material
         or previous.primary_channel != current.primary_channel
@@ -306,18 +310,21 @@ def config_invalidation_stage(
     return PipelineStage.FINALIZE
 
 
-def raw_input_files(directory: str | Path) -> tuple[Path, ...]:
-    """Return Qtegra source files using header detection without loading sweeps.
+def raw_input_files(directory: str | Path | QtegraSession) -> tuple[Path, ...]:
+    """Return source files from a retained session or header-only discovery.
 
-    Rich exports include per-spot companions in the same folder or an immediate
-    subfolder. Derived UPbR files are omitted when Rich or per-spot exports
-    take precedence. A file source is returned directly.
+    Loaded Studio sessions use their exact sources without reading files again.
+    Path callers retain the header-only discovery used before Qtegra sessions
+    were retained by the GUI.
     """
+    if isinstance(directory, QtegraSession):
+        return tuple(source.path for source in directory.sources)
     from UPbRPy.qtegra import detect_format
 
-    source = Path(directory)
+    source = Path(directory).expanduser()
     if source.is_file():
         return (source,)
+    source = raw_directory_for(source)
 
     def csv_formats(folder):
         formats = {}
@@ -350,8 +357,10 @@ def ensure_shared_pipeline(
     config = pipeline_config_from_session(session, preset)
     if session.pipeline is None:
         input_files = (
-            raw_input_files(session.directory)
-            if session.directory and Path(session.directory).is_dir()
+            raw_input_files(session.qtegra or session.directory)
+            if session.qtegra is not None or (
+                session.directory and Path(session.directory).exists()
+            )
             else ()
         )
         session.pipeline = ReductionPipeline(
@@ -604,6 +613,8 @@ def bundle_origin(directory: str | Path) -> dict[str, str] | None:
     from UPbRPy.project import normalize_origin
 
     folder = Path(directory)
+    if folder.is_file():
+        folder = folder.parent
     manifest = find_session_manifest(folder)
     if manifest is None:
         return None
@@ -655,7 +666,7 @@ def load_session(
     selection_method: str | None = None,
     import_settings: Mapping[str, object] | None = None,
 ) -> ReductionSession:
-    """Import one raw experiment with preset or explicitly restored settings."""
+    """Open a Qtegra file or folder once and import with preset/restored settings."""
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
     # Presets contain nested selection-options dictionaries. A shallow copy
@@ -663,7 +674,8 @@ def load_session(
     # the user changes plateau duration or sigma settings.
     read_kwargs = deepcopy(dict(workflow_preset.read_kwargs))
     explicit = normalize_import_settings(import_settings or {})
-    if find_session_manifest(directory) is not None:
+    manifest = resolve_session_manifest(directory, explicit.get("session_manifest"))
+    if manifest is not None:
         # A session manifest names the label separator of this session; a
         # mineral preset's default must not override it (explicit project
         # settings still do).
@@ -674,10 +686,14 @@ def load_session(
     read_kwargs.pop("primary_channel", None)
     if selection_method is not None:
         read_kwargs["selection_method"] = selection_method
+    qtegra = open_qtegra(
+        raw_directory_for(directory) if manifest is not None else directory,
+        cycle_time_s=read_kwargs.get("cycle_time_s"),
+    )
     experiment, channels, total_data = read_experiment_data(
-        directory,
+        qtegra,
         primary_channel=effective_primary,
-        **read_kwargs,
+        **{**read_kwargs, "session_manifest": manifest or False},
     )
     if "plateau_filter_method" not in experiment.columns:
         experiment["plateau_filter_method"] = (
@@ -689,7 +705,8 @@ def load_session(
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
     session = ReductionSession(
-        directory=directory,
+        directory=str(directory),
+        qtegra=qtegra,
         experiment=experiment,
         total_data=total_data,
         channels=clean_channels,
@@ -717,6 +734,43 @@ def load_session(
     session.origin = bundle_origin(directory)
     ensure_shared_pipeline(session, workflow_preset)
     return session
+
+
+def reimport_detector_calibration(
+    session: ReductionSession,
+    detector_calibration: Mapping[str, object],
+) -> ReductionSession:
+    """Rebuild sweeps from retained Qtegra readings, preserving reviewed windows.
+
+    Returns a new GUI session and pipeline; the worker never mutates the active
+    session. Only small settings and selection tables are copied.
+    """
+    if session.qtegra is None:
+        raise ValueError("Load a Qtegra session before changing detector calibration.")
+    settings = deepcopy(session.import_settings)
+    settings["detector_calibration"] = deepcopy(dict(detector_calibration))
+    read_kwargs = dict(settings)
+    read_kwargs.pop("primary_channel", None)
+    experiment, channels, total_data = read_experiment_data(
+        session.qtegra, primary_channel=session.primary_channel, **read_kwargs,
+    )
+    experiment = restore_project_selections(
+        experiment, selection_export_frame(session.experiment).to_dict("records"),
+    )
+    updated = replace(
+        session, experiment=experiment, total_data=total_data, channels=list(channels),
+        import_settings=settings, reduction_cache={},
+    )
+    preset = get_workflow_preset(session.workflow_key)
+    config = pipeline_config_from_session(updated, preset)
+    updated.pipeline = ReductionPipeline(
+        experiment, total_data, channels, current_standard_archive(), config,
+        source_directory=session.directory,
+        reference_library_path=current_standard_archive_path(),
+        input_files=raw_input_files(session.qtegra), build_diagnostic_plots=False,
+        origin=session.origin,
+    )
+    return updated
 
 
 def populate_recalculated_cache(
@@ -858,7 +912,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         session.selected_spot = selected_spot
     session.plot_mode = str(workspace.get("plot_mode", "raw"))
 
-    input_files = raw_input_files(source_directory)
+    input_files = raw_input_files(session.qtegra or source_directory)
     session.pipeline = ReductionPipeline(
         session.experiment,
         session.total_data,

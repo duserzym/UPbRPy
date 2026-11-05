@@ -3,7 +3,7 @@ the single running instance, and the URL-scheme registration.
 
 ``--open`` accepts
 
-- an experiment directory (a Qtegra export folder, or a session-bundle root),
+- an experiment directory, a Qtegra CSV, or a session-bundle root,
 - a ``.upbr`` project,
 - a session-bundle ``.zip``,
 - ``upbr://session/<id>?server=<base url>&code=<one-time code>``,
@@ -127,14 +127,15 @@ def parse_open_target(value: str | os.PathLike) -> LaunchTarget:
         if sys.platform == "win32" and text.startswith("/") and ":" in text[:4]:
             text = text[1:]
     path = Path(text).expanduser()
-    if path.is_dir():
+    if path.is_dir() or (path.is_file() and path.suffix.lower() == ".csv"):
+        # Keep CSVs on the same dispatch path as raw experiment folders.
         return LaunchTarget(kind="directory", path=path.resolve(), original=text)
     suffix = path.suffix.lower()
     if suffix not in {".upbr", ".zip"}:
         if not path.exists():
             raise LaunchError(f"{path} does not exist.")
         raise LaunchError(
-            f"{path.name} is not a folder, a .upbr project or a session-bundle .zip."
+            f"{path.name} is not a folder, a Qtegra .csv, a .upbr project or a session-bundle .zip."
         )
     if not path.is_file():
         raise LaunchError(f"{path} does not exist.")

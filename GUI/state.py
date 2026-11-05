@@ -7,11 +7,13 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from UPbRPy.pipeline import ReductionPipeline
+    from UPbRPy.qtegra import QtegraSession
 
 
 @dataclass
 class ReductionSession:
     directory: str = ""
+    qtegra: Optional["QtegraSession"] = field(default=None, kw_only=True)
     experiment: pd.DataFrame = field(default_factory=pd.DataFrame)
     total_data: pd.DataFrame = field(default_factory=pd.DataFrame)
     channels: list[str] = field(default_factory=list)

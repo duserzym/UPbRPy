@@ -215,3 +215,38 @@ def test_saved_geometry_larger_than_the_screen_is_clamped(app, settings_reset):
     window.has_unsaved_changes = lambda: False
     window.close()
     process(app)
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+def test_rich_detector_panel_fits_laptop_sizes(app, settings_reset, size):
+    from pathlib import Path
+    from GUI.main_window import MainWindow
+
+    source = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    window = MainWindow()
+    window.show()
+    try:
+        window.load_experiment_directory(str(source), background=False)
+        assert window.session.loaded
+        window.resize(*size)
+        window.apply_default_layout()
+        window.inspector_tabs.setCurrentIndex(1)
+        window.calibration_tabs.setCurrentIndex(1)  # Fractionation is the default; inspect Detector.
+        process(app)
+        panel = window.detector_calibration_panel
+        scroll = window.calibration_tabs.currentWidget()
+        scroll.ensureWidgetVisible(panel)
+        process(app)
+        assert (window.width(), window.height()) == size
+        assert window.minimumSizeHint().width() <= size[0]
+        assert window.minimumSizeHint().height() <= size[1]
+        assert panel.isVisible() and panel.isEnabled()
+        top_left = panel.mapTo(scroll.viewport(), QtCore.QPoint(0, 0))
+        assert top_left.y() >= 0
+        assert top_left.y() + panel.height() <= scroll.viewport().height()
+        assert panel.width() <= scroll.viewport().width()
+        assert not clipped_widgets(window)
+    finally:
+        window.has_unsaved_changes = lambda: False
+        window.close()
+        process(app)

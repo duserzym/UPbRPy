@@ -383,13 +383,15 @@ def get_workflow_preset(key: str) -> WorkflowPreset:
 
 
 def infer_workflow_preset(directory: str) -> WorkflowPreset:
-    """Guess the mineral preset from the folder name.
+    """Guess the mineral preset from the source name or its session manifest.
 
     A session bundle's ``raw/`` folder is named after nothing, so its
     manifest's ``material`` and then the bundle folder's name are used.
     """
     folder = Path(directory)
-    names = [folder.name]
+    names = [folder.name, folder.parent.name] if folder.is_file() else [folder.name]
+    if folder.is_file():
+        folder = folder.parent
     try:
         from UPbRPy.session_manifest import (
             find_session_manifest,

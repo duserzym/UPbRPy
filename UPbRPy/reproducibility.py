@@ -185,7 +185,8 @@ def build_reproducibility_notebook(
             "    config,\n"
             "    source_directory=source_directory,\n"
             "    reference_library_path=reference_library_path,\n"
-            "    input_files=tuple(sorted(source_directory.glob('*.csv'))),\n"
+            "    input_files=tuple(Path(source['path']) for source in\n"
+            "        experiment.attrs.get('qtegra', {}).get('sources', [])),\n"
             ")\n"
         ),
         notebook_markdown_cell("## Baseline, normalization, and concentration"),

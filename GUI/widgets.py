@@ -13,7 +13,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
+from GUI.state import ReductionSession
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme
+from UPbRPy.calibration import fit_cross_calibration
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.ratios import (
     excel_plateau_inlier_mask,
@@ -1049,6 +1051,233 @@ def elide_tab_titles(tabs: QtWidgets.QTabWidget) -> None:
     for index in range(tabs.count()):
         if not tabs.tabToolTip(index):
             tabs.setTabToolTip(index, tabs.tabText(index))
+
+
+class DetectorCalibrationPanel(NeumorphicFrame):
+    """Preview overlap fits and request re-import with explicit detector settings."""
+
+    apply_requested = QtCore.Signal(dict)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("DetectorCalibrationPanel")
+        self._session = None
+        self._preview_key = None
+        self._constant = None
+        self._drift = None
+        self._options = {}
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+        title = ElidedLabel("Detector cross-calibration")
+        title.setObjectName("SectionTitle")
+        layout.addWidget(title)
+        self.reason_label = ElidedLabel()
+        layout.addWidget(self.reason_label)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(4)
+        form.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self.mode_combo = StyledComboBox()
+        for label, value in (("Qtegra factor", "qtegra"),
+                             ("Session constant", "constant"), ("Time drift", "drift")):
+            self.mode_combo.addItem(label, value)
+        self.basis_combo = StyledComboBox()
+        self.basis_combo.addItem("All acquisitions", "all")
+        self.basis_combo.addItem("Primary standard", "primary_standard")
+        self.channel_combo = StyledComboBox()
+        self.channel_combo.setToolTip("Channel shown in the plot; Apply calibrates all fitted channels.")
+        for combo in (self.mode_combo, self.basis_combo, self.channel_combo):
+            combo.setMinimumContentsLength(6)
+            combo.setStyleSheet(
+                "QComboBox { min-height: 18px; padding: 0px 4px; border-width: 6px; }"
+            )
+            combo.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+        form.addRow("Mode", self.mode_combo)
+        form.addRow("Basis", self.basis_combo)
+        form.addRow("Plot channel", self.channel_combo)
+        layout.addLayout(form)
+        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button.setToolTip("Re-import detector signals and keep reviewed selection windows.")
+        self.apply_button.clicked.connect(lambda: self.apply_requested.emit(self.settings()))
+        layout.addWidget(self.apply_button)
+        self.plot = pg.PlotWidget()
+        self.plot.setMinimumSize(0, 220)
+        self.plot.setMaximumHeight(220)
+        self.plot.setLabel("bottom", "Session time", units="min")
+        self.plot.setLabel("left", "Factor")
+        self.plot.setToolTip("Points: acquisition slopes; curve: smoothed drift; solid: session constant; dashed: Qtegra.")
+        layout.addWidget(self.plot)
+        self.plot_caption = QtWidgets.QLabel(
+            "points: per-acquisition slope · line: smoothed drift · "
+            "solid: session constant · dashed: Qtegra"
+        )
+        self.plot_caption.setObjectName("SecondaryText")
+        self.plot_caption.setStyleSheet("font-size: 10px;")
+        self.plot_caption.setWordWrap(True)
+        layout.addWidget(self.plot_caption)
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Channel", "Qtegra", "Fitted ± SE", "Δ %"])
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setWordWrap(False)
+        self.table.setStyleSheet(
+            "QTableWidget { font-size: 11px; }"
+            "QHeaderView::section { font-size: 10px; padding: 3px; }"
+        )
+        header_font = QtGui.QFont(self.table.font())
+        header_font.setPixelSize(10)
+        self.table.horizontalHeader().setFont(header_font)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.horizontalHeader().setMinimumHeight(1)
+        self.table.setMinimumSize(0, 92)
+        self.table.setMaximumHeight(112)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table)
+        layout.addStretch(1)
+        self.basis_combo.currentIndexChanged.connect(self._refresh_preview)
+        self.channel_combo.currentIndexChanged.connect(self._draw)
+        self.mode_combo.currentIndexChanged.connect(self._update_apply_button)
+        self.mode_combo.currentIndexChanged.connect(self._draw)
+        self.set_session(None)
+
+    def set_session(self, session: ReductionSession | None) -> None:
+        """Show the retained raw session and its saved detector choices."""
+        self._session = session
+        self._preview_key = None
+        options = {} if session is None else session.import_settings.get("detector_calibration", {})
+        self._options = dict(options) if isinstance(options, dict) else {"mode": options}
+        qtegra = None if session is None else session.qtegra
+        capable = qtegra is not None and qtegra.has("analog_counter")
+        self.setEnabled(capable)
+        for combo in (self.mode_combo, self.basis_combo):
+            combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(self._options.get("mode", "qtegra"))))
+        self.basis_combo.setCurrentIndex(max(0, self.basis_combo.findData(self._options.get("on", "all"))))
+        primary = "" if session is None else session.primary_68_standard
+        self.basis_combo.setItemText(1, f"Primary standard ({primary})" if primary else "Primary standard")
+        for combo in (self.mode_combo, self.basis_combo):
+            combo.blockSignals(False)
+        if capable:
+            self._refresh_preview()
+        else:
+            self._constant = self._drift = None
+            self.channel_combo.clear()
+            self.table.setRowCount(0)
+            self.plot.clear()
+            self.reason_label.setText("Needs a Rich export: analog and counter readings")
+            self.reason_label.show()
+            self._update_apply_button()
+
+    def settings(self) -> dict:
+        """Return the reader's detector-calibration mapping for the pending choice."""
+        options = dict(self._options)
+        options.update(mode=self.mode_combo.currentData(), on=self.basis_combo.currentData())
+        if options["on"] == "primary_standard":
+            options["primary_standard"] = self._session.primary_68_standard
+        else:
+            options.pop("primary_standard", None)
+        return options
+
+    def _refresh_preview(self, *_args) -> None:
+        if self._session is None or self._session.qtegra is None or not self.isEnabled():
+            return
+        options = self.settings()
+        sep = self._session.import_settings.get("sep")
+        if sep is None:
+            from UPbRPy.io import resolve_session_manifest
+            manifest = resolve_session_manifest(
+                self._session.qtegra, self._session.import_settings.get("session_manifest"),
+            )
+            sep = manifest.sep if manifest is not None and manifest.sep else "_"
+        fit_options = dict(
+            on=options["on"], primary_standard=options.get("primary_standard"),
+            window=options.get("window", (1e5, 2.4e6)),
+            smoothing_s=options.get("smoothing_s", 1800.0), sep=sep,
+        )
+        key = (id(self._session.qtegra), repr(fit_options))
+        if key != self._preview_key:
+            try:
+                self._constant = fit_cross_calibration(self._session.qtegra, **fit_options, mode="constant")
+                self._drift = fit_cross_calibration(self._session.qtegra, **fit_options, mode="drift")
+            except ValueError as exc:
+                self._constant = self._drift = None
+                self.channel_combo.clear()
+                self.table.setRowCount(0)
+                self.plot.clear()
+                self.reason_label.setText(str(exc))
+                self.reason_label.show()
+                self._update_apply_button()
+                return
+            self._preview_key = key
+        previous = self.channel_combo.currentText()
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.clear()
+        self.channel_combo.addItems(list(self._constant.channels))
+        target = previous if previous in self._constant.channels else "238U"
+        self.channel_combo.setCurrentIndex(max(0, self.channel_combo.findText(target)))
+        self.channel_combo.blockSignals(False)
+        self.reason_label.setText("" if self._constant.channels else "No overlap points for this basis.")
+        self.reason_label.setVisible(not self._constant.channels)
+        self._update_apply_button()
+        self._draw()
+
+    def _update_apply_button(self, *_args) -> None:
+        self.apply_button.setEnabled(
+            self.isEnabled() and (self.mode_combo.currentData() == "qtegra"
+                                  or bool(self._constant and self._constant.channels))
+        )
+
+    def apply_theme(self, theme: ThemeSpec) -> None:
+        """Use the Studio plot palette for all detector diagnostics."""
+        self.plot.setBackground(theme.plot_background)
+        for name in ("left", "bottom"):
+            axis = self.plot.getAxis(name)
+            axis.setPen(pg.mkPen(theme.axis_line))
+            axis.setTextPen(pg.mkPen(theme.axis_text))
+        self._draw()
+
+    def _draw(self, *_args) -> None:
+        self.plot.clear()
+        if self._constant is None:
+            return
+        theme = active_theme()
+        table_fits = self._drift if self.mode_combo.currentData() == "drift" else self._constant
+        self.table.setRowCount(len(table_fits.channels))
+        for row, (name, fit) in enumerate(table_fits.channels.items()):
+            difference = "—" if not fit.qtegra_factor else f"{100 * (fit.factor / fit.qtegra_factor - 1):+.1f}"
+            factor = f"{fit.factor:,.0f}" if abs(fit.factor) >= 1000 else f"{fit.factor:.4g}"
+            error = f"{fit.factor_se:,.0f}" if abs(fit.factor) >= 1000 else f"{fit.factor_se:.2g}"
+            qtegra = ("—" if fit.qtegra_factor is None else
+                      f"{fit.qtegra_factor:,.0f}" if abs(fit.qtegra_factor) >= 1000 else
+                      f"{fit.qtegra_factor:.4g}")
+            values = (name, qtegra, f"{factor} ± {error}", difference)
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+            if name == self.channel_combo.currentText():
+                self.table.selectRow(row)
+        name = self.channel_combo.currentText()
+        if name not in self._constant.channels:
+            return
+        constant = self._constant.channels[name]
+        drift = self._drift.channels[name]
+        self.plot.addItem(pg.InfiniteLine(pos=constant.factor, angle=0,
+                                         pen=pg.mkPen(theme.muted, width=1)))
+        if constant.qtegra_factor is not None:
+            self.plot.addItem(pg.InfiniteLine(pos=constant.qtegra_factor, angle=0,
+                pen=pg.mkPen(theme.muted, width=1, style=QtCore.Qt.PenStyle.DashLine)))
+        if drift.times_s is not None:
+            point_color = QtGui.QColor(theme.accent)
+            point_color.setAlpha(90)
+            self.plot.plot(drift.times_s / 60, drift.raw_factors, pen=None, symbol="o",
+                           symbolSize=4, symbolBrush=point_color, symbolPen=None).setZValue(1)
+            self.plot.plot(drift.times_s / 60, drift.factors,
+                           pen=pg.mkPen(theme.accent, width=3)).setZValue(2)
 
 
 class ResultsTableWidget(QtWidgets.QWidget):

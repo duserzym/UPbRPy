@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         "--open",
         metavar="TARGET",
         help=(
-            "Open on startup: an experiment directory, a .upbr project, a "
+            "Open on startup: an experiment directory, a Qtegra CSV, a .upbr project, a "
             "session-bundle .zip, or a upbr://session/<id>?server=…&code=…, "
             "upbr://run/<id>?server=… or upbr://auth/callback?code=… link"
         ),
