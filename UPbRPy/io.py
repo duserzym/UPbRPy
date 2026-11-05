@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -930,6 +931,7 @@ def read_experiment_data(
     session_manifest=None,
     *,
     detector_calibration=None,
+    cycle_time_s=None,
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
 
@@ -989,6 +991,11 @@ def read_experiment_data(
         None or 'qtegra' retains exported Y. 'constant', 'drift', or a mapping
         with mode, on, window, primary_standard, channels and smoothing_s fits
         and applies detector factors before building tables and selections.
+    cycle_time_s : float or None, keyword-only
+        Nominal sweep spacing for Rich CSVs with StartTime but no Time rows.
+        None uses DEFAULT_CYCLE_TIME_S (0.4255 s); otherwise finite and > 0.
+        Recorded Time rows win; per-spot input and in-memory sessions ignore
+        this keyword. Reconstructed timing emits one UserWarning per import.
 
     Returns
     -------
@@ -1022,8 +1029,13 @@ def read_experiment_data(
 
     session = (
         directory if isinstance(directory, QtegraSession)
-        else open_qtegra(Path(directory).expanduser())
+        else open_qtegra(Path(directory).expanduser(), cycle_time_s=cycle_time_s)
     )
+    if session.times_reconstructed:
+        warnings.warn(
+            f"Sweep times reconstructed with cycle_time_s={session.nominal_cycle_time_s} s from StartTime.",
+            UserWarning, stacklevel=2,
+        )
     calibration_options = (
         dict(detector_calibration) if isinstance(detector_calibration, Mapping)
         else {"mode": "qtegra" if detector_calibration is None else detector_calibration}
@@ -1089,6 +1101,9 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
     Return ``(experiment, element_channels, total_data)`` in the historical
     column order and dtypes. Session seconds use each acquisition's first
     channel time and recorded start.
+    Without recorded starts, acquisitions follow sequence order on a continuous
+    axis: the next start follows the previous last sweep by its median spacing.
+    Calendar gaps cannot be recovered from per-acquisition Time rows alone.
     Relative seconds pass through pandas nanosecond timedeltas and absolute
     timestamps before subtraction, matching the original per-spot reader.
     Source paths and JSON-safe session provenance are retained.
@@ -1102,13 +1117,23 @@ def experiment_from_session(session, sep="_", sample_aliases=None):
     starts = []
     samples = []
     spot_frames = []
+    next_start = min(
+        (a.start for a in session.acquisitions if a.start is not None),
+        default=pd.Timestamp("1970-01-01"),
+    )
     for acquisition in session.acquisitions:
+        if acquisition.sweep_time is None:
+            raise ValueError(f"{acquisition.label}: no sweep times.")
         if acquisition.start is not None:
             start = acquisition.start
         else:
-            raise ValueError(f"{acquisition.label}: no acquisition start.")
-        if acquisition.sweep_time is None:
-            raise ValueError(f"{acquisition.label}: no sweep times.")
+            start = next_start
+        finite_times = acquisition.sweep_time[np.isfinite(acquisition.sweep_time)]
+        spacings = np.diff(finite_times)
+        spacings = spacings[spacings > 0]
+        spacing = float(np.median(spacings)) if spacings.size else 0.0
+        duration = float(finite_times[-1]) + spacing if finite_times.size else 0.0
+        next_start = start + pd.to_timedelta(duration, unit="s")
         starts.append(start)
         sample = acquisition.label.split(sep)[0]
         sample = aliases.get(sample.casefold(), sample)

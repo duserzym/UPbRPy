@@ -7,7 +7,9 @@ contains MainRuns Y rows but no Time rows or StartTime row. Export the
 **Rich single CSV** (Y, Time, Analog, Counter, X [u] and metadata rows) or
 the **per-spot folder**. Y-only exports raise `UnsupportedQtegraFormat`;
 folder discovery ignores them with a warning when usable exports exist.
-Reduced Rich files with partial quantities remain a later milestone.
+Reduced Rich files are accepted: the minimum is the two header rows,
+MainRuns Y rows for every channel, and either MainRuns Time rows or a
+StartTime row. All other row groups are optional.
 
 The comparison below is historical.
 
@@ -81,12 +83,40 @@ format name, and a `capabilities` set:
 
 | reader | yields | capabilities |
 |---|---|---|
-| `read_rich_csv(path)` | whole session | all but `dwell_xcal` |
+| `read_rich_csv(path, *, cycle_time_s=None)` | whole session, including reduced Rich files with the minimum above | capabilities from row groups present; never `dwell_xcal` |
 | `read_spot_folder(dir)` | whole session, files ordered by time | `timestamps`, `instrument_state`, `dwell_xcal` |
 | `merge(rich, folder)` | Rich plus `dwell_xcal` and threshold from the folder | union |
 
 Rules every consumer follows:
 
+- Optional Rich groups set capabilities only when exported: Time gives
+  `per_channel_time`; X [u] gives `mass`; TuneSettings or StatusReport gives
+  `instrument_state`; Info/UserName gives `user`; StartTime gives `timestamps`;
+  StopTime gives `stop_times`; BrigidMS or PMIAnalyteLaser gives
+  `sequence_fields` (any subset of their rows). Both Analog and Counter are
+  needed for `analog_counter`; an unpaired group is ignored with a warning
+  naming the missing group. Missing fields remain None or empty.
+- Without Time rows, StartTime supplies calendar starts and sweep offsets
+  are `np.arange(n_sweeps) * cycle_time_s` (1-D). None uses
+  `DEFAULT_CYCLE_TIME_S = 0.4255`; explicit spacing must be finite and positive.
+  StopTime includes acquisition overhead and is never used to estimate spacing.
+  The session records `times_reconstructed=True`, `nominal_cycle_time_s`, and
+  one warning. `open_qtegra` and `read_experiment_data` forward this keyword;
+  recorded Time rows and per-spot input ignore it. Experiment import emits
+  one reconstructed-times UserWarning.
+- With Time but no StartTime, experiment import places acquisitions in
+  sequence order on a continuous axis, advancing past the previous last
+  sweep by its median spacing. Calendar gaps are unavailable. Merge requires
+  StartTime for every Rich acquisition and otherwise raises ValueError.
+  Merge retains reconstructed Rich times and skips their equality check
+  against recorded companion times; channel order, Y and NaN checks remain.
+- Checked on the full Zircon_04Nov26 session (245 acquisitions, 29 channels,
+  2026-11-05; 91500 primary, NIST612 concentration standard, reduced to spot
+  means): Y + Time + StartTime gives results bit-identical to the full Rich
+  file. Y + Time alone (no StartTime) shifts session-drift-corrected values by
+  at most 0.010 % in 206Pb/238U age and 0.055 % in 207Pb/235U age; Y +
+  StartTime alone (reconstructed sweep times) by at most 0.003 % and 0.011 %.
+  A Rich file without StartTime carries a session warning saying so.
 - Reduction uses `y`. Where `analog_counter` is present, UPbRPy offers a
   detector cross-calibration step with three modes: Qtegra factor (as
   exported, default and identical to today's results), session-constant fit,

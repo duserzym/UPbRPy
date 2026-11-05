@@ -363,7 +363,18 @@ Both contain Y (cps used for reduction). The UPbR single CSV was dropped
 one raises `UnsupportedQtegraFormat` with instructions to export Rich or
 per-spot data. Folder discovery skips it with a warning when usable exports
 exist; a folder containing only unsupported exports raises the same error.
-Reduced Rich files with partial quantities are reserved for a later milestone.
+Reduced Rich files need only the two header rows, MainRuns Y for every
+channel, and either MainRuns Time or StartTime. Other row groups are optional;
+capabilities describe what was exported. Analog and Counter must both exist
+to enable detector calibration.
+
+Without Time rows, sweep offsets are reconstructed from StartTime using
+`cycle_time_s` (default 0.4255 s), with a warning and timing provenance.
+Pass it as a keyword to `read_rich_csv`, `open_qtegra`, or
+`read_experiment_data`; recorded Time rows and per-spot input ignore it.
+StopTime is never used to estimate sweep spacing. Without StartTime,
+experiment import uses a continuous sequence axis; calendar gaps cannot be
+recovered, and merging per-spot companions requires StartTime.
 
 ```python
 from UPbRPy.io import read_experiment_data

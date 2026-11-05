@@ -50,7 +50,7 @@ class UnsupportedQtegraFormat(ValueError):
 def _no_time_error(path):
     return UnsupportedQtegraFormat(
         f"Unsupported Qtegra export: no time information: {path.name} has "
-        "MainRuns Y rows but no Time rows and no StartTime row. Export the "
+        "MainRuns Y rows but no MainRuns Time rows and no StartTime row. Export the "
         "Rich single CSV (Y, Time, Analog, Counter, X [u] and the metadata "
         "rows) or the per-spot folder."
     )
@@ -142,8 +142,8 @@ class SourceFile:
 class QtegraSession:
     """Acquisitions in sequence order, or chronological order for spot files.
 
-    ``times_reconstructed`` and ``nominal_cycle_time_s`` are reserved for
-    nominal sweep timing; current readers leave them False and None.
+    ``times_reconstructed`` marks nominal sweep timing from StartTime when
+    Rich Time rows are absent; ``nominal_cycle_time_s`` records that spacing.
     """
 
     acquisitions: list[Acquisition]
@@ -251,8 +251,14 @@ def _read_single(path, quantities):
     return path, raw, frame, columns, labels, names, cubes, data_dtypes
 
 
-def read_rich_csv(path) -> QtegraSession:
+def read_rich_csv(path, *, cycle_time_s=None) -> QtegraSession:
     """Read a Rich CSV, preserving original timestamp strings and detector data.
+
+    Requires two headers, MainRuns Y for every channel, and Time or StartTime.
+    Other row groups are optional. Without Time, reconstruct shared sweep
+    offsets from StartTime with finite positive ``cycle_time_s`` (None uses
+    DEFAULT_CYCLE_TIME_S). With Time rows, recorded times win and this keyword
+    is ignored. StopTime is never used to estimate sweep spacing.
 
     Design for large files: read the bytes once, parse the table once with
     pandas, and convert/scatter each whole quantity block with pandas/numpy.
@@ -264,14 +270,38 @@ def read_rich_csv(path) -> QtegraSession:
     )
     if "Time" not in cubes and not (frame[0] == "StartTime").any():
         raise _no_time_error(path)
-    for quantity in ("Time", "Analog", "Counter", "X [u]"):
-        if quantity not in cubes:
-            raise ValueError(f"Missing Rich quantity {quantity!r} in {path}")
-    masses = cubes["X [u]"]
-    valid_mass = np.isfinite(masses)
-    mass_values = np.take_along_axis(
-        masses, valid_mass.argmax(axis=1)[:, None, :], axis=1,
-    )[:, 0, :]
+    y_names = set(frame.loc[(frame[0] == "MainRuns") & (frame[3] == "Y"), 2])
+    if missing := set(names) - y_names:
+        raise ValueError(f"Missing MainRuns Y rows for channels: {', '.join(sorted(missing))}")
+    reconstructed = "Time" not in cubes
+    cycle = None
+    if reconstructed:
+        try:
+            cycle = float(DEFAULT_CYCLE_TIME_S if cycle_time_s is None else cycle_time_s)
+        except (TypeError, ValueError):
+            raise ValueError("cycle_time_s must be finite and > 0.") from None
+        if not np.isfinite(cycle) or cycle <= 0:
+            raise ValueError("cycle_time_s must be finite and > 0.")
+    groups = set(frame[0])
+    capabilities = set()
+    for present, capability in (
+        ("Time" in cubes, "per_channel_time"),
+        ("Analog" in cubes and "Counter" in cubes, "analog_counter"),
+        ("X [u]" in cubes, "mass"),
+        (bool(groups & {"TuneSettings", "StatusReport"}), "instrument_state"),
+        (((frame[0] == "Info") & (frame[1] == "UserName")).any(), "user"),
+        ("StartTime" in groups, "timestamps"),
+        ("StopTime" in groups, "stop_times"),
+        (bool(groups & {"BrigidMS", "PMIAnalyteLaser"}), "sequence_fields"),
+    ):
+        if present:
+            capabilities.add(capability)
+    mass_values = np.full((len(labels), len(names)), np.nan)
+    if "X [u]" in cubes:
+        masses = cubes["X [u]"]
+        mass_values = np.take_along_axis(
+            masses, np.isfinite(masses).argmax(axis=1)[:, None, :], axis=1,
+        )[:, 0, :]
     acquisitions = []
     for i, label in enumerate(labels):
         count = _sweep_count(cubes["Y"][i])
@@ -281,16 +311,29 @@ def read_rich_csv(path) -> QtegraSession:
         )
         acquisitions.append(Acquisition(
             label, i + 1, channels, cubes["Y"][i, :count].copy(),
-            cubes["Time"][i, :count].copy(),
-            analog=cubes["Analog"][i, :count].copy(),
-            counter=cubes["Counter"][i, :count].copy(),
+            np.arange(count) * cycle if reconstructed else cubes["Time"][i, :count].copy(),
+            analog=cubes["Analog"][i, :count].copy() if "analog_counter" in capabilities else None,
+            counter=cubes["Counter"][i, :count].copy() if "analog_counter" in capabilities else None,
             spot_number=_spot_number(label), source_path=path,
             _data_dtypes={"Time": "float64", **data_dtypes[i]},
         ))
     session = QtegraSession(
-        acquisitions, "rich", CAPABILITIES - {"dwell_xcal"},
+        acquisitions, "rich", frozenset(capabilities),
         (SourceFile(path, sha256(raw).hexdigest(), "rich"),),
+        times_reconstructed=reconstructed, nominal_cycle_time_s=cycle,
     )
+    if reconstructed:
+        session.warnings.append(
+            f"No MainRuns Time rows: sweep times reconstructed with cycle_time_s={cycle} s from StartTime."
+        )
+    if "timestamps" not in capabilities:
+        session.warnings.append(
+            "No StartTime row: acquisitions are placed back to back on the session "
+            "time axis; time-dependent drift corrections are approximate."
+        )
+    if ("Analog" in cubes) != ("Counter" in cubes):
+        missing = "Counter" if "Analog" in cubes else "Analog"
+        session.warnings.append(f"Missing MainRuns {missing} rows: ignoring unpaired Analog/Counter data.")
     metadata = frame.loc[(frame.index >= 2) & (frame[0] != "MainRuns")]
     for row in metadata.itertuples(index=False, name=None):
         group, key, subkey = row[:3]
@@ -424,7 +467,7 @@ def read_spot_folder(path) -> QtegraSession:
     return session
 
 
-def _check_pair(rich, spot, rtol):
+def _check_pair(rich, spot, rtol, *, check_time=True):
     label = rich.label
     if rich.channel_names != spot.channel_names:
         raise ValueError(f"{label}: channel names differ: {rich.channel_names} vs {spot.channel_names}")
@@ -434,7 +477,7 @@ def _check_pair(rich, spot, rtol):
     if not equal.all():
         channel = rich.channel_names[np.argwhere(~equal)[0, 1]]
         raise ValueError(f"{label}, channel {channel}: Y values or NaN masks differ")
-    if (rich.sweep_time is None or spot.sweep_time is None
+    if check_time and (rich.sweep_time is None or spot.sweep_time is None
             or rich.sweep_time.shape != spot.sweep_time.shape
             or not np.allclose(rich.sweep_time, spot.sweep_time, rtol=rtol, atol=0, equal_nan=True)):
         raise ValueError(f"{label}, channel {rich.channel_names[0]}: sweep times differ")
@@ -446,9 +489,13 @@ def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSe
     Validate Y, missing-value masks and first-channel sweep times before
     merging. The observed clock offset is recorded, and neither clock shifts.
     ``spot_file_start_text`` retains the complete line 1 without its terminator.
+    StartTime is required for every Rich acquisition. Reconstructed Rich sweep
+    times are retained and are not compared to recorded companion times.
     """
     if rich.format != "rich" or folder.format != "spot_folder":
         raise ValueError("merge requires a rich session and a spot_folder session.")
+    if any(acquisition.start is None for acquisition in rich.acquisitions):
+        raise ValueError("StartTime is needed to merge a Rich session with per-spot files.")
     if len(set(rich.labels)) != len(rich.labels) or len(set(folder.labels)) != len(folder.labels):
         raise ValueError("Cannot merge duplicate acquisition labels.")
     companions = {acquisition.label: acquisition for acquisition in folder.acquisitions}
@@ -456,7 +503,8 @@ def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSe
     if missing:
         raise ValueError(f"Missing per-spot labels: {', '.join(missing)}")
     for acquisition in rich.acquisitions:
-        _check_pair(acquisition, companions[acquisition.label], rtol)
+        _check_pair(acquisition, companions[acquisition.label], rtol,
+                    check_time=not rich.times_reconstructed)
     result = deepcopy(rich)
     result.format = "rich+spot_folder"
     result.capabilities = rich.capabilities | folder.capabilities
@@ -537,7 +585,7 @@ def _has_start_time_footer(path):
 
 
 def detect_format(path) -> str:
-    """Identify Qtegra layouts from headers, the first block and a short footer.
+    """Identify Qtegra layouts from headers, the first block and metadata footer.
 
     Directories containing only per-spot exports return ``spot_folder``;
     other directories return ``folder`` for discovery by :func:`open_qtegra`.
@@ -578,17 +626,20 @@ def detect_format(path) -> str:
     raise ValueError(f"No Qtegra MainRuns data: {path}")
 
 
-def open_qtegra(path) -> QtegraSession:
+def open_qtegra(path, *, cycle_time_s=None) -> QtegraSession:
     """Open a file or discover a session and its immediate companion folder.
 
     Exports without time information are skipped during folder discovery,
     with a warning if usable exports exist, otherwise their error is raised.
     Ambiguous Rich or companion candidates raise ValueError.
+    ``cycle_time_s`` is forwarded to read_rich_csv for missing Time rows;
+    None uses DEFAULT_CYCLE_TIME_S. Recorded Time rows and per-spot input
+    ignore this keyword.
     """
     path = Path(path)
     kind = detect_format(path)
     if kind == "rich":
-        return read_rich_csv(path)
+        return read_rich_csv(path, cycle_time_s=cycle_time_s)
     if kind == "spot":
         return _spot_session([path])
     unsupported = []
@@ -598,7 +649,7 @@ def open_qtegra(path) -> QtegraSession:
     if len(rich_files) > 1:
         raise ValueError(f"More than one Rich CSV in {path}")
     if rich_files:
-        session = read_rich_csv(rich_files[0])
+        session = read_rich_csv(rich_files[0], cycle_time_s=cycle_time_s)
         companions = [
             [file for file, kind in _csv_formats(child, unsupported=unsupported).items()
              if kind == "spot"]

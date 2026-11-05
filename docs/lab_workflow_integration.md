@@ -111,10 +111,18 @@ For laicpmsdb ingest callers:
 
 - Removed `read_upbr_csv(path, *, cycle_time_s=None, acquisition_gap_s=0.0)`
   and `Acquisition.start_offset_s`.
-- Changed `open_qtegra(path, **kwargs)` to `open_qtegra(path)`: removed the
-  `cycle_time_s` and `acquisition_gap_s` keywords.
-- Removed the keyword-only `cycle_time_s` from `read_experiment_data` and
-  its reconstructed-times `UserWarning`.
+- Removed `acquisition_gap_s`; Y-only exports no longer have nominal timing.
+- Milestone 2 adds reduced Rich support to
+  `read_rich_csv(path, *, cycle_time_s=None)` and
+  `open_qtegra(path, *, cycle_time_s=None)`, and restores keyword-only
+  `cycle_time_s=None` and the reconstructed-times `UserWarning` in
+  `read_experiment_data`. This keyword now controls only Rich sweep timing
+  when StartTime exists and Time rows do not; recorded Time and per-spot
+  input ignore it.
+- Rich capabilities now reflect optional row groups. Minimum: two headers,
+  MainRuns Y for every channel, and MainRuns Time or StartTime. Merge requires
+  Rich StartTime; reconstructed times are retained without comparing them
+  to recorded companion times.
 - Removed the `"upbr"` result from `detect_format`, session formats and
   source formats. Added exported `UnsupportedQtegraFormat(ValueError)` for
   single CSVs with MainRuns Y but no Time or StartTime.
@@ -205,20 +213,20 @@ class QtegraSession:
     def acquisition(self, label) -> Acquisition: ...
     def has(self, capability) -> bool: ...
 
-def read_rich_csv(path) -> QtegraSession: ...
+def read_rich_csv(path, *, cycle_time_s=None) -> QtegraSession: ...
 def read_spot_folder(path) -> QtegraSession: ...
 def read_spot_file(path) -> Acquisition: ...
 def merge(rich: QtegraSession, folder: QtegraSession, *, rtol=1e-12) -> QtegraSession: ...
 def recover_xcal(session_or_acquisition) -> dict[str, float]: ...
 def detect_format(path) -> str: ...
-def open_qtegra(path) -> QtegraSession: ...
+def open_qtegra(path, *, cycle_time_s=None) -> QtegraSession: ...
 ```
 
 `y`, `analog` and `counter` have shape `(n_sweeps, n_channels)` in instrument
 channel order; missing cells stay NaN, and counter saturation stays `-33`.
-Rich `time` has the same shape; per-spot `time` has shape
-`(n_sweeps,)`. `sweep_time` selects the first channel when time is per
-channel. Trailing sweeps with no Y are dropped; interior missing cells stay
+Recorded Rich `time` has the same shape; reconstructed Rich and per-spot
+`time` have shape `(n_sweeps,)`. `sweep_time` selects the first channel when
+time is per channel. Trailing sweeps with no Y are dropped; interior missing cells stay
 missing. `_data_dtypes` is internal compatibility metadata for experiment
 tables; ingest need not store it.
 
@@ -239,12 +247,17 @@ If no usable export exists, it raises the unsupported-file error. Direct
 Y-only file detection and opening raise `UnsupportedQtegraFormat` with a
 message starting `Unsupported Qtegra export: no time information` and export
 instructions. A Time row in the first channel block or StartTime in the
-footer identifies time information; reading reduced Rich files is deferred
-to a later milestone. `open_qtegra` accepts only the path.
+footer identifies time information. Reduced Rich reading needs the two
+headers, MainRuns Y for every channel, and Time or StartTime; other groups
+are optional. The footer scan handles any number of metadata rows and no
+footer at all.
 
 `merge` returns a new session, validating channel order, Y, NaN masks and
-first-channel times (`rtol=1e-12`, `atol=0`). Every Rich label must have a
-companion; extras produce a warning. It takes dwell/xcal, software, machine
+first-channel times (`rtol=1e-12`, `atol=0`). StartTime is needed for every
+Rich acquisition, otherwise merge raises ValueError. Reconstructed Rich
+times are retained and skip the companion-time equality check.
+Every Rich label must have a companion; extras produce a warning. It takes
+dwell/xcal, software, machine
 and pulse-counting threshold from the folder, fills empty Rich instrument
 state dictionaries, and retains both sources. `recover_xcal` returns each
 channel's median `y / analog` on saturated sweeps with finite Y and finite,
@@ -256,10 +269,20 @@ Import the adapter from `UPbRPy.io`:
 
 ```python
 def experiment_from_session(session, sep="_", sample_aliases=None): ...
+
+def read_experiment_data(
+    directory, primary_channel='29Si', baseline_sweep_n=10, peak_sweep_n=20,
+    threshold=0.1, filter_percentile=70, baseline_offset=2, plateau_offset=2,
+    sep=None, sample_aliases=None, selection_channels=None,
+    selection_method='threshold', selection_fallback_methods=(),
+    selection_options=None, signal_duration_limit_seconds=None,
+    session_manifest=None, *, detector_calibration=None, cycle_time_s=None,
+): ...
 ```
 
-It returns `(experiment, element_channels, total_data)` before automatic
-window selection. `experiment` contains `spot_names`, `sample`, `spot_paths`,
+`experiment_from_session` returns `(experiment, element_channels, total_data)`
+before automatic window selection; `read_experiment_data` also initializes
+selections. `experiment` contains `spot_names`, `sample`, `spot_paths`,
 `spot_starting_times` in session seconds, and the six initially empty
 baseline/plateau/signal start/end columns. `total_data` contains `Time` in
 session seconds (using each acquisition's first-channel sweep time), Y
@@ -339,9 +362,10 @@ nonfinite numbers become `None`.
 
 | Session | Capabilities |
 | --- | --- |
-| Rich | `timestamps`, `stop_times`, `per_channel_time`, `analog_counter`, `mass`, `instrument_state`, `sequence_fields`, `user` |
+| Full Rich | `timestamps`, `stop_times`, `per_channel_time`, `analog_counter`, `mass`, `instrument_state`, `sequence_fields`, `user` |
+| Reduced Rich | Only capabilities supplied by exported row groups; never `dwell_xcal` |
 | Per-spot folder | `timestamps`, `instrument_state`, `dwell_xcal` |
-| Rich + per-spot folder | Union: all names in `CAPABILITIES` |
+| Rich + per-spot folder | Union of the Rich and folder capabilities |
 
 Both recorded clocks are naive. Rich start/stop text is ISO 8601 with seven
 fractional digits; parsing truncates to six fractional digits (microseconds)
@@ -356,10 +380,27 @@ offset rounded to the nearest 0.25 h (7.0 here), and
 original texts and use the session's time-zone setting to resolve aware UTC
 instants; never silently reinterpret the clocks.
 
-`QtegraSession.times_reconstructed` and `nominal_cycle_time_s` remain
-False and None in current readers and in `experiment.attrs["qtegra"]`.
-They and `DEFAULT_CYCLE_TIME_S` (0.4255 s, the Boise median sweep spacing)
-are reserved for future reduced-Rich timing support.
+Without MainRuns Time rows, Rich StartTime supplies calendar acquisition
+starts and sweep offsets are `np.arange(n_sweeps) * cycle_time_s` (1-D).
+None uses `DEFAULT_CYCLE_TIME_S` (0.4255 s, the Boise median sweep spacing);
+explicit spacing must be finite and positive. StopTime includes overhead
+and is never used to estimate spacing. `times_reconstructed=True` and
+`nominal_cycle_time_s` record this choice in the session and experiment attrs.
+The reader adds one session warning and `read_experiment_data` emits one
+UserWarning mentioning reconstructed timing. With recorded Time rows these
+fields remain False and None, and `cycle_time_s` is ignored; per-spot input
+also ignores it. In-memory sessions retain their existing times.
+
+With Time but no StartTime, experiment import uses a continuous axis in
+sequence order: the next acquisition starts after the previous last sweep
+by its median sweep spacing. Calendar gaps cannot be recovered.
+
+Optional groups set `mass` (X [u]), `instrument_state` (TuneSettings or
+StatusReport), `user` (Info/UserName), `timestamps` (StartTime), `stop_times`
+(StopTime), and `sequence_fields` (BrigidMS or PMIAnalyteLaser, any subset).
+Time rows set `per_channel_time`. Both Analog and Counter are needed for
+`analog_counter`; an unpaired group is ignored with a session warning naming
+the missing one. Absent fields remain None or empty dictionaries.
 
 Rich prints Y with 17 significant digits, sufficient to round-trip a
 double; per-spot CSVs print 15. For example, Rich

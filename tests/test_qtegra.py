@@ -451,7 +451,7 @@ def test_y_only_export_reports_missing_time(tmp_path, reader):
         reader(source)
     message = str(error.value)
     assert source.name in message
-    assert "MainRuns Y rows but no Time rows and no StartTime row" in message
+    assert "MainRuns Y rows but no MainRuns Time rows and no StartTime row" in message
     assert "Export the Rich single CSV" in message
     assert "or the per-spot folder" in message
 
@@ -488,7 +488,7 @@ def test_folder_skips_y_only_export_with_warning(tmp_path, usable):
 
 @pytest.mark.parametrize("time_kind", ["Time", "StartTime"])
 def test_detection_recognizes_reduced_rich_time_information(tmp_path, time_kind):
-    # Detection recognizes time, but reading reduced Rich files is a later milestone.
+    # Y plus either kind of time information is a readable reduced Rich file.
     def edit(rows):
         rows[2:] = [row for row in rows[2:] if
                     (row[0] == "MainRuns" and row[3] in {"Y", time_kind})
@@ -497,8 +497,10 @@ def test_detection_recognizes_reduced_rich_time_information(tmp_path, time_kind)
             rows.extend([["ExtraMetadata", "", "", ""] + [""] * 13 for _ in range(25)])
     source = copy_rows(RICH, tmp_path / "reduced.csv", edit)
     assert q.detect_format(source) == "rich"
-    with pytest.raises(ValueError, match="Missing Rich quantity"):
-        q.read_rich_csv(source)
+    session = q.read_rich_csv(source)
+    expected = {"Time": {"per_channel_time"}, "StartTime": {"timestamps"}}[time_kind]
+    assert session.capabilities == expected
+    assert session.times_reconstructed == (time_kind == "StartTime")
 
 
 def test_non_time_quantities_do_not_make_export_supported(tmp_path):
