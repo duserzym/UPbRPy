@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Qtegra export fixtures keep their CRLF line endings and BOM byte for byte
+tests/fixtures/qtegra/** -text
