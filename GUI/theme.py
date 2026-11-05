@@ -165,6 +165,10 @@ class NeumorphicFrame(QtWidgets.QFrame):
             shade.setAlpha(alpha if theme.name == "light" else alpha * 2)
             painter.setPen(QtGui.QPen(shade, width))
             painter.drawRoundedRect(body.translated(0, 3), radius, radius)
+        if self.property("floatingPanel"):
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color(theme.surface))
+            painter.drawRoundedRect(body, radius, radius)
         painter.setBrush(theme_color(theme.glass))
         painter.setPen(QtGui.QPen(theme_color(theme.glass_edge), 1))
         painter.drawRoundedRect(body, radius, radius)

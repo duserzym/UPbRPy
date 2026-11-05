@@ -69,6 +69,7 @@ from GUI.widgets import (
     StyledComboBox,
     TracePlotWidget,
     WrappingButton,
+    _WorkflowRailDelegate,
     SegmentButton,
     SegmentedBar,
     make_list_item,
@@ -699,6 +700,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_panel.installEventFilter(self)
         self.main_panel = self._build_main_column()
         self.inspector_panel = self._build_inspector()
+        self.compact_settings_panel = NeumorphicFrame(central)
+        self.compact_settings_panel.setProperty("floatingPanel", True)
+        settings_layout = QtWidgets.QVBoxLayout(self.compact_settings_panel)
+        settings_layout.setContentsMargins(16, 12, 16, 12)
+        settings_title = QtWidgets.QToolButton()
+        settings_title.setText("Workflow settings  ×")
+        settings_title.setToolTip("Close workflow settings")
+        settings_title.clicked.connect(lambda: self.autopick_settings_toggle.setChecked(False))
+        settings_layout.addWidget(settings_title)
+        self.compact_settings_panel.hide()
         self.workspace_splitter.addWidget(self.sidebar_panel)
         self.workspace_splitter.addWidget(self.main_panel)
         self.workspace_splitter.addWidget(self.inspector_panel)
@@ -744,6 +755,8 @@ class MainWindow(QtWidgets.QMainWindow):
         "workspace": "workspace_splitter_state_v4",
         "content": "content_splitter_state_v1",
         "spot_channel": "spot_channel_splitter_state_v1",
+        "compact_inspector": "compact_inspector_visible_v1",
+        "compact_workspace": "compact_workspace_sizes_v1",
     }
 
     def _layout_splitters(self) -> dict[str, QtWidgets.QSplitter]:
@@ -770,8 +783,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Remember this reduction's splitter positions and notes visibility."""
         try:
             for name, splitter in self._layout_splitters().items():
-                self.settings.setValue(self.LAYOUT_SETTINGS[name], splitter.saveState())
+                state = (self._expanded_workspace_state if name == "workspace"
+                         and getattr(self, "_width_mode", None) == "compact" else splitter.saveState())
+                self.settings.setValue(self.LAYOUT_SETTINGS[name], state)
             self.settings.setValue(self.LAYOUT_SETTINGS["notes_log"], self.notes_log_visible())
+            if getattr(self, "_width_mode", None) == "compact":
+                self.settings.setValue(self.LAYOUT_SETTINGS["compact_workspace"], self.workspace_splitter.sizes())
         except RuntimeError:  # the C++ window is already gone at quit
             return
         self._sync_notes_log_action()
@@ -797,6 +814,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace_splitter.setSizes([rail, max(400, width - rail - inspector - 40), inspector])
         self.set_notes_log_visible(self.window().height() >= 950)
         self.spot_channel_splitter.setSizes([3, 2])
+        self._apply_width_layout(force=True)
 
     def reset_layout(self) -> None:
         """View > Reset Layout: forget saved sizes, fit the default to the screen."""
@@ -898,6 +916,12 @@ class MainWindow(QtWidgets.QMainWindow):
         action.blockSignals(True)
         action.setChecked(visible)
         action.blockSignals(False)
+        if panel == "inspector" and getattr(self, "_width_mode", None) == "compact":
+            self.settings.setValue("compact_inspector_visible_v1", bool(visible))
+            self.inspector_toggle.blockSignals(True)
+            self.inspector_toggle.setChecked(visible)
+            self.inspector_toggle.blockSignals(False)
+            self._position_compact_panels()
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if watched is getattr(self, "sidebar_panel", None) and event.type() == QtCore.QEvent.Type.Resize:
@@ -911,9 +935,9 @@ class MainWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         if not hasattr(self, "workspace_splitter"):
             return
-        # Side-panel visibility is an explicit View-menu choice. Automatically
-        # hiding a panel while the window or a splitter was being adjusted
-        # made the handles appear to jump and collapse whole columns.
+        self._apply_width_layout()
+        # Panel visibility stays explicit within each mode. Only a width-mode
+        # change moves the inspector between the splitter and a floating card.
         # The notes/log strip is a collapsible splitter pane (View menu)
         # rather than something hidden below a fixed window height.
         self._sync_toolbar_strips()
@@ -931,6 +955,208 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.workspace_splitter.setSizes(
                     [rail, sum(sizes) - rail - inspector, inspector]
                 )
+        self._position_compact_panels()
+
+    def _apply_width_layout(self, *, force: bool = False) -> None:
+        """Change layout only at width boundaries, with a 20 px return band."""
+        width = self.width()
+        previous = getattr(self, "_width_mode", None)
+        compact = width < (1020 if previous == "compact" else 1000)
+        mode = "compact" if compact else "narrow" if width < 1280 else "wide"
+        if previous == mode and not force:
+            return
+        if compact and previous != "compact":
+            self._expanded_workspace_state = self.workspace_splitter.saveState()
+        self._width_mode = mode
+        narrow = mode != "wide"
+        self.header_title.setText("Workspace" if narrow else "U-Pb reduction workspace")
+        self.inspector_toggle.setVisible(compact)
+        self.inspector_panel.setProperty("floatingPanel", compact)
+        self.inspector_panel.update()
+        self.rail_brand_text.setVisible(not compact)
+        self.step_actions_title.setVisible(not compact)
+        self.workflow_step_list.setProperty("compactRail", compact)
+        self.workflow_step_list.viewport().update()
+        self.sidebar_panel.setMinimumWidth(80 if compact else 190 if narrow else 170)
+        self.sidebar_panel.setMaximumWidth(80 if compact else 16777215)
+        self.sidebar_panel.layout().setContentsMargins(*((8, 8, 8, 8) if narrow else (10, 12, 10, 12)))
+        self.workflow_step_list.setStyleSheet("font-size: 11px;" if narrow else "")
+        # Settings remain the same widgets and retain their signals and values.
+        # In compact mode they open over the plot instead of widening the rail.
+        rail_layout = self.sidebar_panel.layout()
+        if compact and previous != "compact":
+            self._inspector_was_visible = not self.inspector_panel.isHidden()
+            self.inspector_panel.setParent(self.centralWidget())
+            self.inspector_panel.setFixedWidth(310)
+            self.inspector_panel.hide()
+            for control in (self.workflow_combo, self.autopick_controls_scroll):
+                rail_layout.removeWidget(control)
+                self.compact_settings_panel.layout().addWidget(control)
+            self.autopick_settings_toggle.setChecked(False)
+        elif not compact and previous == "compact":
+            self.compact_settings_panel.hide()
+            self.inspector_panel.setMinimumWidth(260)
+            self.inspector_panel.setMaximumWidth(16777215)
+            self.workspace_splitter.addWidget(self.inspector_panel)
+            self.inspector_panel.setVisible(self._inspector_was_visible)
+            for index, control in ((1, self.workflow_combo), (3, self.autopick_controls_scroll)):
+                self.compact_settings_panel.layout().removeWidget(control)
+                rail_layout.insertWidget(index, control)
+            self.autopick_settings_toggle.setChecked(False)
+            self.inspector_action.setChecked(self._inspector_was_visible)
+        short = dict(zip(PLOT_MODE_LABELS, ("Raw", "Base", "Norm", "Cal", "Ratios", "Down", "Drift", "Depth", "Final")))
+        for key, button in self.plot_mode_buttons.items():
+            button.setText(short[key] if narrow else PLOT_MODE_LABELS[key])
+        for widget in self._plot_control_labels:
+            widget.setVisible(not narrow)
+        controls_layout = self.plot_control_bar.layout()
+        controls_layout.setSpacing(1 if narrow else 3)
+        inset = 4 if narrow else 6
+        controls_layout.setContentsMargins(inset, 4, inset, 4)
+        self.ratio_combo.setFixedWidth(153)
+        self.main_panel.layout().setSpacing(6 if narrow or self.window() is not self else 10)
+        self.session_overview_plot.setFixedHeight(90 if compact else 115)
+        self._sync_rail_button_icons()
+        if mode == "compact":
+            saved = self.settings.value(self.LAYOUT_SETTINGS["compact_workspace"])
+            sizes = [80, max(400, width-110)]
+            if previous != "compact" and not force and isinstance(saved, list) and len(saved) == 2:
+                sizes = [int(value) for value in saved]
+            self.workspace_splitter.setSizes(sizes)
+            visible = str(self.settings.value("compact_inspector_visible_v1", False)).lower() in {"true", "1"}
+            self.set_workspace_panel_visible("inspector", visible)
+        elif not (mode == "wide" and previous is None and getattr(self, "_layout_restored", False) and not force):
+            rail, inspector = (190, 280) if narrow else ((195, 335) if width < 1400 else (205, 340) if width < 1500 else (240, 380))
+            self.workspace_splitter.setSizes([rail, max(400, width-rail-inspector-40), inspector])
+        self.adapt_workflow_rail_height(self.height())
+        self._sync_toolbar_strips()
+
+    def _sync_rail_button_icons(self) -> None:
+        compact = getattr(self, "_width_mode", None) == "compact"
+        standard = QtWidgets.QStyle.StandardPixmap
+        buttons = [
+            (self.save_project_button, standard.SP_DialogSaveButton),
+            (self.export_results_button, standard.SP_DialogApplyButton),
+            (self.import_button, standard.SP_DirOpenIcon),
+            (self.repick_all_spots_button, standard.SP_BrowserReload),
+            (self.reference_library_button, standard.SP_FileDialogDetailedView),
+            (self.step_primary_button, standard.SP_MediaPlay),
+            *[(button, standard.SP_BrowserReload if i == 0 else standard.SP_FileDialogContentsView)
+              for i, button in enumerate(self.step_secondary_buttons)],
+        ]
+        for button, symbol in buttons:
+            if button is None:
+                continue
+            if button.property("fullText") is None:
+                button.setProperty("fullText", button.text())
+                button.setAccessibleName(button.text())
+                if not button.toolTip():
+                    button.setToolTip(button.text())
+            button.setProperty("compactIcon", compact)
+            button.setText("" if compact else button.property("fullText"))
+            button.setIcon(self._compact_action_icon(symbol, accent=bool(button.property("accent"))) if compact else QtGui.QIcon())
+            button.setIconSize(QtCore.QSize(18, 18))
+            button.setStyleSheet("padding: 3px;" if compact else
+                "padding: 6px; font-size: 11px;" if button is self.step_primary_button else
+                "padding: 3px 6px; font-size: 11px;" if button in self.step_secondary_buttons else "")
+            button.setFixedHeight(28 if compact else button.sizeHint().height())
+        self.autopick_settings_toggle.setText("" if compact else "Auto-pick settings")
+        self.autopick_settings_toggle.setIcon(self._compact_action_icon(standard.SP_FileDialogDetailedView) if compact else QtGui.QIcon())
+        self.autopick_settings_toggle.setToolTip("Workflow and auto-pick settings")
+        for button, text in ((self.step_back_button, "‹ Back"), (self.step_next_button, "Next ›")):
+            button.setText(("‹" if button is self.step_back_button else "›") if compact else text)
+
+    def _compact_action_icon(self, symbol, *, accent: bool = False) -> QtGui.QIcon:
+        """Draw small action shapes with the current glass palette."""
+        theme = active_theme()
+        pixmap = QtGui.QPixmap(36, 36)
+        pixmap.setDevicePixelRatio(2)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        color = QtGui.QColor(theme.on_accent if accent else theme.text)
+        painter.setPen(QtGui.QPen(color, 1.5, QtCore.Qt.PenStyle.SolidLine,
+                                 QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin))
+        standard = QtWidgets.QStyle.StandardPixmap
+        path = QtGui.QPainterPath()
+        if symbol == standard.SP_DialogSaveButton:
+            painter.drawRoundedRect(QtCore.QRectF(3, 2, 12, 14), 1, 1)
+            painter.drawRect(QtCore.QRectF(6, 2, 6, 5))
+            painter.drawRect(QtCore.QRectF(6, 11, 6, 5))
+        elif symbol == standard.SP_DialogApplyButton:
+            path.moveTo(3, 12); path.lineTo(3, 16); path.lineTo(15, 16); path.lineTo(15, 12)
+            path.moveTo(9, 12); path.lineTo(9, 2)
+            path.moveTo(5, 6); path.lineTo(9, 2); path.lineTo(13, 6)
+        elif symbol == standard.SP_DirOpenIcon:
+            path.moveTo(2, 15); path.lineTo(2, 3); path.lineTo(7, 3); path.lineTo(9, 6); path.lineTo(16, 6)
+            path.lineTo(14, 15); path.closeSubpath()
+            path.moveTo(2, 9); path.lineTo(15, 9)
+        elif symbol == standard.SP_BrowserReload:
+            painter.drawArc(QtCore.QRectF(3, 3, 12, 12), 40*16, 285*16)
+            path.moveTo(15, 2); path.lineTo(15, 7); path.lineTo(10, 7)
+        elif symbol == standard.SP_MediaPlay:
+            path.moveTo(5, 3); path.lineTo(15, 9); path.lineTo(5, 15); path.closeSubpath()
+            painter.setBrush(color)
+        else:
+            for y, x in ((4, 7), (9, 12), (14, 6)):
+                painter.drawLine(2, y, 16, y)
+                painter.drawEllipse(QtCore.QPointF(x, y), 2, 2)
+        painter.drawPath(path)
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
+    def _position_compact_panels(self) -> None:
+        if getattr(self, "_width_mode", None) != "compact":
+            return
+        area = self.centralWidget().rect().adjusted(8, 4, -8, -4)
+        top = self.header_card.mapTo(self.centralWidget(), self.header_card.rect().bottomLeft()).y()+4
+        self.inspector_panel.setGeometry(area.right()-309, top, 310, area.bottom()-top+1)
+        self.inspector_panel.raise_()
+        self.compact_settings_panel.setGeometry(self.sidebar_panel.geometry().right()+6, area.top()+48, 280, min(340, area.height()-48))
+        self.compact_settings_panel.raise_()
+
+    def _toggle_compact_settings(self, checked: bool) -> None:
+        if getattr(self, "_width_mode", None) == "compact":
+            self.compact_settings_panel.setVisible(checked)
+            self._position_compact_panels()
+        self.adapt_workflow_rail_height(self.height())
+
+    def _adapt_icon_rail_height(self) -> None:
+        """Use the full rail's height budget with optional copy folded away."""
+        for widget in (self.workflow_section_label, self.workflow_hint_body,
+                       self.reference_library_button, self.database_origin_label):
+            widget.hide()
+        for widget in (self.workflow_combo, self.autopick_controls_scroll,
+                       self.selection_method_combo, self.selection_parameter_stack,
+                       self.plateau_width_control, self.plateau_filter_combo):
+            widget.show()
+        self.autopick_settings_toggle.show()
+        self.autopick_settings_toggle.setArrowType(QtCore.Qt.ArrowType.NoArrow)
+        layout = self.sidebar_panel.layout()
+        layout.setSpacing(4)
+        self.workflow_step_list.setSpacing(0)
+        self.workflow_step_list.setIconSize(QtCore.QSize(20, 20))
+        for button in (self.step_primary_button, *self.step_secondary_buttons):
+            if button is not None:
+                button.setFixedHeight(28)
+        self.step_actions_block.layout().invalidate()
+        # Measure non-list siblings just as the full rail does. Stage actions
+        # change on navigation, so a fixed row count alone cannot set density.
+        fixed = 16
+        visible = 0
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item.isEmpty():
+                continue
+            visible += 1
+            if item.widget() is not self.workflow_step_list:
+                fixed += item.sizeHint().height()
+        fixed += max(0, visible-1)*layout.spacing()
+        count = self.workflow_step_list.count()
+        row_height = max(22, min(36, (self.sidebar_panel.height()-fixed)//max(count, 1)))
+        for index in range(count):
+            self.workflow_step_list.item(index).setSizeHint(QtCore.QSize(0, row_height))
+        self.workflow_step_list.setFixedHeight(count*row_height)
 
     def apply_header_density(self, height: int) -> None:
         """A one-line header on short screens leaves the height to the plot."""
@@ -945,6 +1171,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def adapt_workflow_rail_height(self, height: int) -> None:
         """Fold optional rail content before reducing the ten stage rows."""
+        if getattr(self, "_width_mode", None) == "compact":
+            self._adapt_icon_rail_height()
+            return
         compact = height < 940
         very_compact = height < 700
         toggle = self.autopick_settings_toggle
@@ -1070,6 +1299,7 @@ class MainWindow(QtWidgets.QMainWindow):
         brand_icon.setFixedSize(38, 38)
         brand_text = QtWidgets.QLabel("UPbRPy")
         brand_text.setObjectName("RailBrand")
+        self.rail_brand_text = brand_text
         brand_row.addWidget(brand_icon)
         brand_row.addWidget(brand_text, 1)
         layout.addLayout(brand_row)
@@ -1099,9 +1329,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.autopick_settings_toggle.setVisible(False)
-        self.autopick_settings_toggle.toggled.connect(
-            lambda _checked: self.adapt_workflow_rail_height(self.height())
-        )
+        self.autopick_settings_toggle.toggled.connect(self._toggle_compact_settings)
         layout.addWidget(self.autopick_settings_toggle)
 
         self.selection_method_combo = StyledComboBox()
@@ -1274,6 +1502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(section_label)
 
         self.workflow_step_list = QtWidgets.QListWidget()
+        self.workflow_step_list.setItemDelegate(_WorkflowRailDelegate(self.workflow_step_list))
         self.workflow_step_list.setObjectName("WorkflowStepRail")
         self.workflow_step_list.setIconSize(QtCore.QSize(24, 24))
         self.workflow_step_list.setWordWrap(False)
@@ -1358,6 +1587,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(0, 4, 0, 6)
         layout.setSpacing(4)
         title = QtWidgets.QLabel("This step")
+        self.step_actions_title = title
         title.setObjectName("SectionTitle")
         layout.addWidget(title)
         self.workflow_hint_body = QtWidgets.QLabel()
@@ -1427,6 +1657,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_box = QtWidgets.QVBoxLayout()
         title_box.setSpacing(2)
         title = ElidedLabel("U-Pb reduction workspace")
+        self.header_title = title
         title.setObjectName("HeroTitle")
         subtitle = ElidedLabel(
             "Shared scientific pipeline, editable selections, and "
@@ -1445,7 +1676,9 @@ class MainWindow(QtWidgets.QMainWindow):
         workspace_row.addStretch(1)
         workspace_label = QtWidgets.QLabel("Workspace")
         workspace_label.setObjectName("SectionTitle")
-        self.project_name_label = ElidedLabel("No experiment loaded")
+        self.project_name_label = ElidedLabel(
+            "No experiment loaded", elide_mode=QtCore.Qt.TextElideMode.ElideMiddle,
+        )
         self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         self.project_name_label.setStyleSheet("font-size: 12px; font-weight: 600;")
         workspace_label.hide()
@@ -1489,6 +1722,13 @@ class MainWindow(QtWidgets.QMainWindow):
         summary_box.addLayout(workspace_row)
         summary_box.addLayout(metadata_row)
         header_layout.addLayout(summary_box, 2)
+        self.inspector_toggle = QtWidgets.QToolButton()
+        self.inspector_toggle.setText("Inspector")
+        self.inspector_toggle.setCheckable(True)
+        self.inspector_toggle.setToolTip("Show or hide the spot, channel and calibration inspector")
+        self.inspector_toggle.toggled.connect(lambda checked: self.set_workspace_panel_visible("inspector", checked))
+        self.inspector_toggle.hide()
+        header_layout.addWidget(self.inspector_toggle)
         layout.addWidget(header)
         layout.addWidget(self._build_workflow_context_bar())
 
@@ -1685,6 +1925,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for divider in (_vsep_drag, _vsep1, _vsep2):
             divider.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
             divider.setFixedWidth(1)
+        self._plot_control_labels = (drag_lbl, zoom_lbl, ratio_row_lbl, _vsep_drag, _vsep1, _vsep2)
         control_bar.setMinimumWidth(0)
         control_scroll = QtWidgets.QScrollArea()
         control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -3581,6 +3822,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if persist:
             self.settings.setValue("theme_mode", theme_mode)
         self._sync_theme_controls()
+        if getattr(self, "_width_mode", None) == "compact":
+            self._sync_rail_button_icons()
         self.trace_plot.apply_theme(active_theme(app))
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.set_zoom_mode(self.trace_plot.zoom_mode())
@@ -4079,6 +4322,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spots: list[str],
         ) -> QtWidgets.QTreeWidgetItem:
             folder_item = QtWidgets.QTreeWidgetItem(root, [folder_name])
+            folder_item.setToolTip(0, folder_name)
             folder_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__{folder_name}")
             folder_item.setFlags(
                 folder_item.flags()
@@ -4090,10 +4334,11 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             for sn in spots:
                 spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
+                spot_item.setToolTip(0, sn)
                 if override := sample_overrides.get(sn):
                     spot_item.setText(0, f"{sn} · DB")
                     spot_item.setToolTip(
-                        0, f"Sample {sample_map.get(sn, override['sample'])} from laicpmsdb "
+                        0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from laicpmsdb "
                         f"(label sample {override['label_sample']})",
                     )
                 spot_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, sn)
@@ -4304,6 +4549,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._spot_folder_overrides[new_text] = self._spot_folder_overrides.pop(old_name)
             # Update UserRole so navigation still works
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, new_text)
+            if old_name != new_text:
+                item.setToolTip(0, new_text)
 
 
     def _populate_selectors(self) -> None:
@@ -4928,6 +5175,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.step_buttons_layout.addWidget(button)
             button.show()
         self._sync_workflow_step_locks()
+        self._sync_rail_button_icons()
         self.adapt_workflow_rail_height(self.height())
 
     def _sync_step_navigation(self, unlocked: list[bool]) -> None:
@@ -4955,6 +5203,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.style().unpolish(button)
                 button.style().polish(button)
                 button.update()
+
+        if self.step_primary_button is not None and getattr(self, "_width_mode", None) == "compact":
+            self.step_primary_button.setIcon(self._compact_action_icon(
+                QtWidgets.QStyle.StandardPixmap.SP_MediaPlay,
+                accent=bool(self.step_primary_button.property("accent")),
+            ))
 
     def _workflow_action_specs(self) -> list[tuple[str, object, bool]]:
         if not self.session.loaded:

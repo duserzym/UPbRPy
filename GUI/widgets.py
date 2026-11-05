@@ -69,6 +69,11 @@ def _rounded_legend(plot, **options):
 
 
 class _PillLineLabel(pg.InfLineLabel):
+    def updatePosition(self):
+        super().updatePosition()
+        if callback := getattr(self, "position_callback", None):
+            callback()
+
     def paint(self, painter, *args):
         # Keep pyqtgraph's transform and drag handling; paint only the background.
         super().paint(painter, *args)
@@ -101,6 +106,8 @@ class WrappingButton(QtWidgets.QPushButton):
         )
 
     def heightForWidth(self, width: int) -> int:
+        if self.property("compactIcon"):
+            return 28
         rect = self._text_rect(max(width, 40), 1000)
         text_height = self.fontMetrics().boundingRect(
             QtCore.QRect(0, 0, max(1, rect.width()), 1000),
@@ -112,6 +119,8 @@ class WrappingButton(QtWidgets.QPushButton):
         return QtCore.QSize(160, self.heightForWidth(max(160, self.width())))
 
     def minimumSizeHint(self) -> QtCore.QSize:
+        if self.property("compactIcon"):
+            return QtCore.QSize(24, 28)
         return QtCore.QSize(80, self.heightForWidth(max(80, self.width())))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
@@ -121,6 +130,10 @@ class WrappingButton(QtWidgets.QPushButton):
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         option = QtWidgets.QStyleOptionButton()
         self.initStyleOption(option)
+        if self.property("compactIcon"):
+            painter = QtWidgets.QStylePainter(self)
+            painter.drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, option)
+            return
         option.text = ""
         painter = QtWidgets.QStylePainter(self)
         painter.drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, option)
@@ -144,6 +157,31 @@ class SegmentButton(QtWidgets.QToolButton):
         option.text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight, max(8, self.width()-8))
         painter = QtWidgets.QStylePainter(self)
         painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ToolButton, option)
+
+
+class _WorkflowRailDelegate(QtWidgets.QStyledItemDelegate):
+    """Keep stage icons and number badges readable in the compact rail."""
+
+    def paint(self, painter, option, index):
+        if not self.parent().property("compactRail"):
+            return super().paint(painter, option, index)
+        theme = active_theme()
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        if selected or option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color(theme.accent_soft if selected else theme.row_hover))
+            painter.drawRoundedRect(QtCore.QRectF(rect), 9, 9)
+        icon = index.data(QtCore.Qt.ItemDataRole.DecorationRole)
+        icon.paint(painter, QtCore.QRect(rect.left()+5, rect.center().y()-10, 20, 20))
+        font = option.font
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor(theme.accent if selected else theme.muted))
+        painter.drawText(rect.adjusted(27, 0, -2, 0), QtCore.Qt.AlignmentFlag.AlignCenter, str(index.row()+1))
+        painter.restore()
 
 
 class SegmentedBar(QtWidgets.QFrame):
@@ -216,6 +254,7 @@ class SpotTree(QtWidgets.QTreeWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAllColumnsShowFocus(False)
+        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def drawBranches(self, painter, rect, index):
@@ -288,9 +327,12 @@ class ComboPopupListView(QtWidgets.QListView):
 
 
 class StyledComboBox(QtWidgets.QComboBox):
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *,
+                 elide_mode=QtCore.Qt.TextElideMode.ElideRight) -> None:
         super().__init__(parent)
+        self._elide_mode = elide_mode
         popup_view = ComboPopupListView(self)
+        popup_view.setTextElideMode(elide_mode)
         popup_view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         popup_view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         popup_view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -313,7 +355,7 @@ class StyledComboBox(QtWidgets.QComboBox):
             QtWidgets.QStyle.SubControl.SC_ComboBoxEditField, self,
         )
         option.currentText = self.fontMetrics().elidedText(
-            self.currentText(), QtCore.Qt.TextElideMode.ElideRight, max(0, field.width()-2),
+            self.currentText(), self._elide_mode, max(0, field.width()-2),
         )
         painter = QtWidgets.QStylePainter(self)
         painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, option)
@@ -1212,8 +1254,10 @@ class ElidedLabel(QtWidgets.QLabel):
     be cut off mid-character.
     """
 
-    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None, *,
+                 elide_mode=QtCore.Qt.TextElideMode.ElideRight) -> None:
         super().__init__(parent)
+        self._elide_mode = elide_mode
         self._full_text = ""
         self._own_tooltip = ""
         self.setWordWrap(False)
@@ -1262,7 +1306,7 @@ class ElidedLabel(QtWidgets.QLabel):
         margins = self.contentsMargins()
         width = max(0, self.width() - margins.left() - margins.right())
         shown = self.fontMetrics().elidedText(
-            self._full_text, QtCore.Qt.TextElideMode.ElideRight, width
+            self._full_text, self._elide_mode, width
         )
         super().setText(shown)
         elided = shown != self._full_text
@@ -1596,6 +1640,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_filter.textChanged.connect(self.filter_spot_choices)
         controls_layout.addWidget(self.spot_filter)
         self.spot_choice_list = QtWidgets.QListWidget()
+        self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.spot_choice_list.itemChanged.connect(
             lambda _item: self.refresh_spot_concordia()
         )
@@ -1626,7 +1671,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         # the whole results area) fits a laptop-width plot column.
         controls = QtWidgets.QHBoxLayout()
         controls.addWidget(QtWidgets.QLabel("Depth-profile spot"))
-        self.depth_spot_combo = StyledComboBox()
+        self.depth_spot_combo = StyledComboBox(elide_mode=QtCore.Qt.TextElideMode.ElideMiddle)
+        self.depth_spot_combo.currentTextChanged.connect(self.depth_spot_combo.setToolTip)
         self.depth_spot_combo.setMinimumContentsLength(8)
         self.depth_spot_combo.setSizeAdjustPolicy(
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
@@ -1829,6 +1875,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_choice_list.clear()
         for spot_name in dict.fromkeys(spot_names):
             item = QtWidgets.QListWidgetItem(spot_name)
+            item.setToolTip(spot_name)
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 existing_names.get(spot_name, QtCore.Qt.CheckState.Checked)
@@ -1903,11 +1950,14 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.depth_spot_combo.blockSignals(True)
         self.depth_spot_combo.clear()
         self.depth_spot_combo.addItems(spot_names)
+        for index, name in enumerate(spot_names):
+            self.depth_spot_combo.setItemData(index, name, QtCore.Qt.ItemDataRole.ToolTipRole)
         preferred = spot_name or existing_spot
         preferred_index = self.depth_spot_combo.findText(preferred)
         if preferred_index >= 0:
             self.depth_spot_combo.setCurrentIndex(preferred_index)
         self.depth_spot_combo.blockSignals(False)
+        self.depth_spot_combo.setToolTip(self.depth_spot_combo.currentText())
         self.refresh_depth_concordia()
         target = spot_name or "all spots"
         self.summary_label.setText(
@@ -2500,10 +2550,11 @@ class TracePlotWidget(RoundedPlotWidget):
         self._hover_proxy = pg.SignalProxy(self.scene().sigMouseMoved, rateLimit=60, slot=self._on_scene_mouse_moved)
         self.plot_item.vb.sigXRangeChanged.connect(self._on_x_range_changed)
         self.plot_item.vb.sigYRangeChanged.connect(self._on_y_range_changed)
+        self.plot_item.vb.sigResized.connect(self._position_signal_labels)
         self._configure_plot()
 
         # Floating spot-name label in the top-right corner
-        self._spot_name_label = QtWidgets.QLabel("", self)
+        self._spot_name_label = ElidedLabel("", self, elide_mode=QtCore.Qt.TextElideMode.ElideMiddle)
         self._spot_name_label.setObjectName("SpotOverlayLabel")
         self._spot_name_label.setStyleSheet(
             f"color: {self._theme.muted}; font-size: 11px; font-weight: 600;"
@@ -2518,16 +2569,50 @@ class TracePlotWidget(RoundedPlotWidget):
         super().resizeEvent(event)
         if not hasattr(self, "plot_item"):
             return
-        self.plot_item.layout.setRowFixedHeight(3, 62)
-        self.plot_item.getAxis("bottom").setHeight(54)
+        narrow = self.window().width() < 1280
+        self.plot_item.layout.setRowFixedHeight(3, 50 if narrow else 62)
+        self.plot_item.getAxis("bottom").setHeight(44 if narrow else 54)
         self.plot_item.showAxis("bottom")
         self._reposition_spot_label()
+        self._layout_trace_legend()
+
+    def _layout_trace_legend(self) -> None:
+        """Reserve a row outside the data view for narrow-window legends."""
+        legend = self.plot_item.legend
+        if legend is None:
+            return
+        outside = self.window().width() < 1280
+        if outside != bool(getattr(legend, "_outside_trace", False)):
+            # Anchored legends reposition themselves on every geometry change;
+            # a fresh unanchored item lets the graphics layout own its position.
+            replacement = RoundedLegendItem(
+                offset=None if outside else (12, 8),
+                labelTextColor=self._theme.axis_text, labelTextSize="9pt" if outside else "10pt",
+            )
+            for sample, label in legend.items:
+                replacement.addItem(sample.item, label.text)
+            if getattr(legend, "_outside_trace", False):
+                self.plot_item.layout.removeItem(legend)
+            if legend.scene() is not None:
+                legend.scene().removeItem(legend)
+            legend = replacement
+            self.plot_item.legend = legend
+            if outside:
+                legend.setParentItem(self.plot_item)
+                self.plot_item.layout.addItem(legend, 4, 1)
+                legend.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+                legend.layout.setContentsMargins(4, 0, 4, 0)
+            else:
+                legend.setParentItem(self.plot_item.vb)
+            legend._outside_trace = outside
+        legend.setColumnCount(max(1, min(6, (self.width()-115)//100)) if outside else 2)
 
     def _update_spot_label(self, spot_name: str | None) -> None:
         if not hasattr(self, "_spot_name_label"):
             return
         if spot_name:
             self._spot_name_label.setText(spot_name)
+            self._spot_name_label.setToolTip(spot_name)
             self._spot_name_label.adjustSize()
             self._reposition_spot_label()
             self._spot_name_label.show()
@@ -2538,11 +2623,74 @@ class TracePlotWidget(RoundedPlotWidget):
         if not hasattr(self, "_spot_name_label"):
             return
         lbl = self._spot_name_label
+        lbl.setMaximumWidth(max(1, self.width() - 28))
         lbl.adjustSize()
         margin = 14
         x = self.width() - lbl.width() - margin
-        y = margin
+        y = 0 if self.window().width() < 1280 else margin
         lbl.move(max(0, x), max(0, y))
+
+    def _position_signal_labels(self) -> None:
+        """Keep edge pills outside selection boxes and inside the view."""
+        if getattr(self, "_positioning_signal_labels", False):
+            return
+        self._positioning_signal_labels = True
+        try:
+            view = self.plot_item.vb
+            area = view.sceneBoundingRect().adjusted(5, 5, -5, -5)
+            if area.width() <= 0 or area.height() <= 0:
+                return
+            obstacles = []
+            for overlay in self._region_overlays.values():
+                if "mean" not in overlay:
+                    continue
+                start, end = overlay["region"].getRegion()
+                mean, spread = overlay["mean"], overlay["spread"]
+                rect = QtCore.QRectF(
+                    view.mapViewToScene(QtCore.QPointF(start, mean + spread)),
+                    view.mapViewToScene(QtCore.QPointF(end, mean - spread)),
+                ).normalized().adjusted(-4, -4, 4, 4)
+                obstacles.append(rect)
+            for name in ("signal_start", "signal_end"):
+                line = self._signal_boundaries.get(name)
+                if line is None:
+                    continue
+                label = line.label
+                x = view.mapViewToScene(QtCore.QPointF(line.value(), 0)).x()
+                label.setVisible(view.sceneBoundingRect().left() <= x <= view.sceneBoundingRect().right())
+                if not label.isVisible():
+                    continue
+                size = label.sceneBoundingRect().size()
+                width, height = size.width(), size.height()
+                if width <= 0 or height <= 0:
+                    continue
+                left = x - width - 5 if name == "signal_start" else x + 5
+                left = max(area.left(), min(left, area.right() - width))
+                # Try the top first, then lanes above/below each obstacle.
+                candidates = [area.top(), area.bottom() - height]
+                for obstacle in obstacles:
+                    candidates.extend((obstacle.top() - height - 5, obstacle.bottom() + 5))
+                # A very short plot may lack two vertical lanes. In that case
+                # slide along the nearest box edge rather than cover a pill.
+                left_candidates = [left]
+                for obstacle in obstacles:
+                    left_candidates.extend((obstacle.left() - width - 5, obstacle.right() + 5))
+                left_candidates = sorted(set(left_candidates), key=lambda x: abs(x - left))
+                placement = next((
+                    (x, y) for x in left_candidates for y in sorted(candidates)
+                    if area.left() <= x <= area.right() - width
+                    and area.top() <= y <= area.bottom() - height
+                    and not any(QtCore.QRectF(x, y, width, height).intersects(rect)
+                                for rect in obstacles)
+                ), (left, area.top()))
+                left, top = placement
+                anchor = ((x - left) / width, 0.5)
+                label.anchors = [anchor, anchor]
+                position = 1 - (top + height / 2 - view.sceneBoundingRect().top()) / max(1, view.height())
+                label.setPosition(position)
+                obstacles.append(QtCore.QRectF(left, top, width, height).adjusted(-5, -5, 5, 5))
+        finally:
+            self._positioning_signal_labels = False
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -2560,7 +2708,8 @@ class TracePlotWidget(RoundedPlotWidget):
         self.setClipToView(True)
         self.plot_item.hideButtons()
         self.plot_item.setContentsMargins(20, 16, 20, 8)
-        self.plot_item.layout.setRowFixedHeight(3, 62)
+        narrow = self.window().width() < 1280
+        self.plot_item.layout.setRowFixedHeight(3, 50 if narrow else 62)
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("bottom", "Acquisition Time (s)", **label_style)
         self.plot_item.setLabel("left", "Counts / cps", **label_style)
@@ -2575,12 +2724,14 @@ class TracePlotWidget(RoundedPlotWidget):
         left_axis.setStyle(tickFont=tick_font, tickTextOffset=10, autoExpandTextSpace=False)
         bottom_axis.setStyle(tickFont=tick_font, tickTextOffset=6, autoExpandTextSpace=True)
         left_axis.setWidth(88)
-        bottom_axis.setHeight(54)
+        bottom_axis.setHeight(44 if narrow else 54)
         self.plot_item.showAxis("bottom")
 
     def _reset_items(self) -> None:
         legend = self.plot_item.legend
         if legend is not None and legend.scene() is not None:
+            if getattr(legend, "_outside_trace", False):
+                self.plot_item.layout.removeItem(legend)
             legend.scene().removeItem(legend)
             self.plot_item.legend = None
         self.plot_item.clear()
@@ -2593,6 +2744,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._selection_channel = None
         self._configure_plot()
         _rounded_legend(self.plot_item, offset=(12, 8), labelTextColor=self._theme.axis_text, labelTextSize="10pt", colCount=2)
+        self._layout_trace_legend()
 
     def show_preview(self, region_colors: dict[str, str] | None = None) -> None:
         self._reset_items()
@@ -3097,10 +3249,12 @@ class TracePlotWidget(RoundedPlotWidget):
         )
         line.label = _PillLineLabel(line, text=label, position=0.93, color=self._theme.axis_text, movable=movable)
         line.label.textItem.document().setDocumentMargin(6)
+        line.label.position_callback = self._position_signal_labels
         line.setBounds(tuple(sorted(float(item) for item in bounds)))
         line.setZValue(12)
         self.plot_item.addItem(line)
         self._signal_boundaries[name] = line
+        self._position_signal_labels()
         marker = pg.ScatterPlotItem(
             symbol="d" if name == "signal_start" else "s",
             size=15 if name == "signal_start" else 13,
@@ -3268,6 +3422,7 @@ class TracePlotWidget(RoundedPlotWidget):
         overlay["included_count"] = int(inlier_mask.sum())
         overlay["excluded_count"] = int(excluded_mask.sum())
         self._update_region_span(overlay)
+        self._position_signal_labels()
 
         if region_name == "plateau":
             self._constrain_signal_edges_to_plateau(start_value, end_value)
@@ -3327,6 +3482,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self.regionChanged.emit(region_name, bounds)
 
     def _on_x_range_changed(self, _view_box: object, x_range: object) -> None:
+        self._position_signal_labels()
         if self._suspend_x_window_signal:
             self._measurement_refresh_timer.start()
             return
@@ -3377,6 +3533,7 @@ class TracePlotWidget(RoundedPlotWidget):
         """Keep draggable selection edges confined to the uncertainty box."""
         for overlay in self._region_overlays.values():
             self._update_region_span(overlay)
+        self._position_signal_labels()
 
     def _update_region_span(self, overlay: dict[str, object]) -> None:
         """Map mean ± displayed sigma into the view's normalized height.
