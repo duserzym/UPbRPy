@@ -226,7 +226,10 @@ needed: add it in milestone 4) and `cycle_time_s` (UPbR only).
   today's implementation (in the test module) and compares with
   `pandas.testing.assert_frame_equal(check_exact=True)` on the fixture's
   per-spot folder and on a synthetic folder from the existing tests.
-- From Rich: the same channel arrays exactly (same text, same parser), the
+- From Rich: the same channel arrays to the 15th significant digit (found
+  in milestone 3: Rich prints Y with 17 significant digits, a round-trip
+  double, while the per-spot files print 15, e.g. `449124.38355127671` vs
+  `449124.383551277`; Rich is the more precise record), the
   same within-acquisition `Time`; session start offsets differ by the
   sub-second part only (per-spot line-1 times are truncated to whole seconds,
   Rich keeps 7 digits; the 7 h clock offset cancels because times are

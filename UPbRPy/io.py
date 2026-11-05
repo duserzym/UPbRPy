@@ -10,11 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
-import os
-from datetime import datetime
+from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
+
+from .qtegra import QtegraSession, open_qtegra
 
 
 class SelectionError(ValueError):
@@ -898,6 +900,13 @@ def resolve_session_manifest(directory, session_manifest):
     if isinstance(session_manifest, SessionManifest):
         return session_manifest
     if session_manifest is None or session_manifest is True:
+        if isinstance(directory, QtegraSession):
+            if not directory.sources:
+                return None
+            directory = directory.sources[0].path
+        directory = Path(directory).expanduser()
+        if directory.is_file():
+            directory = directory.parent
         found = find_session_manifest(directory)
         return None if found is None else read_session_manifest(found)
     return read_session_manifest(session_manifest)
@@ -920,17 +929,21 @@ def read_experiment_data(
     selection_options=None,
     signal_duration_limit_seconds=None,
     session_manifest=None,
+    *,
+    cycle_time_s=None,
 ):
-    """Read a directory of per-spot Thermo iCAP CSV exports.
+    """Read Qtegra exports or an in-memory session and initialize selections.
 
-    Files are ordered by acquisition time, their relative sweep times are
-    aligned onto one session axis, and baseline, plateau, signal-start, and
-    signal-end windows are initialized for every analysis.
+    Acquisitions retain reader order (sequence order for single CSVs, time
+    order for per-spot folders). Their relative sweep times are aligned onto
+    one session axis, and baseline, plateau, signal-start, and signal-end
+    windows are initialized for every analysis.
 
     Parameters
     ----------
-    directory : str or path-like
-        Folder containing one CSV export per analysis.
+    directory : str, path-like or QtegraSession
+        Per-spot folder, Rich or UPbR CSV, folder containing these exports,
+        session bundle root, or an already-read session.
     primary_channel : str
         Default matrix-sensitive channel used to detect ablation signals.
     baseline_sweep_n, peak_sweep_n : int
@@ -969,9 +982,14 @@ def read_experiment_data(
         The ``session_manifest.toml`` of a database session bundle
         (:mod:`UPbRPy.session_manifest`). ``None`` (default) looks for one
         inside ``directory`` (a bundle root, whose ``raw/`` is then read) or
-        beside it (``directory`` is the bundle's ``raw/``); ``False`` ignores
-        any manifest. A manifest supplies ``sep`` and ``sample_aliases``;
-        explicit arguments still win.
+        beside it (``directory`` is the bundle's ``raw/``). A CSV source looks
+        in its parent folder with the same rules; an in-memory session uses
+        its first source path. ``False`` ignores any manifest. A manifest
+        supplies ``sep`` and ``sample_aliases``; explicit arguments still win.
+    cycle_time_s : float or None, keyword-only
+        Nominal UPbR sweep cycle in seconds, forwarded to ``open_qtegra``.
+        None uses the reader's default of 0.4255 s. UPbR times are reconstructed
+        and emit one UserWarning. Recorded times in other formats are retained.
 
     Returns
     -------
@@ -988,7 +1006,8 @@ def read_experiment_data(
     if manifest is not None:
         from .session_manifest import raw_directory_for
 
-        directory = os.fspath(raw_directory_for(directory))
+        if not isinstance(directory, QtegraSession):
+            directory = raw_directory_for(directory)
         if sep is None and manifest.sep:
             sep = manifest.sep
         if manifest.sample_aliases:
@@ -1002,86 +1021,13 @@ def read_experiment_data(
     if sep is None:
         sep = '_'
 
-    spot_names = []
-    spot_paths = []
-    spot_starting_times = []
-    csv_files = [name for name in os.listdir(directory) if name.endswith('.csv')]
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files were found in {directory!r}.")
-
-    # Use one instrument export to obtain the common channel names.
-    with open(os.path.join(directory, csv_files[0])) as file_handle:
-        first_file = file_handle.readlines()
-
-    # now update the global variable channels
-    element_channels = first_file[13].split(',')[1:-1]
-
-    time_format = "%m/%d/%Y %I:%M:%S %p"
-
-    # Read only the short header during discovery; numerical tables are loaded
-    # once below after the experiment has been placed in chronological order.
-    for filename in csv_files:
-        this_path = os.path.join(directory, filename)
-        spot_paths.append(this_path)
-        with open(this_path) as file_handle:
-            first_line = file_handle.readline()
-        spot_names.append(first_line.split(':')[0])
-        spot_starting_times.append(
-            datetime.strptime(first_line[-24:-2], time_format)
-        )
-
-    # Create a pandas dataframe to store the experiment data.
-    experiment = pd.DataFrame()
-    experiment['spot_names'] = spot_names
-    parsed_samples = [spot_name.split(sep)[0] for spot_name in spot_names]
-    if sample_aliases:
-        aliases = {
-            str(source).strip().casefold(): str(target).strip()
-            for source, target in sample_aliases.items()
-        }
-        parsed_samples = [
-            aliases.get(sample.casefold(), sample) for sample in parsed_samples
-        ]
-    experiment['sample'] = parsed_samples
-    experiment['spot_paths'] = spot_paths
-    experiment['spot_starting_times'] = spot_starting_times
-
-    experiment = experiment.sort_values(by='spot_starting_times').reset_index(drop=True)
-    spot_frames = []
-    for i in range(experiment.shape[0]):
-        # Accumulate spot frames and concatenate once. Repeated concatenation
-        # would copy all previously imported rows for every additional spot.
-        this_data = pd.read_csv(experiment['spot_paths'][i], skiprows=13)
-        this_data = this_data.iloc[1:].reset_index(drop=True)
-        this_data = this_data.dropna(axis=1, how='all')
-        this_data = this_data.apply(pd.to_numeric, errors='coerce')
-        # Convert relative seconds to absolute timestamps without a Python row
-        # loop; pandas performs this operation as a vectorized timedelta add.
-        this_data['Time'] = (
-            experiment['spot_starting_times'][i]
-            + pd.to_timedelta(this_data['Time'], unit='s')
-        )
-        this_data['spot_name'] = experiment['spot_names'][i]
-        this_data['sample'] = experiment['sample'][i]
-        spot_frames.append(this_data)
-
-    total_data = pd.concat(spot_frames, ignore_index=True)
-
-    experiment = experiment.sort_values(by='spot_names').reset_index(drop=True)
-    #initialize the columns for the experiment dataframe with null values
-
-    # we should also align the time column in both the experiment and total data to be in total seconds with respect to the start of the experiment
-    # this will help with the later session-wide fractionation corrections
-    experiment_start_time = experiment['spot_starting_times'].min()
-    experiment['spot_starting_times'] = (experiment['spot_starting_times'] - experiment_start_time).dt.total_seconds()
-    total_data['Time'] = (total_data['Time'] - experiment_start_time).dt.total_seconds()
-
-    experiment['plateau_start_times'] = None
-    experiment['plateau_end_times'] = None
-    experiment['baseline_start_times'] = None
-    experiment['baseline_end_times'] = None
-    experiment['signal_start_times'] = None
-    experiment['signal_end_times'] = None
+    session = (
+        directory if isinstance(directory, QtegraSession)
+        else open_qtegra(Path(directory).expanduser(), cycle_time_s=cycle_time_s)
+    )
+    experiment, element_channels, total_data = experiment_from_session(
+        session, sep=sep, sample_aliases=sample_aliases,
+    )
 
     experiment = auto_select_baseline_peak(
         experiment,
@@ -1120,6 +1066,112 @@ def read_experiment_data(
     }
 
     return experiment, element_channels, total_data
+
+
+def experiment_from_session(session, sep="_", sample_aliases=None):
+    """Build experiment and sweep tables from a QtegraSession before selection.
+
+    Return ``(experiment, element_channels, total_data)`` in the historical
+    column order and dtypes. Session seconds use each acquisition's first
+    channel time and recorded start, or its reconstructed ``start_offset_s``.
+    Relative seconds pass through pandas nanosecond timedeltas and absolute
+    timestamps before subtraction, matching the original per-spot reader.
+    Source paths and JSON-safe session provenance are retained. UPbR input
+    emits one UserWarning about reconstructed times.
+    """
+    if not session.acquisitions:
+        raise ValueError("Cannot build an experiment from an empty QtegraSession.")
+    if session.times_reconstructed:
+        warnings.warn(
+            "UPbR sweep times reconstructed with "
+            f"cycle_time_s={session.nominal_cycle_time_s}; acquisition starts "
+            "are placed back to back in sequence order.",
+            UserWarning, stacklevel=2,
+        )
+    aliases = {
+        str(source).strip().casefold(): str(target).strip()
+        for source, target in (sample_aliases or {}).items()
+    }
+    starts = []
+    samples = []
+    spot_frames = []
+    for acquisition in session.acquisitions:
+        if acquisition.start is not None:
+            start = acquisition.start
+        elif acquisition.start_offset_s is not None:
+            start = pd.Timestamp("1970-01-01") + pd.to_timedelta(
+                acquisition.start_offset_s, unit="s",
+            )
+        else:
+            raise ValueError(f"{acquisition.label}: no acquisition start or session offset.")
+        if acquisition.sweep_time is None:
+            raise ValueError(f"{acquisition.label}: no sweep times.")
+        starts.append(start)
+        sample = acquisition.label.split(sep)[0]
+        sample = aliases.get(sample.casefold(), sample)
+        samples.append(sample)
+        values = {"Time": acquisition.sweep_time}
+        values.update({
+            name: acquisition.y[:, index]
+            for index, name in enumerate(acquisition.channel_names)
+        })
+        if acquisition._data_dtypes:
+            values = {
+                name: data for name, data in values.items()
+                if name in acquisition._data_dtypes
+            }
+        this_data = pd.DataFrame(values)
+        if not acquisition._data_dtypes:
+            this_data = this_data.dropna(axis=1, how="all")
+        this_data = this_data.apply(pd.to_numeric, errors="coerce")
+        for name, dtype in acquisition._data_dtypes.items():
+            if name in this_data and np.issubdtype(np.dtype(dtype), np.integer):
+                column = this_data[name]
+                # A caller may have changed Y after reading the session.
+                if column.notna().all() and (column % 1 == 0).all():
+                    this_data[name] = column.astype(dtype)
+        this_data["Time"] = start + pd.to_timedelta(this_data["Time"], unit="s")
+        this_data["spot_name"] = acquisition.label
+        this_data["sample"] = sample
+        spot_frames.append(this_data)
+
+    experiment = pd.DataFrame({
+        "spot_names": [acquisition.label for acquisition in session.acquisitions],
+        "sample": samples,
+        "spot_paths": [
+            str(acquisition.source_path) if acquisition.source_path is not None else None
+            for acquisition in session.acquisitions
+        ],
+        "spot_starting_times": starts,
+    })
+    total_data = pd.concat(spot_frames, ignore_index=True)
+    experiment = experiment.sort_values(by="spot_names").reset_index(drop=True)
+    experiment_start_time = experiment["spot_starting_times"].min()
+    experiment["spot_starting_times"] = (
+        experiment["spot_starting_times"] - experiment_start_time
+    ).dt.total_seconds()
+    total_data["Time"] = (total_data["Time"] - experiment_start_time).dt.total_seconds()
+    for column in (
+        "plateau_start_times", "plateau_end_times", "baseline_start_times",
+        "baseline_end_times", "signal_start_times", "signal_end_times",
+    ):
+        experiment[column] = None
+    experiment.attrs["qtegra"] = {
+        "format": session.format,
+        "capabilities": sorted(session.capabilities),
+        "sources": [
+            {"path": str(source.path), "sha256": source.sha256, "format": source.format}
+            for source in session.sources
+        ],
+        "times_reconstructed": session.times_reconstructed,
+        "nominal_cycle_time_s": session.nominal_cycle_time_s,
+        "clock_offset_hours": session.clock_offset_hours,
+        "software": session.software,
+        "machine": session.machine,
+        "warnings": list(session.warnings),
+    }
+    return experiment, list(session.channel_names), total_data
+
 
 def read_spot_data(spot_path):
     '''
@@ -1338,6 +1390,7 @@ __all__ = [
     'select_baseline_peak',
     'select_signal_regions',
     'read_experiment_data',
+    'experiment_from_session',
     'resolve_session_manifest',
     'read_spot_data',
     'auto_select_baseline_peak',

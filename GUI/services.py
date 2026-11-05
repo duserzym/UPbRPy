@@ -301,19 +301,39 @@ def config_invalidation_stage(
 
 
 def raw_input_files(directory: str | Path) -> tuple[Path, ...]:
-    """The files ``read_experiment_data`` imports: the folder's CSV files.
+    """Return Qtegra source files using header detection without loading sweeps.
 
-    Only these are hashed into the reduction manifest, so a stray
-    ``.DS_Store`` or note beside the exports is not reported to a database
-    as an unknown input.
+    Rich exports include per-spot companions in the same folder or an immediate
+    subfolder. Derived UPbR files are omitted when Rich or per-spot exports
+    take precedence. A file source is returned directly.
     """
-    return tuple(
-        sorted(
-            path
-            for path in Path(directory).iterdir()
-            if path.is_file() and path.name.endswith(".csv")
-        )
-    )
+    from UPbRPy.qtegra import detect_format
+
+    source = Path(directory)
+    if source.is_file():
+        return (source,)
+
+    def csv_formats(folder):
+        formats = {}
+        for path in folder.iterdir():
+            if path.is_file() and path.suffix.lower() == ".csv":
+                try:
+                    formats[path] = detect_format(path)
+                except ValueError:
+                    pass
+        return formats
+
+    formats = csv_formats(source)
+    files = [path for path, kind in formats.items() if kind in {"rich", "spot"}]
+    if "rich" in formats.values():
+        for child in source.iterdir():
+            if child.is_dir():
+                files.extend(
+                    path for path, kind in csv_formats(child).items() if kind == "spot"
+                )
+    elif not files:
+        files = [path for path, kind in formats.items() if kind == "upbr"]
+    return tuple(sorted(files))
 
 
 def ensure_shared_pipeline(

@@ -55,7 +55,12 @@ class Channel:
 
 @dataclass
 class Acquisition:
-    """One acquisition; sweep arrays retain missing values as NaN."""
+    """One acquisition; sweep arrays retain missing values as NaN.
+
+    ``time`` always contains seconds since this acquisition's start. UPbR
+    stores its reconstructed session placement separately in ``start_offset_s``;
+    formats with recorded calendar starts leave that field None.
+    """
 
     label: str
     sequence_index: int
@@ -75,6 +80,10 @@ class Acquisition:
     user: str | None = None
     spot_number: int | None = None
     source_path: Path | None = None
+    start_offset_s: float | None = None
+    # Native pandas column dtypes preserve the historical experiment tables.
+    # Y stays a float array; consumers may change it without rereading a file.
+    _data_dtypes: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def channel_names(self) -> tuple[str, ...]:
@@ -88,7 +97,7 @@ class Acquisition:
 
     @property
     def sweep_time(self) -> np.ndarray | None:
-        """Shared sweep time, or the first channel's time when per-channel."""
+        """Seconds since acquisition start, using the first channel if needed."""
         if self.time_per_channel:
             return self.time[:, 0]
         return self.time
@@ -206,7 +215,19 @@ def _read_single(path, quantities):
         cube = np.full((len(labels), int(sweeps.max()) + 1, len(names)), np.nan)
         cube[:, sweeps[mask], channel_indices[mask]] = values.T
         cubes[quantity] = cube
-    return path, raw, frame, columns, labels, names, cubes
+    data_dtypes = []
+    y_rows = main.loc[main[3] == "Y"]
+    y_sweeps = pd.to_numeric(y_rows[1]).to_numpy()
+    channel_masks = {name: (y_rows[2] == name).to_numpy() for name in names}
+    for index, column in enumerate(columns):
+        count = _sweep_count(cubes["Y"][index])
+        dtypes = {}
+        for name in names:
+            texts = y_rows.loc[channel_masks[name] & (y_sweeps < count), column]
+            if (texts != "").any():
+                dtypes[name] = str(pd.to_numeric(texts, errors="coerce").dtype)
+        data_dtypes.append(dtypes)
+    return path, raw, frame, columns, labels, names, cubes, data_dtypes
 
 
 def read_rich_csv(path) -> QtegraSession:
@@ -217,7 +238,7 @@ def read_rich_csv(path) -> QtegraSession:
     Python loops assemble acquisitions and their short metadata dictionaries;
     no Python loop visits individual sweep cells.
     """
-    path, raw, frame, columns, labels, names, cubes = _read_single(
+    path, raw, frame, columns, labels, names, cubes, data_dtypes = _read_single(
         path, ("Y", "Time", "Analog", "Counter", "X [u]"),
     )
     for quantity in ("Time", "Analog", "Counter", "X [u]"):
@@ -241,6 +262,7 @@ def read_rich_csv(path) -> QtegraSession:
             analog=cubes["Analog"][i, :count].copy(),
             counter=cubes["Counter"][i, :count].copy(),
             spot_number=_spot_number(label), source_path=path,
+            _data_dtypes={"Time": "float64", **data_dtypes[i]},
         ))
     session = QtegraSession(
         acquisitions, "rich", CAPABILITIES - {"dwell_xcal"},
@@ -300,30 +322,32 @@ def _read_spot(path):
     # Match the existing per-spot parser: its metadata row forces string
     # columns, followed by pandas.to_numeric for the actual sweeps.
     table = pd.read_csv(BytesIO(raw), skiprows=13, encoding="utf-8-sig")
-    table = table.iloc[1:, :len(names) + 1].apply(pd.to_numeric, errors="coerce")
-    y = table.iloc[:, 1:].to_numpy(dtype=float)
+    table = table.iloc[1:].reset_index(drop=True).dropna(axis=1, how="all")
+    table = table.apply(pd.to_numeric, errors="coerce")
+    y = table.reindex(columns=names).to_numpy(dtype=float)
     count = _sweep_count(y)
     acquisition = Acquisition(
         label, 0, tuple(channels), y[:count].copy(),
-        table.iloc[:count, 0].to_numpy(dtype=float),
+        table["Time"].iloc[:count].to_numpy(dtype=float),
         start_text=start_text, start=datetime.strptime(start_text, "%m/%d/%Y %I:%M:%S %p"),
         tune_name=lines[3].split(":", 1)[0],
         sequence_fields={"spot_file_start_text": lines[0]},
         spot_number=_spot_number(label), source_path=path,
+        _data_dtypes={name: str(dtype) for name, dtype in table.dtypes.items()},
     )
-    software_fields = _key_values(lines[1].split(":", 1)[1])
+    software_fields = _key_values(lines[1].partition(":")[2])
     software = " ".join(software_fields[key] for key in ("Name", "Version") if software_fields.get(key))
-    machine = _key_values(lines[2].split(":", 1)[1]).get("Machine")
+    machine = _key_values(lines[2].partition(":")[2]).get("Machine")
     acquisition.tune_settings = {
         key: _state_value(value)
-        for key, value in _key_values(lines[3].split(":", 1)[1]).items() if value
+        for key, value in _key_values(lines[3].partition(":")[2]).items() if value
     }
     for line in lines[4:11]:
         acquisition.readbacks.update({
             key: _state_value(value)
-            for key, value in _key_values(line.split(":", 1)[1]).items() if value
+            for key, value in _key_values(line.partition(":")[2]).items() if value
         })
-    threshold = _key_values(lines[11].split(":", 1)[1]).get("Threshold")
+    threshold = _key_values(lines[11].partition(":")[2]).get("Threshold")
     return (
         acquisition, software or None, machine, float(threshold) if threshold else None,
         SourceFile(path, sha256(raw).hexdigest(), "spot"),
@@ -371,11 +395,12 @@ def read_spot_folder(path) -> QtegraSession:
 
 def read_upbr_csv(path, *, cycle_time_s: float | None = None,
                   acquisition_gap_s: float = 0.0) -> QtegraSession:
-    """Read Y-only UPbR data with reconstructed session-relative times.
+    """Read Y-only UPbR data with reconstructed acquisition-relative times.
 
     The default cycle is 0.4255 s, the Boise session's median sweep spacing.
     Each acquisition starts after the previous one's sweep count times cycle
-    plus gap; its time array includes that offset. Calendar starts stay None.
+    plus gap, recorded in ``start_offset_s``. Each time array starts at zero.
+    Calendar starts stay None.
     """
     cycle = DEFAULT_CYCLE_TIME_S if cycle_time_s is None else float(cycle_time_s)
     gap = float(acquisition_gap_s)
@@ -383,15 +408,17 @@ def read_upbr_csv(path, *, cycle_time_s: float | None = None,
         raise ValueError("cycle_time_s must be finite and positive.")
     if not np.isfinite(gap) or gap < 0:
         raise ValueError("acquisition_gap_s must be finite and nonnegative.")
-    path, raw, _frame, _columns, labels, names, cubes = _read_single(path, ("Y",))
+    path, raw, _frame, _columns, labels, names, cubes, data_dtypes = _read_single(path, ("Y",))
     acquisitions = []
     offset = 0.0
     for i, label in enumerate(labels):
         count = _sweep_count(cubes["Y"][i])
         acquisitions.append(Acquisition(
             label, i + 1, tuple(Channel(name) for name in names),
-            cubes["Y"][i, :count].copy(), offset + np.arange(count) * cycle,
+            cubes["Y"][i, :count].copy(), np.arange(count) * cycle,
             spot_number=_spot_number(label), source_path=path,
+            start_offset_s=offset,
+            _data_dtypes={"Time": "float64", **data_dtypes[i]},
         ))
         offset += count * cycle + gap
     return QtegraSession(

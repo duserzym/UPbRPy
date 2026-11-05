@@ -91,6 +91,8 @@ def test_reader_counts_and_order(rich, spots, upbr):
             assert acquisition.channel_names == NAMES
             assert acquisition.y.shape == (72, 9)
             assert acquisition.y.dtype == np.dtype(float)
+            if session is not upbr:
+                assert acquisition.start_offset_s is None
             assert session.acquisition(acquisition.label) is acquisition
             assert acquisition.channel_index("238U") == 8
             with pytest.raises(ValueError):
@@ -194,7 +196,9 @@ def test_upbr_y_and_reconstructed_times(rich, upbr):
     assert any("reconstructed" in warning for warning in upbr.warnings)
     for i, (original, derived) in enumerate(zip(rich.acquisitions, upbr.acquisitions)):
         np.testing.assert_array_equal(original.y, derived.y)
-        np.testing.assert_allclose(derived.time, (i * 72 + np.arange(72)) * q.DEFAULT_CYCLE_TIME_S)
+        np.testing.assert_array_equal(derived.time, np.arange(72) * q.DEFAULT_CYCLE_TIME_S)
+        assert derived.time[0] == 0
+        assert derived.start_offset_s == pytest.approx(i * 72 * q.DEFAULT_CYCLE_TIME_S)
         assert derived.start is None and derived.start_text is None
         assert derived.stop is None and derived.stop_text is None
         assert derived.analog is None and derived.counter is None
@@ -203,7 +207,8 @@ def test_upbr_y_and_reconstructed_times(rich, upbr):
     custom = q.read_upbr_csv(UPBR, cycle_time_s=.5, acquisition_gap_s=2)
     assert custom.nominal_cycle_time_s == .5
     for i, acquisition in enumerate(custom.acquisitions):
-        np.testing.assert_array_equal(acquisition.time, i * 38 + np.arange(72) * .5)
+        np.testing.assert_array_equal(acquisition.time, np.arange(72) * .5)
+        assert acquisition.start_offset_s == i * 38
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -400,7 +405,8 @@ def test_folder_layouts_and_reconstruction_kwargs(tmp_path):
     single_folder.mkdir()
     shutil.copy2(UPBR, single_folder / "derived.csv")
     session = q.open_qtegra(single_folder, cycle_time_s=.5, acquisition_gap_s=2)
-    assert session.acquisitions[1].time[0] == 38
+    assert session.acquisitions[1].time[0] == 0
+    assert session.acquisitions[1].start_offset_s == 38
     assert q.open_qtegra(UPBR, cycle_time_s=.25).nominal_cycle_time_s == .25
     shutil.copy2(UPBR, tmp_path / UPBR.name)
     assert q.open_qtegra(tmp_path).format == "spot_folder"
@@ -477,6 +483,11 @@ def test_empty_sweep_72_interior_missing_and_present_sweep_72(tmp_path, rich):
         assert np.isfinite(first.y[2, 1:]).all()
         assert second.y[72, 0] == 0
         assert np.isnan(second.y[72, 1:]).all()
+        if reader is q.read_upbr_csv:
+            assert second.start_offset_s == 72 * q.DEFAULT_CYCLE_TIME_S
+            assert session.acquisitions[2].start_offset_s == pytest.approx(
+                (72 + 73) * q.DEFAULT_CYCLE_TIME_S,
+            )
 
 
 def test_spot_empty_cells_stay_nan(tmp_path):
