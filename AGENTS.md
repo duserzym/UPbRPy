@@ -7,7 +7,12 @@ laicpmsdb, upbstudio, grainatlas and bracketeer, each in its own repository).
 
 ## Current work
 
-The input-layer restructure for Qtegra exports. UPbR CSV dropped 2026-11-05. Read these two first:
+The input-layer restructure for Qtegra exports. As of 2026-11-05 the UPbR
+CSV is dropped, reduced Rich files are accepted, the public data model is in
+`docs/data-model/` (MkDocs, `make docs`; keep it true when you change a
+reader, and keep `tests/test_data_model_docs.py` passing), S513 and LTSE are
+in the reference library, and Studio opens projects as tabs
+(`GUI/studio_window.py`). Read these two first:
 
 - `docs/qtegra_export_formats.md`: the decision and the contract (which export
   is canonical, the in-memory model, the readers, the rules every consumer

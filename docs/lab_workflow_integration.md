@@ -126,8 +126,23 @@ For laicpmsdb ingest callers:
 - Removed the `"upbr"` result from `detect_format`, session formats and
   source formats. Added exported `UnsupportedQtegraFormat(ValueError)` for
   single CSVs with MainRuns Y but no Time or StartTime.
-- No public symbols were renamed. `times_reconstructed`,
+- Without StartTime a Rich session carries the warning "No StartTime row:
+  acquisitions are placed back to back on the session time axis;
+  time-dependent drift corrections are approximate."
+- `read_rich_csv` and `detect_format` reject a file without header row 2
+  ("Missing acquisition label row (header row 2) ...").
+- Reference library: `zircon/S513.toml` and `zircon/LTSE.toml` added (51
+  material files); `sources.toml` entries now require `kind` and accept
+  `no_doi_reason`, `status` and kind `lab_compilation`; new
+  `UPbRPy.standards.check_reference_sources(path=None) -> list[str]`.
+- No engine symbols were renamed. `times_reconstructed`,
   `nominal_cycle_time_s` and `DEFAULT_CYCLE_TIME_S` remain available.
+- Studio (GUI only): new `GUI.studio_window.StudioWindow`; `MainWindow` is one
+  tab. Signals `next_window_requested`, `open_project_in_new_window_requested`
+  and `open_experiment_in_new_window_requested` are replaced by
+  `next_tab_requested`, `open_project_requested(str)` and
+  `open_source_requested(str)`; `StudioWindowController.create_window` returns a
+  `StudioWindow`.
 
 ### Reader API: `UPbRPy.qtegra`
 
