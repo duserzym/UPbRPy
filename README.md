@@ -241,7 +241,15 @@ calibration uncertainty setting. It reports the concordia age with 2SE, MSWD,
 and spot count, and marks the fitted age on the curve. Colour preferences are
 remembered in Studio settings and saved with the project's workspace.
 
-![Final review](docs/screenshots/studio_final_spot_concordia_1440x900.png)
+<img src="./docs/screenshots/studio_final_spot_concordia_1440x900.png" alt="Spot concordia at 1440 × 900: S513 spots selected, sample colours with legend, live concordia age readout under the controls" width="640">
+
+<img src="./docs/screenshots/studio_final_hover_1280x800.png" alt="Spot concordia zoomed to 535–590 Ma at 1280 × 800: 10 Ma age labels and the hover details of one S513 spot" width="640">
+
+<img src="./docs/screenshots/studio_final_results_grouped_1280x800.png" alt="Final results grouped by sample at 1280 × 800: per-sample weighted means, S513 partly excluded" width="640">
+
+<img src="./docs/screenshots/studio_final_depth_concordia_1280x800.png" alt="Depth concordia at 1280 × 800: sweeps coloured with plasma, lighter = shallower, with a time-in-ablation colour bar" width="640">
+
+Before this pass (2026-11-05): `docs/screenshots/studio_final_before_*.png`.
 
 Publication exports follow a Horstwood Table 4-style layout and keep
 analytical, calibration-inclusive, and optional systematic uncertainty
