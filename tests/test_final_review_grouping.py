@@ -8,7 +8,7 @@ import pytest
 pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
-from GUI.theme import THEMES, build_application, theme_color
+from GUI.theme import THEMES, _stylesheet, build_application, theme_color
 from GUI.widgets import ResultsTableWidget
 from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
 
@@ -311,6 +311,45 @@ def test_grouped_hover_reveals_child_without_changing_review_state(review, app):
     assert widget.include_flags == before and widget.selected_spots == {"B_1"}
     widget._scroll_hovered_spot("")
     assert child.data(QtCore.Qt.ItemDataRole.BackgroundRole) is None
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize("view_name", ["results_tree", "secondary_tree", "spot_choice_tree"])
+@pytest.mark.parametrize("state", ["selected", "hovered"])
+def test_grouped_row_background_has_square_cell_corners(review, app, mode, view_name, state):
+    widget, _ = review
+    widget.setStyleSheet(_stylesheet(THEMES[mode]))
+    widget.apply_theme(THEMES[mode])
+    for toggle in (widget.results_group_toggle, widget.secondary_group_toggle, widget.spot_group_toggle):
+        toggle.setChecked(True)
+    page = {"results_tree": widget.results_page, "secondary_tree": widget.secondary_page,
+            "spot_choice_tree": widget.spot_concordia_page}[view_name]
+    widget.tabs.setCurrentWidget(page)
+    view = getattr(widget, view_name)
+    app.processEvents()
+    parent = view.model().index(0, 0)
+    child = view.model().index(0, 0, parent)
+    assert view.alternatingRowColors()
+    assert child.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable
+    assert child.data(QtCore.Qt.ItemDataRole.CheckStateRole) == QtCore.Qt.CheckState.Checked.value
+    rect = view.visualRect(child)
+    if state == "selected":
+        view.selectionModel().select(child, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                    | QtCore.QItemSelectionModel.SelectionFlag.Rows)
+    else:
+        QtTest.QTest.mouseMove(view.viewport(), rect.center())
+    app.processEvents()
+    image = view.viewport().grab().toImage()
+    ratio = image.devicePixelRatio()
+    def pixel(x, y):
+        return image.pixelColor(round(x * ratio), round(y * ratio))
+    # Compare the upper cell corner with the flat part of its background.
+    # Rounded cells expose the view background here, leaving gaps between columns.
+    reference = pixel(rect.right() - 12, rect.top() + 1)
+    assert pixel(rect.right() - 1, rect.top() + 1) == reference
+    if view.model().columnCount() > 1:
+        next_rect = view.visualRect(child.siblingAtColumn(1))
+        assert pixel(next_rect.left() + 1, next_rect.top() + 1) == reference
 
 
 def test_grouping_preferences_and_small_theme_layout(app, tmp_path):

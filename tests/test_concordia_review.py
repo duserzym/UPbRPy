@@ -11,7 +11,7 @@ import pyqtgraph as pg
 import shiboken6
 
 from GUI.theme import THEMES, build_application, theme_color
-from GUI.widgets import ConcordiaReviewWidget, ResultsTableWidget
+from GUI.widgets import ConcordiaReviewWidget, ResultsTableWidget, _REVIEW_SAMPLE_COLORS
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 
 
@@ -305,6 +305,62 @@ def test_stable_sample_colours_and_drawn_legend(review):
     assert plot._legend is None
     widget.set_spot_included({"A_12"}, True)
     assert [label.text for _, label in plot._legend.items] == ["A", "B"]
+
+
+def test_sample_palette_preserves_existing_colours():
+    assert len(_REVIEW_SAMPLE_COLORS) >= 20
+    assert _REVIEW_SAMPLE_COLORS[:12] == [
+        "#4477aa", "#ee7733", "#228833", "#cc6677", "#aa4499", "#66aabb",
+        "#aa8833", "#44aa99", "#dd6699", "#8888cc", "#999933", "#bb5566",
+    ]
+    assert len({QtGui.QColor(color).name() for color in _REVIEW_SAMPLE_COLORS}) == len(_REVIEW_SAMPLE_COLORS)
+
+
+@pytest.mark.parametrize("sample_count,columns", [(10, 1), (11, 2), (18, 2), (21, 2)])
+def test_sample_legend_columns_and_palette_cycling(review, app, sample_count, columns):
+    widget, finalized = review
+    frame = pd.concat([finalized.parallel_results.iloc[[0]]] * sample_count, ignore_index=True)
+    frame["sample"] = [f"Sample {index:02d}" for index in range(sample_count)]
+    frame["spot_name"] = frame["sample"] + "_1"
+    plot = widget.spot_concordia
+    plot.set_spot_context(frame, frame, {})
+    plot.show_data(frame, diagram="wetherill", kind="spot", colour_mode="sample",
+                   include_calibration_uncertainty=True, theme=THEMES["light"])
+    app.processEvents()
+    assert plot._legend.columnCount == columns
+    assert plot._legend.rowCount == (sample_count + columns - 1) // columns
+    assert len(plot._legend.items) == sample_count
+    assert list(plot._sample_colors.values()) == [
+        _REVIEW_SAMPLE_COLORS[index % len(_REVIEW_SAMPLE_COLORS)] for index in range(sample_count)
+    ]
+    if sample_count == 18:
+        assert plot._legend.boundingRect().height() <= plot._plot_item.vb.height() / 2
+
+
+@pytest.mark.parametrize("mode", ["sample", "spot", "single"])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_selected_ellipses_keep_spot_colours(review, mode, theme):
+    widget, _ = review
+    widget.apply_theme(THEMES[theme])
+    widget.set_spot_colour_mode(mode)
+    plot = widget.spot_concordia
+    selected = {name for name, *_ in plot._points[:3]}
+    widget.set_selected_spots(selected)
+    assert len(plot._ellipses) == 4
+    for name, ellipse, color in plot._ellipses:
+        pen = ellipse.opts["pen"]
+        assert pen.color().name() == color.name()
+        assert pen.color().alpha() == (255 if name in selected else 70)
+        assert pen.widthF() == (1.8 if name in selected else 1.0)
+    for point, (name, *_rest) in zip(plot._scatter.points(), plot._points):
+        assert point.size() == (11 if name in selected else 8)
+        assert point.brush().color().alpha() == (255 if name in selected else 100)
+        if name in selected:
+            assert point.pen().color() == QtGui.QColor(THEMES[theme].accent)
+            assert point.pen().widthF() == 2
+    widget.set_selected_spots(set())
+    assert all(ellipse.opts["pen"].color().alpha() == 155 and ellipse.opts["pen"].widthF() == 1
+               for _, ellipse, _ in plot._ellipses)
 
 
 def test_legend_moves_to_empty_corner_and_labels_avoid_it(review, app):

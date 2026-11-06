@@ -1128,9 +1128,9 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._scatter.setSize(sizes)
         for name, ellipse, color in self._ellipses:
             selected = name in self.selected_spots
-            line = QtGui.QColor(theme.accent if selected else color)
-            line.setAlpha(70 if self.selected_spots and not selected else 190 if selected else 155)
-            ellipse.setPen(pg.mkPen(line, width=2.2 if selected else 1.0))
+            line = QtGui.QColor(color)
+            line.setAlpha(70 if self.selected_spots and not selected else 255 if selected else 155)
+            ellipse.setPen(pg.mkPen(line, width=1.8 if selected else 1.0))
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Apply a theme and redraw the retained concordia data."""
@@ -1718,6 +1718,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._legend.setParentItem(self._plot_item.vb)
         self._legend.setZValue(20)
         self._legend.layout.setContentsMargins(5, 4, 5, 4)
+        self._legend.setColumnCount(2 if len(samples) > 10 else 1)
         for sample in samples:
             swatch = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None),
                                         brush=pg.mkBrush(self._sample_colors[sample]))
@@ -2319,6 +2320,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _create_grouped_view(self):
         view = QtWidgets.QTreeView()
+        view.setObjectName("ReviewGroupedTree")
+        view.setStyleSheet("QTreeView#ReviewGroupedTree::item { border-radius: 0px; }")
         model = QtGui.QStandardItemModel(view)
         proxy = _SpotReviewProxy(view, grouped=True)
         proxy.setSourceModel(model)
@@ -3325,6 +3328,8 @@ _DIAG_SPOT_COLORS = [
 _REVIEW_SAMPLE_COLORS = [
     "#4477aa", "#ee7733", "#228833", "#cc6677", "#aa4499", "#66aabb",
     "#aa8833", "#44aa99", "#dd6699", "#8888cc", "#999933", "#bb5566",
+    "#3366cc", "#cc4422", "#7f55aa", "#669944", "#008899", "#b07850",
+    "#6f7d8c", "#bb55bb",
 ]
 
 
