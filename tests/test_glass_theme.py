@@ -59,7 +59,7 @@ def test_chrome_and_inspector_stay_inside_their_viewports(app, mode):
             rail = reduction.workflow_step_list
             last = rail.visualItemRect(rail.item(rail.count()-1))
             assert last.bottom() <= rail.viewport().height()
-            assert reduction.project_name_label.fontMetrics().horizontalAdvance("No experiment loaded") <= reduction.project_name_label.width()
+            assert reduction.project_summary_label.fontMetrics().horizontalAdvance("No experiment loaded") <= reduction.project_summary_label.width()
             # Scrolling vertically is fine; hiding the horizontal scrollbar must
             # never leave fields and their arrow buttons outside the viewport.
             for index in (1, 2):
@@ -109,25 +109,26 @@ def test_step_card_spacing_and_full_stage_labels_on_resize(app, mode):
                 # Exercise the resize path without resetting the layout at 1280.
                 shell.resize(width, height)
                 pump(app)
-                card = reduction.workflow_context_bar
-                assert not card.findChildren(QtWidgets.QPushButton)
-                title = reduction.workflow_hint_title
+                card = reduction.step_actions_block
+                caption = reduction.step_actions_caption
+                assert not caption.findChildren(QtWidgets.QPushButton)
+                title = reduction.step_actions_title
                 status = reduction.workflow_status_label
-                icon = reduction.workflow_context_icon
-                margins = card.layout().contentsMargins()
-                assert margins.top() == margins.bottom()
-                assert card.height() <= max(20, title.sizeHint().height()) + 42
-                previous_right = None
-                for widget in (icon, title, status):
-                    origin = widget.mapTo(card, QtCore.QPoint())
-                    assert origin.x() >= 19
-                    assert origin.y() >= 14
-                    assert origin.y() + widget.height() <= card.height() - 14
-                    assert origin.x() + widget.width() <= card.width() - 19
-                    if previous_right is not None:
-                        assert origin.x() - previous_right >= 8
-                    previous_right = origin.x() + widget.width()
-                assert status.alignment() & QtCore.Qt.AlignmentFlag.AlignRight
+                assert caption.height() <= 28
+                previous_bottom = 0
+                for widget in (title, status):
+                    if not widget.isVisible():
+                        continue
+                    origin = widget.mapTo(caption, QtCore.QPoint())
+                    assert origin.x() >= 0
+                    assert origin.y() >= previous_bottom
+                    assert origin.y() + widget.height() <= caption.height()
+                    assert origin.x() + widget.width() <= caption.width()
+                    shown = QtWidgets.QLabel.text(widget)
+                    assert widget.fontMetrics().horizontalAdvance(shown) <= widget.width()
+                    assert widget.fontMetrics().height() <= widget.height()
+                    assert widget.toolTip() == card.toolTip()
+                    previous_bottom = origin.y() + widget.height()
                 assert reduction.workflow_hint_body.parentWidget() is reduction.step_actions_block
                 assert reduction.workflow_hint_body.toolTip() == card.toolTip()
                 assert reduction.workflow_hint_body.text()

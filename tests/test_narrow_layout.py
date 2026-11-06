@@ -77,8 +77,10 @@ def test_all_requested_widths_and_loaded_states(app, shell):
             pump(app)
             assert shell.size() == QtCore.QSize(width, height)
             assert_controls_fit(window)
-            title = window.header_title
-            assert title.fontMetrics().horizontalAdvance(title.text()) <= title.width()
+            title = window.step_actions_title
+            if title.isVisible():
+                assert title.fontMetrics().horizontalAdvance(QtWidgets.QLabel.text(title)) <= title.width()
+                assert title.toolTip() == window.step_actions_block.toolTip()
             legend = window.trace_plot.plot_item.legend
             if width < 1280:
                 assert not legend.sceneBoundingRect().intersects(window.trace_plot.plot_item.vb.sceneBoundingRect())
@@ -133,6 +135,20 @@ def test_compact_actions_settings_and_remembered_inspector(app, shell):
     window.inspector_toggle.click()
     pump(app)
     assert window.inspector_panel.isVisible()
+    assert window.inspector_toggle.parentWidget() is window.plot_control_bar
+    controls = window.plot_control_bar.layout()
+    assert controls.itemAt(controls.count() - 1).widget() is window.inspector_toggle
+    assert window.inspector_panel.y() == window.plot_card.mapTo(window.centralWidget(), QtCore.QPoint()).y()
+    toggle_rect = QtCore.QRect(
+        window.inspector_toggle.mapTo(window.centralWidget(), QtCore.QPoint()),
+        window.inspector_toggle.size(),
+    )
+    assert not window.inspector_panel.geometry().intersects(toggle_rect)
+    assert window.step_actions_title.isHidden()
+    assert not window.workflow_status_label.isVisible()
+    assert window.step_actions_block.toolTip().endswith(
+        window.workflow_preset.steps[window.workflow_step_list.currentRow()].hint,
+    )
     assert window.workspace_splitter.count() == 2
     assert window.centralWidget().rect().contains(window.inspector_panel.geometry())
     shell.resize(1005, 700)
@@ -222,12 +238,15 @@ def test_spot_names_keep_suffixes_and_full_tooltips(app, shell):
         name = f"SAMPLE-A_S__{suffix}"
         shown = tree.fontMetrics().elidedText(name, tree.textElideMode(), 110)
         assert "…" in shown and shown.endswith(suffix)
-    header = window.project_name_label
+    header = window.project_summary_label
     header.setFixedWidth(120)
     pump(app)
     shown = QtWidgets.QLabel.text(header)
-    assert "…" in shown and shown.endswith(".csv")
-    assert header.toolTip() == fixture.name
+    assert shown.endswith("…")
+    assert header.fontMetrics().horizontalAdvance(shown) <= header.width()
+    assert header.toolTip() == f"{header.text()}\nPrimary channel: {window.session.primary_channel}"
+    assert fixture.name in header.toolTip()
+    assert "12 spots" in header.toolTip()
 
     results = window.results_table
     frame = pd.DataFrame({"spot_name": spot_names})

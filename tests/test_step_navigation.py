@@ -126,13 +126,12 @@ def assert_rail_layout(window):
         assert secondary.toolTip() == secondary.text()
         assert secondary.height() >= secondary.heightForWidth(secondary.width())
     assert abs(window.step_back_button.width() - window.step_next_button.width()) <= 1
-    band = window.workflow_context_bar
-    assert not band.findChildren(QtWidgets.QPushButton)
-    margins = band.layout().contentsMargins()
-    assert margins.top() == margins.bottom()
-    assert band.height() <= max(20, window.workflow_hint_title.sizeHint().height()) + 42
-    assert window.workflow_hint_title.toolTip() == band.toolTip()
-    assert window.workflow_hint_body.toolTip() == band.toolTip()
+    caption = window.step_actions_caption
+    assert not caption.findChildren(QtWidgets.QPushButton)
+    assert caption.height() <= 28
+    assert window.step_actions_title.toolTip() == window.step_actions_block.toolTip()
+    assert window.workflow_status_label.toolTip() == window.step_actions_block.toolTip()
+    assert window.workflow_hint_body.toolTip() == window.step_actions_block.toolTip()
 
 
 @pytest.mark.parametrize("size", [(1280, 800), (1440, 900)])

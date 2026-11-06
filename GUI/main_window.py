@@ -733,6 +733,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.busy_progress.setFixedWidth(150)
         self.busy_progress.setVisible(False)
         self.statusBar().addPermanentWidget(self.busy_progress)
+        self.project_summary_label = ElidedLabel("No experiment loaded")
+        self.project_summary_label.setObjectName("SecondaryText")
+        self.project_summary_label.setStyleSheet("font-size: 10px;")
+        self.project_summary_label.setMaximumWidth(360)
+        self.project_summary_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.statusBar().addPermanentWidget(self.project_summary_label)
         self.capabilities_badge = QtWidgets.QLabel()
         self.capabilities_badge.setObjectName("QtegraCapabilitiesBadge")
         self.capabilities_badge.hide()
@@ -941,8 +949,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # The notes/log strip is a collapsible splitter pane (View menu)
         # rather than something hidden below a fixed window height.
         self._sync_toolbar_strips()
-        if hasattr(self, "header_card"):
-            self.apply_header_density(event.size().height())
         if hasattr(self, "workflow_step_list"):
             self.adapt_workflow_rail_height(event.size().height())
         # Keep the nine stage labels readable on laptops, including when a
@@ -969,7 +975,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._expanded_workspace_state = self.workspace_splitter.saveState()
         self._width_mode = mode
         narrow = mode != "wide"
-        self.header_title.setText("Workspace" if narrow else "U-Pb reduction workspace")
         self.inspector_toggle.setVisible(compact)
         self.inspector_panel.setProperty("floatingPanel", compact)
         self.inspector_panel.update()
@@ -1121,8 +1126,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_width_mode", None) != "compact":
             return
         area = self.centralWidget().rect().adjusted(8, 4, -8, -4)
-        top = self.header_card.mapTo(self.centralWidget(), self.header_card.rect().bottomLeft()).y()+4
-        self.inspector_panel.setGeometry(area.right()-309, top, 310, area.bottom()-top+1)
+        top = self.plot_card.mapTo(self.centralWidget(), QtCore.QPoint()).y()
+        # Leave the toolbar's Inspector toggle reachable while the panel is open.
+        bottom = min(area.bottom(), self.plot_control_bar.mapTo(self.centralWidget(), QtCore.QPoint()).y()-4)
+        self.inspector_panel.setGeometry(area.right()-309, top, 310, bottom-top+1)
         self.inspector_panel.raise_()
         self.compact_settings_panel.setGeometry(self.sidebar_panel.geometry().right()+6, area.top()+48, 280, min(340, area.height()-48))
         self.compact_settings_panel.raise_()
@@ -1136,6 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _adapt_icon_rail_height(self) -> None:
         """Use the full rail's height budget with optional copy folded away."""
         for widget in (self.workflow_section_label, self.workflow_hint_body,
+                       self.step_actions_caption, self.workflow_status_label,
                        self.reference_library_button, self.database_origin_label):
             widget.hide()
         for widget in (self.workflow_combo, self.autopick_controls_scroll,
@@ -1170,17 +1178,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workflow_step_list.item(index).setSizeHint(QtCore.QSize(0, row_height))
         self.workflow_step_list.setFixedHeight(count*row_height)
 
-    def apply_header_density(self, height: int) -> None:
-        """A one-line header on short screens leaves the height to the plot."""
-        compact = height < 880
-        self.header_subtitle.setVisible(not compact)
-        # The theme buttons repeat View > Theme; the engine label is static.
-        for widget in (self.project_engine_label, self._header_separator, *self.theme_mode_buttons.values()):
-            widget.setVisible(not compact)
-        self.header_card.layout().setContentsMargins(16, 6, 16, 6)
-        self.header_card.setMinimumHeight(68 if compact else 84)
-        self.header_card.setMaximumHeight(68 if compact else 96)
-
     def adapt_workflow_rail_height(self, height: int) -> None:
         """Fold optional rail content before reducing the ten stage rows."""
         if getattr(self, "_width_mode", None) == "compact":
@@ -1206,6 +1203,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = rail.layout()
         available = rail.height()
         count = self.workflow_step_list.count()
+        self.step_actions_caption.show()
+        self.workflow_status_label.show()
         self.workflow_hint_body.setVisible(True)
         self.reference_library_button.setVisible(True)
         self.workflow_section_label.setVisible(True)
@@ -1224,7 +1223,9 @@ class MainWindow(QtWidgets.QMainWindow):
         metrics = hint.fontMetrics()
         max_hint_height = 2 * metrics.lineSpacing()  # the full hint is in the tooltip
         hint.setMaximumHeight(max_hint_height)
-        words = hint.toolTip().split()
+        row = self.workflow_step_list.currentRow()
+        words = (self.workflow_preset.steps[row].hint.split()
+                 if 0 <= row < len(self.workflow_preset.steps) else [])
         shortened = False
         while words:
             text = " ".join(words) + ("…" if shortened else "")
@@ -1264,8 +1265,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Order of folding on short rails: the Reference library button (also
         # in the File menu), the roomy 40 px rows, the step hint (also in the
-        # band's tooltip), denser rows, then the section label. The stage
-        # actions, Back/Next and the project buttons always stay.
+        # block's tooltip), the status caption, denser rows, then the section
+        # label. The stage actions, Back/Next and project buttons always stay.
         item_height = 40
         if required(item_height) > available:
             self.reference_library_button.hide()
@@ -1273,12 +1274,19 @@ class MainWindow(QtWidgets.QMainWindow):
             item_height = 31
         if required(item_height) > available:
             self.workflow_hint_body.hide()
+        if required(item_height) > available:
+            self.workflow_status_label.hide()
         for density in (27, 24, 22):
             if required(item_height) <= available:
                 break
             item_height = density
             self.workflow_step_list.setSpacing(0)
             layout.setSpacing(4)
+        # Denser rows may have freed enough height for the one-line status.
+        if self.workflow_status_label.isHidden():
+            self.workflow_status_label.show()
+            if required(item_height) > available:
+                self.workflow_status_label.hide()
         if required(item_height) > available:
             self.workflow_section_label.hide()
         icon_size = 20 if item_height < 31 else 24
@@ -1598,10 +1606,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # A little air before the project buttons keeps the two groups apart.
         layout.setContentsMargins(0, 4, 0, 6)
         layout.setSpacing(4)
-        title = QtWidgets.QLabel("This step")
+        self.step_actions_caption = QtWidgets.QWidget()
+        caption_layout = QtWidgets.QVBoxLayout(self.step_actions_caption)
+        caption_layout.setContentsMargins(0, 0, 0, 0)
+        caption_layout.setSpacing(0)
+        title = ElidedLabel()
         self.step_actions_title = title
         title.setObjectName("SectionTitle")
-        layout.addWidget(title)
+        title.setFixedHeight(14)
+        caption_layout.addWidget(title)
+        self.workflow_status_label = ElidedLabel()
+        self.workflow_status_label.setObjectName("WorkflowStatusCompact")
+        self.workflow_status_label.setFixedHeight(14)
+        self.workflow_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        caption_layout.addWidget(self.workflow_status_label)
+        layout.addWidget(self.step_actions_caption)
         self.workflow_hint_body = QtWidgets.QLabel()
         self.workflow_hint_body.setObjectName("PanelBody")
         self.workflow_hint_body.setWordWrap(True)
@@ -1624,128 +1643,15 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(navigation)
         return self.step_actions_block
 
-    def _build_workflow_context_bar(self) -> QtWidgets.QWidget:
-        """Show a single-line stage title and compact selection status."""
-        card = NeumorphicFrame()
-        card.setObjectName("WorkflowContextBar")
-        self.workflow_context_bar = card
-        card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        layout = QtWidgets.QHBoxLayout(card)
-        # Seven pixels of shadow, then the same inner inset as other cards.
-        layout.setContentsMargins(20, 14, 20, 14)
-        layout.setSpacing(8)
-        self.workflow_context_icon = QtWidgets.QLabel()
-        self.workflow_context_icon.setFixedSize(20, 20)
-        self.workflow_context_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.workflow_context_icon)
-        self.workflow_hint_title = ElidedLabel()
-        self.workflow_hint_title.setObjectName("WorkflowContextTitle")
-        self.workflow_hint_title.setMinimumWidth(0)
-        layout.addWidget(self.workflow_hint_title, 3)
-        self.workflow_status_label = ElidedLabel()
-        self.workflow_status_label.setObjectName("WorkflowStatusCompact")
-        self.workflow_status_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
-        )
-        self.workflow_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.workflow_status_label.setMinimumWidth(0)
-        layout.addWidget(self.workflow_status_label, 2)
-        return card
-
     def _build_main_column(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        header = NeumorphicFrame()
-        header.setObjectName("HeaderCard")
-        header.setMinimumHeight(84)
-        header.setMaximumHeight(96)
-        self.header_card = header
-        header_layout = QtWidgets.QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 10, 20, 10)
-        header_layout.setSpacing(10)
-        title_box = QtWidgets.QVBoxLayout()
-        title_box.setSpacing(2)
-        title = ElidedLabel("U-Pb reduction workspace")
-        self.header_title = title
-        title.setObjectName("HeroTitle")
-        subtitle = ElidedLabel(
-            "Shared scientific pipeline, editable selections, and "
-            "stage-by-stage diagnostic review."
-        )
-        subtitle.setObjectName("SecondaryText")
-        self.header_subtitle = subtitle
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        header_layout.addLayout(title_box, 2)
-
-        summary_box = QtWidgets.QVBoxLayout()
-        summary_box.setSpacing(3)
-        workspace_row = QtWidgets.QHBoxLayout()
-        workspace_row.setSpacing(8)
-        workspace_row.addStretch(1)
-        workspace_label = QtWidgets.QLabel("Workspace")
-        workspace_label.setObjectName("SectionTitle")
-        self.project_name_label = ElidedLabel(
-            "No experiment loaded", elide_mode=QtCore.Qt.TextElideMode.ElideMiddle,
-        )
-        self.project_name_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_name_label.setStyleSheet("font-size: 12px; font-weight: 600;")
-        workspace_label.hide()
-        workspace_row.addWidget(self.project_name_label, 4)
-
-        metadata_row = QtWidgets.QHBoxLayout()
-        metadata_row.setSpacing(8)
-        metadata_row.addStretch(1)
-        self.project_spots_label = ElidedLabel("Import a Thermo iCAP export directory")
-        self.project_spots_label.setObjectName("SecondaryText")
-        self.project_spots_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.project_engine_label = ElidedLabel("Shared UPbRPy core")
-        self.project_engine_label.setObjectName("SecondaryText")
-        self.project_engine_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        metadata_row.addWidget(self.project_spots_label, 3)
-        metadata_separator = QtWidgets.QLabel("·")
-        metadata_separator.setObjectName("SecondaryText")
-        self._header_separator = metadata_separator
-        metadata_row.addWidget(metadata_separator)
-        metadata_row.addWidget(self.project_engine_label, 2)
-
-        self.theme_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
-        self.theme_mode_group = QtWidgets.QButtonGroup(self)
-        self.theme_mode_group.setExclusive(True)
-        for tmode, tlabel, tooltip in [
-            ("system", "A", "Follow system theme"),
-            ("light", "L", "Light theme"),
-            ("dark", "D", "Dark theme"),
-        ]:
-            tbtn = QtWidgets.QToolButton()
-            tbtn.setText(tlabel)
-            tbtn.setToolTip(tooltip)
-            tbtn.setCheckable(True)
-            tbtn.setProperty("modeToggle", True)
-            tbtn.setProperty("compactToggle", True)
-            tbtn.setFixedSize(36, 30)
-            tbtn.clicked.connect(lambda _checked=False, selected_tmode=tmode: self.apply_theme_mode(selected_tmode, persist=True))
-            self.theme_mode_group.addButton(tbtn)
-            self.theme_mode_buttons[tmode] = tbtn
-            metadata_row.addWidget(tbtn)
-        summary_box.addLayout(workspace_row)
-        summary_box.addLayout(metadata_row)
-        header_layout.addLayout(summary_box, 2)
-        self.inspector_toggle = QtWidgets.QToolButton()
-        self.inspector_toggle.setText("Inspector")
-        self.inspector_toggle.setCheckable(True)
-        self.inspector_toggle.setToolTip("Show or hide the spot, channel and calibration inspector")
-        self.inspector_toggle.toggled.connect(lambda checked: self.set_workspace_panel_visible("inspector", checked))
-        self.inspector_toggle.hide()
-        header_layout.addWidget(self.inspector_toggle)
-        layout.addWidget(header)
-        layout.addWidget(self._build_workflow_context_bar())
-
         plot_card = NeumorphicFrame()
         plot_card.setObjectName("PlotCard")
+        self.plot_card = plot_card
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(12, 12, 12, 12)
         plot_layout.setSpacing(8)
@@ -1934,6 +1840,13 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout.addWidget(ratio_row_lbl)
         self.ratio_combo.setFixedWidth(153)
         cb_layout.addWidget(self.ratio_combo)
+        self.inspector_toggle = QtWidgets.QToolButton()
+        self.inspector_toggle.setText("Inspector")
+        self.inspector_toggle.setCheckable(True)
+        self.inspector_toggle.setToolTip("Show or hide the spot, channel and calibration inspector")
+        self.inspector_toggle.toggled.connect(lambda checked: self.set_workspace_panel_visible("inspector", checked))
+        self.inspector_toggle.hide()
+        cb_layout.addWidget(self.inspector_toggle)
         for label in (drag_lbl, zoom_lbl, ratio_row_lbl):
             label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
         for divider in (_vsep_drag, _vsep1, _vsep2):
@@ -3879,10 +3792,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_theme_controls(self) -> None:
         self._is_populating = True
         try:
-            for mode, button in self.theme_mode_buttons.items():
-                button.blockSignals(True)
-                button.setChecked(mode == self.theme_mode)
-                button.blockSignals(False)
             for mode, action in self.theme_actions.items():
                 action.setChecked(mode == self.theme_mode)
         finally:
@@ -4053,30 +3962,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_workflow_hint(self, row: int) -> None:
         if row < 0 or row >= len(self.workflow_preset.steps):
-            self.workflow_hint_title.setText("")
+            self.step_actions_title.setText("")
             self.workflow_hint_body.setText("")
-            self.workflow_context_icon.clear()
-            return
-        step = self.workflow_preset.steps[row]
-        stage = self.workflow_preset.stage_sequence[row]
-        self.workflow_hint_title.setText(
-            f"{row + 1}. {step.title}"
-        )
-        self.workflow_hint_body.setText(step.hint)
-        self.workflow_hint_body.setToolTip(step.hint)
-        self.workflow_hint_title.setToolTip(step.hint)
-        self.workflow_context_bar.setToolTip(step.hint)
-        theme = active_theme(QtWidgets.QApplication.instance())
-        self.workflow_context_icon.setPixmap(
-            build_workflow_stage_icon(
-                stage.value,
-                state="current",
-                size=20,
-                accent=theme.accent,
-                muted=theme.muted,
-                success=theme.success,
-            ).pixmap(20, 20)
-        )
+        else:
+            step = self.workflow_preset.steps[row]
+            self.step_actions_title.setText(f"{row + 1} · {step.title}")
+            self.workflow_hint_body.setText(step.hint)
+        self._update_step_actions_tooltips()
+
+    def _update_step_actions_tooltips(self) -> None:
+        """Keep the full status and step hint reachable when rail copy folds."""
+        row = self.workflow_step_list.currentRow()
+        hint = (self.workflow_preset.steps[row].hint
+                if 0 <= row < len(self.workflow_preset.steps) else "")
+        tooltip = f"{getattr(self, '_workflow_full_status', '')}\n\n{hint}".strip()
+        for widget in (self.step_actions_title, self.workflow_status_label,
+                       self.workflow_hint_body, self.step_actions_block):
+            widget.setToolTip(tooltip)
 
     def on_workflow_preset_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
@@ -4853,9 +4755,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.plot_mode not in {"depth_profile", "final_results"}:
             return
         self._apply_interaction_controls_to_current_plot()
-        self.plot_control_bar.setEnabled(
+        self._set_plot_controls_enabled(
             self.results_table.active_concordia() is not None
         )
+
+    def _set_plot_controls_enabled(self, enabled: bool) -> None:
+        """Keep the compact Inspector toggle available on table pages."""
+        layout = self.plot_control_bar.layout()
+        target = self._current_plot_interaction_target()
+        for index in range(layout.count()):
+            widget = layout.itemAt(index).widget()
+            if widget is None or widget is self.inspector_toggle:
+                continue
+            available = enabled
+            if widget is self.ratio_combo:
+                available = enabled and self.session.plot_mode in {
+                    "raw_ratios", "downhole_ratios", "session_ratios",
+                }
+            elif widget is self.interact_mode_buttons["select"]:
+                available = enabled and hasattr(target, "supports_select_mode") and target.supports_select_mode()
+            widget.setEnabled(available)
 
     def _selected_interaction_mode(self) -> str:
         for key, button in self.interact_mode_buttons.items():
@@ -4931,17 +4850,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 button.setEnabled(cache_key is not None and cache_key in cache)
             button.blockSignals(False)
         self.stage_segment_bar.select_checked()
-        self.ratio_combo.setEnabled(
-            self.session.plot_mode
-            in {"raw_ratios", "downhole_ratios", "session_ratios"}
-        )
         if self.session.plot_mode in {"depth_profile", "final_results"}:
             controls_enabled = (
                 self.results_table.active_concordia() is not None
             )
         else:
             controls_enabled = True
-        self.plot_control_bar.setEnabled(controls_enabled)
+        self._set_plot_controls_enabled(controls_enabled)
 
     def show_raw_traces(self) -> None:
         self.set_plot_mode("raw", refresh=True)
@@ -5177,9 +5092,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_populating = False
 
     def _apply_project_summary(self, summary: dict[str, str]) -> None:
-        self.project_name_label.setText(summary["name"])
-        self.project_spots_label.setText(summary["spots"])
-        self.project_engine_label.setText(summary["engine"])
+        text = ("No experiment loaded" if summary["name"] == "No experiment loaded"
+                else f"{summary['name']} · {summary['spots']}")
+        self.project_summary_label.setText(text)
+        self.project_summary_label.setToolTip(f"{text}\n{summary['engine']}")
 
     def _rebuild_workflow_actions(self) -> None:
         while self.step_buttons_layout.count():
@@ -5308,7 +5224,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.loaded:
             message = "Open an experiment to begin"
             self.workflow_status_label.setText(message)
-            self.workflow_status_label.setToolTip(message)
+            self._workflow_full_status = message
+            self._update_step_actions_tooltips()
             return
         quality = selection_quality(self.session, self.current_spot_name())
         parts = [
@@ -5331,7 +5248,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{'Review warning' if quality['warnings'] else 'Selections ready'}"
         )
         self.workflow_status_label.setText(compact_status)
-        self.workflow_status_label.setToolTip(full_status)
+        self._workflow_full_status = full_status
+        self._update_step_actions_tooltips()
 
     def _sync_workflow_step_locks(self) -> None:
         """Show ordered stage state from the shared dependency-aware cache."""
