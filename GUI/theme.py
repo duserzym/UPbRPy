@@ -263,10 +263,30 @@ def active_theme(app: QtWidgets.QApplication | None = None) -> ThemeSpec:
 
 
 def apply_theme(app: QtWidgets.QApplication, theme_mode: str) -> ThemeSpec:
+    import gc
+
     resolved_name = resolve_theme_name(app, theme_mode)
     theme = THEMES[resolved_name]
-    app.setPalette(_build_palette(theme))
-    app.setStyleSheet(_stylesheet(theme))
+    palette = _build_palette(theme)
+    sheet = _stylesheet(theme)
+    # Avoid redundant repolishing and cyclic collection while Qt visits widgets.
+    # See docs/notes/stylesheet_segfault_2026-11-06.md for the crash hypothesis.
+    if app.palette() != palette:
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            app.setPalette(palette)
+        finally:
+            if was_enabled:
+                gc.enable()
+    if app.styleSheet() != sheet:
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            app.setStyleSheet(sheet)
+        finally:
+            if was_enabled:
+                gc.enable()
     app.setProperty("upbrpy.theme_mode", theme_mode)
     app.setProperty("upbrpy.resolved_theme", resolved_name)
     for widget in app.topLevelWidgets():
