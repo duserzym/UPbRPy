@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import weakref
+from html import escape
 
 import numpy as np
 import pandas as pd
@@ -12,12 +13,15 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 from PySide6 import QtCore, QtGui, QtWidgets
 
 import pyqtgraph as pg
+from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
 from GUI.state import ReductionSession
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
+from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
+from UPbRPy.results import format_value_with_uncertainty
 from UPbRPy.ratios import (
     excel_plateau_inlier_mask,
     normalize_plateau_filter_method,
@@ -895,6 +899,24 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         return str(section + 1)
 
 
+class _ConcordiaLegendSample(ItemSample):
+    """A small colour swatch without the default 20-pixel row height."""
+
+    def __init__(self, item):
+        super().__init__(item)
+        self.setFixedWidth(12)
+        self.setFixedHeight(14)
+
+    def boundingRect(self):
+        return QtCore.QRectF(0, 0, 12, 14)
+
+    def paint(self, painter, *args):
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(self.item.opts["brush"])
+        painter.drawEllipse(QtCore.QPointF(6, 7), 3.25, 3.25)
+
+
 class _ConcordiaViewBox(pg.ViewBox):
     """Route spot clicks and selection rectangles to the review widget."""
 
@@ -903,7 +925,10 @@ class _ConcordiaViewBox(pg.ViewBox):
         self.review = weakref.proxy(review)
 
     def mouseClickEvent(self, event):
-        if self.review.supports_select_mode() and event.button() == QtCore.Qt.MouseButton.LeftButton:
+        if event.double() and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.review._reset_from_double_click(event.scenePos())
+            event.accept()
+        elif self.review.supports_select_mode() and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.review._select_at(event.scenePos(), event.modifiers())
             event.accept()
         else:
@@ -924,6 +949,18 @@ class _ConcordiaViewBox(pg.ViewBox):
         else:
             super().mouseDragEvent(event, axis=axis)
 
+    def showAxRect(self, rect, **kwargs):
+        """Apply rectangle zoom only to the enabled review axes."""
+        mode = self.review.zoom_mode()
+        if mode in {"x", "y"}:
+            rect = rect.normalized()
+            limits = {"xRange": (rect.left(), rect.right())} if mode == "x" else {
+                "yRange": (rect.top(), rect.bottom())}
+            self.setRange(**limits, padding=0)
+            self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
+        else:
+            super().showAxRect(rect, **kwargs)
+
 
 class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     """Lightweight native concordia review with two-sigma ratio ellipses.
@@ -935,6 +972,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     """
 
     selectionChanged = QtCore.Signal(object)
+    spotHovered = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -950,6 +988,47 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._scatter = None
         self._ellipses = []
         self._points = []
+        self._point_xy = np.empty((0, 2))
+        self._point_rows = []
+        self._metadata_by_spot = {}
+        self._include_flags = {}
+        self._spot_colors = {}
+        self._sample_colors = {}
+        self._colour_mode = "spot"
+        self._default_range = None
+        self._age_items = []
+        self._label_ages = np.array([])
+        self._label_step = 100.0
+        self._curve = None
+        self._legend = None
+        self._hover_index = None
+        self._hover_ring = None
+        self._hover_text = None
+        self._click_timer = QtCore.QElapsedTimer()
+        self._click_selection = set()
+        self._click_scene_pos = None
+        self._label_timer = QtCore.QTimer(self)
+        self._label_timer.setSingleShot(True)
+        self._label_timer.timeout.connect(self._update_concordia_labels)
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+    def set_spot_context(self, frame: pd.DataFrame, selected_frame: pd.DataFrame,
+                         include_flags: dict[str, bool]) -> None:
+        """Retain whole-result metadata and stable palettes for spot review."""
+        self._include_flags = include_flags
+        self._metadata_by_spot = {}
+        for source in (frame, selected_frame):
+            for row in source.to_dict("records"):
+                name = str(row.get("spot_name", ""))
+                self._metadata_by_spot.setdefault(name, {}).update(
+                    {key: value for key, value in row.items() if self._has_value(value)})
+        names = list(self._metadata_by_spot)
+        self._spot_colors = {name: _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]
+                             for i, name in enumerate(names)}
+        samples = sorted({str(row["sample"]) for row in self._metadata_by_spot.values()
+                          if self._has_value(row.get("sample"))})
+        self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
+                               for i, name in enumerate(samples)}
 
     def supports_select_mode(self) -> bool:
         """Return whether this canvas shows selectable spot means."""
@@ -972,13 +1051,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                            if rect.contains(QtCore.QPointF(x, y))}, extend=extend)
 
     def _select_at(self, scene_pos, modifiers):
-        hits = []
-        for name, x, y, _color in self._points:
-            delta = self._plot_item.vb.mapViewToScene(QtCore.QPointF(x, y)) - scene_pos
-            distance = delta.x() ** 2 + delta.y() ** 2
-            if distance <= 100:
-                hits.append((distance, name))
-        names = {min(hits)[1]} if hits else set()
+        self._click_selection = set(self.selected_spots)
+        self._click_scene_pos = QtCore.QPointF(scene_pos)
+        self._click_timer.start()
+        index = self.nearest_point(scene_pos, radius=10)
+        names = {self._points[index][0]} if index is not None else set()
         control = bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier)
         shift = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
         if names or not (control or shift):
@@ -1009,7 +1086,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         """Apply a theme and redraw the retained concordia data."""
         self._theme = theme
         self.setBackground(theme.plot_background)
-        self._draw()
+        self._draw(preserve_view=True)
 
     def show_data(
         self,
@@ -1019,8 +1096,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         kind: str,
         include_calibration_uncertainty: bool,
         theme: ThemeSpec,
+        reset_view: bool = True,
+        colour_mode: str = "spot",
     ) -> None:
         """Display selected spot means or one spot's corrected sweeps."""
+        preserve_view = (not reset_view and self._diagram == diagram and self._kind == kind)
         self._frame = frame.copy()
         self._diagram = (
             "tera_wasserburg"
@@ -1032,8 +1112,16 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             include_calibration_uncertainty
         )
         self._theme = theme
+        self._colour_mode = colour_mode
+        if self._kind == "spot" and "sample" in frame:
+            # Standalone canvases can also colour their complete input frame.
+            samples = set(frame["sample"].dropna().astype(str))
+            if not samples.issubset(self._sample_colors):
+                samples = sorted(samples | self._sample_colors.keys())
+                self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
+                                       for i, name in enumerate(samples)}
         self.setBackground(theme.plot_background)
-        self._draw()
+        self._draw(preserve_view=preserve_view)
 
     @staticmethod
     def uncertainty_column(
@@ -1066,21 +1154,23 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         points: int = 48,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return a two-standard-error covariance ellipse in ratio space."""
-        if not all(np.isfinite([x, y, x_2e, y_2e, rho])):
+        if not all(np.isfinite([x, y, x_2e, y_2e])):
             return np.array([]), np.array([])
-        sx = abs(float(x_2e)) / 2.0
-        sy = abs(float(y_2e)) / 2.0
-        if sx == 0 or sy == 0:
+        sx = float(x_2e) / 2.0
+        sy = float(y_2e) / 2.0
+        if sx <= 0 or sy <= 0:
             return np.array([]), np.array([])
-        bounded_rho = float(np.clip(rho, -0.999, 0.999))
+        correlation = float(np.clip(0.0 if np.isnan(rho) else rho, -0.999, 0.999))
         covariance = np.array(
-            [[sx * sx, bounded_rho * sx * sy],
-             [bounded_rho * sx * sy, sy * sy]],
+            [[sx * sx, correlation * sx * sy],
+             [correlation * sx * sy, sy * sy]],
             dtype=float,
         )
         eigenvalues, eigenvectors = np.linalg.eigh(covariance)
         eigenvalues = np.maximum(eigenvalues, 0.0)
-        angle = np.linspace(0.0, 2.0 * np.pi, points)
+        # Include all four cardinal angles, including the closing point.
+        count = max(4, int(np.ceil((points - 1) / 4)) * 4)
+        angle = np.linspace(0.0, 2.0 * np.pi, count + 1)
         circle = np.vstack((np.cos(angle), np.sin(angle)))
         # The supplied columns are absolute 2SE values, so multiplying the
         # one-SE covariance axes by two returns the requested 2SE ellipse.
@@ -1110,22 +1200,47 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             ),
         )
 
-    def _draw(self) -> None:
-        self.clear()
-        self._plot_item = None
+    def _draw(self, *, preserve_view=False) -> None:
+        retained_range = self._plot_item.vb.viewRange() if preserve_view and self._plot_item else None
+        hovered = (self._points[self._hover_index][0] if self._hover_index is not None else None)
+        self._label_timer.stop()
+        if self._hover_index is not None:
+            self._set_hover(None)
+        # GraphicsLayout.clear() only detaches PlotItems; their parentless
+        # menus and scroll areas depend on Python wrapper lifetime. Retain
+        # one plot and give its QWidget controls the canvas as Qt owner.
+        if self._plot_item is not None:
+            self._plot_item.clear()
+            for overlay in (self._hover_text, self._legend):
+                if overlay is not None:
+                    self.scene().removeItem(overlay)
+                    overlay.deleteLater()
         self._scatter = None
         self._ellipses = []
         self._points = []
+        self._point_xy = np.empty((0, 2))
+        self._point_rows = []
+        self._hover_index = None
+        self._age_items = []
+        self._label_ages = np.array([])
+        self._default_range = None
+        self._legend = None
         theme = self._theme
         if theme is None:
             return
-        plot = self.addPlot(0, 0, viewBox=_ConcordiaViewBox(self))
-        self._plot_item = plot
+        if self._plot_item is None:
+            self._plot_item = self.addPlot(0, 0, viewBox=_ConcordiaViewBox(self))
+            for menu in (self._plot_item.ctrlMenu, self._plot_item.vb.menu):
+                menu.setParent(self, menu.windowFlags())
+            self._plot_item.vb.sigRangeChanged.connect(self._schedule_labels)
+            self._plot_item.vb.sigResized.connect(self._schedule_labels)
+        plot = self._plot_item
         _make_diag_axis(plot, theme)
         plot.setAspectLocked(False)
         tick_font = QtGui.QFont()
         tick_font.setPointSizeF(12.0)
         for axis_name in ("left", "bottom"):
+            plot.getAxis(axis_name).enableAutoSIPrefix(False)
             plot.getAxis(axis_name).setStyle(
                 tickFont=tick_font,
                 tickTextOffset=8,
@@ -1158,11 +1273,25 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             color=theme.axis_text,
             size="13pt",
         )
-        plot.plot(
+        self._curve = plot.plot(
             concordia_x,
             concordia_y,
             pen=pg.mkPen(theme.muted, width=1.4),
         )
+        self._hover_ring = pg.ScatterPlotItem(size=16, pen=pg.mkPen(theme.accent, width=2),
+                                             brush=pg.mkBrush(None))
+        self._hover_ring.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        plot.addItem(self._hover_ring, ignoreBounds=True)
+        hover_background = theme_color(theme.surface)
+        hover_background.setAlpha(245)
+        self._hover_text = pg.TextItem(color=theme.axis_text, fill=pg.mkBrush(hover_background),
+                                      border=pg.mkPen(theme_color(theme.input_border)), anchor=(0, 0))
+        self._hover_text.setZValue(30)
+        self._hover_ring.setZValue(29)
+        self._hover_text.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        # A viewport child stays above the legend and does not enter auto-range.
+        self._hover_text.setParentItem(plot.vb)
+        self._hover_text.hide()
 
         frame = self._frame
         x_column, y_column, sx_column, sy_column = self._ratio_columns()
@@ -1175,6 +1304,13 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             )
             plot.addItem(message)
             message.setPos(0.5, 0.5)
+            self._default_range = [[0, 1], [0, 1]]
+            plot.setRange(xRange=(0, 1), yRange=(0, 1), padding=0)
+            if retained_range is not None:
+                plot.setRange(xRange=retained_range[0], yRange=retained_range[1], padding=0)
+            self._apply_zoom_mode()
+            self._apply_interaction_mode()
+            self._schedule_labels()
             return
 
         x_values = pd.to_numeric(frame[x_column], errors="coerce").to_numpy()
@@ -1206,8 +1342,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         )
         rho_values = (
             pd.to_numeric(frame[correlation_column], errors="coerce")
-            .fillna(0.0)
-            .clip(-1.0, 1.0)
             .to_numpy()
             if correlation_column is not None
             else np.zeros(len(frame), dtype=float)
@@ -1235,8 +1369,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             ]
         else:
             brushes = [
-                pg.mkColor(_DIAG_SPOT_COLORS[index % len(_DIAG_SPOT_COLORS)])
-                for index in range(len(frame))
+                pg.mkColor(self._sample_colors.get(str(row.get("sample", "")), theme.muted)
+                           if self._colour_mode == "sample" else
+                           self._spot_colors.get(str(row.get("spot_name", "")),
+                                                 _DIAG_SPOT_COLORS[index % len(_DIAG_SPOT_COLORS)]))
+                for index, row in enumerate(frame.to_dict("records"))
             ]
 
         for index in np.flatnonzero(finite):
@@ -1258,6 +1395,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                 self._ellipses.append((str(frame.iloc[index].get("spot_name", "")), ellipse, brushes[index]))
         self._points = [(str(frame.iloc[index].get("spot_name", "")), float(x_values[index]),
                          float(y_values[index]), brushes[index]) for index in np.flatnonzero(finite)]
+        self._point_xy = np.column_stack((x_values[finite], y_values[finite]))
+        self._point_rows = frame.loc[finite].to_dict("records")
         self._scatter = pg.ScatterPlotItem(
             x=x_values[finite],
             y=y_values[finite],
@@ -1270,26 +1409,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._scatter.sigClicked.connect(self._spot_clicked)
         self._update_selection_style()
 
-        # Age labels remain sparse enough for a quick-look panel, while the
-        # full 0--4.5 Ga curve remains available when users pan or zoom.
-        for age in (500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500):
-            if self._diagram == "wetherill":
-                age_x, age_y = wetherill_point(age)
-            else:
-                age_x, age_y = tera_wasserburg_point(age)
-            marker = pg.ScatterPlotItem(
-                x=[float(age_x)], y=[float(age_y)], size=4,
-                pen=pg.mkPen(theme.muted), brush=pg.mkBrush(theme.muted),
-            )
-            marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
-            plot.addItem(marker)
-            label = pg.TextItem(str(age), color=theme.muted, anchor=(0, 0.5))
-            age_font = QtGui.QFont()
-            age_font.setPointSizeF(10.5)
-            label.setFont(age_font)
-            plot.addItem(label)
-            label.setPos(float(age_x), float(age_y))
-
         self._set_initial_range(
             plot,
             x_values[finite],
@@ -1299,6 +1418,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             concordia_x,
             concordia_y,
         )
+        self._default_range = plot.vb.viewRange()
+        if retained_range is not None:
+            plot.setRange(xRange=retained_range[0], yRange=retained_range[1], padding=0)
+        self._update_sample_legend(finite)
+        if hovered is not None:
+            index = next((i for i, point in enumerate(self._points) if point[0] == hovered), None)
+            self._set_hover(index)
+        self._schedule_labels()
         self._apply_zoom_mode()
         self._apply_interaction_mode()
 
@@ -1318,7 +1445,9 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._apply_interaction_mode()
 
     def _spot_clicked(self, _scatter, _points, event):
-        if self.supports_select_mode():
+        if event.double():
+            self._reset_from_double_click(event.scenePos())
+        elif self.supports_select_mode():
             self._select_at(event.scenePos(), event.modifiers())
 
     def interaction_mode(self) -> str:
@@ -1343,8 +1472,288 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         )
 
     def restore_default_view(self) -> None:
-        """Recompute the useful data-plus-concordia initial range."""
-        self._draw()
+        """Reset the data-plus-concordia range without rebuilding plot items."""
+        if self._plot_item is not None and self._default_range is not None:
+            self._plot_item.setRange(xRange=self._default_range[0],
+                                     yRange=self._default_range[1], padding=0)
+
+    def mouseDoubleClickEvent(self, event):
+        """Reset on a native double-click anywhere inside the plot area."""
+        scene_pos = self.mapToScene(event.position().toPoint())
+        if (event.button() == QtCore.Qt.MouseButton.LeftButton and self._plot_item is not None
+                and self._plot_item.vb.sceneBoundingRect().contains(scene_pos)):
+            self._reset_from_double_click(scene_pos)
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def _reset_from_double_click(self, scene_pos):
+        # Qt delivers the first click before it recognizes a double-click.
+        # Undo that click's selection edit while keeping ordinary clicks immediate.
+        if (self.supports_select_mode() and self._click_timer.isValid()
+                and self._click_timer.elapsed() <= QtWidgets.QApplication.doubleClickInterval()
+                and (scene_pos - self._click_scene_pos).manhattanLength()
+                <= QtWidgets.QApplication.startDragDistance()):
+            self.select_spots(self._click_selection)
+        self.restore_default_view()
+
+    def _schedule_labels(self, *_args):
+        if not self.closed and self.isVisible() and not self._label_timer.isActive():
+            self._label_timer.start(0)
+
+    def _visible_age_interval(self, ranges):
+        """Invert each monotonic ratio to find the visible age interval."""
+        point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
+        lower, upper = 0.001, 4567.3
+        for axis, limits in enumerate(ranges):
+            ends = point(np.array([0.001, 4567.3]))[axis]
+            increasing = ends[1] > ends[0]
+            ages = []
+            for limit in sorted(limits):
+                lo, hi = 0.001, 4567.3
+                for _ in range(48):
+                    mid = (lo + hi) / 2
+                    if (point(mid)[axis] < limit) == increasing:
+                        lo = mid
+                    else:
+                        hi = mid
+                ages.append((lo + hi) / 2)
+            lower = max(lower, min(ages))
+            upper = min(upper, max(ages))
+        return lower, upper
+
+    @QtCore.Slot()
+    def _update_concordia_labels(self):
+        if self._plot_item is None or self._curve is None:
+            return
+        plot, theme = self._plot_item, self._theme
+        self._position_sample_legend()
+        legend_rect = self._legend.sceneBoundingRect() if self._legend is not None else QtCore.QRectF()
+        for item in self._age_items:
+            plot.removeItem(item)
+        self._age_items = []
+        self._label_ages = np.array([])
+        ranges = plot.vb.viewRange()
+        lo, hi = self._visible_age_interval(ranges)
+        point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
+        if hi <= lo:
+            self._curve.setData([], [])
+            return
+        margin = max((hi - lo) * 0.15, 0.001)
+        ages = np.linspace(max(.001, lo - margin), min(4567.3, hi + margin), 1200)
+        x, y = point(ages)
+        self._curve.setData(x, y)
+        candidates = visible_concordia_age_labels(
+            "Wetherill" if self._diagram == "wetherill" else "TW",
+            ages, x, y, ranges[0], ranges[1], maximum=12,
+        )
+        step = (nice_step(round(float(np.ptp(candidates)) / (len(candidates) - 1), 10))
+                if len(candidates) > 1 else nice_step(max(hi - lo, 1) / 10))
+        self._label_step = step
+        previous = []
+        accepted = []
+        for age in candidates:
+            px, py = point(age)
+            scene_pos = plot.vb.mapViewToScene(QtCore.QPointF(float(px), float(py)))
+            label = pg.TextItem(format_age_label(age, step), color=theme.muted, anchor=(0, 0))
+            font = QtGui.QFont()
+            font.setPointSizeF(10.5)
+            label.setFont(font)
+            plot.addItem(label, ignoreBounds=True)
+            self._place_text(label, scene_pos + QtCore.QPointF(5, -8))
+            rect = label.sceneBoundingRect().adjusted(-4, -3, 4, 3)
+            if (not plot.vb.sceneBoundingRect().contains(label.sceneBoundingRect())
+                    or rect.intersects(legend_rect)
+                    or any(rect.intersects(other) for other in previous)):
+                plot.removeItem(label)
+                continue
+            marker = pg.ScatterPlotItem(x=[px], y=[py], size=4,
+                                        pen=pg.mkPen(theme.muted), brush=pg.mkBrush(theme.muted))
+            marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            label.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            plot.addItem(marker, ignoreBounds=True)
+            previous.append(rect)
+            accepted.append(age)
+            self._age_items.extend((label, marker))
+        self._label_ages = np.asarray(accepted)
+        if self._hover_index is not None:
+            self._position_hover()
+
+    def _place_text(self, item, scene_pos):
+        item.updateTransform()
+        bounds = self._plot_item.vb.sceneBoundingRect().adjusted(3, 3, -3, -3)
+        rect = item.sceneBoundingRect()
+        x = max(bounds.left(), min(scene_pos.x(), bounds.right() - rect.width()))
+        y = max(bounds.top(), min(scene_pos.y(), bounds.bottom() - rect.height()))
+        item.setPos(item.parentItem().mapFromScene(QtCore.QPointF(x, y)))
+
+    def _update_sample_legend(self, finite):
+        if self._kind != "spot" or self._colour_mode != "sample" or "sample" not in self._frame:
+            return
+        samples = sorted(set(self._frame.loc[finite, "sample"].dropna().astype(str)))
+        if len(samples) < 2:
+            return
+        self._legend = pg.LegendItem(labelTextColor=self._theme.axis_text,
+                                     labelTextSize="8.5pt", verSpacing=-1, horSpacing=3,
+                                     sampleType=_ConcordiaLegendSample,
+                                     brush=pg.mkBrush(theme_color(self._theme.glass_strong)),
+                                     pen=pg.mkPen(theme_color(self._theme.input_border)))
+        self._legend.setParentItem(self._plot_item.vb)
+        self._legend.setZValue(20)
+        self._legend.layout.setContentsMargins(5, 4, 5, 4)
+        for sample in samples:
+            swatch = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None),
+                                        brush=pg.mkBrush(self._sample_colors[sample]))
+            self._legend.addItem(swatch, escape(sample))
+            label = self._legend.items[-1][1]
+            label.item.document().setDocumentMargin(0)
+            label.updateMin()
+        self._legend.layout.activate()
+        self._legend.updateSize()
+
+    def _position_sample_legend(self):
+        """Choose the corner covering the fewest drawn centres in this view."""
+        if self._legend is None:
+            return
+        vb = self._plot_item.vb
+        bounds = vb.boundingRect().adjusted(8, 8, -8, -8)
+        size = self._legend.boundingRect().size()
+        corners = [QtCore.QPointF(x, y)
+                   for y in (bounds.top(), bounds.bottom() - size.height())
+                   for x in (bounds.right() - size.width(), bounds.left())]
+        boxes = [QtCore.QRectF(corner, size) for corner in corners]
+        # Map four boxes, then count all centres together with numpy.
+        limits = [vb.childGroup.mapRectFromParent(box) for box in boxes]
+        low = np.array([[box.left(), box.top()] for box in limits])
+        high = np.array([[box.right(), box.bottom()] for box in limits])
+        counts = np.all((self._point_xy[:, None, :] >= low)
+                        & (self._point_xy[:, None, :] <= high), axis=2).sum(axis=0)
+        self._legend.setPos(corners[int(np.argmin(counts))])
+
+    def nearest_point(self, scene_pos, *, radius: float = 6) -> int | None:
+        """Return the nearest drawn centre within a screen-space pixel radius."""
+        if self._plot_item is None or not len(self._point_xy):
+            return None
+        vb = self._plot_item.vb
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return None
+        pos = vb.mapSceneToView(scene_pos)
+        scale = np.abs(vb.viewPixelSize())
+        if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+            return None
+        delta = (self._point_xy - [pos.x(), pos.y()]) / scale
+        distances = np.einsum("ij,ij->i", delta, delta)
+        index = int(np.argmin(distances))
+        return index if distances[index] <= radius * radius else None
+
+    @staticmethod
+    def _has_value(value):
+        if isinstance(value, (int, float, np.number)):
+            return bool(np.isfinite(value))
+        return value is not None and str(value).strip() not in {"", "nan", "None", "<NA>"}
+
+    def tooltip_text(self, index: int) -> str:
+        """Build a plain-text tooltip for one drawn spot or corrected sweep."""
+        row = self._point_rows[index].copy()
+        name = self._points[index][0]
+        if self._kind == "spot":
+            row.update(self._metadata_by_spot.get(name, {}))
+        lines = [name] if name else []
+
+        def add(label, value, suffix=""):
+            if self._has_value(value):
+                lines.append(f"{label}: {value}{suffix}")
+
+        def measured(label, column, suffix):
+            error_column = self.uncertainty_column(pd.DataFrame(columns=list(row)), column,
+                                                  self._include_calibration_uncertainty)
+            text = format_value_with_uncertainty(row.get(column), row.get(error_column))
+            add(label, text, suffix)
+
+        if self._kind == "depth":
+            time = row.get("signal_relative_time")
+            if self._has_value(time):
+                add("Sweep time", f"{float(time):.3g}", " s")
+            for ratio in ("206Pb/238U", "207Pb/235U", "238U/206Pb", "207Pb/206Pb", "208Pb/232Th"):
+                measured(ratio, f"{ratio}_fractionation_corrected", "")
+            return "\n".join(lines)
+        add("Sample", row.get("sample"))
+        grain = row.get("grain")
+        if self._has_value(grain):
+            add("Grain", grain)
+        else:
+            number = row.get("spot_number")
+            match = re.search(r"(\d+)$", name)
+            add("Spot number", number if self._has_value(number) else match.group(1) if match else None)
+        preferred = format_value_with_uncertainty(
+            row.get("preferred_date"), row.get(self.uncertainty_column(
+                pd.DataFrame(columns=list(row)), "preferred_date", self._include_calibration_uncertainty)))
+        details = []
+        method = row.get("preferred_date_method")
+        if self._has_value(method):
+            details.append(str(method))
+        passed = row.get("preferred_date_pass")
+        if self._has_value(passed):
+            details.append("pass" if passed is True or str(passed).lower() == "true" else "fail")
+        add("Preferred date", preferred, " Ma" + (f" ({', '.join(details)})" if details else ""))
+        for ratio in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb"):
+            measured(f"{ratio} date", f"{ratio}_age", " Ma")
+        for key, label, spec, suffix in (("disc%", "Discordance", ".1f", "%"),
+                                         ("U", "U", ".3g", " ug/g"),
+                                         ("Th", "Th", ".3g", " ug/g"),
+                                         ("Th/U", "Th/U", ".3g", "")):
+            value = row.get(key)
+            if self._has_value(value):
+                add(label, format(float(value), spec), suffix)
+        add("Automatic flags", row.get("automatic_flags"))
+        add("Included in review", "yes" if self._include_flags.get(name, True) else "no")
+        return "\n".join(lines)
+
+    @QtCore.Slot(object)
+    def _on_mouse_moved(self, scene_pos):
+        self._set_hover(self.nearest_point(scene_pos))
+
+    def _set_hover(self, index):
+        if index == self._hover_index:
+            return
+        self._hover_index = index
+        if index is None:
+            self._hover_ring.setData([], [])
+            self._hover_text.hide()
+            if self._kind == "spot":
+                self.spotHovered.emit("")
+            return
+        name, x, y, _color = self._points[index]
+        self._hover_ring.setData([x], [y])
+        self._hover_text.setHtml('<div style="color:' + self._theme.axis_text +
+                                 '; padding:3px; font-size:11px">' +
+                                 escape(self.tooltip_text(index)).replace("\n", "<br>") + '</div>')
+        self._hover_text.show()
+        self._position_hover()
+        if self._kind == "spot":
+            self.spotHovered.emit(name)
+
+    def _position_hover(self):
+        _name, x, y, _color = self._points[self._hover_index]
+        scene_pos = self._plot_item.vb.mapViewToScene(QtCore.QPointF(x, y))
+        self._place_text(self._hover_text, scene_pos + QtCore.QPointF(12, 12))
+
+    def leaveEvent(self, event):
+        """Clear the hover highlight when the pointer leaves the canvas."""
+        if self._hover_ring is not None:
+            self._set_hover(None)
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        """Stop deferred scene edits and clear hover while the canvas is hidden."""
+        self._label_timer.stop()
+        if not self.closed and self._hover_index is not None:
+            self._set_hover(None)
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_labels()
 
     @staticmethod
     def _set_initial_range(
@@ -1755,6 +2164,29 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia.selectionChanged.connect(
             lambda names: self.set_selected_spots(names, origin=self.spot_concordia)
         )
+        self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
+        self.tabs.currentChanged.connect(self._results_tab_changed)
+        self._hovered_choice_name = ""
+
+    def _scroll_hovered_spot(self, name):
+        chooser = self.spot_choice_list
+        blocker = QtCore.QSignalBlocker(chooser)
+        for row in range(chooser.count()):
+            item = chooser.item(row)
+            if item.text() == self._hovered_choice_name:
+                item.setData(QtCore.Qt.ItemDataRole.BackgroundRole, None)
+            if name and item.text() == name and not item.isHidden():
+                color = theme_color(self._theme.accent_soft)
+                item.setBackground(QtGui.QBrush(color))
+                self._scroll_selection_into_view(chooser, [chooser.indexFromItem(item)])
+        self._hovered_choice_name = name
+        del blocker
+
+    def _results_tab_changed(self, _index):
+        if self.tabs.currentWidget() is self.results_table:
+            rows = sorted(self.results_table.selectionModel().selectedRows(), key=lambda index: index.row())
+            self._scroll_selection_into_view(
+                self.results_table, [index for index in rows if not self.results_table.isRowHidden(index.row())])
 
     def _table_include_changed(self, name, included):
         self.set_spot_included({name}, included)
@@ -1813,6 +2245,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
     @staticmethod
     def _scroll_selection_into_view(view, rows) -> None:
         """Reveal the first selected row only when all are outside the viewport."""
+        if not view.isVisible():
+            return
         for index in rows:
             rect = view.visualRect(index)
             if rect.height() > 0 and rect.bottom() >= 0 and rect.top() < view.viewport().height():
@@ -1947,6 +2381,23 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.refresh_spot_concordia
         )
         controls_layout.addWidget(diagram_row)
+        colour_row = QtWidgets.QHBoxLayout()
+        colour_row.setSpacing(0)
+        colour_row.addWidget(QtWidgets.QLabel("Colour: "))
+        colour_group = QtWidgets.QButtonGroup(page)
+        self.spot_colour_buttons = {}
+        for key, label in (("spot", "Spot"), ("sample", "Sample")):
+            button = QtWidgets.QToolButton()
+            button.setText(label)
+            button.setCheckable(True)
+            button.setProperty("modeToggle", True)
+            button.setChecked(key == "spot")
+            button.clicked.connect(self.refresh_spot_concordia)
+            colour_group.addButton(button)
+            colour_row.addWidget(button)
+            self.spot_colour_buttons[key] = button
+        colour_row.addStretch(1)
+        controls_layout.addLayout(colour_row)
         self.spot_concordia = ConcordiaReviewWidget()
         layout.addWidget(controls)
         layout.addWidget(self.spot_concordia, 1)
@@ -2053,7 +2504,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         """Check or clear every currently visible spot in one redraw."""
         self.set_spot_included(self._visible_spot_names(self.spot_choice_list), checked)
 
-    def refresh_spot_concordia(self) -> None:
+    def refresh_spot_concordia(self, *, reset_view: bool = False) -> None:
         """Redraw only the checked final spot means."""
         if self._theme is None:
             return
@@ -2071,6 +2522,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 self._include_calibration_uncertainty
             ),
             theme=self._theme,
+            reset_view=reset_view,
+            colour_mode="sample" if self.spot_colour_buttons["sample"].isChecked() else "spot",
         )
 
     def refresh_depth_concordia(self) -> None:
@@ -2157,6 +2610,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         retained_flags = {name: self.include_flags.get(name, True) for name in spot_names}
         self.include_flags.clear()
         self.include_flags.update(retained_flags)
+        self.spot_concordia.set_spot_context(self._spot_frame, final_frame, self.include_flags)
         self.spot_choice_list.blockSignals(True)
         self.spot_choice_list.clear()
         for spot_name in dict.fromkeys(spot_names):
@@ -2171,7 +2625,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._syncing_selection = False
         self.filter_spot_choices(self.spot_filter.text())
         self.set_selected_spots(retained_selection)
-        self.refresh_spot_concordia()
+        self.refresh_spot_concordia(reset_view=True)
         if self.tabs.currentWidget() not in (
             self.results_table,
             self.secondary_table,
@@ -2289,6 +2743,11 @@ _DIAG_SPOT_COLORS = [
     "#5590f5", "#f5c040", "#f07840", "#b864f0", "#40c870",
     "#d04848", "#40c8d8", "#f060a8", "#b8d840", "#f0a040",
     "#7090d8", "#d090f0",
+]
+
+_REVIEW_SAMPLE_COLORS = [
+    "#4477aa", "#ee7733", "#228833", "#cc6677", "#aa4499", "#66aabb",
+    "#aa8833", "#44aa99", "#dd6699", "#8888cc", "#999933", "#bb5566",
 ]
 
 

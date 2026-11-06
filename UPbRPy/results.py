@@ -26,6 +26,30 @@ from .constants import (
 )
 
 
+def format_value_with_uncertainty(value, two_se, sig_figs=2) -> str:
+    """Format a value and absolute 2SE at the uncertainty's decimal precision."""
+    if not isinstance(sig_figs, int) or sig_figs < 1:
+        raise ValueError("sig_figs must be a positive integer")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    try:
+        error = float(two_se)
+    except (TypeError, ValueError):
+        error = np.nan
+    if not np.isfinite(error) or error <= 0:
+        return f"{value:.6g}"
+    places = sig_figs - 1 - int(np.floor(np.log10(error)))
+    error = round(error, places)
+    # Rounding can carry the uncertainty into the next power of ten.
+    places = sig_figs - 1 - int(np.floor(np.log10(error)))
+    decimals = max(0, places)
+    return f"{round(value, places):.{decimals}f} ± {error:.{decimals}f}"
+
+
 @dataclass(frozen=True)
 class AutomaticFlagSettings:
     """Thresholds for workbook-style automatic data-quality flags."""
