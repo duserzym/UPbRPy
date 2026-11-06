@@ -180,6 +180,8 @@ def assert_provenance(experiment, session):
         "software": session.software,
         "machine": session.machine,
         "warnings": session.warnings,
+        # Added 2026-11-06 for the publication-table footnotes.
+        "acquisition_summary": io.acquisition_summary(session),
     }
     assert experiment.attrs["qtegra"] == expected
     assert json.loads(json.dumps(expected, allow_nan=False)) == expected

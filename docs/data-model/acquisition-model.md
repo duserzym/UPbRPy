@@ -125,8 +125,43 @@ Spot numbers always use a trailing underscore integer, independently of `sep`.
 `experiment.attrs["qtegra"]` contains JSON-safe `format`, sorted
 `capabilities`, `sources` (objects with `path`, `sha256`, `format`),
 `times_reconstructed`, `nominal_cycle_time_s`, `clock_offset_hours`,
-`software`, `machine`, and `warnings`. It does not include every session
+`software`, `machine`, `acquisition_summary`, and `warnings`. It does not include every session
 field: threshold and unrounded clock offset remain on QtegraSession.
+
+## Acquisition summary
+
+`experiment.attrs["qtegra"]["acquisition_summary"]` is a small JSON-safe
+mapping for export footnotes. It summarizes the original acquisitions before
+selection, without per-acquisition lists. Missing scalars are `None`, missing
+sets are empty lists. Timestamps retain the recorded clock; no timezone is
+inferred and merged sessions keep Rich starts, not companion-clock starts.
+`UPbRPy.io.acquisition_summary(session: QtegraSession) -> dict` also returns
+this mapping without constructing experiment or sweep tables.
+
+| Name | Type / unit | Meaning |
+| --- | --- | --- |
+| first_start | Text or `None` | Earliest recorded start in ISO form; original Rich text retains all fractional digits; per-spot start is converted to ISO |
+| first_start_text | Text or `None` | Original export text of the earliest start |
+| first_start_date | Text or `None` | Earliest start date, `YYYY-MM-DD` |
+| last_start | Text or `None` | Latest recorded start, with the same ISO convention |
+| last_start_text | Text or `None` | Original export text of the latest start |
+| last_start_date | Text or `None` | Latest start date, `YYYY-MM-DD` |
+| last_stop | Text or `None` | Latest recorded stop, with the same ISO convention |
+| last_stop_text | Text or `None` | Original export text of the latest stop |
+| last_stop_date | Text or `None` | Latest stop date, `YYYY-MM-DD` |
+| users | List of text | Sorted unique recorded user names |
+| machine | Text or `None` | Session instrument name |
+| tune_names | List of text | Sorted unique recorded tune names |
+| dwell_s | Mapping of channel to float or `None`, s | Median finite recorded dwell over acquisitions, in instrument channel order; `None` when never recorded |
+| sweeps_per_acquisition | Mapping | `median` (float), `min` and `max` (integers) of acquisition sweep counts, or `None` for empty sessions |
+| laser_output_settings_percent | List of text, % | Sorted unique nonempty `Laser Output Setting [%]` sample-list values, retaining exported text |
+
+Projects (`project.py`) store source paths and reviewed selections, rather
+than serializing experiment attrs. Re-import recreates this summary from the
+source data, and `restore_project_selections` preserves those imported attrs.
+Session bundles (`session_bundle.py`) unpack raw exports and an optional
+project; importing those exports recreates the summary in the same way.
+Neither format persists edits made only to attrs in memory.
 
 ## Detector calibration
 

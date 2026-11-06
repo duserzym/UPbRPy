@@ -1097,6 +1097,47 @@ def read_experiment_data(
     return experiment, element_channels, total_data
 
 
+def acquisition_summary(session: QtegraSession) -> dict:
+    """Keep small, JSON-safe acquisition metadata on the recorded clock.
+
+    ISO export text retains every fractional digit. Per-spot text is kept
+    alongside its parsed ISO representation. Missing dwell values stay None.
+    """
+    acquisitions = session.acquisitions
+    timed = sorted((a for a in acquisitions if a.start is not None), key=lambda a: a.start)
+    stopped = sorted((a for a in acquisitions if a.stop is not None), key=lambda a: a.stop)
+    summary = {}
+    for prefix, acquisition in (("first_start", timed[0] if timed else None),
+                                ("last_start", timed[-1] if timed else None),
+                                ("last_stop", stopped[-1] if stopped else None)):
+        field = "stop" if prefix == "last_stop" else "start"
+        stamp = getattr(acquisition, field) if acquisition else None
+        original = getattr(acquisition, field + "_text") if acquisition else None
+        summary[prefix] = (original if original and "T" in original else stamp.isoformat()) if stamp else None
+        summary[prefix + "_text"] = original
+        summary[prefix + "_date"] = stamp.date().isoformat() if stamp else None
+    dwell = {}
+    for acquisition in acquisitions:
+        for channel in acquisition.channels:
+            dwell.setdefault(channel.name, [])
+            if channel.dwell_s is not None and np.isfinite(channel.dwell_s):
+                dwell[channel.name].append(channel.dwell_s)
+    sweeps = [a.n_sweeps for a in acquisitions]
+    summary.update(
+        users=sorted({a.user for a in acquisitions if a.user}),
+        machine=session.machine,
+        tune_names=sorted({a.tune_name for a in acquisitions if a.tune_name}),
+        dwell_s={name: float(np.median(values)) if values else None for name, values in dwell.items()},
+        sweeps_per_acquisition={"median": float(np.median(sweeps)) if sweeps else None,
+                                "min": int(min(sweeps)) if sweeps else None,
+                                "max": int(max(sweeps)) if sweeps else None},
+        laser_output_settings_percent=sorted({str(value) for a in acquisitions
+            for key, value in a.sequence_fields.items()
+            if key == "Laser Output Setting [%]" and value not in (None, "")}),
+    )
+    return summary
+
+
 def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_samples=None):
     """Build experiment and sweep tables from a QtegraSession before selection.
 
@@ -1216,6 +1257,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
         "clock_offset_hours": session.clock_offset_hours,
         "software": session.software,
         "machine": session.machine,
+        "acquisition_summary": acquisition_summary(session),
         "warnings": list(session.warnings),
     }
     return experiment, list(session.channel_names), total_data
@@ -1439,6 +1481,7 @@ __all__ = [
     'select_signal_regions',
     'read_experiment_data',
     'experiment_from_session',
+    'acquisition_summary',
     'resolve_session_manifest',
     'read_spot_data',
     'auto_select_baseline_peak',

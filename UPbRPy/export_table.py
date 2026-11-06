@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, fields
+from datetime import date
+from html import escape
+from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -106,6 +110,16 @@ class ExportColumn:
     optional: bool = False
     footnotes: tuple[str, ...] = ()
     materials: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class Footnote:
+    """Numbered publication text and the metadata fields still unavailable."""
+
+    id: str
+    number: int
+    text: str
+    missing_fields: tuple[str, ...]
 
 
 @dataclass
@@ -349,13 +363,13 @@ def _catalogue(elements):
     def add(key, group, unit="", kind="text", optional=False, footnotes=(), materials=None, label=None):
         columns.append(ExportColumn(key, group, label or key, unit, kind, optional, footnotes, materials))
     add("spot_name", "Analysis", footnotes=("session", "method"), label="Analysis")
-    add("notes", "Analysis")
+    add("notes", "Analysis", footnotes=("notes", "glasses"), label="Notes")
     for key in ("U", "Th", "Pb", "204Pb", "206Pb", "207Pb", "208Pb", "Pb_208"):
-        add(key, "Composition", "µg/g", "conc", key not in {"U", "Th", "Pb"}, ("total_pb",) if "Pb" in key else ())
+        add(key, "Composition", "µg/g", "conc", key not in {"U", "Th", "Pb"}, ("total_pb",) if "Pb" in key else (), label="Pb (208)" if key == "Pb_208" else key)
     add("Th/U", "Composition", kind="ratio_el")
-    add("206Pb_cps", "Composition", "cps", "int")
-    add("206Pb/204Pb", "Composition", kind="int", footnotes=("total_pb",))
-    add("206Pb/204Pb_1s", "Composition", kind="int", label="206Pb/204Pb ±1s")
+    add("206Pb_cps", "Composition", "cps", "int", label="206Pb")
+    add("206Pb/204Pb", "Composition", kind="int", footnotes=("pb204",))
+    add("206Pb/204Pb_1s", "Composition", kind="int", footnotes=("pb204",), label="206Pb/204Pb ±1s")
     for system in (SYSTEMS[3], SYSTEMS[1], SYSTEMS[0], "238U/206Pb", SYSTEMS[2], "208Pb/206Pb"):
         optional = system == "208Pb/206Pb"
         add(system, "Isotope ratios", kind={SYSTEMS[0]: "ratio_68", SYSTEMS[1]: "ratio_75", SYSTEMS[3]: "ratio_82", "238U/206Pb": "ratio_86"}.get(system, "ratio_76"), optional=optional, footnotes=("standards", "corrections"))
@@ -367,15 +381,15 @@ def _catalogue(elements):
         base = system + "_age"
         add(base, "Dates", "Ma", "date", label=system + " date")
         add(base + "_2e_no_calibration", "Dates", "Ma", "date_2s", footnotes=("uncertainty",), label=system + " date ±2s")
-        add(base + "_2e_sys", "Dates", "Ma", "date_2s", footnotes=("sys",), label=system + " date ±2s-sys")
+        add(base + "_2e_sys", "Dates", "Ma", "date_2s", footnotes=("uncertainty", "constants"), label=system + " date ±2s-sys")
     add("disc_pct", "Dates", "%", "pct", footnotes=("discordance",), label="Discordance")
     add("disc_2s_pct", "Dates", "%", "pct_2s", label="Discordance ±2s")
     for method in ("207", "208"):
         base = method + "Pb_corrected_age"
         for suffix, label in (("", "date"), ("_2e_no_calibration", "date ±2s"), ("_2e_sys", "date ±2s-sys")):
-            add(base + suffix, "Common-Pb corrected", "Ma", "date" if not suffix else "date_2s", footnotes=("corrections", "sys" if suffix == "_2e_sys" else "uncertainty"), label=f"{method}-method 206Pb*/238U* {label}")
+            add(base + suffix, "Common-Pb corrected", "Ma", "date" if not suffix else "date_2s", footnotes=("corrections", "uncertainty"), label=f"{method}-method 206Pb*/238U* {label}")
     for key, label, kind in (("preferred_date", "Preferred date", "date"), ("preferred_date_2e", "Preferred date ±2s", "date_2s"), ("preferred_date_2e_sys", "Preferred date ±2s-sys", "date_2s"), ("preferred_date_method", "Method", "text")):
-        add(key, "Preferred date", "" if kind == "text" else "Ma", kind, footnotes=("preferred", "sys" if key.endswith("sys") else "uncertainty"), label=label)
+        add(key, "Preferred date", "" if kind == "text" else "Ma", kind, footnotes=("preferred", "uncertainty"), label=label)
     for element in elements:
         # The spreadsheet repeats U and Th in this block. Distinct keys allow
         # independent visibility while keeping one authoritative source value.
@@ -383,14 +397,14 @@ def _catalogue(elements):
         add(key, "Concentrations", "µg/g", "conc", label=element)
         add(element + "_95CI", "Concentrations", "µg/g", "conc", True, ("uncertainty",), label=element + " 95% CI")
     for element in CHONDRITE_REE:
-        add(element + "_N", "Chondrite-normalized", kind="conc", footnotes=("chondrite",))
+        add(element + "_N", "Chondrite-normalized", kind="conc", footnotes=("chondrite",), label=element)
     zircon = ("zircon",)
     add("Ti_in_zircon_C", "Ti-in-zircon", "°C", "temp", footnotes=("ti_in_zircon",), materials=zircon, label="T")
     groups = {
         "Trace-element ratios": ("Ce/Ce*", "Eu/Eu*", "sum_REE", "(Gd/Yb)_N", "Lu/Hf", "Nb/Ta", "Nb/U", "Nb/Th", "Th/Y", "Hf/Y"),
         "Grimes et al. (2015)": ("Nb/Yb", "Ce/Yb", "Gd/Yb", "U/Yb"),
         "Itano '24": ("Nb/P", "Ce/P", "sum_REE_Y"),
-        "Lu / Pizarro": ("Dy/Yb", "10000Eu/Eu*/Y", "(Ce/Nd)/Y"),
+        "Lu et al. (2016); Pizarro et al. (2020)": ("Dy/Yb", "10000Eu/Eu*/Y", "(Ce/Nd)/Y"),
         "Roberts et al. (2024)": ("Ce/U",),
         "Loucks et al. (2024)": ("U_i", "Th_i", "10000Eu/Eu*/Yb_N", "1000(Ce/Nd)_N/Y"),
     }
@@ -398,7 +412,8 @@ def _catalogue(elements):
         for key in keys:
             mass = key in {"sum_REE", "sum_REE_Y", "U_i", "Th_i"}
             add(key, group, "µg/g" if mass else "", "conc" if mass else "ratio_el", footnotes=(citation,), materials=zircon,
-                label={"sum_REE": "ΣREE", "sum_REE_Y": "ΣREE+Y"}.get(key))
+                label={"sum_REE": "ΣREE", "sum_REE_Y": "ΣREE+Y", "10000Eu/Eu*/Y": "10,000(Eu/Eu*)/Y",
+                       "10000Eu/Eu*/Yb_N": "10,000(Eu/Eu*)/Yb_N"}.get(key))
     return tuple(columns)
 
 
@@ -580,6 +595,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     rows = rows[[c.key for c in columns] + ["sample", "role", "excluded", "run_order"]].reset_index(drop=True)
     context = dict(material=config.material, primary_standards=dict(zip(SYSTEMS, (config.primary_68_standard, config.primary_68_standard, config.primary_76_standard, config.primary_82_standard))),
         secondary_standards=config.secondary_standards, concentration_standards=config.concentration_standards,
+        active_concentration_standards=tuple(concentration["active_standards"]) if config.concentration_standards else (),
         decision=asdict(finalized.decision), uncertainty_settings=config.uncertainty.to_dict(),
         primary_reference_terms=reference, long_term_relative_1s=long_term,
         systematic_components={base: {key: dict(zip(frame.spot_name, values.tolist())) for key, values in parts.items()} for base, parts in components.items()},
@@ -590,5 +606,379 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     return ExportTable(rows, columns, summaries, secondary, settings, context)
 
 
-__all__ = ["CHONDRITE_REE", "ExportSettings", "ExportColumn", "ExportTable",
-           "build_export_table", "summarize_reference_materials_by_system", "secondary_summary_wide"]
+def _git_commit(package_root=None):
+    """Read only the adjacent checkout's Git metadata, including worktrees."""
+    root = Path(package_root) if package_root is not None else Path(__file__).resolve().parent.parent
+    gitdir = root / ".git"
+    try:
+        if gitdir.is_file():
+            directive = gitdir.read_text().strip()
+            if not directive.startswith("gitdir: "):
+                return None
+            gitdir = (root / directive[8:]).resolve()
+        head = (gitdir / "HEAD").read_text().strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head):
+            return head.lower()
+        if not head.startswith("ref: refs/"):
+            return None
+        ref = head[5:]
+        if ".." in Path(ref).parts:
+            return None
+        dirs = [gitdir]
+        if (gitdir / "commondir").is_file():
+            dirs.append((gitdir / (gitdir / "commondir").read_text().strip()).resolve())
+        for directory in dirs:
+            loose = directory / ref
+            if loose.is_file():
+                value = loose.read_text().strip()
+                if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+                    return value.lower()
+            packed = directory / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text().splitlines():
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] == ref and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", parts[0]):
+                        return parts[0].lower()
+    except (OSError, UnicodeError):
+        pass
+    return None
+
+
+def _reference_records(measurements, archive, name, system, seen=()):
+    """Trace a ratio through the library's direct, age and algebraic inputs.
+
+    Only records matching active archive values are cited. The public loader
+    expands source IDs to display text; its attrs retain the registry used to
+    resolve those displays back to DOI metadata.
+    """
+    if name not in archive.index or system in seen:
+        return measurements.iloc[:0]
+    def direct(quantity):
+        candidates = measurements.loc[measurements.standard.eq(name) & measurements.quantity.eq(quantity)]
+        value = archive.loc[name].get(quantity, np.nan)
+        return candidates.loc[np.isclose(candidates.value, value, rtol=1e-10, atol=0)]
+    for quantity in (system + "*", system + "_age"):
+        rows = direct(quantity)
+        if not rows.empty:
+            return rows
+    # The archive derives 68/75/82 from a concordia age before algebraic links.
+    if system != SYSTEMS[2]:
+        rows = direct("concordia_age")
+        if not rows.empty:
+            return rows
+    links = {SYSTEMS[0]: (SYSTEMS[1], SYSTEMS[2]),
+             SYSTEMS[1]: (SYSTEMS[0], SYSTEMS[2]),
+             SYSTEMS[2]: (SYSTEMS[0], SYSTEMS[1])}
+    if system in links:
+        parts = [_reference_records(measurements, archive, name, s, (*seen, system)) for s in links[system]]
+        if all(not part.empty for part in parts):
+            return pd.concat(parts).drop_duplicates()
+    return direct("concordia_age") if system == SYSTEMS[2] else measurements.iloc[:0]
+
+
+def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Footnote]:
+    """Generate global notes, then notes in first visible-column use order.
+
+    No reduction stages or table values are changed. Missing field paths are
+    stable identifiers for an export preview; missing values are never guessed.
+    Rebuild the notes after changing visible columns or export settings.
+    """
+    from .standards import build_standard_archive, load_standard_measurements
+
+    context, settings = table.context, table.settings
+    manifest = context["manifest"]
+    config = manifest["config"]
+    uncertainty = context["uncertainty_settings"]
+    metadata = context.get("experiment_metadata", {})
+    qtegra = metadata.get("qtegra", {})
+    acquisition = qtegra.get("acquisition_summary", {})
+    notes = {}
+    missing = {}
+    def fmt(note, field, value, unit=""):
+        if value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, (int, float)) and not np.isfinite(value)):
+            missing.setdefault(note, []).append(field)
+            return "not recorded"
+        return (f"{value:.8g}" if isinstance(value, (int, float)) else str(value)) + (" " + unit if unit else "")
+    def sentence(note, value):
+        notes[note] = value
+
+    sources = qtegra.get("sources", [])
+    rich = [Path(s["path"]).stem for s in sources if s.get("format") == "rich"]
+    paths = [Path(s["path"]) for s in sources] or [Path(s["path"]) for s in manifest.get("input_files", [])]
+    session_name = (metadata.get("session_name") or manifest.get("metadata", {}).get("origin", {}).get("session_key")
+                    or (", ".join(re.sub(r"_Rich$", "", x, flags=re.I) for x in rich) if rich else None)
+                    or (paths[0].parent.name if paths else None))
+    first, last = acquisition.get("first_start_date"), acquisition.get("last_start_date")
+    dates = first if first == last else f"{first} to {last}" if first and last else None
+    starts = (f"{acquisition['first_start']} to {acquisition['last_start']}"
+              if acquisition.get("first_start") and acquisition.get("last_start") else None)
+    session_fields = [("session_name", "Session", session_name, ""),
+        ("acquisition_dates", "acquisition dates", dates, ""),
+        ("acquisition_starts", "first to last acquisition start (recorded clock)", starts, ""),
+        ("operator", "operator", settings.operator or ", ".join(acquisition.get("users", [])), ""),
+        ("instrument", "instrument", acquisition.get("machine") or qtegra.get("machine"), ""),
+        ("laboratory", "laboratory", settings.laboratory, ""),
+        ("laser_system", "laser system", settings.laser_system, ""),
+        ("spot_diameter_um", "spot diameter", settings.spot_diameter_um, "µm"),
+        ("repetition_rate_hz", "repetition rate", settings.repetition_rate_hz, "Hz"),
+        ("fluence_j_cm2", "fluence", settings.fluence_j_cm2, "J/cm²")]
+    sentence("session", "; ".join(f"{label}: {fmt('session', field, value, unit)}" for field, label, value, unit in session_fields) + ".")
+
+    grouped = {}
+    for channel, value in acquisition.get("dwell_s", {}).items():
+        grouped.setdefault(value, []).append(channel)
+    dwell_parts = []
+    for value, channels in sorted(grouped.items(), key=lambda item: (item[0] is None, item[0] or 0)):
+        for channel in channels:
+            display = fmt("method", "dwell_s." + channel, value, "s")
+        dwell_parts.append(f"{', '.join(channels)} {display}")
+    dwell = "; ".join(dwell_parts)
+    if not dwell:
+        dwell = fmt("method", "dwell_s", None)
+    sweeps = acquisition.get("sweeps_per_acquisition", {})
+    windows = []
+    selections = pd.DataFrame(context.get("selections", []))
+    methods = selections.get("selection_method", pd.Series(dtype=str)).dropna().unique()
+    selection = ", ".join(map(str, methods)) or config.get("selection_method")
+    for region in ("baseline", "plateau"):
+        duration = _numeric(selections, region + "_end_times") - _numeric(selections, region + "_start_times")
+        duration = duration.loc[np.isfinite(duration) & duration.ge(0)]
+        windows.append(f"{region} median duration {fmt('method', region + '_duration_s', float(duration.median()) if len(duration) else None, 's')}")
+    tune = fmt("method", "tune_names", ", ".join(acquisition.get("tune_names", [])))
+    laser_output = fmt("method", "laser_output_settings_percent", ", ".join(acquisition.get("laser_output_settings_percent", [])), "%")
+    sentence("method", f"Dwell times per channel (median over acquisitions): {dwell}. "
+        f"Sweeps per analysis: median {fmt('method', 'sweeps.median', sweeps.get('median'))}, "
+        f"range {fmt('method', 'sweeps.min', sweeps.get('min'))} to {fmt('method', 'sweeps.max', sweeps.get('max'))}. "
+        f"Window selection method: {fmt('method', 'selection_method', selection)}; {'; '.join(windows)}. "
+        f"Ratio aggregation: {fmt('method', 'ratio_aggregation', config.get('ratio_aggregation'))}. "
+        f"Tune names: {tune}. Laser output settings seen: {laser_output}.")
+
+    try:
+        measurements = load_standard_measurements(pipeline.reference_library_path)
+    except (OSError, ValueError, KeyError):
+        measurements = pd.DataFrame(columns=("standard", "quantity", "role", "value", "source"))
+    registry = measurements.attrs.get("sources", {})
+    library_archive = build_standard_archive(measurements) if not measurements.empty else pd.DataFrame()
+    def citations(note, field, records):
+        values = []
+        for display in records.source.unique():
+            entries = [entry for entry in registry.values() if entry["display"] == display]
+            entry = entries[0] if len(entries) == 1 else {}
+            doi = entry.get("doi")
+            text = display
+            if doi and doi not in text:
+                text += f", doi:{doi}"
+            elif not doi:
+                text += "; DOI " + fmt(note, field + ".doi", None)
+            values.append(text)
+        return "; ".join(values) if values else fmt(note, field + ".citation", None)
+    standard_text = []
+    primaries = context["primary_standards"]
+    names = tuple(dict.fromkeys((*primaries.values(), *context["secondary_standards"])))
+    dates = accepted_dates(pipeline.standard_archive, names, systems=SYSTEMS)
+    for role in ("Primary", "Secondary"):
+        for name in (tuple(dict.fromkeys(primaries.values())) if role == "Primary" else context["secondary_standards"]):
+            systems = [s for s in SYSTEMS if primaries[s] == name] if role == "Primary" else SYSTEMS
+            row = pipeline.standard_archive.loc[name] if name in pipeline.standard_archive.index else pd.Series(dtype=float)
+            for system in systems:
+                field = f"{role.lower()}.{name or 'unassigned'}.{system}"
+                reference_records = _reference_records(measurements, pipeline.standard_archive, name, system)
+                if (name not in library_archive.index or not np.isclose(
+                        row.get(system + "*", np.nan), library_archive.loc[name].get(system + "*", np.nan), rtol=1e-10, atol=0)):
+                    reference_records = measurements.iloc[:0]
+                ratio_source_missing = reference_records.empty
+                age_records = measurements.loc[measurements.standard.eq(name)
+                    & measurements.role.eq("reference_age") & measurements.quantity.eq(system + "_age")]
+                age_records = age_records.loc[np.isclose(age_records.value, row.get(system + "_age", np.nan), rtol=1e-10, atol=0)]
+                # Reference-age inputs can supply uncertainty independently of
+                # the ratio defining accepted_dates; cite both provenances.
+                reference_records = pd.concat([reference_records, age_records]).drop_duplicates()
+                citation = citations("standards", field, reference_records)
+                if ratio_source_missing and not age_records.empty:
+                    citation = ("accepted-ratio citation " + fmt("standards", field + ".citation", None)
+                                + "; reference-age citation " + citation)
+                standard_text.append(f"{role} standard for {system}: {fmt('standards', field + '.name', name)}, "
+                    f"accepted ratio {fmt('standards', field + '.ratio', row.get(system + '*'))}, "
+                    f"date {fmt('standards', field + '.date', dates.loc[name, system], 'Ma')} "
+                    f"({citation})")
+    for name in context["active_concentration_standards"]:
+        records = measurements.loc[measurements.standard.eq(name) & measurements.role.eq("concentration")]
+        standard_text.append(f"Concentration reference glass: {name} ({citations('standards', 'glass.' + name, records)})")
+    sentence("standards", ". ".join(standard_text) + ".")
+
+    propagated = "is propagated" if uncertainty["propagate_baseline"] else "is not propagated (disabled in settings)"
+    detector = manifest.get("detector_calibration", {})
+    model_text = []
+    for model in ("downhole", "session"):
+        fit = config.get(model, {})
+        options = ", ".join(f"{key} = {value}" for key, value in sorted(fit.get("options", {}).items())) or "no options"
+        rejection = (f"outlier sigma = {fit['outlier_sigma']}" if fit.get("outlier_sigma") is not None
+                     else "outlier rejection disabled")
+        model_text.append(f"{model.capitalize()} model: {fmt('corrections', model + '.method', fit.get('method'))} "
+                          f"({options}; {rejection})")
+    # Reports may contain acquisition arrays for drift: summarize factors only.
+    channels = detector.get("channels", {})
+    factors = []
+    for channel, record in channels.items():
+        if not isinstance(record, dict):
+            continue
+        parts = [f"{key} {fmt('corrections', 'detector_calibration.' + channel + '.' + key, record.get(key))}"
+                 for key in ("factor", "qtegra_factor")]
+        drift = np.asarray(record.get("factors", []), dtype=float)
+        drift = drift[np.isfinite(drift)]
+        if drift.size:
+            parts.append(f"drift-factor range {drift.min():.8g} to {drift.max():.8g} (median {np.median(drift):.8g})")
+        factors.append(f"{channel}: {', '.join(parts)}")
+    factor_text = "; ".join(factors) or fmt("corrections", "detector_calibration.factors", None)
+    common_methods = [method for method in ("207", "208") if any(
+        c.key.startswith(method + "Pb_corrected_age") for c in table.visible_columns())]
+    common_options = config.get("common_pb_options", {})
+    initial_pb = ("Initial Pb follows Stacey and Kramers (1975), doi:10.1016/0012-821X(75)90088-6. "
+                  if common_options.get("common_pb_model", "stacey_kramers") == "stacey_kramers"
+                  else "Initial Pb uses the configured fixed composition. ")
+    if common_options:
+        initial_pb += "Common-Pb options: " + "; ".join(f"{key} = {value}" for key, value in sorted(common_options.items())) + ". "
+    sentence("corrections", f"Per-spot baselines are subtracted; baseline-mean uncertainty {propagated}. "
+        + ". ".join(model_text) + ". "
+        + ("Mass 204 is corrected for 204Hg via 202Hg where available; " if "202Hg" in pipeline.channels else "204Hg correction via 202Hg is unavailable because 202Hg was not measured; ")
+        + f"total-Pb mass-204 correction: {context['total_pb']['hg_correction']}. "
+        + f"Common-Pb method dates reported: {', '.join(common_methods) + ' method' if common_methods else 'none'}. "
+        + initial_pb
+        + f"Preferred-date common-Pb method: {context['decision']['common_pb_method']}. "
+        + f"Detector cross-calibration mode: {fmt('corrections', 'detector_calibration.mode', detector.get('mode'))}; factors {factor_text}.")
+
+    reference_terms = []
+    for system, term in context["primary_reference_terms"].items():
+        value = term["relative_ratio_1s"] * 100 if term["available"] else None
+        reference_terms.append(f"{system} ({term['standard']}): {fmt('uncertainty', 'primary_reference_terms.' + system, value, '% (relative 1s)')}")
+    physical = "; ".join(f"lambda{mass} 1s = {uncertainty['lambda_' + mass + '_1s']:.8g} yr^-1" for mass in ("238", "235", "232"))
+    sentence("uncertainty", "All ±2s values are absolute 2s unless the unit is %. Spot analytical 2s are two standard errors of the mean. "
+        + "Analytical 2s includes counting statistics, "
+        + ("propagated baseline-mean uncertainty, " if uncertainty["propagate_baseline"] else "")
+        + "within-analysis dispersion, and applicable common-Pb composition uncertainty. "
+        + "The calibration-inclusive branch additionally includes session-calibration residual scatter. "
+        + "Downhole-fit uncertainty, fitted-coefficient covariance and cross-ratio session covariance are not propagated. "
+        + "±2s-sys adds in quadrature to the calibration-inclusive 2s twice each 1s date-space term for the primary reference value, decay constants, "
+        + "238U/235U (207Pb/235U and 207Pb/206Pb), and long-term reproducibility. "
+        + "Primary reference-value terms in ratio space are " + "; ".join(reference_terms) + ". "
+        + "Reference terms with no recorded uncertainty are omitted, not estimated. "
+        + f"Physical uncertainty inputs: {physical}; 238U/235U 1s = {uncertainty['u238_u235_1s']:.8g}. "
+        + f"Long-term term: {context['long_term_relative_1s'] * 100:.8g}% (relative ratio 1s; mode {uncertainty['long_term_reproducibility_mode']}). "
+        + "Ratio-space terms are mapped to dates with the local ratio–date derivative. Systematic terms are included in ±2s-sys regardless of the selected-systematic switches. "
+        + "Weighted means report analytical 2s and add shared systematic terms once to the mean.")
+    sentence("constants", f"Decay constants are lambda238 = {lambda_238:.8g} yr^-1 and lambda235 = {lambda_235:.8g} yr^-1 "
+        + "(Jaffey et al. 1971, doi:10.1103/PhysRevC.4.1889), "
+        + f"and lambda232 = {lambda_232:.8g} yr^-1 (Le Roux and Glendenin 1963). "
+        + f"238U/235U = {uncertainty['u238_u235']:.8g} ± {2 * uncertainty['u238_u235_1s']:.8g} (2s; "
+        + "Hiess et al. 2012, doi:10.1126/science.1215507).")
+    other = "207Pb/235U" if settings.discordance_definition == "7/5-6/8" else "207Pb/206Pb"
+    sentence("discordance", f"Discordance ({settings.discordance_definition}) = 100 × (1 − t206Pb/238U / t{other}); "
+        + f"discordance and its analytical 2s are in percentage points. The discordant note means |disc| − 2s > {settings.discordance_threshold_percent:g}%. "
+        + f"Uncertainty propagation uses {context['discordance_covariance']}.")
+    decision = context["decision"]
+    preferred = (f"The preferred date uses the {decision['common_pb_method']}-method common-Pb-corrected 206Pb/238U date. "
+                 if decision["common_pb_method"] in {"207", "208"} else
+                 f"The preferred date uses {'204Pb-corrected ' if decision['common_pb_method'] == '204' else ''}206Pb/238U below {decision['age_transition_ma']:g} Ma and 207Pb/206Pb at or above that transition. ")
+    sentence("preferred", preferred + f"The configured age transition is {decision['age_transition_ma']:g} Ma. "
+        + "Sample weighted means use inverse analytical variance and included analyses only; they are reported only when all included analyses share one preferred-date method and the MSWD probability is at least 0.001. Otherwise the sample is labelled dispersed or mixed methods and no weighted mean is reported.")
+
+    pb = context["total_pb"]
+    compositions = []
+    for name, abundances in pb.get("glass_mass_abundances", {}).items():
+        row = pipeline.standard_archive.loc[name]
+        values = ", ".join(f"{mass}Pb/204Pb_i = {row[str(mass) + 'Pb/204Pb_i']:.8g}" for mass in (206, 207, 208))
+        records = measurements.loc[measurements.standard.eq(name) & measurements.role.eq("initial_ratio")]
+        compositions.append(f"{name}: {values}; isotope mass abundances "
+                            + ", ".join(f"{isotope} {value:.8g}" for isotope, value in abundances.items())
+                            + f" ({citations('total_pb', 'glass.' + name, records)})")
+    composition_text = "; ".join(compositions) or fmt("total_pb", "glass_mass_abundances", None)
+    contributing = len(table.rows) - len(pb["omitted_204_spots"])
+    sentence("total_pb", "Total Pb is the sum of calibrated 204Pb, 206Pb, 207Pb and 208Pb mass fractions. "
+        + "Each isotope is calibrated from internally normalized sample/glass cps against glass Pb concentration times that isotope's mass abundance. "
+        + f"Glass compositions used: {composition_text}. Mass 204 is Hg-corrected where possible; unmeasured or undetected 204 contributes zero. "
+        + f"204Pb contributed to {contributing} of {len(table.rows)} analyses. Pb (208), when shown, is the separate 208Pb-based elemental estimate.")
+    sentence("pb204", "206Pb/204Pb uses Hg-corrected mass 204 and is blank when 204Pb is not detected; its uncertainty is absolute ±1s.")
+    sentence("chondrite", "Chondrite-normalized values use Sun and McDonough (1989), doi:10.1144/GSL.SP.1989.042.01.19. "
+        + "CI chondrite concentrations (µg/g) are " + ", ".join(f"{el} {value:g}" for el, value in CHONDRITE_REE.items())
+        + ". Subscript _N denotes chondrite normalization. Trace-element ratios are mass ratios of µg/g values unless subscript _N; ΣREE sums La to Lu, excluding Pm and Y.")
+    sentence("ti_in_zircon", f"Ti-in-zircon temperatures use Ferry and Watson (2007), doi:10.1007/s00410-007-0201-0, "
+        + f"with assumed aSiO2 = {settings.a_sio2:g} and aTiO2 = {settings.a_tio2:g}.")
+    for key, citation in {
+        "grimes2015": "Grimes et al. (2015), doi:10.1007/s00410-015-1199-3",
+        "itano24": '"Itano \'24" as labelled in UPbR26plus; citation not verified',
+        "lu_pizarro": "Lu et al. (2016, SEG Spec. Publ. 19, 329-347) and Pizarro et al. (2020), doi:10.1016/j.oregeorev.2020.103771",
+        "roberts2024": "Roberts et al. (2024), doi:10.1016/j.epsl.2024.118638",
+        "loucks2024": "Loucks et al. (2024), doi:10.5382/econgeo.5071",
+    }.items():
+        sentence(key, citation + ". Ratios are mass ratios of µg/g values unless subscript _N, which denotes chondrite normalization."
+                 + (" U_i and Th_i restore radioactive decay using the preferred date." if key == "loucks2024" else ""))
+    sentence("software", f"Reduced with UPbRPy {fmt('software', 'upbrpy_version', manifest.get('upbrpy_version'))}, "
+        + f"git commit {fmt('software', 'git_commit', _git_commit())}; reference library version "
+        + f"{fmt('software', 'reference_library_version', manifest.get('reference_library_version'))}, "
+        + f"SHA-256 {fmt('software', 'reference_library_sha256', (manifest.get('reference_library_sha256') or '')[:12])}. "
+        + f"Data-reduction date: {date.today().isoformat()}.")
+    vocabulary = {
+        "excluded": "Excluded analyses remain in the table and are omitted from weighted means.",
+        "discordant": "Discordant means |disc| − 2s exceeds the configured discordance threshold.",
+        "204Pb detected": "204Pb detected denotes flag_detectable_204pb, a detectable mass-204 signal after Hg correction where available.",
+        "reverse fractionation": "Reverse fractionation denotes a flagged reverse downhole fractionation trend.",
+        "high common Pb": "High common Pb denotes a common-Pb fraction above the configured screening limit.",
+        "burn-through": "Burn-through denotes primary-signal relative standard deviation above the configured screening limit.",
+        "high ratio scatter": "High ratio scatter denotes within-analysis ratio scatter above the configured screening limit.",
+        "U mean/intercept mismatch": "U mean/intercept mismatch denotes disagreement between mean and intercept U estimates above the configured limit.",
+        "high uncertainty": "High uncertainty denotes date uncertainty above the configured screening limit.",
+        "session extrapolation": "Session extrapolation denotes an analysis outside the reference-material time range.",
+        "concentration reference glass": "Concentration reference glass identifies a glass used for concentration calibration.",
+    }
+    terms = {word for value in table.rows.notes for word in str(value).split(", ") if word}
+    sentence("notes", " ".join(text for term, text in vocabulary.items() if term in terms))
+    sentence("glasses", "U-Pb ratios and dates are not reported for reference glasses.")
+    global_ids = ("session", "method", "standards", "corrections", "uncertainty", "constants", "software")
+    ordered = dict.fromkeys((*global_ids, *(key for column in table.visible_columns() for key in column.footnotes)))
+    return [Footnote(key, i, notes[key], tuple(dict.fromkeys(missing.get(key, ()))))
+            for i, key in enumerate(ordered, 1)]
+
+
+def column_heading(column: ExportColumn, footnotes: Iterable[Footnote], style: str = "plain") -> str | list[tuple[str, bool]]:
+    """Append resolved markers; rich segments superscript isotope masses too.
+
+    Subscript tokens ``_N`` and ``_i`` are preserved for the future writer.
+    A missing referenced ID raises KeyError; unsupported styles raise ValueError.
+    """
+    if style not in {"plain", "markdown", "rich"}:
+        raise ValueError("style must be plain, markdown, or rich")
+    numbers = {note.id: note.number for note in footnotes}
+    markers = sorted({numbers[key] for key in column.footnotes})
+    heading = column.label + (f" ({column.unit})" if column.unit else "")
+    marker = ",".join(map(str, markers))
+    if style == "plain":
+        return heading + (f" [{marker}]" if marker else "")
+    if style == "markdown":
+        return escape(heading) + (f"<sup>{marker}</sup>" if marker else "")
+    segments = []
+    end = 0
+    for match in re.finditer(r"(?<![\w.])\d{2,3}(?=[A-Z][a-z]?)", heading):
+        if match.start() > end:
+            segments.append((heading[end:match.start()], False))
+        segments.append((match.group(), True))
+        end = match.end()
+    if end < len(heading):
+        segments.append((heading[end:], False))
+    if marker:
+        segments.append((marker, True))
+    return segments
+
+
+def footnotes_text(footnotes: Iterable[Footnote]) -> str:
+    """Render one numbered paragraph per footnote."""
+    return "\n\n".join(f"[{note.number}] {note.text}" for note in footnotes)
+
+
+def footnotes_markdown(footnotes: Iterable[Footnote]) -> str:
+    """Render footnotes as a numbered Markdown list."""
+    return "\n\n".join(f"{note.number}. {escape(note.text)}" for note in footnotes)
+
+
+__all__ = ["CHONDRITE_REE", "ExportSettings", "ExportColumn", "ExportTable", "Footnote",
+           "build_export_table", "build_footnotes", "column_heading", "footnotes_text", "footnotes_markdown",
+           "summarize_reference_materials_by_system", "secondary_summary_wide"]
