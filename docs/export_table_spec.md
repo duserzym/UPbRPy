@@ -248,11 +248,31 @@ concordia age, which made 91500 look 40 Ma old (docs/notes/91500_bias_2026-11-05
 ### 4.5 Notes column
 
 Short, comma-separated, from fixed vocabulary: `excluded` (unticked in
-Studio's final review), `discordant` (|disc| - 2s > threshold), `204Pb detected`
-(`flag_detectable_204pb`), `reverse fractionation`, `high common Pb`,
+Studio's final review), `discordant` (|disc| - 2s > threshold), `high 204`
+(rule below), `reverse fractionation`, `high common Pb`,
 `burn-through`, `high ratio scatter`, `U mean/intercept mismatch`,
 `high uncertainty`, `session extrapolation`, `concentration reference glass`.
 Excluded analyses stay in the table and are left out of weighted means.
+Glass rows carry only `concentration reference glass` (and `excluded`).
+
+`high 204` uses the UPbR26plus criterion, read from the workbook's formulas and
+VBA (Samples row 4800, Backgrounds rows 4792 and 4797, and the macro block
+"shades red if 204 counts above background"): the plateau-mean mass-204 count
+rate minus the analysis's own baseline-mean mass-204 count rate exceeds five
+times the standard deviation, over all analyses in the session, of the
+per-analysis baseline-mean mass-204 count rates. No Hg correction enters this
+test. Decided by Yiming Zhang on 2026-11-06 ("Use high 204"). The engine's
+`flag_detectable_204pb` (3 sigma, Hg-corrected) is a different and more
+sensitive test; it still drives the automatic flags but not this note.
+
+On DemoSession the rule notes 5 of the spreadsheet's 9 unknowns and no
+others, and the same 18 glasses (the note is suppressed on glass rows). The
+session spread of baseline means is 19.5 cps in UPbRPy against 14.8 cps in
+the workbook (thresholds 97 and 74 cps), because UPbRPy's automatic baseline
+windows (10 sweeps, about 4 s) differ from the spreadsheet's 10 s gas blank.
+Three of the four missed analyses have net mass-204 between the two
+thresholds (81, 85, 97 cps); the fourth (44 cps) differs through the
+windows. Before this rule UPbRPy's detection flag fired on 50 unknowns.
 
 ### 4.6 Number formats
 

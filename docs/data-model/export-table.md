@@ -31,7 +31,7 @@ long-term components in date space. Optional columns start disabled.
 | Key | Group | Label | Unit | Default/optional | Source quantity | Footnote ids |
 | --- | --- | --- | --- | --- | --- | --- |
 | spot_name | Analysis | Analysis |  | Default | spot identity | session, method |
-| notes | Analysis | Notes |  | Default | exclusion, discordance and QC flags | notes, glasses |
+| notes | Analysis | Notes |  | Default | exclusion, discordance, UPbR26plus high-204 rule and QC flags | notes, glasses |
 | U | Composition | U | µg/g | Default | U | — |
 | Th | Composition | Th | µg/g | Default | Th | — |
 | Pb | Composition | Pb | µg/g | Default | sum of calibrated 204Pb, 206Pb, 207Pb, 208Pb mass fractions | total_pb |

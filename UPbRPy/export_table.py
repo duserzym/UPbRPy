@@ -484,6 +484,52 @@ def _sample_summaries(rows, components, secondary, uncertainty, reference, long_
     return pd.DataFrame(records)
 
 
+def _high_204(pipeline):
+    """Return the UPbR26plus "high 204" test per spot and its provenance.
+
+    UPbR26plus (Samples row 4800, Backgrounds row 4797, VBA "shades red if 204
+    counts above background") notes "high 204" when the plateau-mean mass-204
+    count rate minus that analysis's own baseline-mean mass-204 count rate
+    exceeds five times the standard deviation, over all analyses in the
+    session, of the per-analysis baseline-mean mass-204 count rates. No Hg
+    correction enters this test. The engine's ``flag_detectable_204pb`` (a
+    3-sigma, Hg-corrected detection test) is a different, more sensitive rule
+    and is not used for the note.
+    """
+    channel = next((c for c in ("204Pb", "204Hg") if c in pipeline.channels), None)
+    names = pipeline.experiment.spot_names.astype(str)
+    if channel is None:
+        return pd.Series(False, index=names), dict(channel=None, rule="mass 204 not measured")
+    raw = dict(tuple(pipeline.total_data.groupby("spot_name", sort=False)))
+    baseline, net = {}, {}
+    for row in pipeline.experiment.to_dict("records"):
+        data = raw.get(row["spot_names"])
+        if data is None:
+            continue
+        time = data.Time
+        base = data.loc[time.ge(row["baseline_start_times"]) & time.lt(row["baseline_end_times"]), channel].mean()
+        plateau = data.loc[time.ge(row["plateau_start_times"]) & time.lt(row["plateau_end_times"]), channel].mean()
+        baseline[row["spot_names"]] = base
+        net[row["spot_names"]] = plateau - base
+    baseline, net = pd.Series(baseline, dtype=float), pd.Series(net, dtype=float)
+    spread = float(baseline.std(ddof=1)) if baseline.notna().sum() > 1 else np.nan
+    threshold = 5 * spread
+    high = (net > threshold).reindex(names, fill_value=False) if np.isfinite(threshold) else pd.Series(False, index=names)
+    return high, dict(channel=channel, session_baseline_sd_cps=spread, threshold_cps=threshold, n_high=int(high.sum()),
+                      rule="plateau-mean minus baseline-mean mass-204 cps > 5 x session SD of baseline-mean mass-204 cps "
+                           "(UPbR26plus Samples row 4800)")
+
+
+def high_204_note(record) -> str:
+    """Describe the UPbR26plus high-204 rule with this session's numbers."""
+    threshold = record.get("threshold_cps")
+    numbers = (f" (here {record['session_baseline_sd_cps']:.1f} cps, threshold {threshold:.0f} cps)"
+               if threshold is not None and np.isfinite(threshold) else "")
+    return ("High 204 follows UPbR26plus: the plateau-mean mass-204 count rate minus the analysis's own "
+            "baseline-mean mass-204 count rate exceeds five times the standard deviation, over all analyses "
+            f"in the session, of the baseline-mean mass-204 count rates{numbers}; no Hg correction enters this test.")
+
+
 def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | None = None, *,
                        excluded_spots: Iterable[str] = ()) -> ExportTable:
     """Build the full catalogue and publication quantities from cached stages.
@@ -574,7 +620,9 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     rho = _numeric(rows, "err_corr_no_calibration").fillna(0).clip(-1, 1) if other == SYSTEMS[1] else 0.
     rows["disc_2s_pct"] = 100 * np.sqrt(np.maximum(0, (ea / b)**2 + (a * eb / b**2)**2 - 2 * rho * ea * eb * a / b**3))
     rows = pd.concat([rows, _trace_quantities(rows, settings, config.uncertainty)], axis=1)
-    flags = (("flag_detectable_204pb", "204Pb detected"), ("flag_reverse_fractionation", "reverse fractionation"), ("flag_high_common_pb", "high common Pb"), ("flag_burn_through", "burn-through"), ("flag_high_ratio_scatter", "high ratio scatter"), ("flag_u_mean_intercept_mismatch", "U mean/intercept mismatch"), ("flag_high_uncertainty", "high uncertainty"), ("flag_session_extrapolation", "session extrapolation"))
+    high_204, high_204_context = _high_204(pipeline)
+    rows["_high_204"] = rows.spot_name.map(high_204).fillna(False).astype(bool)
+    flags = (("_high_204", "high 204"), ("flag_reverse_fractionation", "reverse fractionation"), ("flag_high_common_pb", "high common Pb"), ("flag_burn_through", "burn-through"), ("flag_high_ratio_scatter", "high ratio scatter"), ("flag_u_mean_intercept_mismatch", "U mean/intercept mismatch"), ("flag_high_uncertainty", "high uncertainty"), ("flag_session_extrapolation", "session extrapolation"))
     notes = []
     for row in rows.to_dict("records"):
         words = ["excluded"] if row["excluded"] else []
@@ -587,6 +635,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
             words += [label for key, label in flags if pd.notna(row.get(key)) and bool(row.get(key))]
         notes.append(", ".join(words))
     rows["notes"] = notes
+    rows = rows.copy()  # defragment after many column insertions
     columns = _catalogue(elements)
     for column in columns:
         if column.key not in rows:
@@ -613,7 +662,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
         decision=asdict(finalized.decision), uncertainty_settings=config.uncertainty.to_dict(),
         primary_reference_terms=reference, long_term_relative_1s=long_term,
         systematic_components={base: {key: dict(zip(frame.spot_name, values.tolist())) for key, values in parts.items()} for base, parts in components.items()},
-        total_pb=pb_context, discordance_covariance="analytical 68/75 rho; independent 68/76 dates",
+        total_pb=pb_context, high_204=high_204_context, discordance_covariance="analytical 68/75 rho; independent 68/76 dates",
         experiment_metadata=dict(pipeline.experiment.attrs), selections=pipeline.experiment.to_dict("records"),
         reference_values=pipeline.standard_archive.to_dict("index"),
         manifest=pipeline.manifest(metadata={"export_settings": settings.to_dict()}))
@@ -953,7 +1002,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     vocabulary = {
         "excluded": "Excluded analyses remain in the table and are omitted from weighted means.",
         "discordant": "Discordant means |disc| − 2s exceeds the configured discordance threshold.",
-        "204Pb detected": "204Pb detected denotes flag_detectable_204pb, a detectable mass-204 signal after Hg correction where available.",
+        "high 204": high_204_note(context.get("high_204", {})),
         "reverse fractionation": "Reverse fractionation denotes a flagged reverse downhole fractionation trend.",
         "high common Pb": "High common Pb denotes a common-Pb fraction above the configured screening limit.",
         "burn-through": "Burn-through denotes primary-signal relative standard deviation above the configured screening limit.",

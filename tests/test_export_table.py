@@ -85,8 +85,8 @@ def test_sys_decomposition_order_notes_and_no_mutation():
     table = build_export_table(pipeline, excluded_spots=("B_3",))
     rows = table.rows.set_index("spot_name")
     assert table.rows.spot_name.tolist() == ["B_0", "B_3", "A_2", "A_6", "S513_1", "91500_4", "NIST612_5"]
-    assert rows.loc["B_0", "notes"] == "204Pb detected, burn-through"
-    assert rows.loc["B_3", "notes"] == "excluded, 204Pb detected"
+    assert rows.loc["B_0", "notes"] == "high 204, burn-through"
+    assert rows.loc["B_3", "notes"] == "excluded, high 204"
     assert "concentration reference glass" in rows.loc["NIST612_5", "notes"]
     assert pd.isna(rows.loc["NIST612_5", "206Pb/238U_age"])
     assert rows.loc["NIST612_5", "U"] > 0
@@ -347,7 +347,7 @@ def test_complete_note_vocabulary_and_long_term_term():
         frame["flag_" + flag] = True
     original = build_export_table(pipeline, excluded_spots=("B_0",))
     assert original.rows.iloc[0].notes == (
-        "excluded, 204Pb detected, reverse fractionation, high common Pb, burn-through, "
+        "excluded, high 204, reverse fractionation, high common Pb, burn-through, "
         "high ratio scatter, U mean/intercept mismatch, high uncertainty, session extrapolation")
     pipeline.config = replace(pipeline.config, uncertainty=replace(pipeline.config.uncertainty,
         long_term_reproducibility_mode="user", long_term_reproducibility_relative_1s=.02))
@@ -383,3 +383,24 @@ def test_supervisor_corrections_glass_mixed_methods_and_unmeasured_standards(tmp
     with zipfile.ZipFile(workbook) as archive:
         strings = archive.read("xl/sharedStrings.xml").decode()
     assert "Table &lt;n&gt;" not in strings and "Weighted mean (Ma)" in strings
+
+
+def test_high_204_note_follows_upbr26plus_rule():
+    """Net plateau mass-204 cps > 5 x session SD of baseline-mean mass-204 cps."""
+    from UPbRPy.export_table import _high_204
+
+    pipeline = synthetic_pipeline()
+    data = pipeline.total_data
+    # A_2: no 204 above its baseline. A_6: a 10 cps higher baseline, which sets
+    # the session spread of baseline means; its net signal is unchanged.
+    data.loc[data.spot_name.eq("A_2") & data.Time.ge(22), "204Hg"] = 2.
+    data.loc[data.spot_name.eq("A_6"), "204Hg"] += 10.
+    high, context = _high_204(pipeline)
+    baselines = pd.Series([2.] * 6 + [12.])
+    assert context["session_baseline_sd_cps"] == pytest.approx(baselines.std(ddof=1))
+    assert context["threshold_cps"] == pytest.approx(5 * baselines.std(ddof=1))
+    net = 10.  # every other spot's plateau adds 10 cps of mass 204
+    assert not high["A_2"]
+    assert bool(high["B_0"]) == (net > context["threshold_cps"])
+    table = build_export_table(pipeline)
+    assert "high 204" not in table.rows.set_index("spot_name").loc["A_2", "notes"]
