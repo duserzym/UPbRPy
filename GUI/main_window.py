@@ -40,6 +40,7 @@ from GUI.services import (
     get_downhole_plot_data,
     get_selection_regions,
     get_session_plot_data,
+    get_standard_bias_data,
     get_spot_data,
     fit_method_label,
     load_standard_archive_from_path,
@@ -64,6 +65,8 @@ from GUI.widgets import (
     IsotopeGridWidget,
     ResultsTableWidget,
     SessionFractionationWidget,
+    StandardBiasControls,
+    StandardBiasWidget,
     SessionOverviewWidget,
     SpotTree,
     StyledComboBox,
@@ -94,6 +97,7 @@ PLOT_MODE_LABELS = {
     "raw_ratios": "Ratios",
     "downhole_ratios": "Downhole",
     "session_ratios": "Session",
+    "standard_bias": "Bias",
     "depth_profile": "Depth",
     "final_results": "Final",
 }
@@ -106,6 +110,7 @@ _STAGE_CACHE_KEYS: dict[str, str | None] = {
     "raw_ratios": "plateau_data_with_raw_ratios",
     "downhole_ratios": "downhole_results",
     "session_ratios": "session_correction_results",
+    "standard_bias": "finalized_results",
     "depth_profile": "depth_profile_results",
     "final_results": "finalized_results",
 }
@@ -119,6 +124,7 @@ _PLOT_STACK_IDX: dict[str, int] = {
     "raw_ratios": 0,
     "downhole_ratios": 2,
     "session_ratios": 3,
+    "standard_bias": 5,
     "depth_profile": 4,
     "final_results": 4,
 }
@@ -1009,7 +1015,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 rail_layout.insertWidget(index, control)
             self.autopick_settings_toggle.setChecked(False)
             self.inspector_action.setChecked(self._inspector_was_visible)
-        short = dict(zip(PLOT_MODE_LABELS, ("Raw", "Base", "Norm", "Cal", "Ratios", "Down", "Drift", "Depth", "Final")))
+        short = dict(zip(PLOT_MODE_LABELS, ("Raw", "Base", "Norm", "Cal", "Ratios", "Down", "Drift", "Bias", "Depth", "Final")))
         for key, button in self.plot_mode_buttons.items():
             button.setText(short[key] if narrow else PLOT_MODE_LABELS[key])
         for widget in self._plot_control_labels:
@@ -1746,6 +1752,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plots_stack.addWidget(self.downhole_frac_plot)   # index 2
         self.plots_stack.addWidget(self.session_frac_plot)    # index 3
         self.plots_stack.addWidget(self.results_table)        # index 4
+        # Reference-material bias graph; selection is shared with the table.
+        self.bias_plot = StandardBiasWidget()
+        self.bias_plot.selectionChanged.connect(
+            lambda names: self.results_table.set_selected_spots(
+                names, origin=self.bias_plot
+            )
+        )
+        self.results_table.selectedSpotsChanged.connect(
+            self.bias_plot.set_selected_spots
+        )
+        self.plots_stack.addWidget(self.bias_plot)            # index 5
         plot_layout.addWidget(self.plots_stack)
 
         # ── Control bar below both plots ───────────────────────────────────
@@ -2272,6 +2289,17 @@ class MainWindow(QtWidgets.QMainWindow):
         results_layout = QtWidgets.QVBoxLayout(results_page)
         results_layout.setContentsMargins(6, 8, 6, 8)
         results_layout.setSpacing(10)
+
+        self.bias_card = NeumorphicFrame()
+        self.bias_card.setObjectName("SessionCard")
+        bias_layout = QtWidgets.QVBoxLayout(self.bias_card)
+        bias_layout.setContentsMargins(10, 10, 10, 10)
+        bias_layout.addWidget(QtWidgets.QLabel("Bias graph"))
+        self.bias_controls = StandardBiasControls()
+        self.bias_controls.changed.connect(self.on_bias_controls_changed)
+        bias_layout.addWidget(self.bias_controls)
+        self.bias_card.setVisible(False)
+        results_layout.addWidget(self.bias_card, 0)
 
         decision_card = NeumorphicFrame()
         decision_card.setObjectName("SessionCard")
@@ -3125,6 +3153,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "selection_colors": dict(self.selection_colors),
             "review_spot_colour": self.results_table.spot_colour_mode(),
             "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
+            "bias_controls": self.bias_controls.state(),
+            "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
             "include_export_concentrations": (
                 self.session.include_export_concentrations
@@ -3313,6 +3343,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "review_spot_colour", self.results_table.spot_colour_mode())))
         self.results_table.set_depth_colormap(str(workspace.get(
             "review_depth_colormap", self.results_table.depth_colormap_combo.currentText())))
+        self.results_table.set_show_glasses(
+            bool(workspace.get("review_show_glasses", False))
+        )
+        bias_state = workspace.get("bias_controls")
+        if isinstance(bias_state, dict):
+            self.bias_controls.set_state(bias_state)
+            self.bias_plot.set_per_sample_trends(
+                bool(self.bias_controls.state().get("per_sample_trends", False))
+            )
         folder_overrides = workspace.get("spot_folder_overrides", {})
         self._spot_folder_overrides = (
             {
@@ -4734,9 +4773,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_plot_mode(self, plot_mode: str, *, refresh: bool) -> None:
         self.session.plot_mode = plot_mode
+        self.bias_card.setVisible(plot_mode == "standard_bias")
+        if plot_mode == "standard_bias":
+            for index in range(self.inspector_tabs.count()):
+                if self.inspector_tabs.tabText(index) == "Results":
+                    self.inspector_tabs.setCurrentIndex(index)
         self._sync_plot_mode_buttons()
         if refresh:
             self.refresh_view()
+
+    def on_bias_controls_changed(self, state: dict) -> None:
+        """Redraw the bias graph after a date, quantity or scale change."""
+        self.bias_plot.set_per_sample_trends(bool(state.get("per_sample_trends", False)))
+        if self.session.loaded and self.session.plot_mode == "standard_bias":
+            app = QtWidgets.QApplication.instance()
+            self._refresh_bias_plot(active_theme(app) if app else None)
+
+    def _refresh_bias_plot(self, theme) -> None:
+        if theme is None:
+            return
+        try:
+            data = get_standard_bias_data(
+                self.session, self.workflow_preset, self.bias_controls.state()
+            )
+        except Exception as exc:  # keep the window usable; report in the status bar
+            self.statusBar().showMessage(f"Bias graph unavailable: {exc}", 8000)
+            return
+        if data is None:
+            return
+        self.bias_plot.show_bias(
+            data["table"], data["summary"], theme=theme, log_x=data["log_x"],
+            x_label=data["x_label"], y_label=data["y_label"],
+        )
+        self.bias_controls.set_summary(data["summary"])
+        self.bias_plot.set_selected_spots(self.results_table.selected_spots)
 
     def _current_plot_interaction_target(self) -> object:
         mode = self.session.plot_mode
@@ -4746,6 +4816,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.downhole_frac_plot
         if mode == "session_ratios":
             return self.session_frac_plot
+        if mode == "standard_bias":
+            return self.bias_plot
         if mode in {"depth_profile", "final_results"}:
             return self.results_table
         return self.trace_plot
@@ -4997,6 +5069,10 @@ class MainWindow(QtWidgets.QMainWindow):
             data = get_session_plot_data(self.session, self.workflow_preset, ratio_name)
             if theme:
                 self.session_frac_plot.show_data(data, theme)
+            return
+
+        if self.session.plot_mode == "standard_bias":
+            self._refresh_bias_plot(theme)
             return
 
         if self.session.plot_mode == "final_results":

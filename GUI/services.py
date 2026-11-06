@@ -1694,6 +1694,53 @@ def get_session_plot_data(
     }
 
 
+def get_standard_bias_data(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+    state: Mapping[str, object] | None = None,
+) -> dict | None:
+    """Return the reference-material bias table, its summary and axis labels.
+
+    ``state`` holds the bias controls (``date``, ``quantity``, ``log_x``).
+    Returns ``None`` until the session has finalized results.
+    """
+    from UPbRPy.bias import (
+        BIAS_QUANTITIES,
+        bias_summary,
+        spot_signal_quantities,
+        standard_bias_table,
+    )
+
+    if not session.loaded or "finalized_results" not in session.reduction_cache:
+        return None
+    state = dict(state or {})
+    date = str(state.get("date", "206Pb/238U"))
+    quantity = str(state.get("quantity", "U"))
+    log_x = bool(state.get("log_x", False))
+    pipeline = ensure_shared_pipeline(session, preset)
+    finalized = pipeline.run_finalize()
+    signals = spot_signal_quantities(pipeline.experiment, pipeline.run_baseline())
+    table = standard_bias_table(
+        finalized.parallel_results,
+        pipeline.standard_archive,
+        date=date,
+        quantity=quantity,
+        signal_quantities=signals,
+        uncertainty=(
+            "with_calibration"
+            if session.include_calibration_uncertainty
+            else "analytical"
+        ),
+    )
+    return {
+        "table": table,
+        "summary": bias_summary(table, log_x=log_x),
+        "log_x": log_x,
+        "x_label": str(BIAS_QUANTITIES.get(quantity, quantity)),
+        "y_label": f"Offset from accepted {date} date (%)",
+    }
+
+
 def get_calibration_slope_data(
     session: ReductionSession,
     preset: WorkflowPreset,

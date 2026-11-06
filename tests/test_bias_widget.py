@@ -62,7 +62,7 @@ def test_scatter_legend_means_error_bars_and_theme(widget, table):
     assert widget._scatters['A']._bias_color == _REVIEW_SAMPLE_COLORS[0]
     assert widget._scatters['B']._bias_color == _REVIEW_SAMPLE_COLORS[1]
     for sample, label in widget._legend.items:
-        assert '+/-' in label.text and 'n 3' in label.text
+        assert '±' in label.text and 'n 3' in label.text
     assert 'slope' in widget._trend_text.toPlainText()
     widget.set_per_sample_trends(True)
     assert len(widget._trend_lines) == 3
@@ -105,7 +105,7 @@ def test_hover_log_axes_and_interaction_modes(widget, table, app):
     widget._on_mouse_moved(pos)
     assert names[-1] == 'spot_3'
     assert widget._hover_text.isVisible()
-    for text in ['spot_3', 'Accepted', '504', 'Ma', '+/-']:
+    for text in ['spot_3', 'Accepted', '504', 'Ma', '±']:
         assert text in widget.tooltip_text(0)
     widget._set_hover(None)
     assert names[-1] == '' and not widget._hover_text.isVisible()

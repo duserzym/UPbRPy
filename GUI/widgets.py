@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import weakref
+from collections.abc import Iterable
 from html import escape
 
 import numpy as np
@@ -15,7 +16,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
-from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
+from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard_archive
 from GUI.state import ReductionSession
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
@@ -2246,6 +2247,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
     selectedSpotsChanged = QtCore.Signal(object)
+    showGlassesChanged = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
@@ -2255,6 +2257,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.include_flags: dict[str, bool] = {}
         self.selected_spots: set[str] = set()
         self._spot_samples: dict[str, str] = {}
+        archive = current_standard_archive()
+        self._glass_materials = (set(archive.index[archive["material"].eq("glass")].astype(str))
+                                 if "material" in archive else set())
+        self._show_glasses = False
+        self._glass_buttons = []
         self._syncing_selection = False
         self._readout_timer = QtCore.QTimer(self)
         self._readout_timer.setSingleShot(True)
@@ -2313,6 +2320,64 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
+
+    @staticmethod
+    def _sample_names(*frames):
+        samples = {}
+        for frame in frames:
+            if "spot_name" in frame:
+                for _, row in frame.iterrows():
+                    sample = row.get("sample", "")
+                    samples.setdefault(str(row.spot_name), "" if pd.isna(sample) else str(sample))
+        return samples
+
+    def _glass_spot_names(self):
+        samples = self._sample_names(self._depth_frame)
+        samples.update(self._spot_samples)
+        return {name for name, sample in samples.items() if sample in self._glass_materials}
+
+    def set_glass_materials(self, names: Iterable[str]) -> None:
+        """Replace glass sample names; apply defaults to reclassified spots."""
+        previous = self._glass_spot_names()
+        self._glass_materials = set(map(str, names))
+        current = self._glass_spot_names()
+        self.set_spot_included(previous - current, True)
+        self.set_spot_included(current - previous, self._show_glasses)
+        self._update_glass_buttons()
+
+    def show_glasses(self) -> bool:
+        """Return the bulk glass inclusion preference."""
+        return self._show_glasses
+
+    def set_show_glasses(self, enabled: bool) -> None:
+        """Set all glass spots' inclusion without emitting showGlassesChanged."""
+        self._show_glasses = bool(enabled)
+        for button in self._glass_buttons:
+            blocker = QtCore.QSignalBlocker(button)
+            button.setChecked(self._show_glasses)
+            del blocker
+        self.set_spot_included(self._glass_spot_names(), self._show_glasses)
+
+    def _glass_toggled(self, enabled):
+        self.set_show_glasses(enabled)
+        self.showGlassesChanged.emit(self._show_glasses)
+
+    def _create_glass_button(self):
+        button = QtWidgets.QToolButton()
+        button.setText("Glasses")
+        button.setCheckable(True)
+        button.setProperty("modeToggle", True)
+        button.setToolTip("Include or exclude all glass reference spots")
+        button.setChecked(self._show_glasses)
+        button.setVisible(False)
+        button.toggled.connect(self._glass_toggled)
+        self._glass_buttons.append(button)
+        return button
+
+    def _update_glass_buttons(self):
+        visible = bool(self._glass_spot_names())
+        for button in self._glass_buttons:
+            button.setVisible(visible)
 
     def _review_views(self):
         return (self.results_table, self.results_tree, self.secondary_tree,
@@ -2486,13 +2551,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 model.setHorizontalHeaderLabels(["Include", *map(str, columns)])
             self.spot_choice_group_model.clear()
             self.spot_choice_group_model.setHorizontalHeaderLabels(["Spots"])
-            self._spot_samples = {}
-            for frame in (final, self._spot_frame):
-                if "spot_name" in frame:
-                    for _, row in frame.iterrows():
-                        sample = row.get("sample", "")
-                        sample = "" if pd.isna(sample) else str(sample)
-                        self._spot_samples.setdefault(str(row.spot_name), sample)
+            self._spot_samples = self._sample_names(final, self._spot_frame)
             if "spot_name" in final:
                 for sample in sorted({self._spot_samples[str(name)] for name in final.spot_name}):
                     spots = final.loc[final.spot_name.astype(str).map(self._spot_samples).eq(sample)]
@@ -2636,6 +2695,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                                [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
         self._update_group_inclusion()
         self.refresh_spot_concordia()
+        self.refresh_depth_concordia(reset_view=False)
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
         """Share spot selection, keeping the origin view's scroll position."""
@@ -2818,7 +2878,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_filter.textChanged.connect(self.filter_spot_choices)
         controls_layout.addWidget(self.spot_filter)
         self.spot_group_toggle = self._group_button("chooser")
-        controls_layout.addWidget(self.spot_group_toggle)
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setSpacing(4)
+        filter_row.addWidget(self.spot_group_toggle)
+        self.spot_glasses_toggle = self._create_glass_button()
+        filter_row.addWidget(self.spot_glasses_toggle)
+        filter_row.addStretch(1)
+        controls_layout.addLayout(filter_row)
         self.spot_choice_list = QtWidgets.QListWidget()
         self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.spot_choice_list.itemChanged.connect(self._chooser_include_changed)
@@ -2907,6 +2973,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.refresh_depth_concordia
         )
         controls.addWidget(self.depth_spot_combo, 1)
+        self.depth_glasses_toggle = self._create_glass_button()
+        controls.addWidget(self.depth_glasses_toggle)
         layout.addLayout(controls)
         diagram_row, self.depth_diagram_buttons = self.create_diagram_buttons(
             self.refresh_depth_concordia
@@ -3111,6 +3179,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         selected = self._depth_frame
         if spot_name and "spot_name" in selected.columns:
             selected = selected[selected["spot_name"].astype(str).eq(spot_name)]
+        if not self.include_flags.get(spot_name, self._show_glasses
+                                      if spot_name in self._glass_spot_names() else True):
+            selected = selected.iloc[0:0]
         self.depth_concordia.show_data(
             selected,
             diagram=self.selected_diagram(self.depth_diagram_buttons),
@@ -3186,9 +3257,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
         spot_names = list(dict.fromkeys(name for frame in (final_frame, self._spot_frame)
                                       if "spot_name" in frame
                                       for name in frame["spot_name"].dropna().astype(str)))
-        retained_flags = {name: self.include_flags.get(name, True) for name in spot_names}
+        self._spot_samples = self._sample_names(final_frame, self._spot_frame)
+        glass_spots = self._glass_spot_names()
+        retained_flags = {name: self.include_flags.get(
+            name, self._show_glasses if name in glass_spots else True) for name in spot_names}
         self.include_flags.clear()
         self.include_flags.update(retained_flags)
+        self._update_glass_buttons()
         self.spot_concordia.set_spot_context(self._spot_frame, final_frame, self.include_flags)
         self.spot_choice_list.blockSignals(True)
         self.spot_choice_list.clear()
@@ -3206,6 +3281,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.filter_spot_choices(self.spot_filter.text())
         self.set_selected_spots(retained_selection)
         self.refresh_spot_concordia(reset_view=True)
+        self.refresh_depth_concordia()
         if self.tabs.currentWidget() not in (
             self.results_page,
             self.secondary_page,
@@ -3264,6 +3340,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         )
         self.depth_model.set_frame(review_frame)
         self._depth_frame = depth_profile.copy()
+        self._update_glass_buttons()
         existing_spot = self.depth_spot_combo.currentText()
         spot_names = (
             depth_profile["spot_name"].dropna().astype(str).drop_duplicates().tolist()
@@ -5178,7 +5255,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
                 self._error_bars.append(bars)
                 stats = self._summary.get("samples", {}).get(sample, {})
                 mean, error = stats.get("weighted_mean", np.nan), stats.get("weighted_mean_2e", np.nan)
-                self._legend.addItem(scatter, f"{sample}  {mean:+.1f} +/- {error:.1f} %  n {stats.get('n', 0)}")
+                self._legend.addItem(scatter, f"{sample}  {mean:+.1f} ± {error:.1f} %  n {stats.get('n', 0)}")
                 if np.isfinite(mean):
                     self._mean_lines.append(plot.plot([x.min(), x.max()], [mean, mean],
                         pen=pg.mkPen(color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)))
@@ -5211,7 +5288,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
     @staticmethod
     def _slope_text(fit):
         units = fit['units'].replace('percent', '%')
-        return (f"slope {fit['slope']:+.3g} +/- {fit['slope_2s']:.3g} {units} (2s), "
+        return (f"slope {fit['slope']:+.3g} ± {fit['slope_2s']:.3g} {units} (2σ), "
                 f"p {fit['p_value']:.2g}, n {fit['n']}")
 
     def _draw_trend(self, fit, color):
@@ -5280,9 +5357,9 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         """Return the spot's date, reference value and offset with absolute 2s."""
         row = self._point_rows[index]
         return (f"{row['spot_name']}\n{row['sample']}\n{self._x_label}: {row['x']:.5g}\n"
-                f"Date: {row['date']:.5g} +/- {row['date_2s']:.4g} Ma (2s)\n"
+                f"Date: {row['date']:.5g} ± {row['date_2s']:.4g} Ma (2σ)\n"
                 f"Accepted {row['date_system']}: {row['accepted']:.5g} Ma\n"
-                f"Offset: {row['offset_percent']:+.4g} +/- {row['offset_2s_percent']:.4g} % (2s)")
+                f"Offset: {row['offset_percent']:+.4g} ± {row['offset_2s_percent']:.4g} % (2σ)")
 
     def _on_mouse_moved(self, scene_pos):
         self._set_hover(self.nearest_point(scene_pos))
@@ -5411,7 +5488,7 @@ class StandardBiasControls(QtWidgets.QWidget):
         fit = summary.get("trend")
         lines = [StandardBiasWidget._slope_text(fit) if fit else "Trend unavailable"]
         for sample, stats in summary.get("samples", {}).items():
-            lines.append(f"{sample}: {stats['weighted_mean']:+.2g} +/- {stats['weighted_mean_2e']:.2g} % (2s), n {stats['n']}")
+            lines.append(f"{sample}: {stats['weighted_mean']:+.1f} ± {stats['weighted_mean_2e']:.1f} % (2σ), n {stats['n']}")
         self.summary_label.setText("\n".join(lines))
 
     def _emit_changed(self, *args):
