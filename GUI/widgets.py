@@ -2849,6 +2849,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
     @staticmethod
     def _secondary_summary(row):
         """Describe the engine's secondary summary without recalculating it."""
+        if "6/38 WM ±2s" in row:
+            return " · ".join([str(row["sample"]), f"n={row['n']}", *(
+                f"{system} {row[system + ' WM ±2s']} Ma; accepted "
+                f"{row[system + ' accepted']} Ma; offset {row[system + ' offset %']}%"
+                for system in ("6/38", "7/6"))])
         def number(column):
             try:
                 return float(row.get(column, np.nan))
@@ -3626,6 +3631,21 @@ class ResultsTableWidget(QtWidgets.QWidget):
             "secondary_standard_summary",
             pd.DataFrame(),
         )
+        by_system = getattr(finalized, "reference_material_summary_by_system", pd.DataFrame())
+        if not by_system.empty:
+            from UPbRPy.export_table import secondary_summary_wide
+
+            wide = secondary_summary_wide(by_system)
+            secondary = wide[["sample", "n"]].copy()
+            for system, prefix in (("6/38", "68"), ("7/6", "76")):
+                secondary[system + " WM ±2s"] = [
+                    f"{mean:.1f} ± {error:.1f}" if np.isfinite(mean) and np.isfinite(error) else ""
+                    for mean, error in zip(wide[prefix + "_weighted_mean"], wide[prefix + "_weighted_mean_2e"])
+                ]
+                secondary[system + " accepted"] = wide[prefix + "_accepted_date"].map(
+                    lambda value: f"{value:.1f}" if np.isfinite(value) else "")
+                secondary[system + " offset %"] = wide[prefix + "_offset_percent"].map(
+                    lambda value: f"{value:+.2f}" if np.isfinite(value) else "")
         retained_selection = set(self.selected_spots)
         self._syncing_selection = True
         self.results_model.set_frame(final_frame)

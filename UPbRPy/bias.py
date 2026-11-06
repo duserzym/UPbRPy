@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.optimize import brentq
 from scipy.stats import t
 
-from .constants import common_U238_U235, lambda_235, lambda_238
+from .constants import common_U238_U235, lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
 
 
@@ -27,18 +27,28 @@ BIAS_QUANTITIES = {
 _REE = "La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu".split()
 
 
-def accepted_dates(standard_archive, names) -> pd.DataFrame:
+def accepted_dates(standard_archive, names, *, systems=None) -> pd.DataFrame:
     """Return system-specific radiogenic dates in Ma, indexed by material.
 
     Missing, nonpositive, or physically unsolvable ratios give NaN. The
     207Pb/206Pb date solves the concordia ratio for ages from 0 to 10 Ga.
+    ``systems`` may also request 208Pb/232Th; the default retains the original
+    three-column interface.
     """
     frame = standard_archive.reindex(list(dict.fromkeys(names)))
-    dates = pd.DataFrame(np.nan, index=frame.index, columns=BIAS_DATE_SYSTEMS[:3])
-    for system, decay in zip(BIAS_DATE_SYSTEMS[:2], (lambda_238, lambda_235)):
+    systems = BIAS_DATE_SYSTEMS[:3] if systems is None else tuple(systems)
+    if set(systems) - {*BIAS_DATE_SYSTEMS[:3], "208Pb/232Th"}:
+        raise ValueError("Unsupported accepted-date system")
+    dates = pd.DataFrame(np.nan, index=frame.index, columns=systems)
+    for system, decay in (("206Pb/238U", lambda_238), ("207Pb/235U", lambda_235),
+                          ("208Pb/232Th", lambda_232)):
+        if system not in systems:
+            continue
         ratio = _numeric(frame, system + "*")
         dates[system] = np.log1p(ratio.where(ratio > 0)) / decay / 1e6
     for name, ratio in _numeric(frame, "207Pb/206Pb*").items():
+        if "207Pb/206Pb" not in systems:
+            break
         if not np.isfinite(ratio) or ratio <= 0:
             continue
         def residual(years):

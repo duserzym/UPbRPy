@@ -22,6 +22,7 @@ from .results import *  # noqa: F401,F403
 from .pipeline import *  # noqa: F401,F403
 from .reproducibility import *  # noqa: F401,F403
 from .project import *  # noqa: F401,F403
+from .export_table import *  # noqa: F401,F403
 
 from .constants import __all__ as _constants_all
 from .standards import __all__ as _standards_all
@@ -41,6 +42,7 @@ from .results import __all__ as _results_all
 from .pipeline import __all__ as _pipeline_all
 from .reproducibility import __all__ as _reproducibility_all
 from .project import __all__ as _project_all
+from .export_table import __all__ as _export_table_all
 
 __all__ = [
     *_constants_all,
@@ -61,4 +63,5 @@ __all__ = [
     *_pipeline_all,
     *_reproducibility_all,
     *_project_all,
+    *_export_table_all,
 ]

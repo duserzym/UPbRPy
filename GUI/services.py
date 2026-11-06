@@ -257,6 +257,7 @@ def pipeline_config_from_session(
         ),
         automatic_flags=retained_config.automatic_flags,
         depth_calibration=retained_config.depth_calibration,
+        export_settings=retained_config.export_settings,
         common_pb_options=common_pb_options,
         uncertainty=UncertaintySettings(
             propagate_baseline=True,
@@ -1389,9 +1390,10 @@ def ensure_finalized_results(
     session: ReductionSession,
     preset: WorkflowPreset,
 ):
-    """Return common-Pb calculations, flags, and preferred-age decisions."""
+    """Return final decisions and both legacy and per-system RM summaries."""
     cache_key = "finalized_results"
-    result = ensure_shared_pipeline(session, preset).run_finalize()
+    pipeline = ensure_shared_pipeline(session, preset)
+    result = pipeline.run_finalize()
     ensure_spot_means(session, preset)
     session.reduction_cache[cache_key] = result
     return result

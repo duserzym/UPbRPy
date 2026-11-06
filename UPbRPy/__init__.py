@@ -24,6 +24,7 @@ FOCUSED_SUBMODULES = frozenset(
         "concentration",
         "constants",
         "depth",
+        "export_table",
         "fractionation",
         "io",
         "isochron",

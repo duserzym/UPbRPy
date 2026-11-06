@@ -19,6 +19,7 @@ from enum import Enum
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -38,6 +39,9 @@ from .standards import (
     canonicalize_reference_material_samples,
     reference_library_info,
 )
+
+if TYPE_CHECKING:
+    from .export_table import ExportSettings
 
 PIPELINE_FORMAT_VERSION = 2
 
@@ -267,9 +271,15 @@ class PipelineConfig:
     uncertainty: UncertaintySettings = field(default_factory=UncertaintySettings)
     depth_calibration: LinearDepthCalibration | None = None
     detector_calibration: dict = field(default_factory=dict)
+    export_settings: ExportSettings | None = None
 
     def __post_init__(self) -> None:
         """Validate calibration mode and required configuration invariants."""
+        if self.export_settings is not None:
+            from .export_table import ExportSettings
+
+            if not isinstance(self.export_settings, ExportSettings):
+                raise TypeError("export_settings must be ExportSettings or None")
         mode = str(self.common_pb_calibration).strip().lower()
         if mode not in {"radiogenic", "tera_wasserburg"}:
             raise ValueError(
@@ -337,6 +347,8 @@ class PipelineConfig:
             "automatic_flags": asdict(self.automatic_flags),
             "common_pb_options": dict(self.common_pb_options),
             "uncertainty": self.uncertainty.to_dict(),
+            "export_settings": (None if self.export_settings is None
+                                else self.export_settings.to_dict()),
             "depth_calibration": (
                 None
                 if self.depth_calibration is None
@@ -373,6 +385,10 @@ def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
     data["uncertainty"] = UncertaintySettings(
         **dict(data.get("uncertainty", {}))
     )
+    if data.get("export_settings") is not None:
+        from .export_table import ExportSettings
+
+        data["export_settings"] = ExportSettings.from_dict(data["export_settings"])
     depth_calibration = data.get("depth_calibration")
     if isinstance(depth_calibration, Mapping):
         data["depth_calibration"] = linear_depth_calibration_from_dict(
@@ -983,6 +999,13 @@ class ReductionPipeline:
         )
         result.parallel_results.attrs["detector_calibration"] = (
             self.experiment.attrs.get("detector_calibration", {"mode": "qtegra"})
+        )
+        from .export_table import summarize_reference_materials_by_system
+
+        result.reference_material_summary_by_system = summarize_reference_materials_by_system(
+            result.parallel_results, self.standard_archive,
+            (self.config.primary_68_standard, self.config.primary_76_standard,
+             self.config.primary_82_standard, *self.config.secondary_standards),
         )
         return self.cache.set(PipelineStage.FINALIZE, result)
 

@@ -248,7 +248,7 @@ concordia age, which made 91500 look 40 Ma old (docs/notes/91500_bias_2026-11-05
 ### 4.5 Notes column
 
 Short, comma-separated, from fixed vocabulary: `excluded` (unticked in
-Studio's final review), `discordant` (|disc| - 2s > threshold), `high 204`
+Studio's final review), `discordant` (|disc| - 2s > threshold), `204Pb detected`
 (`flag_detectable_204pb`), `reverse fractionation`, `high common Pb`,
 `burn-through`, `high ratio scatter`, `U mean/intercept mismatch`,
 `high uncertainty`, `session extrapolation`, `concentration reference glass`.

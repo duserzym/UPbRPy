@@ -7,7 +7,7 @@ succinct, reproducible result table without deleting the underlying columns.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import re
 
@@ -117,6 +117,7 @@ class FinalizedReduction:
     quality_metrics: pd.DataFrame
     secondary_standard_summary: pd.DataFrame
     decision: ReductionDecision
+    reference_material_summary_by_system: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def calculate_spot_quality_metrics(
