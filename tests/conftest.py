@@ -16,6 +16,9 @@ from __future__ import annotations
 import importlib.abc
 import os
 import sys
+from pathlib import Path
+
+import pytest
 
 
 class _BlockedImports(importlib.abc.MetaPathFinder):
@@ -42,7 +45,7 @@ if _blocked:
     sys.meta_path.insert(0, _BlockedImports(_blocked))
 
 
-def _isolate_qt_settings() -> None:
+def _isolate_qt_settings() -> Path | None:
     try:
         from PySide6 import QtCore
     except ImportError:
@@ -54,5 +57,27 @@ def _isolate_qt_settings() -> None:
     for scope in (QtCore.QSettings.Scope.UserScope, QtCore.QSettings.Scope.SystemScope):
         QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, scope, folder)
 
+    class IsolatedQSettings(QtCore.QSettings):
+        """Redirect the organization-name overload, which always uses native settings."""
 
-_isolate_qt_settings()
+        def __init__(self, *args, **kwargs):
+            if args and isinstance(args[0], str) and (len(args) < 2 or isinstance(args[1], str)):
+                super().__init__(self.Format.IniFormat, self.Scope.UserScope, *args, **kwargs)
+            else:
+                super().__init__(*args, **kwargs)
+
+    # Install before collection imports any GUI modules. Explicit format and
+    # file-name overloads still go through to Qt unchanged; enums are inherited.
+    QtCore.QSettings = IsolatedQSettings
+    return Path(folder)
+
+
+_qt_settings_folder = _isolate_qt_settings()
+
+
+@pytest.fixture
+def qt_settings_folder() -> Path:
+    """Return the temporary settings root installed before test collection."""
+    if _qt_settings_folder is None:
+        pytest.skip("PySide6 is unavailable")
+    return _qt_settings_folder

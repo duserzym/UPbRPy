@@ -3210,6 +3210,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "sigma_level": self.sigma_level,
             "channel_colors": dict(self.channel_colors),
             "selection_colors": dict(self.selection_colors),
+            "review_spot_colour": self.results_table.spot_colour_mode(),
+            "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
             "include_export_concentrations": (
                 self.session.include_export_concentrations
@@ -3394,6 +3396,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_workflow_ui()
 
         workspace = restored.workspace
+        self.results_table.set_spot_colour_mode(str(workspace.get(
+            "review_spot_colour", self.results_table.spot_colour_mode())))
+        self.results_table.set_depth_colormap(str(workspace.get(
+            "review_depth_colormap", self.results_table.depth_colormap_combo.currentText())))
         folder_overrides = workspace.get("spot_folder_overrides", {})
         self._spot_folder_overrides = (
             {

@@ -2138,6 +2138,72 @@ def concordia_age_from_frame(
     )
 
 
+@dataclass(frozen=True)
+class ConcordiaAgeReadout:
+    """Common concordia age and internal 2SE for a review set."""
+
+    age_ma: float
+    age_2se: float
+    mswd: float
+    p_value: float
+    n: int
+    space: str
+
+    @property
+    def text(self) -> str:
+        """Return copyable age, uncertainty, fit statistic and spot count."""
+        from .results import format_mswd, format_value_with_uncertainty
+
+        age = format_value_with_uncertainty(self.age_ma, self.age_2se)
+        return f"Concordia age {age} Ma (2σ) · MSWD {format_mswd(self.mswd)} · n = {self.n}"
+
+
+def concordia_age_readout(
+    frame, *, space="wetherill", include_calibration_uncertainty=True,
+) -> ConcordiaAgeReadout | None:
+    """Fit usable parallel-result rows, returning None for missing or bad input.
+
+    Named calibration branches take precedence over plain 2SE and correlation
+    columns. Ratios and errors must be finite and positive; correlations may
+    be negative or zero, and finite endpoint values are clipped as for review
+    ellipses. A missing correlation column or NaN value means zero correlation.
+    """
+    import pandas as pd
+
+    try:
+        data = pd.DataFrame(frame)
+        key = normalise_space(space)
+        x, y, stem = (("207Pb/235U", "206Pb/238U", "err_corr") if key == "wetherill"
+                      else ("238U/206Pb", "207Pb/206Pb", "tw_rho"))
+        branch = "with_calibration" if include_calibration_uncertainty else "no_calibration"
+
+        def column(*candidates):
+            name = next(name for name in candidates if name in data)
+            return pd.to_numeric(data[name], errors="coerce").to_numpy(dtype=float)
+
+        xv, yv = column(x), column(y)
+        sx = column(f"{x}_2e_{branch}", f"{x}_2e") / 2
+        sy = column(f"{y}_2e_{branch}", f"{y}_2e") / 2
+        rho = (column(f"{stem}_{branch}", stem)
+               if any(name in data for name in (f"{stem}_{branch}", stem)) else np.zeros(len(data)))
+        rho = np.where(np.isnan(rho), 0.0, rho)
+        valid = np.isfinite(rho)
+        for values in (xv, yv, sx, sy):
+            valid &= np.isfinite(values) & (values > 0)
+        if not valid.any():
+            return None
+        result = concordia_age(xv[valid], yv[valid], sx[valid], sy[valid],
+                               np.clip(rho[valid], -.999, .999), space=key)
+        if (not np.all(np.isfinite([result.age_ma, result.two_sigma_ma, result.mswd, result.p_value]))
+                or result.age_ma <= 0 or result.two_sigma_ma <= 0):
+            return None
+        return ConcordiaAgeReadout(result.age_ma, result.two_sigma_ma, result.mswd,
+                                   result.p_value, result.n, result.space)
+    except Exception:
+        # Review must remain usable when an incomplete frame or failed fit is supplied.
+        return None
+
+
 def find_intersection_ages(line: LineFit, space: str, max_age_ma=EARTH_AGE_MA):
     """Find unique line-concordia intersections over the Earth-age interval.
 
@@ -2819,6 +2885,8 @@ __all__ = [
     "concordia_point",
     "concordia_age",
     "concordia_age_from_frame",
+    "ConcordiaAgeReadout",
+    "concordia_age_readout",
     "concordia_intercepts",
     "fit_discordia",
     "fit_discordia_from_frame",

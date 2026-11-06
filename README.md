@@ -217,6 +217,32 @@ materials, fit models, outlier filtering, common-Pb method, calibration
 uncertainty, and preferred-age transition are represented directly in the
 shared pipeline configuration.
 
+#### Final review (step 9)
+
+The include check boxes choose which spots appear on the Spot concordia and
+enter its live concordia age readout. They affect review only; reduced results
+and exports stay unchanged. Click to select a spot, Shift-click to select a
+range, and Cmd/Ctrl-click to add or remove individual spots. Cmd/Ctrl+A selects
+all visible spots; Space toggles inclusion for the selection. The right-click
+menu also provides selection and inclusion actions. **Select** drag mode selects
+spots inside a rectangle. Double-click the plot to reset its view.
+
+Concordia age labels adjust their spacing and precision as you zoom. Hover over
+a point for spot metadata, ratios, and reduced ages. Spot points and ellipses
+use **Sample** colours and a legend by default; **Spot** gives each spot its own
+colour, and **Single** uses one colour. Depth concordia uses **plasma** by default;
+the colour-map picker offers other maps, always with the lighter end indicating
+shallower, earlier sweeps. The bar shows time in ablation or sweep position.
+
+Use **Group by sample** to browse sample groups and the filter to find spots or
+samples. The live readout fits the included spots in your selection, or all
+included spots when nothing is selected, using the current diagram and
+calibration uncertainty setting. It reports the concordia age with 2SE, MSWD,
+and spot count, and marks the fitted age on the curve. Colour preferences are
+remembered in Studio settings and saved with the project's workspace.
+
+![Final review](docs/screenshots/studio_final_spot_concordia_1440x900.png)
+
 Publication exports follow a Horstwood Table 4-style layout and keep
 analytical, calibration-inclusive, and optional systematic uncertainty
 components explicit. See

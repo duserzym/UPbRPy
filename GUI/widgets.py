@@ -19,7 +19,7 @@ from GUI.services import CHANNEL_SECTIONS, _parse_channel_name
 from GUI.state import ReductionSession
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
-from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
+from UPbRPy.isochron import concordia_age_readout, tera_wasserburg_point, wetherill_point
 from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
 from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
 from UPbRPy.ratios import (
@@ -1040,7 +1040,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._include_flags = {}
         self._spot_colors = {}
         self._sample_colors = {}
-        self._colour_mode = "spot"
+        self._colour_mode = "sample"
+        self._depth_colormap = "plasma"
+        self._colorbar = None
+        self._concordia_age_ma = None
+        self._age_marker = None
         self._default_range = None
         self._age_items = []
         self._label_ages = np.array([])
@@ -1143,7 +1147,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         include_calibration_uncertainty: bool,
         theme: ThemeSpec,
         reset_view: bool = True,
-        colour_mode: str = "spot",
+        colour_mode: str = "sample",
+        depth_colormap: str = "plasma",
     ) -> None:
         """Display selected spot means or one spot's corrected sweeps."""
         preserve_view = (not reset_view and self._diagram == diagram and self._kind == kind)
@@ -1159,6 +1164,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         )
         self._theme = theme
         self._colour_mode = colour_mode
+        self._depth_colormap = depth_colormap
         if self._kind == "spot" and "sample" in frame:
             # Standalone canvases can also colour their complete input frame.
             samples = set(frame["sample"].dropna().astype(str))
@@ -1168,6 +1174,83 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                                        for i, name in enumerate(samples)}
         self.setBackground(theme.plot_background)
         self._draw(preserve_view=preserve_view)
+
+    def set_concordia_age(self, age_ma: float | None) -> None:
+        """Mark the fitted age on the curve without fitting or changing the view."""
+        self._concordia_age_ma = age_ma
+        if self._plot_item is None or self._theme is None:
+            return
+        if self._age_marker is None:
+            self._age_marker = pg.ScatterPlotItem(symbol="d", size=10)
+            self._age_marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            self._age_marker.setZValue(20)
+            self._plot_item.addItem(self._age_marker, ignoreBounds=True)
+        if age_ma is None or self._kind != "spot":
+            self._age_marker.setData([], [])
+            return
+        point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
+        x, y = point(np.array([age_ma]))
+        self._age_marker.setData(x, y, brush=pg.mkBrush(self._theme.accent),
+                                 pen=pg.mkPen(self._theme.axis_text, width=.7))
+
+    @staticmethod
+    def depth_color_map(name: str) -> pg.ColorMap:
+        """Return a built-in map oriented with its lighter endpoint at time zero."""
+        source = pg.colormap.get(name)
+        colors = source.color.copy()
+        qcolors = source.mapToQColor(source.pos)
+
+        def luminance(rgb):
+            rgb = rgb[:3]
+            linear = np.where(rgb <= .04045, rgb / 12.92, ((rgb + .055) / 1.055) ** 2.4)
+            return float(linear @ np.array([.2126, .7152, .0722]))
+
+        if luminance(colors[0]) < luminance(colors[-1]):
+            return pg.ColorMap(1 - source.pos[::-1], qcolors[::-1], name=name)
+        return pg.ColorMap(source.pos.copy(), qcolors, name=name)
+
+    def _depth_brushes(self, frame, theme):
+        use_time = "signal_relative_time" in frame
+        times = (pd.to_numeric(frame["signal_relative_time"], errors="coerce").to_numpy(dtype=float)
+                 if use_time else np.arange(len(frame), dtype=float))
+        finite = times[np.isfinite(times)]
+        low, high = (float(finite.min()), float(finite.max())) if finite.size else (0., 1.)
+        cmap = self.depth_color_map(self._depth_colormap)
+        normalized = (times - low) / max(high - low, np.finfo(float).eps)
+        brushes = [cmap.mapToQColor(float(np.clip(value, 0, 1))) if np.isfinite(value)
+                   else pg.mkColor(theme.muted) for value in normalized]
+        if self._colorbar is None:
+            self._colorbar = pg.ColorBarItem(width=10, interactive=False, orientation="horizontal",
+                                             colorMapMenu=False)
+            self.addItem(self._colorbar, 1, 0)
+            self.ci.layout.setRowStretchFactor(0, 1)
+            self.ci.layout.setRowStretchFactor(1, 0)
+            self._colorbar.setMaximumHeight(65)
+        self._colorbar.show()
+        self._colorbar.setColorMap(cmap)
+        self._colorbar.setLevels((low, high if high > low else low + 1))
+        for name in ("left", "right", "top", "bottom"):
+            axis = self._colorbar.getAxis(name)
+            axis.setPen(pg.mkPen(theme.axis_line))
+            axis.setTextPen(pg.mkPen(theme.axis_text))
+        label = "Time in ablation (s)" if use_time else "Sweep"
+        self._colorbar.axis.setLabel(label, color=theme.axis_text)
+
+        def endpoint(value, depth):
+            text = f"{value:.2g} s" if use_time else f"sweep {int(value) + 1}"
+            return value, f"{text} ({depth})"
+
+        ticks = [endpoint(low, "shallow")]
+        if high > low:
+            ticks.append(endpoint(high, "deep"))
+        # Tick text is centred at each endpoint. Reserve its overhang inside
+        # the canvas and allow the axis to draw the full labels.
+        metrics = QtGui.QFontMetricsF(self._colorbar.axis.style["tickFont"] or self.font())
+        margin = int(max(metrics.horizontalAdvance(text) for _, text in ticks) / 2) + 10
+        self._colorbar.layout.setContentsMargins(margin, 0, margin, 0)
+        self._colorbar.axis.setStyle(hideOverlappingLabels=margin)
+        self._colorbar.axis.setTicks([ticks])
+        return brushes
 
     @staticmethod
     def uncertainty_column(
@@ -1262,6 +1345,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                     self.scene().removeItem(overlay)
                     overlay.deleteLater()
         self._scatter = None
+        self._age_marker = None
         self._ellipses = []
         self._points = []
         self._point_xy = np.empty((0, 2))
@@ -1271,6 +1355,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._label_ages = np.array([])
         self._default_range = None
         self._legend = None
+        if self._colorbar is not None:
+            self._colorbar.hide()
         theme = self._theme
         if theme is None:
             return
@@ -1394,29 +1480,13 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         )
         finite = np.isfinite(x_values) & np.isfinite(y_values)
 
-        if self._kind == "depth" and "signal_relative_time" in frame.columns:
-            times = pd.to_numeric(
-                frame["signal_relative_time"], errors="coerce"
-            ).to_numpy()
-            finite_times = times[np.isfinite(times)]
-            time_min = float(np.nanmin(finite_times)) if finite_times.size else 0.0
-            time_span = (
-                float(np.nanmax(finite_times) - time_min)
-                if finite_times.size
-                else 1.0
-            )
-            time_span = max(time_span, np.finfo(float).eps)
-            normalized = np.clip((times - time_min) / time_span, 0.0, 1.0)
-            brushes = [
-                pg.intColor(int(value * 255), hues=256)
-                if np.isfinite(value)
-                else pg.mkColor(theme.muted)
-                for value in normalized
-            ]
+        if self._kind == "depth":
+            brushes = self._depth_brushes(frame, theme)
         else:
             brushes = [
                 pg.mkColor(self._sample_colors.get(str(row.get("sample", "")), theme.muted)
-                           if self._colour_mode == "sample" else
+                           if self._colour_mode == "sample" else theme.accent
+                           if self._colour_mode == "single" else
                            self._spot_colors.get(str(row.get("spot_name", "")),
                                                  _DIAG_SPOT_COLORS[index % len(_DIAG_SPOT_COLORS)]))
                 for index, row in enumerate(frame.to_dict("records"))
@@ -1468,6 +1538,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if retained_range is not None:
             plot.setRange(xRange=retained_range[0], yRange=retained_range[1], padding=0)
         self._update_sample_legend(finite)
+        self.set_concordia_age(self._concordia_age_ma)
         if hovered is not None:
             index = next((i for i, point in enumerate(self._points) if point[0] == hovered), None)
             self._set_hover(index)
@@ -2177,13 +2248,17 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
-        """Create review views, optionally remembering grouping in settings."""
+        """Create review views, optionally remembering display preferences."""
         super().__init__(parent)
         self._settings = settings
         self.include_flags: dict[str, bool] = {}
         self.selected_spots: set[str] = set()
         self._spot_samples: dict[str, str] = {}
         self._syncing_selection = False
+        self._readout_timer = QtCore.QTimer(self)
+        self._readout_timer.setSingleShot(True)
+        self._readout_timer.timeout.connect(self._update_age_readout)
+        self.concordia_readout = None
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
@@ -2606,6 +2681,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         finally:
             self._syncing_selection = False
         self.selectedSpotsChanged.emit(set(self.selected_spots))
+        self._readout_timer.start(0)
 
     @staticmethod
     def _scroll_selection_into_view(view, rows) -> None:
@@ -2749,6 +2825,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.spot_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self._chooser_stack = QtWidgets.QStackedWidget()
+        # A wrapping readout makes Qt ask this page for height-for-width.
+        # Let the chooser and canvas shrink instead of inheriting their
+        # preferred heights and scrolling the bottom controls off a laptop.
+        self._chooser_stack.setMinimumHeight(80)
+        self._chooser_stack.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                           QtWidgets.QSizePolicy.Policy.Ignored)
         self._chooser_stack.addWidget(self.spot_choice_list)
         self._chooser_stack.addWidget(self.spot_choice_tree)
         self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
@@ -2771,19 +2853,34 @@ class ResultsTableWidget(QtWidgets.QWidget):
         colour_row.addWidget(QtWidgets.QLabel("Colour: "))
         colour_group = QtWidgets.QButtonGroup(page)
         self.spot_colour_buttons = {}
-        for key, label in (("spot", "Spot"), ("sample", "Sample")):
+        saved_colour = (self._settings.value("review_spot_colour_v1", "sample", type=str)
+                        if self._settings is not None else "sample")
+        if saved_colour not in {"sample", "spot", "single"}:
+            saved_colour = "sample"
+        for key, label in (("sample", "Sample"), ("spot", "Spot"), ("single", "Single")):
             button = QtWidgets.QToolButton()
             button.setText(label)
             button.setCheckable(True)
             button.setProperty("modeToggle", True)
-            button.setChecked(key == "spot")
-            button.clicked.connect(self.refresh_spot_concordia)
+            button.setChecked(key == saved_colour)
+            button.clicked.connect(lambda checked=False, key=key: self.set_spot_colour_mode(key))
             colour_group.addButton(button)
             colour_row.addWidget(button)
             self.spot_colour_buttons[key] = button
         colour_row.addStretch(1)
         controls_layout.addLayout(colour_row)
+        self.concordia_age_label = QtWidgets.QLabel("Included: No concordia age for this set")
+        self.concordia_age_label.setObjectName("SecondaryText")
+        self.concordia_age_label.setWordWrap(True)
+        self.concordia_age_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+                                                       | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.concordia_age_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                              QtWidgets.QSizePolicy.Policy.Preferred)
+        self.concordia_age_label.setMaximumHeight(self.concordia_age_label.fontMetrics().lineSpacing() * 3 + 6)
+        controls_layout.addWidget(self.concordia_age_label)
         self.spot_concordia = ConcordiaReviewWidget()
+        self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                          QtWidgets.QSizePolicy.Policy.Ignored)
         layout.addWidget(controls)
         layout.addWidget(self.spot_concordia, 1)
         return page
@@ -2812,6 +2909,25 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.refresh_depth_concordia
         )
         layout.addWidget(diagram_row)
+        cmap_row = QtWidgets.QHBoxLayout()
+        cmap_row.setSpacing(6)
+        cmap_row.addWidget(QtWidgets.QLabel("Colour map"))
+        self.depth_colormap_combo = StyledComboBox()
+        self.depth_colormap_combo.setMinimumContentsLength(7)
+        self.depth_colormap_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        available = set(pg.colormap.listMaps())
+        self.depth_colormap_combo.addItems([name for name in (
+            "plasma", "viridis", "inferno", "magma", "cividis", "turbo", "CET-L1", "CET-L2")
+            if name in available])
+        saved_map = (self._settings.value("review_depth_colormap_v1", "plasma", type=str)
+                     if self._settings is not None else "plasma")
+        index = self.depth_colormap_combo.findText(saved_map)
+        self.depth_colormap_combo.setCurrentIndex(max(0, index))
+        self.depth_colormap_combo.currentTextChanged.connect(self.set_depth_colormap)
+        cmap_row.addWidget(self.depth_colormap_combo)
+        cmap_row.addStretch(1)
+        layout.addLayout(cmap_row)
         self.depth_concordia = ConcordiaReviewWidget()
         layout.addWidget(self.depth_concordia, 1)
         return page
@@ -2918,10 +3034,73 @@ class ResultsTableWidget(QtWidgets.QWidget):
             ),
             theme=self._theme,
             reset_view=reset_view,
-            colour_mode="sample" if self.spot_colour_buttons["sample"].isChecked() else "spot",
+            colour_mode=self.spot_colour_mode(),
         )
+        self.spot_concordia.set_concordia_age(None)
+        self._readout_timer.start(0)
 
-    def refresh_depth_concordia(self) -> None:
+    def spot_colour_mode(self) -> str:
+        """Return the spot ellipse and point colour mode."""
+        return next(key for key, button in self.spot_colour_buttons.items() if button.isChecked())
+
+    def set_spot_colour_mode(self, mode: str) -> None:
+        """Choose sample, spot or single colour and remember the preference."""
+        if mode not in self.spot_colour_buttons:
+            return
+        self.spot_colour_buttons[mode].setChecked(True)
+        if self._settings is not None:
+            self._settings.setValue("review_spot_colour_v1", mode)
+        self.refresh_spot_concordia()
+
+    def set_depth_colormap(self, name: str) -> None:
+        """Choose a built-in depth map, recolouring without changing the view."""
+        index = self.depth_colormap_combo.findText(name)
+        if index < 0:
+            return
+        blocker = QtCore.QSignalBlocker(self.depth_colormap_combo)
+        self.depth_colormap_combo.setCurrentIndex(index)
+        del blocker
+        if self._settings is not None:
+            self._settings.setValue("review_depth_colormap_v1", name)
+        self.refresh_depth_concordia(reset_view=False)
+
+    def _update_age_readout(self):
+        frame = self._spot_frame
+        selected = bool(self.selected_spots)
+        names = {name for name, included in self.include_flags.items() if included
+                 and (not selected or name in self.selected_spots)}
+        frame = (frame.loc[frame.spot_name.astype(str).isin(names)] if "spot_name" in frame
+                 else frame.iloc[0:0])
+        self.concordia_readout = concordia_age_readout(
+            frame, space=self.selected_diagram(self.spot_diagram_buttons),
+            include_calibration_uncertainty=self._include_calibration_uncertainty)
+        prefix = "Selected" if selected else "Included"
+        result = self.concordia_readout
+        if result is None:
+            text = f"{prefix}: No concordia age for this set"
+            tooltip = text
+        else:
+            age = format_value_with_uncertainty(result.age_ma, result.age_2se)
+            text = (f"{prefix}: Concordia age\n{age} Ma (2σ)\n"
+                    f"MSWD {format_mswd(result.mswd)} · n = {result.n}")
+            tooltip = f"{prefix}: {result.text}"
+            if selected and len(names) < len(self.selected_spots):
+                tooltip += f"\n{len(names)} of {len(self.selected_spots)} selected are included"
+        self.concordia_age_label.setText(text)
+        self.concordia_age_label.setToolTip(tooltip)
+        self.spot_concordia.set_concordia_age(result.age_ma if result else None)
+
+    def hideEvent(self, event):
+        """Stop pending fits before closing or hiding the review views."""
+        self._readout_timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """Refresh the readout when returning to the review views."""
+        super().showEvent(event)
+        self._readout_timer.start(0)
+
+    def refresh_depth_concordia(self, *, reset_view: bool = True) -> None:
         """Redraw corrected sweeps for the chosen depth-profile spot."""
         if self._theme is None:
             return
@@ -2937,6 +3116,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 self._include_calibration_uncertainty
             ),
             theme=self._theme,
+            reset_view=reset_view,
+            depth_colormap=self.depth_colormap_combo.currentText(),
         )
 
     def create_table(
