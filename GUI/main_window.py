@@ -1829,7 +1829,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_frac_plot = SessionFractionationWidget()
         self.downhole_frac_plot.set_sigma_level(self.sigma_level)
         self.session_frac_plot.set_sigma_level(self.sigma_level)
-        self.results_table = ResultsTableWidget()
+        self.results_table = ResultsTableWidget(settings=self.settings)
         self.results_table.tabs.currentChanged.connect(
             self.on_results_review_tab_changed
         )

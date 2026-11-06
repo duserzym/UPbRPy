@@ -21,7 +21,7 @@ from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
-from UPbRPy.results import format_value_with_uncertainty
+from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
 from UPbRPy.ratios import (
     excel_plateau_inlier_mask,
     normalize_plateau_filter_method,
@@ -897,6 +897,52 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
                 return "Include"
             return str(self.frame.columns[section - int(self.include_flags is not None)])
         return str(section + 1)
+
+
+_SPOT_NAMES_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+_SAMPLE_ROLE = _SPOT_NAMES_ROLE + 1
+
+
+class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
+    """Filter spot names and samples, keeping tree groups in sample order."""
+
+    def __init__(self, parent=None, *, grouped=False):
+        super().__init__(parent)
+        self._query = ""
+        self._grouped = grouped
+        self.setRecursiveFilteringEnabled(grouped)
+        self.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
+
+    def set_spot_filter(self, text):
+        """Apply a literal, case-insensitive spot or sample substring."""
+        self.beginFilterChange()
+        self._query = text.strip().casefold()
+        self.endFilterChange()
+
+    def filterAcceptsRow(self, row, parent):
+        """Match spots directly and retain their sample ancestors recursively."""
+        if not self._query:
+            return super().filterAcceptsRow(row, parent)
+        model = self.sourceModel()
+        index = model.index(row, 0, parent)
+        if self._grouped:
+            if not parent.isValid():
+                return False  # Recursive filtering retains matching children.
+            names = index.data(_SPOT_NAMES_ROLE) or []
+            sample = index.data(_SAMPLE_ROLE) or ""
+        else:
+            names = [model.spot_name(row)]
+            sample = model.frame.iloc[row].get("sample", "")
+        return any(self._query in str(value).casefold() for value in [*names, sample])
+
+    def lessThan(self, left, right):
+        """Sort samples ascending even when their spot sort is descending."""
+        if self._grouped and not left.parent().isValid():
+            model = self.sourceModel()
+            a = model.index(left.row(), 0).data(_SAMPLE_ROLE)
+            b = model.index(right.row(), 0).data(_SAMPLE_ROLE)
+            return a > b if self.sortOrder() == QtCore.Qt.SortOrder.DescendingOrder else a < b
+        return super().lessThan(left, right)
 
 
 class _ConcordiaLegendSample(ItemSample):
@@ -2113,15 +2159,30 @@ class DetectorCalibrationPanel(NeumorphicFrame):
                            pen=pg.mkPen(theme.accent, width=3)).setZValue(2)
 
 
+class _ReviewTabs(QtWidgets.QTabWidget):
+    """Accept the original table handles when selecting their containing tab."""
+
+    def setCurrentWidget(self, widget):
+        """Select the tab containing a review view or page."""
+        while widget is not None and self.indexOf(widget) < 0:
+            widget = widget.parentWidget()
+        if widget is not None:
+            super().setCurrentWidget(widget)
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
     selectedSpotsChanged = QtCore.Signal(object)
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *,
+                 settings: QtCore.QSettings | None = None) -> None:
+        """Create review views, optionally remembering grouping in settings."""
         super().__init__(parent)
+        self._settings = settings
         self.include_flags: dict[str, bool] = {}
         self.selected_spots: set[str] = set()
+        self._spot_samples: dict[str, str] = {}
         self._syncing_selection = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -2133,14 +2194,20 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
 
-        self.tabs = QtWidgets.QTabWidget()
+        self.tabs = _ReviewTabs()
         self.results_table, self.results_model = self.create_table(include_flags=self.include_flags)
         self.results_model.includeChanged.connect(self._table_include_changed)
         self.results_table.selectionModel().selectionChanged.connect(self._table_selection_changed)
         self.secondary_table, self.secondary_model = self.create_table()
         self.depth_table, self.depth_model = self.create_table()
-        self.tabs.addTab(self.results_table, "Final results")
-        self.tabs.addTab(self.secondary_table, "Secondary standards")
+        self.results_tree, self.results_group_model = self._create_grouped_view()
+        self.secondary_tree, self.secondary_group_model = self._create_grouped_view()
+        (self.results_page, self.results_group_toggle, self.results_filter,
+         self._results_stack) = self._create_group_page(self.results_table, self.results_tree, "final")
+        (self.secondary_page, self.secondary_group_toggle, self.secondary_filter,
+         self._secondary_stack) = self._create_group_page(self.secondary_table, self.secondary_tree, "secondary")
+        self.tabs.addTab(self.results_page, "Final results")
+        self.tabs.addTab(self.secondary_page, "Secondary standards")
         self.tabs.addTab(self.depth_table, "Depth profile")
         # The concordia pages scroll when the plot column is short, so a
         # laptop screen does not force every results page to their height.
@@ -2155,12 +2222,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._spot_frame = pd.DataFrame()
         self._depth_frame = pd.DataFrame()
         self._include_calibration_uncertainty = True
-        for view in (self.results_table, self.spot_choice_list):
+        for view in self._review_views():
             view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
             view.installEventFilter(self)
             view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             view.customContextMenuRequested.connect(self._show_spot_menu)
         self.spot_choice_list.itemSelectionChanged.connect(self._chooser_selection_changed)
+        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+            view.selectionModel().selectionChanged.connect(
+                lambda *args, view=view: self._group_selection_changed(view))
         self.spot_concordia.selectionChanged.connect(
             lambda names: self.set_selected_spots(names, origin=self.spot_concordia)
         )
@@ -2168,8 +2238,279 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
 
+    def _review_views(self):
+        return (self.results_table, self.results_tree, self.secondary_tree,
+                self.spot_choice_list, self.spot_choice_tree)
+
+    def _create_grouped_view(self):
+        view = QtWidgets.QTreeView()
+        model = QtGui.QStandardItemModel(view)
+        proxy = _SpotReviewProxy(view, grouped=True)
+        proxy.setSourceModel(model)
+        view.setModel(proxy)
+        view.setSortingEnabled(True)
+        view.setAlternatingRowColors(True)
+        view.setUniformRowHeights(True)
+        view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        view.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.header().setStretchLastSection(False)
+        view.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        model.itemChanged.connect(lambda item: self._group_include_changed(item))
+        return view, model
+
+    def _group_button(self, key):
+        button = QtWidgets.QToolButton()
+        button.setText("Group by sample")
+        button.setCheckable(True)
+        button.setProperty("modeToggle", True)
+        if self._settings is not None:
+            button.setChecked(self._settings.value(f"review_group_{key}_v1", False, type=bool))
+            button.toggled.connect(lambda checked: self._settings.setValue(f"review_group_{key}_v1", checked))
+        return button
+
+    def _create_group_page(self, flat, tree, key):
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
+        toggle = self._group_button(key)
+        search = QtWidgets.QLineEdit()
+        search.setMinimumWidth(0)
+        search.setPlaceholderText("Filter spots…")
+        search.setClearButtonEnabled(True)
+        row.addWidget(toggle)
+        row.addWidget(search, 1)
+        layout.addLayout(row)
+        stack = QtWidgets.QStackedWidget()
+        stack.addWidget(flat)
+        stack.addWidget(tree)
+        stack.setCurrentIndex(int(toggle.isChecked()))
+        toggle.toggled.connect(lambda checked: self._switch_group_view(stack, checked))
+        search.textChanged.connect(lambda text: self._filter_group_page(flat, tree, text))
+        layout.addWidget(stack, 1)
+        return page, toggle, search, stack
+
+    def _switch_group_view(self, stack, checked):
+        stack.setCurrentIndex(int(checked))
+        self.set_selected_spots(self.selected_spots)
+
+    def _filter_group_page(self, flat, tree, text):
+        self._syncing_selection = True
+        try:
+            if flat is self.results_table:
+                flat.model().set_spot_filter(text)
+            else:
+                flat.model().setFilterKeyColumn(-1)
+                flat.model().setFilterFixedString(text)
+                flat.model().setFilterCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            tree.model().set_spot_filter(text)
+        finally:
+            self._syncing_selection = False
+        self.set_selected_spots(self.selected_spots)
+
+    @staticmethod
+    def _tree_rows(view):
+        model = view.model()
+        for row in range(model.rowCount()):
+            parent = model.index(row, 0)
+            yield parent
+            for child in range(model.rowCount(parent)):
+                yield model.index(child, 0, parent)
+
+    def _group_selection_changed(self, view):
+        if self._syncing_selection:
+            return
+        names = {name for index in view.selectionModel().selectedRows()
+                 for name in index.data(_SPOT_NAMES_ROLE) or []}
+        visible = self._visible_spot_names(view)
+        self.set_selected_spots(names | (self.selected_spots - visible), origin=view)
+
+    def _group_include_changed(self, item):
+        if not getattr(self, "_updating_groups", False) and item.column() == 0 and item.isCheckable():
+            self.set_spot_included(item.data(_SPOT_NAMES_ROLE) or [],
+                                   item.checkState() != QtCore.Qt.CheckState.Unchecked)
+
+    def _sample_summary(self, names):
+        frame = self.results_model.frame
+        if not {"spot_name", "preferred_date", "preferred_date_2e"}.issubset(frame.columns):
+            return ""
+        included = [name for name in names if self.include_flags.get(name, True)]
+        spots = frame.loc[frame.spot_name.astype(str).isin(included)]
+        result = weighted_mean_and_mswd(pd.to_numeric(spots.preferred_date, errors="coerce"),
+                                        pd.to_numeric(spots.preferred_date_2e, errors="coerce"))
+        if result["n"] < 2:
+            return ""
+        value = format_value_with_uncertainty(result["weighted_mean"], result["weighted_mean_2e"])
+        return f"{value} Ma (2SE); MSWD {format_mswd(result['mswd'])}; n={result['n']}"
+
+    @staticmethod
+    def _secondary_summary(row):
+        """Describe the engine's secondary summary without recalculating it."""
+        def number(column):
+            try:
+                return float(row.get(column, np.nan))
+            except (TypeError, ValueError):
+                return np.nan
+
+        parts = [str(row["sample"])]
+        total, flagged = number("n_total"), number("n_flagged")
+        counts = f"{total:g} spots" if np.isfinite(total) else ""
+        if np.isfinite(flagged):
+            counts += f" ({flagged:g} flagged)" if counts else f"{flagged:g} flagged"
+        if counts:
+            parts.append(counts)
+        mean = format_value_with_uncertainty(number("weighted_mean"), number("weighted_mean_2e"))
+        if mean:
+            parts.append(f"weighted mean {mean} Ma (2SE)")
+        mswd = format_mswd(number("mswd"))
+        if mswd:
+            parts.append(f"MSWD {mswd}")
+        accepted, error = number("accepted_age"), number("accepted_age_2e")
+        if np.isfinite(accepted):
+            uncertainty = f" ± {error:g}" if np.isfinite(error) else ""
+            parts.append(f"accepted {accepted:g}{uncertainty} Ma")
+        offset = number("offset_percent")
+        if np.isfinite(offset):
+            parts.append(f"offset {offset:+.1f}%")
+        return " · ".join(parts)
+
+    @staticmethod
+    def _group_row(values, columns, names, sample):
+        items = [QtGui.QStandardItem() for _ in range(len(columns) + 1)]
+        for item in items:
+            item.setEditable(False)
+        items[0].setCheckable(True)
+        items[0].setData(list(names), _SPOT_NAMES_ROLE)
+        items[0].setData(sample, _SAMPLE_ROLE)
+        for item, column in zip(items[1:], columns):
+            value = values.get(column, "")
+            if pd.isna(value):
+                value = ""
+            if isinstance(value, np.generic):
+                value = value.item()
+            item.setText(f"{value:.7g}" if isinstance(value, float) else str(value))
+            item.setData(value, QtCore.Qt.ItemDataRole.UserRole)
+        return items
+
+    def _build_grouped_views(self):
+        self._updating_groups = True
+        try:
+            final = self.results_model.frame
+            secondary = self.secondary_model.frame
+            child_columns = [name for name in ("spot_name", "preferred_date", "preferred_date_2e",
+                             "preferred_date_method", "preferred_date_pass", "disc%", "automatic_flags")
+                             if name in self._spot_frame]
+            for model, columns in ((self.results_group_model, list(final.columns)),
+                                   (self.secondary_group_model, child_columns)):
+                model.clear()
+                model.setHorizontalHeaderLabels(["Include", *map(str, columns)])
+            self.spot_choice_group_model.clear()
+            self.spot_choice_group_model.setHorizontalHeaderLabels(["Spots"])
+            self._spot_samples = {}
+            for frame in (final, self._spot_frame):
+                if "spot_name" in frame:
+                    for _, row in frame.iterrows():
+                        sample = row.get("sample", "")
+                        sample = "" if pd.isna(sample) else str(sample)
+                        self._spot_samples.setdefault(str(row.spot_name), sample)
+            if "spot_name" in final:
+                for sample in sorted({self._spot_samples[str(name)] for name in final.spot_name}):
+                    spots = final.loc[final.spot_name.astype(str).map(self._spot_samples).eq(sample)]
+                    names = list(spots.spot_name.astype(str))
+                    parent = self._group_row({}, list(final.columns), names, sample)
+                    self.results_group_model.appendRow(parent)
+                    for _, row in spots.iterrows():
+                        parent[0].appendRow(self._group_row(row, list(final.columns), [str(row.spot_name)], sample))
+            if "sample" in secondary:
+                for _, row in secondary.sort_values("sample").iterrows():
+                    sample = str(row["sample"])
+                    spots = self._spot_frame
+                    if {"sample", "spot_name"}.issubset(spots.columns):
+                        spots = spots.loc[spots["sample"].astype(str).eq(sample)]
+                    else:
+                        spots = pd.DataFrame()
+                    names = list(spots.spot_name.astype(str)) if "spot_name" in spots else []
+                    parent = self._group_row({}, child_columns, names, sample)
+                    parent[0].setText(self._secondary_summary(row))
+                    self.secondary_group_model.appendRow(parent)
+                    for _, spot in spots.iterrows():
+                        # Summary values remain the engine's; children show only spot fields.
+                        values = {column: spot.get(column, "") for column in child_columns}
+                        parent[0].appendRow(self._group_row(values, child_columns, [str(spot.spot_name)], sample))
+            for sample in sorted(set(self._spot_samples.values())):
+                names = [name for name in self.include_flags if self._spot_samples.get(name) == sample]
+                parent = self._group_row({}, [], names, sample)[0]
+                self.spot_choice_group_model.appendRow(parent)
+                for name in names:
+                    child = self._group_row({}, [], [name], sample)[0]
+                    child.setText(name)
+                    child.setToolTip(name)
+                    parent.appendRow(child)
+        finally:
+            self._updating_groups = False
+        self._update_group_inclusion()
+        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+            model = view.model()
+            columns = [model.headerData(column, QtCore.Qt.Orientation.Horizontal)
+                       for column in range(model.columnCount())]
+            view.sortByColumn(columns.index("spot_name") if "spot_name" in columns else 0,
+                              QtCore.Qt.SortOrder.AscendingOrder)
+            view.expandAll()
+        for view in (self.results_tree, self.secondary_tree):
+            for row in range(view.model().rowCount()):
+                view.setFirstColumnSpanned(row, QtCore.QModelIndex(), True)
+
+    def _update_group_inclusion(self):
+        self._updating_groups = True
+        try:
+            for model in (self.results_group_model, self.secondary_group_model, self.spot_choice_group_model):
+                for row in range(model.rowCount()):
+                    parent = model.item(row)
+                    names = parent.data(_SPOT_NAMES_ROLE) or []
+                    count = sum(self.include_flags.get(name, True) for name in names)
+                    state = (QtCore.Qt.CheckState.PartiallyChecked if 0 < count < len(names)
+                             else QtCore.Qt.CheckState.Checked if count else QtCore.Qt.CheckState.Unchecked)
+                    parent.setCheckState(state)
+                    sample = parent.data(_SAMPLE_ROLE) or "(no sample)"
+                    if model is self.results_group_model:
+                        summary = self._sample_summary(names)
+                        parent.setText(f"{sample} · {len(names)} spots ({count} included)" + (f" · {summary}" if summary else ""))
+                    elif model is self.spot_choice_group_model:
+                        parent.setText(f"{sample} · {count}/{len(names)}")
+                    parent.setToolTip(f"{sample} ({count} included / {len(names)})"
+                                      if model is self.spot_choice_group_model else parent.text())
+                    for child_row in range(parent.rowCount()):
+                        child = parent.child(child_row)
+                        included = self.include_flags.get(child.data(_SPOT_NAMES_ROLE)[0], True)
+                        child.setCheckState(QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked)
+                        child.setData(included, QtCore.Qt.ItemDataRole.UserRole)
+        finally:
+            self._updating_groups = False
+
     def _scroll_hovered_spot(self, name):
-        chooser = self.spot_choice_list
+        chooser = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
+        if chooser is self.spot_choice_tree:
+            model = self.spot_choice_group_model
+            rows = []
+            self._updating_groups = True
+            try:
+                for index in self._tree_rows(chooser):
+                    if not index.parent().isValid():
+                        continue
+                    names = index.data(_SPOT_NAMES_ROLE)
+                    item = model.itemFromIndex(chooser.model().mapToSource(index))
+                    item.setData(QtGui.QBrush(theme_color(self._theme.accent_soft)) if names == [name] else None,
+                                 QtCore.Qt.ItemDataRole.BackgroundRole)
+                    if names == [name]:
+                        chooser.expand(index.parent())
+                        rows.append(index)
+            finally:
+                self._updating_groups = False
+            self._scroll_selection_into_view(chooser, rows)
+            self._hovered_choice_name = name
+            return
         blocker = QtCore.QSignalBlocker(chooser)
         for row in range(chooser.count()):
             item = chooser.item(row)
@@ -2183,8 +2524,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
         del blocker
 
     def _results_tab_changed(self, _index):
-        if self.tabs.currentWidget() is self.results_table:
-            rows = sorted(self.results_table.selectionModel().selectedRows(), key=lambda index: index.row())
+        if self.tabs.currentWidget() is self.results_page:
+            view = self.results_tree if self.results_group_toggle.isChecked() else self.results_table
+            rows = view.selectionModel().selectedRows()
+            if view is self.results_tree:
+                for index in rows:
+                    view.expand(index.parent())
+                self._scroll_selection_into_view(view, rows)
+                return
+            rows = sorted(rows, key=lambda index: index.row())
             self._scroll_selection_into_view(
                 self.results_table, [index for index in rows if not self.results_table.isRowHidden(index.row())])
 
@@ -2208,6 +2556,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.results_model.dataChanged.emit(self.results_model.index(0, 0),
                                                self.results_model.index(self.results_model.rowCount()-1, 0),
                                                [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
+        self._update_group_inclusion()
         self.refresh_spot_concordia()
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
@@ -2237,6 +2586,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                (self.spot_choice_list, chooser_rows)):
                 if view is not origin:
                     self._scroll_selection_into_view(view, rows)
+            for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+                selection = QtCore.QItemSelection()
+                rows = []
+                for index in self._tree_rows(view):
+                    if not index.parent().isValid():
+                        continue  # A header is a selection action for its spots.
+                    names = set(index.data(_SPOT_NAMES_ROLE) or [])
+                    if names and names <= self.selected_spots:
+                        selection.select(index, index.siblingAtColumn(view.model().columnCount()-1))
+                        if index.parent().isValid():
+                            rows.append(index)
+                view.selectionModel().select(selection, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
+                if view is not origin and view.isVisible():
+                    for index in rows:
+                        view.expand(index.parent())
+                    self._scroll_selection_into_view(view, rows)
             self.spot_concordia.select_spots(self.selected_spots)
         finally:
             self._syncing_selection = False
@@ -2258,7 +2623,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if not self._syncing_selection:
             proxy = self.results_table.model()
             self.set_selected_spots({self.results_model.spot_name(proxy.mapToSource(index).row())
-                                     for index in self.results_table.selectionModel().selectedRows()},
+                                     for index in self.results_table.selectionModel().selectedRows()}
+                                    | (self.selected_spots - self._visible_spot_names(self.results_table)),
                                     origin=self.results_table)
 
     def _chooser_selection_changed(self):
@@ -2269,6 +2635,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                     | (self.selected_spots & hidden), origin=self.spot_choice_list)
 
     def _visible_spot_names(self, view):
+        if view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+            return {name for index in self._tree_rows(view) if index.parent().isValid()
+                    for name in index.data(_SPOT_NAMES_ROLE) or []}
         if view is self.spot_choice_list:
             return {view.item(i).text() for i in range(view.count()) if not view.item(i).isHidden()}
         proxy = self.results_table.model()
@@ -2291,15 +2660,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def invert_selection(self, view=None) -> None:
         """Invert selection within the invoking view's visible spots."""
-        visible = self._visible_spot_names(self.results_table if view is None else view)
+        if view is None:
+            view = self.results_tree if self.results_group_toggle.isChecked() else self.results_table
+        visible = self._visible_spot_names(view)
         self.set_selected_spots(self.selected_spots ^ visible, origin=view)
 
     def select_same_sample(self) -> None:
         """Select all spots belonging to any currently selected sample."""
-        frame = self.results_model.frame
-        if {"sample", "spot_name"}.issubset(frame.columns):
-            samples = frame.loc[frame.spot_name.astype(str).isin(self.selected_spots), "sample"]
-            self.set_selected_spots(set(frame.loc[frame["sample"].isin(samples), "spot_name"].astype(str)))
+        samples = {self._spot_samples[name] for name in self.selected_spots if name in self._spot_samples}
+        self.set_selected_spots({name for name, sample in self._spot_samples.items() if sample in samples})
 
     def _show_spot_menu(self, pos):
         view = self.sender()
@@ -2309,11 +2678,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                ("Invert selection", lambda: self.invert_selection(view)),
                                ("Select same sample", self.select_same_sample)):
             menu.addAction(text, callback)
+        if isinstance(view, QtWidgets.QTreeView):
+            menu.addSeparator()
+            menu.addAction("Expand all", view.expandAll)
+            menu.addAction("Collapse all", view.collapseAll)
         menu.exec(view.viewport().mapToGlobal(pos))
 
     def eventFilter(self, watched, event):
         """Handle review inclusion and native Select All keyboard commands."""
-        if event.type() == QtCore.QEvent.Type.KeyPress and watched in (self.results_table, self.spot_choice_list):
+        if event.type() == QtCore.QEvent.Type.KeyPress and watched in self._review_views():
             if event.key() == QtCore.Qt.Key.Key_Space:
                 self.toggle_selected_inclusion()
                 return True
@@ -2365,10 +2738,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_filter.setPlaceholderText("Filter spots…")
         self.spot_filter.textChanged.connect(self.filter_spot_choices)
         controls_layout.addWidget(self.spot_filter)
+        self.spot_group_toggle = self._group_button("chooser")
+        controls_layout.addWidget(self.spot_group_toggle)
         self.spot_choice_list = QtWidgets.QListWidget()
         self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.spot_choice_list.itemChanged.connect(self._chooser_include_changed)
-        controls_layout.addWidget(self.spot_choice_list, 1)
+        self.spot_choice_tree, self.spot_choice_group_model = self._create_grouped_view()
+        self.spot_choice_tree.model().setSortRole(QtCore.Qt.ItemDataRole.DisplayRole)
+        self.spot_choice_tree.setHeaderHidden(True)
+        self.spot_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        self.spot_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._chooser_stack = QtWidgets.QStackedWidget()
+        self._chooser_stack.addWidget(self.spot_choice_list)
+        self._chooser_stack.addWidget(self.spot_choice_tree)
+        self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
+        self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
+        controls_layout.addWidget(self._chooser_stack, 1)
         select_row = QtWidgets.QHBoxLayout()
         select_all = QtWidgets.QPushButton("All")
         select_none = QtWidgets.QPushButton("None")
@@ -2497,12 +2882,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
         blocker = QtCore.QSignalBlocker(self.spot_choice_list)
         for index in range(self.spot_choice_list.count()):
             item = self.spot_choice_list.item(index)
-            item.setHidden(query not in item.text().casefold())
+            sample = getattr(self, "_spot_samples", {}).get(item.text(), "")
+            item.setHidden(not any(query in value.casefold() for value in (item.text(), sample)))
         del blocker
+        syncing = self._syncing_selection
+        self._syncing_selection = True
+        try:
+            self.spot_choice_tree.model().set_spot_filter(text)
+        finally:
+            self._syncing_selection = syncing
+        if not syncing:
+            self.set_selected_spots(self.selected_spots, origin=self.spot_choice_list)
 
     def set_all_spot_choices(self, checked: bool) -> None:
         """Check or clear every currently visible spot in one redraw."""
-        self.set_spot_included(self._visible_spot_names(self.spot_choice_list), checked)
+        view = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
+        self.set_spot_included(self._visible_spot_names(view), checked)
 
     def refresh_spot_concordia(self, *, reset_view: bool = False) -> None:
         """Redraw only the checked final spot means."""
@@ -2552,7 +2947,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         """Create one sortable table backed by a Qt proxy."""
         view = QtWidgets.QTableView()
         model = DataFrameTableModel(parent=view, include_flags=include_flags)
-        proxy = QtCore.QSortFilterProxyModel(view)
+        proxy = _SpotReviewProxy(view) if include_flags is not None else QtCore.QSortFilterProxyModel(view)
         proxy.setSourceModel(model)
         proxy.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
         view.setModel(proxy)
@@ -2622,16 +3017,17 @@ class ResultsTableWidget(QtWidgets.QWidget):
             )
             self.spot_choice_list.addItem(item)
         self.spot_choice_list.blockSignals(False)
+        self._build_grouped_views()
         self._syncing_selection = False
         self.filter_spot_choices(self.spot_filter.text())
         self.set_selected_spots(retained_selection)
         self.refresh_spot_concordia(reset_view=True)
         if self.tabs.currentWidget() not in (
-            self.results_table,
-            self.secondary_table,
+            self.results_page,
+            self.secondary_page,
             self.spot_concordia_page,
         ):
-            self.tabs.setCurrentWidget(self.results_table)
+            self.tabs.setCurrentWidget(self.results_page)
 
     def show_depth_profile(
         self,

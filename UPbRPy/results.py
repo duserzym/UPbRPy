@@ -50,6 +50,18 @@ def format_value_with_uncertainty(value, two_se, sig_figs=2) -> str:
     return f"{round(value, places):.{decimals}f} ± {error:.{decimals}f}"
 
 
+def format_mswd(value) -> str:
+    """Format finite MSWD values with fewer decimals at larger magnitudes."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(value):
+        return ""
+    decimals = 2 if value < 10 else 1 if value < 100 else 0
+    return f"{value:.{decimals}f}"
+
+
 @dataclass(frozen=True)
 class AutomaticFlagSettings:
     """Thresholds for workbook-style automatic data-quality flags."""
