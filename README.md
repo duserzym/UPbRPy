@@ -197,6 +197,11 @@ to close a tab. **Ctrl+S** saves the active project. **Window → Move Tab to Ne
 Window** moves the current reduction with its state intact; **Ctrl+Shift+N**
 opens an empty Studio window. Closing the last tab leaves an empty tab.
 
+The window has one menu bar (on macOS, the system menu bar) whose File,
+Workflow, Calibration, Results, View, Window and Help menus belong to the
+active tab: they are rebuilt from that tab's menus whenever the tab changes,
+and every menu command and shortcut acts on the active tab only.
+
 <img src="./docs/screenshots/studio_tabs_rich_1280x800.png" alt="Studio with two sessions open as tabs at 1280 × 800" width="640">
 
 Screenshots of two tabs (the Boise per-spot folder, merged with its Rich file,
@@ -410,7 +415,11 @@ pip install -e ".[gui,database]"
   bundle (with input hashes and the `.upbr`), posts it as a new run of the
   session, shows the run id and any quarantined items, and records
   `origin.run_id` in the project. **Mark as Preferred** makes that run the
-  session's preferred run.
+  session's preferred run. Both ask first, naming the session, the server and
+  the run, and report the result in the status bar. At step 9 Final review of
+  a project opened from the database, **Submit to database** and **Mark as
+  preferred** buttons in the "This step" block and in the Results inspector
+  do the same; **Ctrl+Shift+D** (**Cmd+Shift+D** on macOS) submits.
 - Tokens are kept per server in the OS keychain (macOS Keychain, Windows
   Credential Manager), never in files. Without the extra the database
   actions are disabled with the reason as tooltip.
