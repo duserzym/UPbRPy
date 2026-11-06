@@ -260,9 +260,14 @@ and concentration-export conventions.
 
 The interface shows a compact icon-and-label workflow rail, plots, and the
 spot/isotope inspector together on large displays. The complete ordered
-sequence fits without scrolling on normal screens. The line above the plot
-names the selected step and the compact selection status. Below step 10 in
-the rail, **This step** holds the step's primary action (for example
+sequence fits without scrolling on normal screens. The middle column holds
+only the plot: its tab strip, the canvas, the session overview and one
+toolbar row. Below step 10 in the rail, **This step** is captioned with the
+selected step's title (for example *9 · Dates and concordia review*) and its
+compact selection status (*B 11 · P 19 · Selections ready*); its tooltip
+gives the full status and the step's explanation. The status bar shows the
+project name with its spot and channel counts, next to the source-format
+badge (for example *Rich + per-spot*). **This step** holds the step's primary action (for example
 *Calibrate and calculate concentrations*), its secondary actions, and a
 **Back / Next** pair. A step unlocks once the previous step's stage has run;
 until then **Next** is disabled and its tooltip names the action to run first.
@@ -281,13 +286,30 @@ Side panels collapse on smaller
 monitors and can be restored from the View menu. File, Workflow, Calibration,
 Results, View, and Help menus expose the same operations without depending on
 panel visibility.
-On a laptop (tested at 1440 × 900 and 1280 × 800 points) the header becomes
-one line, the auto-pick settings fold behind a toggle in the workflow rail,
-the step hint under **This step** folds before any button does (it stays in
+On a laptop (tested at 1440 × 900 and 1280 × 800 points) the auto-pick
+settings fold behind a toggle in the workflow rail, the step hint and then
+the status line under **This step** fold before any button does (both stay in
 the tooltip), the notes and activity log start hidden (**View → Reduction Notes and
 Activity Log**, Ctrl+Shift+L), and long labels shorten with "…" rather than
 widening the window. The window size and every panel width are remembered;
 **View → Reset Layout** fits the default layout to the current screen.
+Without the old title and stage cards the canvas is 142 px taller at both
+sizes (695 px instead of 553 px at 1440 × 900, 595 px instead of 453 px at
+1280 × 800). In compact width (below 1000 px) the **Inspector** toggle sits
+at the right end of the plot toolbar.
+
+<img src="./docs/screenshots/studio_canvas_after_spotconc_1280x800.png" alt="Spot concordia at 1280 × 800: the plot fills the middle column from the top; step title and status under This step in the rail; project summary in the status bar" width="640">
+
+Before and after screenshots of the Raw, Session, Final and Spot concordia
+views at both sizes: `docs/screenshots/studio_canvas_{before,after}_*.png`.
+
+**Pan and zoom.** The toolbar under every plot has **Drag: Box / Pan**
+(and **Select** on the concordia pages) and **Zoom axis: XY / X / Y**.
+Panning, by dragging in **Pan** mode or with the middle button in any mode,
+always moves both axes. The zoom-axis choice applies only to zooming: the
+mouse wheel, box zoom and right-button drag. Dragging on an axis or turning
+the wheel over it still pans or zooms that axis alone. **Reset** restores
+the default view; on the concordia pages a double-click does too.
 
 Run the desktop application from source with:
 
