@@ -5069,3 +5069,350 @@ def _resolved_region_colors(region_colors: dict[str, str] | None) -> dict[str, s
     if region_colors:
         colors.update({key: value for key, value in region_colors.items() if key in colors and value})
     return colors
+
+
+class StandardBiasWidget(RoundedGraphicsLayoutWidget):
+    """Selectable reference-material date offsets supplied by UPbRPy.bias."""
+
+    selectionChanged = QtCore.Signal(object)
+    spotHovered = QtCore.Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent=parent)
+        self._theme = active_theme()
+        self._table = pd.DataFrame()
+        self._summary = {}
+        self._log_x = False
+        self._per_sample_trends = False
+        self._x_label = "U, ug/g"
+        self._y_label = "Offset from accepted 206Pb/238U date (%)"
+        self._zoom_mode = "xy"
+        self._interaction_mode = "zoom"
+        self.selected_spots = set()
+        self._scatters = {}
+        self._point_rows = []
+        self._point_xy = np.empty((0, 2))
+        self._hover_index = None
+        self._legend = self._hover_text = self._trend_text = None
+        self._plot_item = self.addPlot(0, 0, viewBox=_ConcordiaViewBox(self))
+        for menu in (self._plot_item.ctrlMenu, self._plot_item.vb.menu):
+            menu.setParent(self, menu.windowFlags())
+        self._plot_item.vb.sigRangeChanged.connect(self._position_labels)
+        self._plot_item.vb.sigResized.connect(self._position_labels)
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+    def show_bias(self, table, summary, *, theme, log_x=False, x_label, y_label) -> None:
+        """Draw a bias table and matching summary; labels describe original units."""
+        self._table = table.copy()
+        self._summary = summary
+        self._theme = theme
+        self._log_x = bool(log_x)
+        self._x_label, self._y_label = x_label, y_label
+        self._draw()
+
+    def apply_theme(self, theme: ThemeSpec) -> None:
+        """Redraw using the supplied Studio palette."""
+        self._theme = theme
+        self._draw()
+
+    def set_per_sample_trends(self, enabled: bool) -> None:
+        """Show or hide the optional individual reference-material fits."""
+        self._per_sample_trends = bool(enabled)
+        self._draw()
+
+    def _draw(self):
+        plot, theme = self._plot_item, self._theme
+        self._set_hover(None)
+        plot.clear()
+        for item in (self._legend, self._hover_text, self._trend_text):
+            if item is not None and item.scene() is not None:
+                item.scene().removeItem(item)
+        self._legend = self._hover_text = self._trend_text = None
+        self._scatters = {}
+        self._point_rows = []
+        self._point_xy = np.empty((0, 2))
+        self._error_bars = []
+        self._mean_lines = []
+        self._trend_lines = []
+        self.setBackground(theme.plot_background)
+        _make_diag_axis(plot, theme)
+        plot.setLogMode(x=self._log_x, y=False)
+        plot.setLabel("bottom", self._x_label, color=theme.axis_text)
+        plot.setLabel("left", self._y_label, color=theme.axis_text)
+        for name in ("bottom", "left"):
+            plot.getAxis(name).enableAutoSIPrefix(False)
+        plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(theme.muted, width=1)))
+        table = self._table
+        if not table.empty:
+            finite = table.plottable & np.isfinite(table.x) & np.isfinite(table.offset_percent)
+            if self._log_x:
+                finite &= table.x > 0
+            visible = table.loc[finite]
+            samples = sorted(table["sample"].astype(str).unique())
+            colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
+                      for i, name in enumerate(samples)}
+            self._legend = _rounded_legend(plot, offset=(-10, 32), labelTextColor=theme.axis_text,
+                                           labelTextSize="9pt", verSpacing=0)
+            self._legend.anchor((1, 0), (1, 0), offset=(-10, 32))
+            for sample, group in visible.groupby("sample", sort=True):
+                color = colors[str(sample)]
+                x = group.x.to_numpy(dtype=float)
+                y = group.offset_percent.to_numpy(dtype=float)
+                display_x = np.log10(x) if self._log_x else x
+                scatter = pg.ScatterPlotItem(x=display_x, y=y, size=8, brush=color,
+                                             pen=pg.mkPen(color, width=0.8))
+                # ScatterPlotItem and ErrorBarItem have no pyqtgraph log transform;
+                # only their coordinates are mapped, while the axis uses log mode.
+                scatter.sigClicked.connect(self._spot_clicked)
+                scatter._bias_rows = group.to_dict("records")
+                scatter._bias_color = color
+                self._scatters[sample] = scatter
+                plot.addItem(scatter)
+                self._point_rows.extend(scatter._bias_rows)
+                errors = group.offset_2s_percent.to_numpy(dtype=float)
+                valid_error = np.isfinite(errors) & (errors >= 0)
+                bars = pg.ErrorBarItem(x=display_x[valid_error], y=y[valid_error],
+                                      top=errors[valid_error], bottom=errors[valid_error],
+                                      pen=pg.mkPen(color, width=1))
+                plot.addItem(bars)
+                self._error_bars.append(bars)
+                stats = self._summary.get("samples", {}).get(sample, {})
+                mean, error = stats.get("weighted_mean", np.nan), stats.get("weighted_mean_2e", np.nan)
+                self._legend.addItem(scatter, f"{sample}  {mean:+.1f} +/- {error:.1f} %  n {stats.get('n', 0)}")
+                if np.isfinite(mean):
+                    self._mean_lines.append(plot.plot([x.min(), x.max()], [mean, mean],
+                        pen=pg.mkPen(color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)))
+                if self._per_sample_trends:
+                    self._draw_trend(self._summary.get("trend_by_sample", {}).get(sample), color)
+            self._point_xy = np.array([
+                [np.log10(row['x']) if self._log_x else row['x'], row['offset_percent']]
+                for row in self._point_rows], dtype=float).reshape(-1, 2)
+        self._draw_trend(self._summary.get("trend"), theme.text)
+        background = theme_color(theme.surface)
+        background.setAlpha(245)
+        self._hover_text = pg.TextItem(color=theme.axis_text, fill=pg.mkBrush(background),
+                                      border=pg.mkPen(theme_color(theme.input_border)))
+        self._hover_text.setParentItem(plot.vb)
+        self._hover_text.setZValue(30)
+        self._hover_text.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self._hover_text.hide()
+        fit = self._summary.get("trend")
+        self._trend_text = pg.TextItem(color=theme.text)
+        self._trend_text.setParentItem(plot.vb)
+        self._trend_text.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self._trend_text.setZValue(20)
+        self._trend_text.setText(self._slope_text(fit) if fit else "Trend unavailable (requires 3 points with errors and x spread)")
+        self._update_selection_style()
+        plot.autoRange()
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
+        self._position_labels()
+
+    @staticmethod
+    def _slope_text(fit):
+        units = fit['units'].replace('percent', '%')
+        return (f"slope {fit['slope']:+.3g} +/- {fit['slope_2s']:.3g} {units} (2s), "
+                f"p {fit['p_value']:.2g}, n {fit['n']}")
+
+    def _draw_trend(self, fit, color):
+        if not fit:
+            return
+        bounds = fit["x_range"]
+        x = np.geomspace(*bounds, 100) if self._log_x else np.linspace(*bounds, 100)
+        y = fit["intercept"] + fit["slope"] * (np.log10(x) if self._log_x else x)
+        self._trend_lines.append(self._plot_item.plot(x, y, pen=pg.mkPen(color, width=1.8)))
+
+    def set_selected_spots(self, names) -> None:
+        """Highlight spot names without emitting selectionChanged."""
+        self.selected_spots = set(names)
+        self._update_selection_style()
+
+    def select_spots(self, names, *, extend=False, toggle=False) -> None:
+        """Update the selection and emit only when its set changes."""
+        names = set(names)
+        selected = (self.selected_spots ^ names if toggle else
+                    self.selected_spots | names if extend else names)
+        if selected != self.selected_spots:
+            self.set_selected_spots(selected)
+            self.selectionChanged.emit(set(selected))
+
+    def _update_selection_style(self):
+        for scatter in self._scatters.values():
+            chosen = [str(row["spot_name"]) in self.selected_spots for row in scatter._bias_rows]
+            scatter.setPen([pg.mkPen(scatter._bias_color, width=2.5 if selected else 0.8)
+                            for selected in chosen])
+            scatter.setSize([11 if selected else 8 for selected in chosen])
+
+    def supports_select_mode(self) -> bool:
+        """Return True because all displayed points represent individual spots."""
+        return True
+
+    def _select_at(self, scene_pos, modifiers):
+        index = self.nearest_point(scene_pos, radius=10)
+        names = {str(self._point_rows[index]["spot_name"])} if index is not None else set()
+        toggle = bool(modifiers & (QtCore.Qt.KeyboardModifier.ControlModifier
+                                   | QtCore.Qt.KeyboardModifier.MetaModifier))
+        extend = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if names or not (toggle or extend):
+            self.select_spots(names, extend=extend, toggle=toggle)
+
+    def _spot_clicked(self, scatter, points, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if event.double():
+                self._reset_from_double_click(event.scenePos())
+            else:
+                self._select_at(event.scenePos(), event.modifiers())
+
+    def select_rectangle(self, rect, *, extend=False) -> None:
+        """Select centres in view coordinates, including log coordinates."""
+        rect = rect.normalized()
+        self.select_spots({str(row["spot_name"]) for row, xy in zip(self._point_rows, self._point_xy)
+                           if rect.contains(QtCore.QPointF(*xy))}, extend=extend)
+
+    def nearest_point(self, scene_pos, *, radius=6):
+        """Return the nearest visible point within a radius in screen pixels."""
+        return ConcordiaReviewWidget.nearest_point(self, scene_pos, radius=radius)
+
+    def _reset_from_double_click(self, scene_pos):
+        self._plot_item.autoRange()
+
+    def tooltip_text(self, index: int) -> str:
+        """Return the spot's date, reference value and offset with absolute 2s."""
+        row = self._point_rows[index]
+        return (f"{row['spot_name']}\n{row['sample']}\n{self._x_label}: {row['x']:.5g}\n"
+                f"Date: {row['date']:.5g} +/- {row['date_2s']:.4g} Ma (2s)\n"
+                f"Accepted {row['date_system']}: {row['accepted']:.5g} Ma\n"
+                f"Offset: {row['offset_percent']:+.4g} +/- {row['offset_2s_percent']:.4g} % (2s)")
+
+    def _on_mouse_moved(self, scene_pos):
+        self._set_hover(self.nearest_point(scene_pos))
+
+    def _set_hover(self, index):
+        if index == self._hover_index:
+            return
+        self._hover_index = index
+        if index is None:
+            if self._hover_text is not None:
+                self._hover_text.hide()
+            self.spotHovered.emit("")
+            return
+        self._hover_text.setHtml('<div style="color:' + self._theme.axis_text +
+            '; padding:3px; font-size:11px">' + escape(self.tooltip_text(index)).replace('\n', '<br>') + '</div>')
+        self._hover_text.show()
+        self._position_labels()
+        self.spotHovered.emit(str(self._point_rows[index]["spot_name"]))
+
+    def _position_labels(self, *args):
+        vb = self._plot_item.vb
+        if self._trend_text is not None:
+            self._trend_text.setPos(8, 8)
+        if self._hover_index is not None and self._hover_text is not None:
+            point = vb.mapFromView(QtCore.QPointF(*self._point_xy[self._hover_index]))
+            bounds = self._hover_text.boundingRect()
+            self._hover_text.setPos(max(4, min(point.x() + 12, vb.width() - bounds.width() - 4)),
+                                    max(4, min(point.y() + 12, vb.height() - bounds.height() - 4)))
+
+    def leaveEvent(self, event):
+        self._set_hover(None)
+        super().leaveEvent(event)
+
+    def set_zoom_mode(self, mode: str) -> None:
+        """Constrain mouse zoom to xy, x, or y."""
+        self._zoom_mode = mode if mode in {"xy", "x", "y"} else "xy"
+        self._apply_zoom_mode()
+
+    def zoom_mode(self) -> str:
+        """Return the current zoom-axis constraint."""
+        return self._zoom_mode
+
+    def set_interaction_mode(self, mode: str) -> None:
+        """Set pan, rectangle zoom, or rectangle spot selection."""
+        self._interaction_mode = mode if mode in {"pan", "zoom", "select"} else "zoom"
+        self._apply_interaction_mode()
+
+    def interaction_mode(self) -> str:
+        """Return the current mouse interaction mode."""
+        return self._interaction_mode
+
+    def _apply_zoom_mode(self):
+        self._plot_item.vb.setMouseEnabled(x=self._zoom_mode != "y", y=self._zoom_mode != "x")
+
+    def _apply_interaction_mode(self):
+        self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode if self._interaction_mode == "pan"
+                                       else pg.ViewBox.RectMode)
+
+
+class StandardBiasControls(QtWidgets.QWidget):
+    """Compact date and x selectors with an externally supplied bias summary."""
+
+    changed = QtCore.Signal(dict)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        from UPbRPy.bias import BIAS_DATE_SYSTEMS, BIAS_QUANTITIES
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.date_combo = StyledComboBox()
+        self.quantity_combo = StyledComboBox()
+        for system in BIAS_DATE_SYSTEMS:
+            self.date_combo.addItem("Preferred" if system == "preferred" else system, system)
+        for key, label in BIAS_QUANTITIES.items():
+            self.quantity_combo.addItem(label, key)
+        for combo in (self.date_combo, self.quantity_combo):
+            combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(5)
+            combo.setMinimumWidth(0)
+        form.addRow("Date", self.date_combo)
+        form.addRow("X", self.quantity_combo)
+        layout.addLayout(form)
+        self.log_x_check = QtWidgets.QCheckBox("Log x")
+        self.per_sample_trends_check = QtWidgets.QCheckBox("Per-standard trends")
+        layout.addWidget(self.log_x_check)
+        layout.addWidget(self.per_sample_trends_check)
+        self.summary_label = QtWidgets.QLabel()
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.summary_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.summary_label)
+        layout.addStretch(1)
+        self.date_combo.currentIndexChanged.connect(self._emit_changed)
+        self.quantity_combo.currentIndexChanged.connect(self._emit_changed)
+        self.log_x_check.toggled.connect(self._emit_changed)
+        self.per_sample_trends_check.toggled.connect(self._emit_changed)
+
+    def state(self) -> dict:
+        """Return date, quantity, log_x and per_sample_trends settings."""
+        return {"date": self.date_combo.currentData(), "quantity": self.quantity_combo.currentData(),
+                "log_x": self.log_x_check.isChecked(),
+                "per_sample_trends": self.per_sample_trends_check.isChecked()}
+
+    def set_state(self, state: dict) -> None:
+        """Apply known settings without emitting changed; ignore unknown keys."""
+        widgets = (self.date_combo, self.quantity_combo, self.log_x_check, self.per_sample_trends_check)
+        blockers = [QtCore.QSignalBlocker(widget) for widget in widgets]
+        for key, combo in (("date", self.date_combo), ("quantity", self.quantity_combo)):
+            if key in state:
+                index = combo.findData(state[key])
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        for key, check in (("log_x", self.log_x_check), ("per_sample_trends", self.per_sample_trends_check)):
+            if key in state:
+                check.setChecked(bool(state[key]))
+        del blockers
+
+    def set_summary(self, summary: dict) -> None:
+        """Show the pooled slope and sample weighted means in percent (2s)."""
+        fit = summary.get("trend")
+        lines = [StandardBiasWidget._slope_text(fit) if fit else "Trend unavailable"]
+        for sample, stats in summary.get("samples", {}).items():
+            lines.append(f"{sample}: {stats['weighted_mean']:+.2g} +/- {stats['weighted_mean_2e']:.2g} % (2s), n {stats['n']}")
+        self.summary_label.setText("\n".join(lines))
+
+    def _emit_changed(self, *args):
+        self.changed.emit(self.state())

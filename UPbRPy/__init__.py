@@ -19,6 +19,7 @@ from importlib import import_module
 FOCUSED_SUBMODULES = frozenset(
     {
         "age",
+        "bias",
         "calibration",
         "concentration",
         "constants",
