@@ -7,9 +7,84 @@ from pathlib import Path
 import sys
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from shiboken6 import isValid
 
 from GUI.main_window import MainWindow
 from GUI.theme import WallpaperWidget, active_theme, theme_color, paint_wallpaper
+
+
+class _MirrorMenu(QtWidgets.QMenu):
+    """Own the platform menu while sharing the reduction's leaf actions."""
+
+    def __init__(self, source: QtWidgets.QMenu, parent: QtWidgets.QWidget):
+        super().__init__(parent)
+        self._source: QtWidgets.QMenu | None = source
+        self._submenus: list[_MirrorMenu] = []
+        source.menuAction().changed.connect(self._sync_state)
+        source.destroyed.connect(self._source_destroyed)
+        self.aboutToShow.connect(self._refresh)
+        self._sync_state()
+        self._sync_contents()
+
+    def _sync_state(self) -> None:
+        source = self._source
+        if source is not None and isValid(source):
+            action = source.menuAction()
+            self.setTitle(source.title())
+            self.setObjectName(source.objectName())
+            self.setToolTipsVisible(source.toolTipsVisible())
+            self.setIcon(source.icon())
+            self.menuAction().setEnabled(action.isEnabled())
+            self.menuAction().setVisible(action.isVisible())
+
+    def _clear_contents(self) -> None:
+        # Remove shared actions before disposing menus; their owner is the
+        # reduction, which may be deleted before DeferredDelete is processed.
+        for action in self.actions():
+            self.removeAction(action)
+        for submenu in self._submenus:
+            submenu.dispose()
+        self._submenus.clear()
+
+    def _sync_contents(self) -> None:
+        self._clear_contents()
+        if self._source is not None and isValid(self._source):
+            actions = self._source.actions()
+            submenus = {action: menu for action in actions
+                        if (menu := action.menu()) is not None}
+            # QAction.menu() gives PySide's wrapper a reference to its menu
+            # action. Retain the original submenu tree on its source parent
+            # too, so Python GC cannot collect inactive submenu/action cycles.
+            self._source._studio_submenus = list(submenus.values())
+            for action in actions:
+                if action in submenus:
+                    submenu = _MirrorMenu(submenus[action], self)
+                    self._submenus.append(submenu)
+                    self.addMenu(submenu)
+                else:
+                    self.addAction(action)
+
+    def _refresh(self) -> None:
+        # A source aboutToShow handler may clear and delete its old submenus.
+        self._clear_contents()
+        if self._source is not None and isValid(self._source):
+            self._source.aboutToShow.emit()
+            self._sync_state()
+            self._sync_contents()
+
+    def _source_destroyed(self) -> None:
+        self._source = None
+        self._clear_contents()
+        self.menuAction().setEnabled(False)
+
+    def dispose(self) -> None:
+        """Disconnect and empty the mirror before scheduling its deletion."""
+        if self._source is not None and isValid(self._source):
+            self._source.menuAction().changed.disconnect(self._sync_state)
+            self._source.destroyed.disconnect(self._source_destroyed)
+        self._source = None
+        self._clear_contents()
+        self.deleteLater()
 
 
 class _DocumentCloseButton(QtWidgets.QAbstractButton):
@@ -58,7 +133,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         )
         self._connections: dict[MainWindow, list[tuple[object, Callable]]] = {}
         self._shortcuts: dict[MainWindow, dict[QtGui.QAction, list[QtGui.QKeySequence]]] = {}
-        self._shown_menus: list[QtGui.QAction] = []
+        self._shown_menus: list[_MirrorMenu] = []
         self.setMinimumSize(760, 620)
         self.setProperty("wallpaperRoot", True)
         if app_icon is not None:
@@ -102,6 +177,11 @@ class StudioWindow(QtWidgets.QMainWindow):
     def add_tab(self, reduction: MainWindow | None = None) -> MainWindow:
         """Insert an existing reduction, or create an empty one, and select it."""
         reduction = reduction or self._reduction_factory()
+        # Drop the reduction's own Cocoa menu bar while it is still a separate
+        # top-level window. Reparenting first attaches that menu bar to the
+        # shell's window; destroying it afterwards detaches the shell's menu
+        # bar from macOS, which then shows only the application menu.
+        reduction.menuBar().setNativeMenuBar(False)
         reduction.setParent(self.tabs)
         reduction.setWindowFlags(QtCore.Qt.WindowType.Widget)
         reduction.setMinimumSize(760, 580)
@@ -110,12 +190,11 @@ class StudioWindow(QtWidgets.QMainWindow):
         reduction.centralWidget().layout().setContentsMargins(10, 0, 10, 0)
         reduction.main_panel.layout().setSpacing(6)
         reduction.inspector_panel.layout().setContentsMargins(10, 0, 10, 0)
-        reduction.menuBar().setNativeMenuBar(False)
         reduction.menuBar().hide()
         if not hasattr(reduction, "_studio_menus"):
             reduction._studio_menus = reduction.menuBar().actions()
-            # Cocoa permits a QMenu in only one menu bar at a time. Keep
-            # ownership on the reduction, but insert it only in the shell.
+            # Retain the original menus on the reduction. The shell builds
+            # fresh menus because Cocoa cannot move an existing platform menu.
             for action in reduction._studio_menus:
                 reduction.menuBar().removeAction(action)
         shortcuts = getattr(reduction, "_studio_shortcuts", None)
@@ -175,17 +254,19 @@ class StudioWindow(QtWidgets.QMainWindow):
         return reduction
 
     def _activate_tab(self, index: int) -> None:
-        for action in self._shown_menus:
-            self.menuBar().removeAction(action)
+        self.menuBar().clear()
+        for menu in self._shown_menus:
+            menu.dispose()
         self._shown_menus.clear()
         active = self.active_reduction
         for reduction, shortcuts in self._shortcuts.items():
             for action, sequences in shortcuts.items():
                 action.setShortcuts(sequences if reduction is active else [])
         if active is not None:
-            self._shown_menus = list(active._studio_menus)
-            for action in self._shown_menus:
-                self.menuBar().addAction(action)
+            for action in active._studio_menus:
+                menu = _MirrorMenu(action.menu(), self)
+                self._shown_menus.append(menu)
+                self.menuBar().addMenu(menu)
             active.update_project_window_title()
 
     def _update_title(self, reduction: MainWindow, title: str) -> None:

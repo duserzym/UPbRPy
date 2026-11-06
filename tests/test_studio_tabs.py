@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 import time
@@ -150,7 +151,153 @@ def test_shortcuts_route_only_to_active_tab_and_cycle_from_table(loaded, app, mo
     assert first.menuBar().isHidden() and second.menuBar().isHidden()
     assert [a.text() for a in shell.menuBar().actions()] == ["File", "Workflow", "Calibration", "Results", "View", "Window", "Help"]
     assert not first.menuBar().actions() and not second.menuBar().actions()
-    assert shell.menuBar().actions() == first._studio_menus
+    assert [a.text() for a in shell.menuBar().actions()] == [a.text() for a in first._studio_menus]
+    assert all(a.menu() is not original.menu()
+               for a, original in zip(shell.menuBar().actions(), first._studio_menus))
+
+
+def assert_menu_mirrors(shell, reduction):
+    def check(mirror, source):
+        assert isinstance(mirror, QtWidgets.QMenu) and mirror is not source
+        parent = mirror.parent()
+        while parent is not None and parent is not shell:
+            parent = parent.parent()
+        assert parent is shell
+        assert mirror.title() == source.title()
+        assert mirror.objectName() == source.objectName()
+        assert mirror.toolTipsVisible() == source.toolTipsVisible()
+        assert mirror.menuAction().isEnabled() == source.menuAction().isEnabled()
+        assert mirror.menuAction().isVisible() == source.menuAction().isVisible()
+        assert len(mirror.actions()) == len(source.actions())
+        for mirrored, original in zip(mirror.actions(), source.actions()):
+            if original.menu() is not None:
+                check(mirrored.menu(), original.menu())
+            else:
+                # Also preserves separators, shortcuts and macOS menu roles.
+                assert mirrored is original
+
+    actions = shell.menuBar().actions()
+    assert [a.text() for a in actions] == ["File", "Workflow", "Calibration", "Results", "View", "Window", "Help"]
+    for action, original in zip(actions, reduction._studio_menus):
+        check(action.menu(), original.menu())
+
+
+def test_shell_owns_menus_and_database_actions_follow_active_tab(loaded, monkeypatch):
+    from types import SimpleNamespace
+
+    shell, first, second = loaded
+    submitted = []
+    for reduction in (first, second, first):
+        monkeypatch.setattr(reduction, "database", lambda: SimpleNamespace(submit=submitted.append))
+        shell.tabs.setCurrentWidget(reduction)
+        shell._activate_tab(shell.tabs.currentIndex())
+        assert_menu_mirrors(shell, reduction)
+        file_menu = shell.menuBar().actions()[0].menu()
+        database = next(a.menu() for a in file_menu.actions() if a.text() == "Database")
+        assert any(a is reduction.submit_to_database_action for a in database.actions())
+        assert any(a is reduction.prefer_run_action for a in database.actions())
+        submit = next(a for a in database.actions() if a is reduction.submit_to_database_action)
+        submit.setEnabled(True)
+        submit.trigger()
+        gc.collect()
+    assert submitted == [first, second, first]
+
+
+def test_mirror_refreshes_dynamic_menus_and_tracks_menu_state(loaded):
+    shell, first, second = loaded
+    source = second._studio_menus[1].menu()
+    dynamic = source.addMenu("Dynamic presets")
+    dynamic.setObjectName("DynamicPresets")
+    dynamic.setToolTipsVisible(True)
+    dynamic.setIcon(second.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+    opened = []
+
+    def populate():
+        dynamic.clear()
+        opened.append(True)
+        dynamic.addAction(f"Preset {len(opened)}")
+        nested = dynamic.addMenu("Nested")
+        nested.addAction("Initial")
+        nested.aboutToShow.connect(lambda: nested.addAction("Added on opening"))
+
+    dynamic.aboutToShow.connect(populate)
+    shell._activate_tab(1)
+    workflow = shell.menuBar().actions()[1].menu()
+    mirror = next(a.menu() for a in workflow.actions() if a.text() == dynamic.title())
+    for count in (1, 2):
+        mirror.aboutToShow.emit()
+        assert opened == [True] * count
+        assert mirror.actions()[0] is dynamic.actions()[0]
+        assert mirror.actions()[0].text() == f"Preset {count}"
+        nested_mirror = mirror.actions()[1].menu()
+        nested_mirror.aboutToShow.emit()
+        assert [a.text() for a in nested_mirror.actions()] == ["Initial", "Added on opening"]
+        assert nested_mirror.actions()[1] is dynamic.actions()[1].menu().actions()[1]
+        assert_menu_mirrors(shell, second)
+    assert mirror.icon().cacheKey() == dynamic.icon().cacheKey()
+    for menu, mirrored in ((source, workflow), (dynamic, mirror)):
+        menu.menuAction().setEnabled(False)
+        menu.menuAction().setVisible(False)
+        menu.setTitle("Updated menu")
+        assert not mirrored.menuAction().isEnabled()
+        assert not mirrored.menuAction().isVisible()
+        assert mirrored.title() == "Updated menu"
+        menu.menuAction().setEnabled(True)
+        menu.menuAction().setVisible(True)
+    source.addAction("Added after construction")
+    workflow.aboutToShow.emit()
+    assert workflow.actions()[-1] is source.actions()[-1]
+    dynamic.clear()
+    workflow.aboutToShow.emit()
+    mirror = next(a.menu() for a in workflow.actions() if a.text() == dynamic.title())
+    assert not mirror.actions()
+
+
+def test_closing_active_tab_disposes_mirrors_and_routes_remaining_tab(loaded, app, monkeypatch):
+    shell, first, second = loaded
+    old_menus = [a.menu() for a in shell.menuBar().actions()]
+    destroyed = []
+    for menu in old_menus:
+        menu.destroyed.connect(lambda: destroyed.append(True))
+    monkeypatch.setattr(second, "request_close", lambda: True)
+    assert shell.close_tab(1)
+    assert shell.active_reduction is first
+    assert_menu_mirrors(shell, first)
+    assert all(menu._source is None and not menu.actions() for menu in old_menus)
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    assert len(destroyed) == len(old_menus)
+    process(app)
+    assert_menu_mirrors(shell, first)
+
+
+def test_reduction_menu_bar_is_not_native_before_it_joins_the_shell(controller):
+    # On macOS a native menu bar reparented into the shell claims the shell's
+    # window; destroying it afterwards leaves macOS with only the app menu.
+    shell = controller.create_window(show=False)
+    reduction = controller._create_reduction()
+    seen = []
+    original = reduction.setParent
+
+    def record(*args):
+        seen.append(reduction.menuBar().isNativeMenuBar())
+        return original(*args)
+
+    reduction.setParent = record
+    shell.add_tab(reduction)
+    assert seen and seen[0] is False
+    assert_menu_mirrors(shell, reduction)
+
+
+def test_taking_last_tab_empties_shell_menu_bar(controller):
+    shell = controller.create_window(show=False)
+    reduction = shell.active_reduction
+    old_menus = [a.menu() for a in shell.menuBar().actions()]
+    assert shell.take_tab(reduction) is reduction
+    assert shell.active_reduction is None and not shell.menuBar().actions()
+    assert all(menu._source is None and not menu.actions() for menu in old_menus)
+    # The original menus remain usable when the reduction moves to a shell.
+    shell.add_tab(reduction)
+    assert_menu_mirrors(shell, reduction)
 
 
 def test_close_tab_cancel_discard_and_release(loaded, app, monkeypatch):
