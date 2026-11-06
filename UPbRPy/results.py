@@ -123,6 +123,7 @@ def calculate_spot_quality_metrics(
     sweep_data,
     *,
     ratio_column: str | None = None,
+    slope_ratio_column: str | None = None,
     primary_signal_column: str | None = None,
     signal_data=None,
 ):
@@ -136,6 +137,10 @@ def calculate_spot_quality_metrics(
     ratio_column
         Explicit Pb/U ratio column. When omitted, the corrected column is
         preferred over the raw column.
+    slope_ratio_column
+        Optional ratio column used only for the slope. When omitted or absent,
+        use ``ratio_column``. Use the raw ratio for reverse fractionation
+        because the corrected ratio has no expected trend.
     primary_signal_column
         Matrix-element channel used to diagnose burn-through.
     signal_data
@@ -150,9 +155,10 @@ def calculate_spot_quality_metrics(
         mass-204 detection significance, and sweep count.
 
     The function works with either raw or fractionation-corrected sweep tables.
-    A negative 206Pb/238U slope reproduces the workbook's reverse-fractionation
-    diagnostic. Relative standard deviations preserve anomalous measurements
-    for inspection rather than silently filtering them.
+    A negative raw 206Pb/238U slope reproduces the workbook's
+    reverse-fractionation diagnostic. Relative standard deviations use
+    ``ratio_column`` and preserve anomalous measurements for inspection rather
+    than silently filtering them.
     """
     if not isinstance(sweep_data, pd.DataFrame):
         raise TypeError("sweep_data must be a pandas DataFrame")
@@ -169,6 +175,8 @@ def calculate_spot_quality_metrics(
                 break
     if ratio_column is None or ratio_column not in sweep_data.columns:
         raise KeyError("Could not find a 206Pb/238U sweep column")
+    if slope_ratio_column is None or slope_ratio_column not in sweep_data.columns:
+        slope_ratio_column = ratio_column
 
     signal_groups = {}
     if signal_data is not None:
@@ -191,9 +199,11 @@ def calculate_spot_quality_metrics(
         )
         time = pd.to_numeric(spot[time_column], errors="coerce")
         valid = np.isfinite(ratio) & np.isfinite(time)
+        slope_ratio = pd.to_numeric(spot[slope_ratio_column], errors="coerce")
+        slope_valid = np.isfinite(slope_ratio) & np.isfinite(time)
         slope = np.nan
-        if valid.sum() >= 2 and np.ptp(time[valid]) > 0:
-            slope = float(np.polyfit(time[valid], ratio[valid], 1)[0])
+        if slope_valid.sum() >= 2 and np.ptp(time[slope_valid]) > 0:
+            slope = float(np.polyfit(time[slope_valid], slope_ratio[slope_valid], 1)[0])
         ratio_mean = float(ratio[valid].mean()) if valid.any() else np.nan
         # RSD diagnoses unstable ablation while preserving the actual sweeps;
         # it is a flagging statistic, not a hidden rejection criterion.
@@ -744,6 +754,8 @@ def finalize_reduction_results(
         Spot or sweep table after fractionation and concentration calibration.
     sweep_data, quality_signal_data
         Optional data used to calculate spot-level automatic metrics.
+        The reverse-fractionation slope uses the raw ``206Pb/238U`` ratio
+        when present because the corrected ratio has no expected trend.
     decision
         Preferred common-Pb and uncertainty branch.
     common_pb_options
@@ -786,6 +798,9 @@ def finalize_reduction_results(
     metrics = (
         calculate_spot_quality_metrics(
             sweep_data,
+            slope_ratio_column=(
+                "206Pb/238U" if "206Pb/238U" in sweep_data.columns else None
+            ),
             primary_signal_column=primary_signal_column,
             signal_data=quality_signal_data,
         )
