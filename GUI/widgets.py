@@ -2315,6 +2315,154 @@ class _ReviewTabs(QtWidgets.QTabWidget):
             super().setCurrentWidget(widget)
 
 
+class FlowLayout(QtWidgets.QLayout):
+    """Lay out review chips in rows, constraining each item to the row width."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(4)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QtCore.QRect(0, 0, width, 0), measure=True)
+
+    def minimumSize(self):
+        return QtCore.QSize(0, 0)
+
+    def sizeHint(self):
+        return QtCore.QSize(200, self.heightForWidth(200))
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect)
+
+    def _arrange(self, rect, *, measure=False):
+        x, y, row_height = rect.x(), rect.y(), 0
+        width = max(1, rect.width())
+        for item in self._items:
+            chip = item.widget()
+            if chip.isHidden():
+                continue
+            item_width = min(width, item.sizeHint().width())
+            item_height = chip.height_for_width(item_width)
+            if row_height and x + item_width > rect.x() + width:
+                x, y, row_height = rect.x(), y + row_height + self.spacing(), 0
+            if not measure:
+                item.setGeometry(QtCore.QRect(x, y, item_width, item_height))
+            x += item_width + self.spacing()
+            row_height = max(row_height, item_height)
+        return y - rect.y() + row_height
+
+
+class _SampleChip(QtWidgets.QAbstractButton):
+    """A sample swatch and count with a full, partial or empty inclusion border."""
+
+    def __init__(self, sample, count, color, parent=None):
+        super().__init__(parent)
+        self.sample_color = QtGui.QColor(color)
+        self.setText(f"{sample} {count}")
+        self.setAccessibleName(self.text())
+        self.setToolTip(f"{sample}: {count} spots\nClick: show only · Cmd/Ctrl-click: toggle · Shift-click: add range")
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setProperty("inclusionState", "inactive")
+        font = self.font()
+        font.setPixelSize(11)
+        self.setFont(font)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+
+    def sizeHint(self):
+        # Leave one pixel for Qt's fractional glyph-advance rounding.
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance(self.text()) + 25,
+                            self.height_for_width(10000))
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, self.sizeHint().height())
+
+    def height_for_width(self, width):
+        bounds = self.fontMetrics().boundingRect(
+            QtCore.QRect(0, 0, max(1, width - 24), 10000),
+            QtCore.Qt.TextFlag.TextWrapAnywhere, self.text())
+        return max(22, bounds.height() + 6)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        state = self.property("inclusionState")
+        color = self.sample_color
+        background = self.palette().color(QtGui.QPalette.ColorRole.Button)
+        painter.setBrush(background)
+        border = color if state != "inactive" else self.palette().color(QtGui.QPalette.ColorRole.Mid)
+        pen = QtGui.QPen(border, 2 if state == "active" or self.hasFocus() else 1)
+        if state == "partial":
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        rect = QtCore.QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.drawRoundedRect(rect, 7, 7)
+        if state != "inactive" or self.isDown():
+            tint = QtGui.QColor(color)
+            tint.setAlpha(28 if state == "active" else 12)
+            painter.setBrush(tint)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect, 7, 7)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(QtCore.QRectF(6, (self.height() - 8) / 2, 8, 8))
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.ButtonText))
+        painter.drawText(self.rect().adjusted(18, 3, -6, -3),
+                         QtCore.Qt.TextFlag.TextWrapAnywhere | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                         self.text())
+
+
+class _SampleChipArea(QtWidgets.QScrollArea):
+    """Wrap chips, scrolling vertically after about three rows."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(0)
+        content = QtWidgets.QWidget()
+        self.flow = FlowLayout(content)
+        self.setWidget(content)
+        self.chips = {}
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.Resize:
+            self.reflow()
+        return super().eventFilter(watched, event)
+
+    def reflow(self):
+        height = self.flow.heightForWidth(self.viewport().width())
+        self.widget().setMinimumHeight(height)
+        row_height = max((chip.sizeHint().height() for chip in self.chips.values()
+                          if not chip.isHidden()), default=22)
+        self.setFixedHeight(min(height, 3 * row_height + 2 * self.flow.spacing()))
+        self.flow.invalidate()
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
@@ -2329,11 +2477,18 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.include_flags: dict[str, bool] = {}
         self.selected_spots: set[str] = set()
         self._spot_samples: dict[str, str] = {}
+        self._spot_sample_order: list[str] = []
+        self._depth_sample_order: list[str] = []
+        self._run_order: list[str] = []
         archive = current_standard_archive()
         self._glass_materials = (set(archive.index[archive["material"].eq("glass")].astype(str))
                                  if "material" in archive else set())
         self._show_glasses = False
         self._glass_buttons = []
+        self._chip_areas = []
+        self._last_sample_chip = None
+        self._depth_sample_choices = False
+        self._blank_empty_readout = False
         self._syncing_selection = False
         self._readout_timer = QtCore.QTimer(self)
         self._readout_timer.setSingleShot(True)
@@ -2413,8 +2568,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         previous = self._glass_spot_names()
         self._glass_materials = set(map(str, names))
         current = self._glass_spot_names()
-        self.set_spot_included(previous - current, True)
-        self.set_spot_included(current - previous, self._show_glasses)
+        self._set_spot_inclusions({**dict.fromkeys(previous - current, True),
+                                   **dict.fromkeys(current - previous, self._show_glasses)})
         self._update_glass_buttons()
 
     def show_glasses(self) -> bool:
@@ -2450,6 +2605,137 @@ class ResultsTableWidget(QtWidgets.QWidget):
         visible = bool(self._glass_spot_names())
         for button in self._glass_buttons:
             button.setVisible(visible)
+        self._update_sample_chips()
+
+    def _sample_spots(self):
+        samples = dict(self._spot_samples)
+        for name, sample in self._sample_names(self._depth_frame).items():
+            samples.setdefault(name, sample)
+        return samples
+
+    def sample_chip_names(self) -> list[str]:
+        """Return samples in run order, then depth-only samples."""
+        return self._in_run_order(self._spot_sample_order + self._depth_sample_order)
+
+    def set_sample_run_order(self, names: Iterable[str]) -> None:
+        """Order the sample chips by acquisition (first spot of each sample).
+
+        The reduction frames are grouped by sample, so the caller supplies the
+        order taken from the session's acquisition start times. Samples not
+        named keep their frame order after the named ones.
+        """
+        self._run_order = list(dict.fromkeys(map(str, names)))
+        if self._chip_areas:
+            self._rebuild_sample_chips()
+
+    def _in_run_order(self, names):
+        names = list(dict.fromkeys(names))
+        rank = {name: index for index, name in enumerate(self._run_order)}
+        return sorted(names, key=lambda name: (rank.get(name, len(rank)), names.index(name)))
+
+    @staticmethod
+    def _sample_order(*frames):
+        return list(dict.fromkeys(sample for sample in
+                                  ResultsTableWidget._sample_names(*frames).values() if sample))
+
+    def _create_sample_chips(self, kind):
+        area = _SampleChipArea()
+        area.kind = kind
+        self._chip_areas.append(area)
+        return area
+
+    def _rebuild_sample_chips(self):
+        samples = self._sample_spots()
+        names = self.sample_chip_names()
+        fallback = {sample: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
+                    for i, sample in enumerate(sorted(names))}
+        colors = {**fallback, **self.spot_concordia._sample_colors}
+        self.depth_concordia._sample_colors = colors.copy()
+        for area in self._chip_areas:
+            while area.flow.count():
+                chip = area.flow.takeAt(0).widget()
+                chip.hide()
+                chip.deleteLater()
+            area.chips.clear()
+            page_spots = (self._spot_samples if area.kind == "spot"
+                          else self._sample_names(self._depth_frame))
+            page_order = self._in_run_order(
+                self._spot_sample_order if area.kind == "spot" else self._depth_sample_order
+            )
+            for sample in page_order:
+                count = sum(samples.get(name) == sample for name in page_spots)
+                if not count:
+                    continue
+                chip = _SampleChip(sample, count, colors[sample])
+                chip.clicked.connect(lambda checked=False, sample=sample, area=area:
+                                     self._sample_chip_clicked(sample, area))
+                area.chips[sample] = chip
+                area.flow.addWidget(chip)
+        if self._last_sample_chip not in names:
+            self._last_sample_chip = None
+        self._update_sample_chips()
+
+    def _update_sample_chips(self):
+        samples = self._sample_spots()
+        for area in self._chip_areas:
+            page_spots = (self._spot_samples if area.kind == "spot"
+                          else self._sample_names(self._depth_frame))
+            for sample, chip in area.chips.items():
+                flags = [self.include_flags.get(name, False) for name in page_spots
+                         if samples.get(name) == sample]
+                state = "active" if all(flags) else "partial" if any(flags) else "inactive"
+                chip.setProperty("inclusionState", state)
+                chip.setVisible(self._show_glasses or sample not in self._glass_materials)
+                chip.update()
+            area.setVisible(any(not chip.isHidden() for chip in area.chips.values()))
+            area.reflow()
+
+    def _sample_chip_clicked(self, sample, area):
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        names = [name for name, chip in area.chips.items() if not chip.isHidden()]
+        if (modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier
+                and self._last_sample_chip in names):
+            first, last = sorted((names.index(self._last_sample_chip), names.index(sample)))
+            self.show_samples(names[first:last + 1], mode="add")
+        else:
+            mode = "toggle" if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier else "replace"
+            self.show_samples([sample], mode=mode)
+        self._last_sample_chip = sample
+
+    def show_samples(self, names: Iterable[str], *, mode: str = "replace") -> None:
+        """Include whole samples by replacement, per-sample toggle or addition.
+
+        A partially included sample toggles to fully included. Glass samples
+        can be selected through chips only while the Glasses toggle is on.
+        """
+        if mode not in {"replace", "toggle", "add"}:
+            raise ValueError("mode must be 'replace', 'toggle' or 'add'")
+        names = {names} if isinstance(names, str) else set(names)
+        samples = self._sample_spots()
+        groups = {sample: [name for name, value in samples.items() if value == sample]
+                  for sample in names if self._show_glasses or sample not in self._glass_materials}
+        changes = dict.fromkeys(self.include_flags, False) if mode == "replace" else {}
+        for spots in groups.values():
+            included = mode != "toggle" or not all(self.include_flags.get(name, False) for name in spots)
+            changes.update(dict.fromkeys(spots, included))
+        self._depth_sample_choices = True
+        self.set_selected_spots(set())
+        self._set_spot_inclusions(changes)
+
+    def clear_spot_choices(self) -> None:
+        """Exclude every spot, clear selection and blank the live age readout."""
+        self.set_selected_spots(set())
+        self._set_spot_inclusions(dict.fromkeys(self.include_flags, False))
+        self._blank_empty_readout = True
+
+    def _create_spot_bulk_buttons(self):
+        row = QtWidgets.QHBoxLayout()
+        for text, callback in (("All", lambda: self.set_all_spot_choices(True)),
+                               ("Clear", self.clear_spot_choices)):
+            button = QtWidgets.QPushButton(text)
+            button.clicked.connect(callback)
+            row.addWidget(button)
+        return row
 
     def _review_views(self):
         return (self.results_table, self.results_tree, self.secondary_tree,
@@ -2753,8 +3039,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def set_spot_included(self, spot_names, included: bool) -> None:
         """Set review inclusion for spot keys and update both views once."""
-        for name in spot_names:
-            self.include_flags[name] = bool(included)
+        self._set_spot_inclusions(dict.fromkeys(spot_names, bool(included)))
+
+    def _set_spot_inclusions(self, changes):
+        """Apply mixed inclusion changes before notifying views or fitting."""
+        self._blank_empty_readout = False
+        self.include_flags.update(changes)
         blocker = QtCore.QSignalBlocker(self.spot_choice_list)
         for index in range(self.spot_choice_list.count()):
             item = self.spot_choice_list.item(index)
@@ -2766,6 +3056,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                                self.results_model.index(self.results_model.rowCount()-1, 0),
                                                [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
         self._update_group_inclusion()
+        self._update_sample_chips()
         self.refresh_spot_concordia()
         self.refresh_depth_concordia(reset_view=False)
 
@@ -2937,15 +3228,21 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def create_spot_concordia_page(self) -> QtWidgets.QWidget:
         """Build the selectable multi-spot concordia review page."""
         page = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(page)
+        layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
+        self.spot_sample_chips = self._create_sample_chips("spot")
+        layout.addWidget(self.spot_sample_chips)
+        review_row = QtWidgets.QHBoxLayout()
+        review_row.setSpacing(8)
+        layout.addLayout(review_row, 1)
         controls = QtWidgets.QWidget()
         controls.setMaximumWidth(230)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.addWidget(QtWidgets.QLabel("Spot means to display"))
         self.spot_filter = QtWidgets.QLineEdit()
+        self.spot_filter.setMinimumWidth(0)
         self.spot_filter.setPlaceholderText("Filter spots…")
         self.spot_filter.textChanged.connect(self.filter_spot_choices)
         controls_layout.addWidget(self.spot_filter)
@@ -2977,14 +3274,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
         self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
         controls_layout.addWidget(self._chooser_stack, 1)
-        select_row = QtWidgets.QHBoxLayout()
-        select_all = QtWidgets.QPushButton("All")
-        select_none = QtWidgets.QPushButton("None")
-        select_all.clicked.connect(lambda: self.set_all_spot_choices(True))
-        select_none.clicked.connect(lambda: self.set_all_spot_choices(False))
-        select_row.addWidget(select_all)
-        select_row.addWidget(select_none)
-        controls_layout.addLayout(select_row)
+        controls_layout.addLayout(self._create_spot_bulk_buttons())
         diagram_row, self.spot_diagram_buttons = self.create_diagram_buttons(
             self.refresh_spot_concordia
         )
@@ -3022,8 +3312,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia = ConcordiaReviewWidget()
         self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                           QtWidgets.QSizePolicy.Policy.Ignored)
-        layout.addWidget(controls)
-        layout.addWidget(self.spot_concordia, 1)
+        review_row.addWidget(controls)
+        review_row.addWidget(self.spot_concordia, 1)
         return page
 
     def create_depth_concordia_page(self) -> QtWidgets.QWidget:
@@ -3031,9 +3321,17 @@ class ResultsTableWidget(QtWidgets.QWidget):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        # Two short rows rather than one long one, so the page (and with it
-        # the whole results area) fits a laptop-width plot column.
-        controls = QtWidgets.QHBoxLayout()
+        layout.setSpacing(4)
+        self.depth_sample_chips = self._create_sample_chips("depth")
+        layout.addWidget(self.depth_sample_chips)
+        review_row = QtWidgets.QHBoxLayout()
+        review_row.setSpacing(8)
+        layout.addLayout(review_row, 1)
+        chooser = QtWidgets.QWidget()
+        chooser.setMaximumWidth(230)
+        controls = QtWidgets.QVBoxLayout(chooser)
+        controls.setContentsMargins(0, 0, 0, 0)
+        review_row.addWidget(chooser)
         controls.addWidget(QtWidgets.QLabel("Depth-profile spot"))
         self.depth_spot_combo = StyledComboBox(elide_mode=QtCore.Qt.TextElideMode.ElideMiddle)
         self.depth_spot_combo.currentTextChanged.connect(self.depth_spot_combo.setToolTip)
@@ -3042,16 +3340,16 @@ class ResultsTableWidget(QtWidgets.QWidget):
             QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self.depth_spot_combo.currentIndexChanged.connect(
-            self.refresh_depth_concordia
+            self._depth_spot_changed
         )
-        controls.addWidget(self.depth_spot_combo, 1)
+        controls.addWidget(self.depth_spot_combo)
         self.depth_glasses_toggle = self._create_glass_button()
-        controls.addWidget(self.depth_glasses_toggle)
-        layout.addLayout(controls)
+        controls.addWidget(self.depth_glasses_toggle, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        controls.addLayout(self._create_spot_bulk_buttons())
         diagram_row, self.depth_diagram_buttons = self.create_diagram_buttons(
             self.refresh_depth_concordia
         )
-        layout.addWidget(diagram_row)
+        controls.addWidget(diagram_row)
         cmap_row = QtWidgets.QHBoxLayout()
         cmap_row.setSpacing(6)
         cmap_row.addWidget(QtWidgets.QLabel("Colour map"))
@@ -3070,9 +3368,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.depth_colormap_combo.currentTextChanged.connect(self.set_depth_colormap)
         cmap_row.addWidget(self.depth_colormap_combo)
         cmap_row.addStretch(1)
-        layout.addLayout(cmap_row)
+        controls.addLayout(cmap_row)
+        controls.addStretch(1)
         self.depth_concordia = ConcordiaReviewWidget()
-        layout.addWidget(self.depth_concordia, 1)
+        self.depth_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                           QtWidgets.QSizePolicy.Policy.Ignored)
+        review_row.addWidget(self.depth_concordia, 1)
         return page
 
     @staticmethod
@@ -3154,9 +3455,20 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.set_selected_spots(self.selected_spots, origin=self.spot_choice_list)
 
     def set_all_spot_choices(self, checked: bool) -> None:
-        """Check or clear every currently visible spot in one redraw."""
-        view = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
-        self.set_spot_included(self._visible_spot_names(view), checked)
+        """Include all non-glass spots and glasses per the toggle.
+
+        False retains the legacy action of excluding filtered chooser spots;
+        clear_spot_choices() excludes every spot regardless of the filter.
+        """
+        if checked:
+            glasses = self._glass_spot_names()
+            self._depth_sample_choices = True
+            self.set_selected_spots(set())
+            self._set_spot_inclusions({name: self._show_glasses or name not in glasses
+                                       for name in self.include_flags})
+        else:
+            view = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
+            self.set_spot_included(self._visible_spot_names(view), False)
 
     def refresh_spot_concordia(self, *, reset_view: bool = False) -> None:
         """Redraw only the checked final spot means."""
@@ -3220,7 +3532,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         prefix = "Selected" if selected else "Included"
         result = self.concordia_readout
         if result is None:
-            text = f"{prefix}: No concordia age for this set"
+            text = "" if self._blank_empty_readout and not names else f"{prefix}: No concordia age for this set"
             tooltip = text
         else:
             age = format_value_with_uncertainty(result.age_ma, result.age_2se)
@@ -3243,15 +3555,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
         super().showEvent(event)
         self._readout_timer.start(0)
 
+    def _depth_spot_changed(self, _index):
+        self._depth_sample_choices = False
+        self.refresh_depth_concordia()
+
     def refresh_depth_concordia(self, *, reset_view: bool = True) -> None:
         """Redraw corrected sweeps for the chosen depth-profile spot."""
         if self._theme is None:
             return
         spot_name = self.depth_spot_combo.currentText()
         selected = self._depth_frame
-        if spot_name and "spot_name" in selected.columns:
+        if self._depth_sample_choices and "spot_name" in selected.columns:
+            names = {name for name, included in self.include_flags.items() if included}
+            selected = selected[selected["spot_name"].astype(str).isin(names)]
+        elif spot_name and "spot_name" in selected.columns:
             selected = selected[selected["spot_name"].astype(str).eq(spot_name)]
-        if not self.include_flags.get(spot_name, self._show_glasses
+        if not self._depth_sample_choices and not self.include_flags.get(spot_name, self._show_glasses
                                       if spot_name in self._glass_spot_names() else True):
             selected = selected.iloc[0:0]
         self.depth_concordia.show_data(
@@ -3299,6 +3618,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def show_results(self, finalized: object) -> None:
         """Display a FinalizedReduction without duplicating reduction logic."""
         final_frame = getattr(finalized, "selected_results", pd.DataFrame())
+        parallel_frame = getattr(finalized, "parallel_results", pd.DataFrame())
+        # Capture acquisition order before any table or grouped-view sorting.
+        self._spot_sample_order = self._sample_order(parallel_frame, final_frame)
         secondary = getattr(
             finalized,
             "secondary_standard_summary",
@@ -3311,9 +3633,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                             for name in ("sample", "spot_name") if name in final_frame), -1)
         self.results_table.sortByColumn(sort_column, QtCore.Qt.SortOrder.AscendingOrder)
         self.secondary_model.set_frame(secondary)
-        self._spot_frame = getattr(
-            finalized, "parallel_results", pd.DataFrame()
-        ).copy()
+        self._spot_frame = parallel_frame.copy()
         decision = getattr(finalized, "decision", None)
         method = getattr(decision, "common_pb_method", "none")
         uncertainty = getattr(
@@ -3349,6 +3669,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.spot_choice_list.addItem(item)
         self.spot_choice_list.blockSignals(False)
         self._build_grouped_views()
+        self._rebuild_sample_chips()
         self._syncing_selection = False
         self.filter_spot_choices(self.spot_filter.text())
         self.set_selected_spots(retained_selection)
@@ -3372,6 +3693,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._include_calibration_uncertainty = bool(
             include_calibration_uncertainty
         )
+        self._depth_sample_order = self._sample_order(depth_profile)
         selected = depth_profile
         if spot_name and "spot_name" in selected:
             selected = selected[selected["spot_name"].eq(spot_name)]
@@ -3412,6 +3734,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
         )
         self.depth_model.set_frame(review_frame)
         self._depth_frame = depth_profile.copy()
+        self._depth_sample_choices = False
+        glasses = self._glass_spot_names()
+        for name in self._sample_names(self._depth_frame):
+            self.include_flags.setdefault(name, self._show_glasses if name in glasses else True)
+        self._rebuild_sample_chips()
         self._update_glass_buttons()
         existing_spot = self.depth_spot_combo.currentText()
         spot_names = (

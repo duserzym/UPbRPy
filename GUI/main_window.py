@@ -5082,6 +5082,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.plot_mode == "final_results":
             finalized = self.session.reduction_cache.get("finalized_results")
             if finalized is not None:
+                experiment = self.session.experiment
+                if {"sample", "spot_starting_times"}.issubset(experiment.columns):
+                    self.results_table.set_sample_run_order(
+                        experiment.sort_values("spot_starting_times")["sample"]
+                        .astype(str)
+                        .drop_duplicates()
+                    )
                 self.results_table.show_results(finalized)
             return
 
