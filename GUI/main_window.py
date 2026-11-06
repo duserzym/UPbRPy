@@ -298,6 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.submit_to_database_action = database_menu.addAction(
             "Submit to Database"
         )
+        self.submit_to_database_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+D"))
         self.submit_to_database_action.triggered.connect(
             lambda _checked=False: self.database().submit(self)
         )
@@ -1066,6 +1067,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (self.step_primary_button, standard.SP_MediaPlay),
             *[(button, standard.SP_BrowserReload if i == 0 else standard.SP_FileDialogContentsView)
               for i, button in enumerate(self.step_secondary_buttons)],
+            (self.step_database_buttons[0], standard.SP_DialogApplyButton),
+            (self.step_database_buttons[1], standard.SP_DialogYesButton),
         ]
         for button, symbol in buttons:
             if button is None:
@@ -1081,7 +1084,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setIconSize(QtCore.QSize(18, 18))
             button.setStyleSheet("padding: 3px;" if compact else
                 "padding: 6px; font-size: 11px;" if button is self.step_primary_button else
-                "padding: 3px 6px; font-size: 11px;" if button in self.step_secondary_buttons else "")
+                "padding: 3px 6px; font-size: 11px;" if button in (*self.step_secondary_buttons, *self.step_database_buttons) else "")
             button.setFixedHeight(28 if compact else button.sizeHint().height())
         self.autopick_settings_toggle.setText("" if compact else "Auto-pick settings")
         self.autopick_settings_toggle.setIcon(self._compact_action_icon(standard.SP_FileDialogDetailedView) if compact else QtGui.QIcon())
@@ -1174,7 +1177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setSpacing(4)
         self.workflow_step_list.setSpacing(0)
         self.workflow_step_list.setIconSize(QtCore.QSize(20, 20))
-        for button in (self.step_primary_button, *self.step_secondary_buttons):
+        for button in (self.step_primary_button, *self.step_secondary_buttons, *self.step_database_buttons):
             if button is not None:
                 button.setFixedHeight(28)
         self.step_actions_block.layout().invalidate()
@@ -1231,7 +1234,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         margins = layout.contentsMargins()
         width = max(80, rail.contentsRect().width() - margins.left() - margins.right())
-        for button in (self.step_primary_button, *self.step_secondary_buttons):
+        for button in (self.step_primary_button, *self.step_secondary_buttons, *self.step_database_buttons):
             if button is not None:
                 button.ensurePolished()
                 button.setFixedHeight(button.heightForWidth(width))
@@ -1650,6 +1653,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(self.step_buttons_layout)
         self.step_primary_button = None
         self.step_secondary_buttons = []
+        self.step_database_block, self.step_database_buttons = self._build_database_buttons()
+        layout.addWidget(self.step_database_block)
         navigation = QtWidgets.QHBoxLayout()
         navigation.setSpacing(4)
         self.step_back_button = QtWidgets.QPushButton("‹ Back")
@@ -1660,6 +1665,44 @@ class MainWindow(QtWidgets.QMainWindow):
             navigation.addWidget(button, 1)
         layout.addLayout(navigation)
         return self.step_actions_block
+
+    def _build_database_buttons(
+        self,
+    ) -> tuple[QtWidgets.QWidget, tuple[WrappingButton, WrappingButton]]:
+        """Bind panel buttons to the menu actions, including their tooltips."""
+        block = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        buttons = []
+        for label, action in (
+            ("Submit to database", self.submit_to_database_action),
+            ("Mark as preferred", self.prefer_run_action),
+        ):
+            button = WrappingButton(label)
+            button.clicked.connect(action.trigger)
+
+            def sync(button=button, action=action):
+                button.setEnabled(action.isEnabled())
+                shortcut = action.shortcut().toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+                button.setToolTip(action.toolTip() + (f"\n{shortcut}" if shortcut else ""))
+
+            action.changed.connect(sync)
+            sync()
+            layout.addWidget(button)
+            buttons.append(button)
+        block.hide()
+        return block, tuple(buttons)
+
+    def _sync_database_button_visibility(self) -> None:
+        """Offer database controls only at final review of a database session."""
+        if not hasattr(self, "workflow_step_list"):
+            return
+        visible = bool(self.session.origin) and self.current_workflow_stage() == PipelineStage.FINALIZE
+        for name in ("step_database_block", "results_database_block"):
+            block = getattr(self, name, None)
+            if block is not None:
+                block.setVisible(visible)
 
     def _build_main_column(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -2305,6 +2348,8 @@ class MainWindow(QtWidgets.QMainWindow):
         results_layout = QtWidgets.QVBoxLayout(results_page)
         results_layout.setContentsMargins(6, 8, 6, 8)
         results_layout.setSpacing(10)
+        self.results_database_block, self.results_database_buttons = self._build_database_buttons()
+        results_layout.addWidget(self.results_database_block)
 
         self.bias_card = NeumorphicFrame()
         self.bias_card.setObjectName("SessionCard")
@@ -3564,6 +3609,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action.setEnabled(enabled)
             action.setToolTip(tip if available else reason)
             action.setStatusTip(tip if available else reason)
+        self._sync_database_button_visibility()
 
     def register_url_scheme(self) -> None:
         from GUI.launch import LaunchError, register_url_scheme
@@ -5203,6 +5249,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_summary_label.setToolTip(f"{text}\n{summary['engine']}")
 
     def _rebuild_workflow_actions(self) -> None:
+        self._sync_database_button_visibility()
         while self.step_buttons_layout.count():
             widget = self.step_buttons_layout.takeAt(0).widget()
             if widget is not None:

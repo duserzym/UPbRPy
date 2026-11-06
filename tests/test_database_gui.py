@@ -39,10 +39,11 @@ def dialogs(monkeypatch):
     def record(kind):
         def show(parent, title, text, *args, **kwargs):
             shown.append((kind, title, str(text)))
-            return QtWidgets.QMessageBox.StandardButton.Ok
+            return (QtWidgets.QMessageBox.StandardButton.Yes if kind == "question"
+                    else QtWidgets.QMessageBox.StandardButton.Ok)
         return staticmethod(show)
 
-    for kind in ("information", "warning", "critical"):
+    for kind in ("information", "warning", "critical", "question"):
         monkeypatch.setattr(QtWidgets.QMessageBox, kind, record(kind))
     monkeypatch.setattr(
         QtWidgets.QMessageBox,

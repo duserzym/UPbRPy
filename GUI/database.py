@@ -312,6 +312,18 @@ class DatabaseLinks(QtCore.QObject):
         if not window.session.loaded or not origin:
             self.show_error(title, ORIGIN_REQUIRED)
             return
+        label = origin.get("session_key") or origin["session_id"]
+        question = (
+            f"Submit this reduction to session {label} on {origin['server']} as a new run?"
+        )
+        if origin.get("run_id"):
+            question += f"\n\nIt will supersede run {origin['run_id']}."
+        if QtWidgets.QMessageBox.question(
+            window, title, question,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
         from GUI.services import ensure_shared_pipeline
         from UPbRPy.pipeline import PipelineStage
         from UPbRPy.project import write_reduction_project
@@ -371,6 +383,9 @@ class DatabaseLinks(QtCore.QObject):
         counts = ", ".join(f"{k}: {v}" for k, v in result.counts.items()) or "none reported"
         held = result.quarantine_items
         window.append_log(f"Submitted to the database as run {result.run_id} ({counts}).")
+        origin = window.session.origin
+        label = origin.get("session_key") or origin["session_id"]
+        window.statusBar().showMessage(f"Submitted to {label} as run {result.run_id}.")
         box = QtWidgets.QMessageBox(window)
         box.setIcon(
             QtWidgets.QMessageBox.Icon.Warning if held else QtWidgets.QMessageBox.Icon.Information
@@ -399,8 +414,16 @@ class DatabaseLinks(QtCore.QObject):
         if not origin.get("run_id"):
             self.show_error(title, RUN_REQUIRED)
             return
-        db = client()
         server, session_id, run_id = origin["server"], origin["session_id"], origin["run_id"]
+        label = origin.get("session_key") or session_id
+        if QtWidgets.QMessageBox.question(
+            window, title,
+            f"Make run {run_id} the preferred run of session {label} on {server}?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        db = client()
 
         def call() -> None:
             self.run(
@@ -414,7 +437,9 @@ class DatabaseLinks(QtCore.QObject):
 
     def _preferred(self, window, run_id: str) -> None:
         window.append_log(f"Run {run_id} is now the preferred run of its session.")
-        window.statusBar().showMessage(f"Run {run_id} marked as preferred.")
+        origin = window.session.origin
+        label = origin.get("session_key") or origin["session_id"]
+        window.statusBar().showMessage(f"Run {run_id} marked as preferred for session {label}.")
         QtWidgets.QMessageBox.information(
             window, "Mark as preferred", f"Run {run_id} is now the session's preferred run."
         )
