@@ -497,7 +497,7 @@ def test_nearest_point_for_large_frame_at_different_ranges(review, app):
 
 @pytest.mark.parametrize("mode,enabled", [("xy", (True, True)), ("x", (True, False)),
                                          ("y", (False, True))])
-def test_wheel_box_zoom_and_pan_respect_axes(review, app, mode, enabled):
+def test_zoom_respects_axes_and_pan_moves_both(review, app, mode, enabled):
     plot = review[0].spot_concordia
     vb = plot._plot_item.vb
     plot.set_zoom_mode(mode)
@@ -544,5 +544,5 @@ def test_wheel_box_zoom_and_pan_respect_axes(review, app, mode, enabled):
     for axis, changed in enumerate(enabled):
         assert (not np.allclose(before[axis], boxed[axis])) == changed
         assert (np.ptp(wheeled[axis]) < np.ptp(boxed[axis])) == changed
-        assert (not np.allclose(panned[axis], wheeled[axis])) == changed
+        assert not np.allclose(panned[axis], wheeled[axis])
         np.testing.assert_allclose(np.ptp(panned[axis]), np.ptp(wheeled[axis]))

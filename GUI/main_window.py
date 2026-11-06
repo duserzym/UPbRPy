@@ -1795,6 +1795,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.interact_mode_buttons[imode] = ibtn
             cb_layout.addWidget(ibtn)
         self.interact_mode_buttons["zoom"].setChecked(True)
+        self.interact_mode_buttons["pan"].setToolTip("Drag to pan in x and y")
         self.interact_mode_buttons["select"].setEnabled(False)
         self.interact_mode_buttons["select"].hide()
 
@@ -1803,7 +1804,7 @@ class MainWindow(QtWidgets.QMainWindow):
         _vsep_drag.setObjectName("ControlBarDivider")
         cb_layout.addWidget(_vsep_drag)
 
-        zoom_lbl = QtWidgets.QLabel("Zoom")
+        zoom_lbl = QtWidgets.QLabel("Zoom axis")
         zoom_lbl.setObjectName("ControlBarLabel")
         cb_layout.addWidget(zoom_lbl)
         self.zoom_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
@@ -1825,6 +1826,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.zoom_mode_buttons[mode] = btn
             cb_layout.addWidget(btn)
         self.zoom_mode_buttons["xy"].setChecked(True)
+        self.zoom_mode_buttons["xy"].setToolTip("Zoom both axes (wheel and box)")
+        self.zoom_mode_buttons["x"].setToolTip("Zoom the x axis only; panning still moves both axes")
+        self.zoom_mode_buttons["y"].setToolTip("Zoom the y axis only; panning still moves both axes")
 
         _vsep1 = QtWidgets.QFrame()
         _vsep1.setFrameShape(QtWidgets.QFrame.Shape.VLine)

@@ -964,7 +964,94 @@ class _ConcordiaLegendSample(ItemSample):
         painter.drawEllipse(QtCore.QPointF(6, 7), 3.25, 3.25)
 
 
-class _ConcordiaViewBox(pg.ViewBox):
+class AxisZoomViewBox(pg.ViewBox):
+    """Constrain zoom axes while allowing panning in both directions."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.set_zoom_axes("xy")
+
+    def set_zoom_axes(self, mode: str) -> None:
+        """Choose xy, x, or y for zooming without restricting panning."""
+        self._zoom_axes = mode if mode in {"xy", "x", "y"} else "xy"
+        self.setMouseEnabled(x=True, y=True)
+
+    def zoom_axes(self) -> str:
+        """Return the selected zoom axes."""
+        return self._zoom_axes
+
+    def _zoom_mask(self):
+        return [self.state["mouseEnabled"][0] and self._zoom_axes != "y",
+                self.state["mouseEnabled"][1] and self._zoom_axes != "x"]
+
+    def wheelEvent(self, event, axis=None):
+        """Zoom the chosen axes, or the axis item receiving the wheel."""
+        mask = ([enabled and index == axis
+                 for index, enabled in enumerate(self.state["mouseEnabled"])]
+                if axis in (0, 1) else self._zoom_mask())
+        if not any(mask):
+            event.ignore()
+            return
+        scale = 1.02 ** (event.delta() * self.state["wheelScaleFactor"])
+        factors = [scale if enabled else None for enabled in mask]
+        transform = pg.functions.invertQTransform(self.childGroup.transform())
+        center = pg.Point(transform.map(event.pos()))
+        self._resetTarget()
+        self.scaleBy(factors, center)
+        event.accept()
+        self.sigRangeChangedManually.emit(mask)
+
+    def mouseDragEvent(self, event, axis=None):
+        """Pan with left/middle drag and constrain right-drag zoom axes."""
+        button = event.button()
+        if (button == QtCore.Qt.MouseButton.LeftButton
+                and self.state["mouseMode"] == self.RectMode and axis is None):
+            # Keep pyqtgraph's rubber band and view history; showAxRect below
+            # applies the zoom-axis choice when the rectangle is finished.
+            super().mouseDragEvent(event, axis=axis)
+            return
+
+        event.accept()
+        transform = pg.functions.invertQTransform(self.childGroup.transform())
+        if button in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.MiddleButton):
+            mask = [enabled and (axis is None or index == axis)
+                    for index, enabled in enumerate(self.state["mouseEnabled"])]
+            delta = (event.lastPos() - event.pos()) * np.array(mask, dtype=float)
+            delta = transform.map(delta) - transform.map(pg.Point(0, 0))
+            self._resetTarget()
+            if any(mask):
+                self.translateBy(x=delta.x() if mask[0] else None,
+                                 y=delta.y() if mask[1] else None)
+            self.sigRangeChangedManually.emit(mask)
+        elif button == QtCore.Qt.MouseButton.RightButton:
+            mask = [enabled and (axis is None or index == axis)
+                    for index, enabled in enumerate(self._zoom_mask())]
+            if self.state["aspectLocked"] is not False:
+                mask[0] = False
+            delta = event.screenPos() - event.lastScreenPos()
+            factors = (1 + np.array(mask, dtype=float) * 0.02) ** np.array([-delta.x(), delta.y()])
+            center = pg.Point(transform.map(event.buttonDownPos(button)))
+            self._resetTarget()
+            self.scaleBy(x=factors[0] if mask[0] else None,
+                         y=factors[1] if mask[1] else None, center=center)
+            self.sigRangeChangedManually.emit(mask)
+
+    def showAxRect(self, rect, **kwargs):
+        """Apply rectangle zoom only to the selected zoom axes."""
+        rect = rect.normalized()
+        mask = self._zoom_mask()
+        limits = {}
+        if mask[0]:
+            limits["xRange"] = (rect.left(), rect.right())
+        if mask[1]:
+            limits["yRange"] = (rect.top(), rect.bottom())
+        if self._zoom_axes != "xy":
+            kwargs.setdefault("padding", 0)
+        self.setRange(**limits, **kwargs)
+        self.sigRangeChangedManually.emit(mask)
+
+
+class _ConcordiaViewBox(AxisZoomViewBox):
     """Route spot clicks and selection rectangles to the review widget."""
 
     def __init__(self, review):
@@ -995,18 +1082,6 @@ class _ConcordiaViewBox(pg.ViewBox):
                 self.updateScaleBox(event.buttonDownPos(), event.pos())
         else:
             super().mouseDragEvent(event, axis=axis)
-
-    def showAxRect(self, rect, **kwargs):
-        """Apply rectangle zoom only to the enabled review axes."""
-        mode = self.review.zoom_mode()
-        if mode in {"x", "y"}:
-            rect = rect.normalized()
-            limits = {"xRange": (rect.left(), rect.right())} if mode == "x" else {
-                "yRange": (rect.top(), rect.bottom())}
-            self.setRange(**limits, padding=0)
-            self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
-        else:
-            super().showAxRect(rect, **kwargs)
 
 
 class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
@@ -1575,10 +1650,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     def _apply_zoom_mode(self) -> None:
         if self._plot_item is None:
             return
-        self._plot_item.vb.setMouseEnabled(
-            x=self._zoom_mode in {"xy", "x"},
-            y=self._zoom_mode in {"xy", "y"},
-        )
+        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self) -> None:
         if self._plot_item is None:
@@ -3463,7 +3535,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         if theme is None:
             return
         if data is None:
-            p = self.addPlot(0, 0)
+            p = self.addPlot(0, 0, viewBox=AxisZoomViewBox())
             self._plot_item = p
             lbl = pg.TextItem("No downhole correction data available.\nRun the downhole correction step first.",
                               color=theme.muted, anchor=(0.5, 0.5))
@@ -3479,7 +3551,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         primary_standard = data["primary_standard"]
         fit_label = str(data.get("fit_label", "Interpolated"))
 
-        p = self.addPlot(row=0, col=0)
+        p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
         self._plot_item = p
         _make_diag_axis(p, theme)
         p.setLabel("bottom", "Relative time (s)", color=theme.axis_text, size="9px")
@@ -3571,12 +3643,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
     def _apply_zoom_mode(self) -> None:
         if self._plot_item is None:
             return
-        if self._zoom_mode == "x":
-            self._plot_item.vb.setMouseEnabled(x=True, y=False)
-        elif self._zoom_mode == "y":
-            self._plot_item.vb.setMouseEnabled(x=False, y=True)
-        else:
-            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self) -> None:
         if self._plot_item is None:
@@ -3627,7 +3694,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         if theme is None:
             return
         if data is None:
-            p = self.addPlot(0, 0)
+            p = self.addPlot(0, 0, viewBox=AxisZoomViewBox())
             self._plot_item = p
             lbl = pg.TextItem("No session fractionation data available.\nRun the session correction step first.",
                               color=theme.muted, anchor=(0.5, 0.5))
@@ -3647,7 +3714,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         show_uncertainty = bool(data.get("show_uncertainty", False))
         fit_label = str(data.get("fit_label", "Polynomial"))
 
-        p = self.addPlot(row=0, col=0)
+        p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
         self._plot_item = p
         _make_diag_axis(p, theme)
         p.setLabel("bottom", "Session time (s)", color=theme.axis_text, size="9px")
@@ -3731,12 +3798,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
     def _apply_zoom_mode(self) -> None:
         if self._plot_item is None:
             return
-        if self._zoom_mode == "x":
-            self._plot_item.vb.setMouseEnabled(x=True, y=False)
-        elif self._zoom_mode == "y":
-            self._plot_item.vb.setMouseEnabled(x=False, y=True)
-        else:
-            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self) -> None:
         if self._plot_item is None:
@@ -3794,7 +3856,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
         if theme is None:
             return
         if data is None or not data.get("channels"):
-            p = self.addPlot(0, 0)
+            p = self.addPlot(0, 0, viewBox=AxisZoomViewBox())
             self._plot_item = p
             lbl = pg.TextItem("No calibration data available.\nRun the concentration calibration step first.",
                               color=theme.muted, anchor=(0.5, 0.5))
@@ -3804,7 +3866,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             return
 
         channels = data["channels"]
-        p = self.addPlot(row=0, col=0)
+        p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
         self._plot_item = p
         _make_diag_axis(p, theme)
         p.setTitle("Calibration slopes by element", color=theme.axis_text, size="10pt")
@@ -3901,12 +3963,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
     def _apply_zoom_mode(self) -> None:
         if self._plot_item is None:
             return
-        if self._zoom_mode == "x":
-            self._plot_item.vb.setMouseEnabled(x=True, y=False)
-        elif self._zoom_mode == "y":
-            self._plot_item.vb.setMouseEnabled(x=False, y=True)
-        else:
-            self._plot_item.vb.setMouseEnabled(x=True, y=True)
+        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self) -> None:
         if self._plot_item is None:
@@ -3922,7 +3979,7 @@ class TracePlotWidget(RoundedPlotWidget):
     xWindowChanged = QtCore.Signal(tuple)
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(viewBox=AxisZoomViewBox())
         # 160 px keeps the trace editable when a laptop screen squeezes the
         # column; it normally gets 250 px or more (tests/test_small_screens.py).
         self.setMinimumHeight(160)
@@ -4513,12 +4570,7 @@ class TracePlotWidget(RoundedPlotWidget):
             self.plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
 
     def _apply_zoom_mode(self) -> None:
-        if self._zoom_mode == "x":
-            self.setMouseEnabled(x=True, y=False)
-        elif self._zoom_mode == "y":
-            self.setMouseEnabled(x=False, y=True)
-        else:
-            self.setMouseEnabled(x=True, y=True)
+        self.plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def set_sigma_level(self, sigma_level: int) -> None:
         self._sigma_level = 1 if sigma_level <= 1 else 2
@@ -5412,7 +5464,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         return self._interaction_mode
 
     def _apply_zoom_mode(self):
-        self._plot_item.vb.setMouseEnabled(x=self._zoom_mode != "y", y=self._zoom_mode != "x")
+        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self):
         self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode if self._interaction_mode == "pan"

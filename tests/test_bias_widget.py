@@ -111,7 +111,8 @@ def test_hover_log_axes_and_interaction_modes(widget, table, app):
     assert names[-1] == '' and not widget._hover_text.isVisible()
     widget.set_zoom_mode('x')
     assert widget.zoom_mode() == 'x'
-    assert widget._plot_item.vb.state['mouseEnabled'] == [True, False]
+    assert widget._plot_item.vb.state['mouseEnabled'] == [True, True]
+    assert widget._plot_item.vb.zoom_axes() == 'x'
     widget.set_interaction_mode('pan')
     assert widget.interaction_mode() == 'pan'
     assert widget._plot_item.vb.state['mouseMode'] == pg.ViewBox.PanMode
