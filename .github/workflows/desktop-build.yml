@@ -49,3 +49,55 @@ jobs:
           path: ${{ runner.temp }}/upbrpy-dist/UPbRPy-Studio-*.zip
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check version tag
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != "v" + version:
+              raise SystemExit(f"Tag {tag} does not match pyproject.toml version {version}")
+          PY
+
+      - name: Download platform archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: UPbRPy-Studio-*
+          merge-multiple: true
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/sha256sums.py *.zip > SHA256SUMS.txt
+          cat > "$RUNNER_TEMP/release-notes.txt" <<'NOTES'
+          Download the macOS-arm64 zip for Apple silicon Macs, or Windows-x86_64 for Windows PCs.
+          Unzip and move UPbRPy Studio to your Applications folder or a writable folder on Windows.
+          On first launch on macOS, use System Settings > Privacy & Security > Open Anyway if prompted.
+          Later versions can download and install updates from inside Studio using the version chip or Help > Check for updates.
+          NOTES
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(b|rc)[0-9]+$ ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --draft "${prerelease[@]}" \
+            --title "UPbRPy Studio $GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.txt" *.zip SHA256SUMS.txt

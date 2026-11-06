@@ -24,6 +24,7 @@ from GUI.launch import (
 from GUI.main_window import MainWindow
 from GUI.studio_window import StudioWindow
 from GUI.theme import build_application
+from GUI.updater import Updater
 
 
 class StudioWindowController(QtCore.QObject):
@@ -41,9 +42,11 @@ class StudioWindowController(QtCore.QObject):
         self.windows: dict[int, StudioWindow] = {}
         self._last_active: StudioWindow | None = None
         self._database = None
+        self.updater = Updater(self)
+        self.updater.start_scheduler()
 
     def _create_reduction(self) -> MainWindow:
-        reduction = MainWindow(theme_mode=self.theme_mode, app_icon=self.app_icon)
+        reduction = MainWindow(theme_mode=self.theme_mode, app_icon=self.app_icon, updater=self.updater)
         reduction.database_links = self.database
         return reduction
 

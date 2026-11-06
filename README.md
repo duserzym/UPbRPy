@@ -217,6 +217,19 @@ materials, fit models, outlier filtering, common-Pb method, calibration
 uncertainty, and preferred-age transition are represented directly in the
 shared pipeline configuration.
 
+#### Updates
+
+The version chip at the bottom-right of the plot canvas opens **Updates**;
+**Help → Check for updates** opens it and checks immediately. Use **Check now**,
+choose **Stable** or **Beta (pre-releases)**, and turn automatic downloads on or
+off. Downloaded updates are verified with SHA-256; **Restart to update** installs
+them. Frozen, writable copies check after 8 seconds and every 6 hours. Source
+checkouts update with `git pull`.
+
+To cut a release, bump `version` in `pyproject.toml`, tag it `v<version>`, push
+the tag, then publish the draft release created by the desktop workflow.
+See [in-app updates](docs/in-app-updates.md) for the mechanism and release flow.
+
 #### Final review (step 9)
 
 The include check boxes choose which spots appear on the Spot concordia and

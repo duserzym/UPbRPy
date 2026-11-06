@@ -78,6 +78,8 @@ from GUI.widgets import (
     make_list_item,
 )
 from GUI.workers import FunctionWorker
+from GUI.updater import Updater
+from GUI.update_widgets import VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 from UPbRPy.io import SELECTION_METHODS, selection_method_label
 from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
@@ -174,8 +176,10 @@ class MainWindow(QtWidgets.QMainWindow):
     open_source_requested = QtCore.Signal(str)
     title_changed = QtCore.Signal(str)
 
-    def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None) -> None:
+    def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None, updater=None) -> None:
         super().__init__()
+        self.updater = updater if updater is not None else Updater()
+        self.updater.start_scheduler()
         # Closed sessions may contain large sweep tables. Delete the window
         # promptly so those frames and pipeline caches can be reclaimed.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -485,6 +489,8 @@ class MainWindow(QtWidgets.QMainWindow):
         window_new_action.triggered.connect(self.new_window_requested.emit)
 
         help_menu = self.menuBar().addMenu("Help")
+        updates_action = help_menu.addAction("Check for updates")
+        updates_action.triggered.connect(lambda: self.version_chip.open_dialog(manual=True))
         guide_action = help_menu.addAction("Reduction Workflow Guide")
         guide_action.triggered.connect(self.show_pipeline_guide)
         about_action = help_menu.addAction("About UPbRPy Studio")
@@ -705,6 +711,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_panel = self._build_workflow_rail()
         self.sidebar_panel.installEventFilter(self)
         self.main_panel = self._build_main_column()
+        self.version_chip = VersionChip(self.updater)
+        self.version_chip.anchor_to(self.plots_stack)
         self.inspector_panel = self._build_inspector()
         self.compact_settings_panel = NeumorphicFrame(central)
         self.compact_settings_panel.setProperty("floatingPanel", True)
