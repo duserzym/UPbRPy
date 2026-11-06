@@ -918,13 +918,18 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
     )
     session.age_transition_ma = config.decision.age_transition_ma
 
-    visible_channels = workspace.get("visible_channels", ())
-    if isinstance(visible_channels, (list, tuple)):
-        session.visible_channels = [
+    visible_channels = workspace.get("visible_channels")
+    restored_channels = []
+    if isinstance(visible_channels, list):
+        restored_channels = [
             str(channel)
             for channel in visible_channels
             if str(channel) in session.channels
         ]
+    # Database bundles and projects saved with no usable channels need folder-open defaults.
+    session.visible_channels = restored_channels or default_visible_channels(
+        session.channels, session.primary_channel,
+    )
     selected_spot = str(workspace.get("selected_spot", "") or "")
     if selected_spot in session.spot_names:
         session.selected_spot = selected_spot
