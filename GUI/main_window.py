@@ -55,6 +55,7 @@ from GUI.services import (
     unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
+from GUI.export_dialog import ExportResultsDialog
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
     CalibrationSlopesWidget,
@@ -82,6 +83,7 @@ from GUI.updater import Updater
 from GUI.update_widgets import VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 from UPbRPy.io import SELECTION_METHODS, selection_method_label
+from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
 from UPbRPy.project import write_reduction_project
 from UPbRPy.reproducibility import (
@@ -185,6 +187,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.settings = QtCore.QSettings("UPbRPy", "Studio")
         self.session = ReductionSession()
+        self.export_settings = ExportSettings()
         self.project_path: Path | None = None
         self._saved_project_fingerprint: str | None = None
         self.channel_colors: dict[str, str] = {}
@@ -276,7 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         export_menu = file_menu.addMenu("Export")
         bundle_action = export_menu.addAction(
-            "Export Publication + Reproducibility Bundle…"
+            "Export results…"
         )
         bundle_action.triggered.connect(self.choose_reduction_bundle_export)
         notebook_action = export_menu.addAction(
@@ -412,7 +415,7 @@ class MainWindow(QtWidgets.QMainWindow):
         depth_action.triggered.connect(self.run_depth_profile_review)
         results_menu.addSeparator()
         results_bundle_action = results_menu.addAction(
-            "Export Publication + Reproducibility Bundle…"
+            "Export results…"
         )
         results_bundle_action.triggered.connect(
             self.choose_reduction_bundle_export
@@ -608,6 +611,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "export": (
                 self.session.include_export_concentrations,
                 self.session.include_export_depth_concentrations,
+                self.export_settings.to_dict(),
             ),
             "display_choices": {
                 "visible_channels": self.checked_channels(),
@@ -3166,6 +3170,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "review_spot_colour": self.results_table.spot_colour_mode(),
             "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
             "bias_controls": self.bias_controls.state(),
+            "export_settings": self.export_settings.to_dict(),
             "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
             "include_export_concentrations": (
@@ -3351,6 +3356,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._populate_workflow_ui()
 
         workspace = restored.workspace
+        self.export_settings = ExportSettings.from_dict(workspace.get("export_settings", {}))
         self.results_table.set_spot_colour_mode(str(workspace.get(
             "review_spot_colour", self.results_table.spot_colour_mode())))
         self.results_table.set_depth_colormap(str(workspace.get(
@@ -3607,51 +3613,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Notebook saved to {written}")
 
     def choose_reduction_bundle_export(self) -> None:
-        """Export publication tables, audit products, and replay notebook."""
+        """Prepare one table, then edit publication and audit export choices."""
         if not self._require_loaded() or self.session.pipeline is None:
             return
-        target = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Choose reduction export folder",
-            str(Path(self.session.directory).parent),
-        )
-        if not target:
-            return
-        pipeline = ensure_shared_pipeline(
-            self.session,
-            self.workflow_preset,
-        )
+        pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
+        excluded = tuple(name for name, included in self.results_table.include_flags.items() if not included)
 
-        def show_result(result: object) -> None:
-            bundle = result
-            self.append_log(
-                f"Exported {len(bundle.files)} files to {bundle.directory}."
-            )
+        def show_result(bundle) -> None:
+            for path in bundle.files:
+                self.append_log(f"Exported: {path}")
             for warning in bundle.warnings:
                 self.append_log(f"Export warning: {warning}")
-            self.statusBar().showMessage(
-                f"Reduction bundle saved to {bundle.directory}"
-            )
+            self.statusBar().showMessage(f"Exported {len(bundle.files)} files to {bundle.directory}")
             self.refresh_view()
 
-        self.run_background(
-            "Exporting reduction bundle",
-            lambda: export_reduction_bundle(
-                pipeline,
-                target,
-                include_depth_profile=(
-                    self.workflow_preset.supports_depth_profiles
-                ),
-                hash_inputs=True,
-                include_concentrations=(
-                    self.session.include_export_concentrations
-                ),
-                include_depth_concentrations=(
-                    self.session.include_export_depth_concentrations
-                ),
-            ),
-            show_result,
-        )
+        def open_dialog(table) -> None:
+            dialog = ExportResultsDialog(table, self,
+                folder=str(self.settings.value("publication_export_folder", "") or Path(self.session.directory).parent),
+                file_stem=Path(self.session.directory).stem + "_results_table",
+                excluded_spots=excluded)
+            self._export_dialog = dialog
+
+            def finished(result):
+                if result != QtWidgets.QDialog.DialogCode.Accepted:
+                    return
+                self.export_settings = dialog.export_settings()
+                target = dialog.folder_edit.text().strip()
+                self.settings.setValue("publication_export_folder", target)
+                self.update_project_window_title()
+                export_settings = dialog.export_settings()
+                formats = dialog.selected_formats()
+                file_stem = dialog.stem_edit.text().strip()
+                include_audit = dialog.audit_check.isChecked()
+                prepared_table = dialog.table
+                self.run_background("Exporting results", lambda: export_reduction_bundle(
+                    pipeline, target,
+                    include_depth_profile=self.workflow_preset.supports_depth_profiles,
+                    hash_inputs=True,
+                    include_concentrations=self.session.include_export_concentrations,
+                    include_depth_concentrations=self.session.include_export_depth_concentrations,
+                    export_settings=export_settings, formats=formats,
+                    excluded_spots=excluded, file_stem=file_stem,
+                    include_audit_files=include_audit, table=prepared_table), show_result)
+            dialog.finished.connect(finished)
+            dialog.open()
+
+        # Queue opening until the preparation worker's finish handler has run.
+        self.run_background("Preparing export preview",
+            lambda: build_export_table(pipeline, self.export_settings, excluded_spots=excluded),
+            lambda table: QtCore.QTimer.singleShot(0, lambda: open_dialog(table)))
 
     def reload_current_directory(self) -> None:
         if self.session.directory:

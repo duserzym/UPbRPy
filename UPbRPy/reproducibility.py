@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterable
 from datetime import datetime, timezone
 import json
 from uuid import uuid4
@@ -13,6 +14,10 @@ import pandas as pd
 
 from .pipeline import ReductionPipeline
 from .results import build_publication_tables, export_publication_tables
+from .export_table import (
+    ExportSettings, ExportTable, ExportColumn, build_export_table,
+    write_export_xlsx, write_export_csv, write_export_markdown,
+)
 
 
 SELECTION_EXPORT_COLUMNS = (
@@ -301,6 +306,12 @@ def export_reduction_bundle(
     hash_inputs: bool = True,
     include_concentrations: bool = True,
     include_depth_concentrations: bool = True,
+    export_settings: ExportSettings | None = None,
+    formats: Iterable[str] = ("xlsx", "csv", "md"),
+    excluded_spots: Iterable[str] = (),
+    file_stem: str | None = None,
+    include_audit_files: bool = True,
+    table: ExportTable | None = None,
 ) -> ExportBundle:
     """Export publication tables, audit data, provenance, and a notebook.
 
@@ -308,16 +319,46 @@ def export_reduction_bundle(
     every raw CSV is what lets a database match the bundle to the session it
     came from (``upbstudio/docs/WORKFLOW.md`` section 3.3).
     """
+    formats = tuple(dict.fromkeys(formats))
+    excluded_spots = tuple(excluded_spots)
+    if set(formats) - {"xlsx", "csv", "md"}:
+        raise ValueError("formats must contain only xlsx, csv, md")
+    settings = export_settings or (table.settings if table is not None else pipeline.config.export_settings) or ExportSettings()
+    stem = file_stem or f"{Path(pipeline.source_directory).stem if pipeline.source_directory else 'session'}_results_table"
+    if not stem.strip() or Path(stem).name != stem or stem in {".", ".."}:
+        raise ValueError("file_stem must be a single file name")
     root = Path(output_directory)
     root.mkdir(parents=True, exist_ok=True)
     files: list[Path] = []
     warnings: list[str] = []
 
     finalized = pipeline.run_finalize()
+    if formats and (table is not None or not finalized.parallel_results.empty):
+        if table is None:
+            if "preferred_date" in finalized.parallel_results:
+                table = build_export_table(pipeline, settings, excluded_spots=excluded_spots)
+            else:
+                # Older cached audit frames predate the publication quantity
+                # model. Preserve export compatibility without inventing dates.
+                frame = finalized.parallel_results.copy()
+                frame["role"], frame["notes"] = "unknown", ""
+                frame["excluded"] = frame.spot_name.isin(tuple(excluded_spots))
+                frame.loc[frame.excluded, "notes"] = "excluded"
+                columns = (ExportColumn("spot_name", "Analysis", "Analysis"),
+                           ExportColumn("notes", "Analysis", "Notes"))
+                table = ExportTable(frame, columns, pd.DataFrame(), pd.DataFrame(), settings,
+                    {"session_name": stem.removesuffix("_results_table"), "legacy_audit": True})
+        for fmt in formats:
+            path = root / (stem + "." + fmt)
+            written = {"xlsx": write_export_xlsx, "csv": write_export_csv, "md": write_export_markdown}[fmt](table, path)
+            files.extend(written if isinstance(written, list) else [written])
+    if not include_audit_files:
+        return ExportBundle(root, tuple(files), tuple(warnings))
     depth_profile = (
         pipeline.run_depth_profile() if include_depth_profile else None
     )
-    manifest = pipeline.manifest(hash_inputs=hash_inputs)
+    manifest = pipeline.manifest(hash_inputs=hash_inputs, metadata={"export_settings": settings.to_dict(),
+        "excluded_spots": list(excluded_spots)})
     tables = build_publication_tables(
         finalized,
         metadata={

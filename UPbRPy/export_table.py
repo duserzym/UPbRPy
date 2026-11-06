@@ -1,4 +1,4 @@
-"""Publication-table quantities, without rendering or file-writing policy.
+"""Publication-table quantities, display policy, and portable file writers.
 
 The analytical columns always use the no-calibration branch. ``disc_2s_pct``
 is an absolute uncertainty in percentage points; the reduction's historical
@@ -8,7 +8,7 @@ is an absolute uncertainty in percentage points; the reduction's historical
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import date
 from html import escape
 from pathlib import Path
@@ -424,7 +424,7 @@ def _sample_summaries(rows, components, secondary, uncertainty, reference, long_
         methods = included.preferred_date_method.dropna().unique()
         stats = weighted_mean_and_mswd(included.preferred_date, included.preferred_date_2e)
         k = stats["n"]
-        status = ("mixed methods" if len(methods) > 1 else
+        status = ("glass" if group.role.iloc[0] == "glass" else "mixed methods" if len(methods) > 1 else
                   "ok" if len(methods) == 1 and stats["probability"] >= .001 else "dispersed")
         sys = np.nan
         if status == "ok":
@@ -467,8 +467,15 @@ def _sample_summaries(rows, components, secondary, uncertainty, reference, long_
             text = f"{title}; concentration reference glass"
         elif status == "ok":
             text = f"{title}; weighted mean {methods[0]} date = {stats['weighted_mean']:.1f} ± {stats['weighted_mean_2e']:.1f} / ± {sys:.1f} Ma (2s; MSWD = {stats['mswd']:.2f}, n = {k})"
+        elif status == "mixed methods":
+            # A pooled MSWD across 206/238 and 207/206 dates means nothing.
+            counts = included.preferred_date_method.value_counts()
+            text = (f"{title}; preferred dates use mixed methods ("
+                    + ", ".join(f"{method} {count}" for method, count in counts.items())
+                    + "); no weighted mean")
         else:
             text = f"{title}; {status}: MSWD = {stats['mswd']:.2f}, n = {k}; no weighted mean"
+        text = re.sub(r"\bnan\b", "not available", text, flags=re.I)
         records.append(dict(sample=sample, role=group.role.iloc[0], n=len(group), n_excluded=int(group.excluded.sum()),
                             status=status, method=methods[0] if len(methods) == 1 else "", k=k,
                             mean=stats["weighted_mean"] if status == "ok" else np.nan,
@@ -493,7 +500,9 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     primary = tuple(x for x in primary if x)
     rows = frame.copy()
     rows["role"] = rows["sample"].map(lambda name: "primary" if name in primary else "secondary" if name in config.secondary_standards else "glass" if name in config.concentration_standards else "unknown")
-    rows["excluded"] = rows.spot_name.isin(excluded)
+    # Studio hides glasses from the concordia review by default; that is not
+    # a rejection, and glasses are never part of a U-Pb summary.
+    rows["excluded"] = rows.spot_name.isin(excluded) & rows.role.ne("glass")
     order = pipeline.experiment.sort_values("spot_starting_times", kind="stable").spot_names.tolist()
     rows["run_order"] = rows.spot_name.map({name: i + 1 for i, name in enumerate(order)})
     signals = spot_signal_quantities(pipeline.experiment, pipeline.run_baseline()).set_index("spot_name")
@@ -593,8 +602,13 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     rows = rows.sort_values(["_role_order", "_sample_order", "run_order"], kind="stable")
     summaries = _sample_summaries(rows, preferred_parts, secondary, config.uncertainty, reference, long_term)
     rows = rows[[c.key for c in columns] + ["sample", "role", "excluded", "run_order"]].reset_index(drop=True)
-    context = dict(material=config.material, primary_standards=dict(zip(SYSTEMS, (config.primary_68_standard, config.primary_68_standard, config.primary_76_standard, config.primary_82_standard))),
-        secondary_standards=config.secondary_standards, concentration_standards=config.concentration_standards,
+    context = dict(material=config.material, channels=tuple(pipeline.channels),
+        reference_library_path=pipeline.reference_library_path,
+        session_name=Path(pipeline.source_directory).stem if pipeline.source_directory else "session",
+        primary_standards=dict(zip(SYSTEMS, (config.primary_68_standard, config.primary_68_standard, config.primary_76_standard, config.primary_82_standard))),
+        # Only materials analysed in this session are cited in footnotes.
+        secondary_standards=tuple(x for x in config.secondary_standards if rows["sample"].eq(x).any()),
+        concentration_standards=config.concentration_standards,
         active_concentration_standards=tuple(concentration["active_standards"]) if config.concentration_standards else (),
         decision=asdict(finalized.decision), uncertainty_settings=config.uncertainty.to_dict(),
         primary_reference_terms=reference, long_term_relative_1s=long_term,
@@ -694,11 +708,11 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     acquisition = qtegra.get("acquisition_summary", {})
     notes = {}
     missing = {}
-    def fmt(note, field, value, unit=""):
+    def fmt(note, field, value, unit="", precision=None):
         if value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, (int, float)) and not np.isfinite(value)):
             missing.setdefault(note, []).append(field)
             return "not recorded"
-        return (f"{value:.8g}" if isinstance(value, (int, float)) else str(value)) + (" " + unit if unit else "")
+        return (format(value, precision or ".8g") if isinstance(value, (int, float)) else str(value)) + (" " + unit if unit else "")
     def sentence(note, value):
         notes[note] = value
 
@@ -710,11 +724,13 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
                     or (paths[0].parent.name if paths else None))
     first, last = acquisition.get("first_start_date"), acquisition.get("last_start_date")
     dates = first if first == last else f"{first} to {last}" if first and last else None
-    starts = (f"{acquisition['first_start']} to {acquisition['last_start']}"
-              if acquisition.get("first_start") and acquisition.get("last_start") else None)
+    starts = None
+    if acquisition.get("first_start") and acquisition.get("last_start"):
+        start, end = (str(acquisition[key]).replace("T", " ")[:16]
+                      for key in ("first_start", "last_start"))
+        starts = f"{start} to {end[11:] if start[:10] == end[:10] else end} (instrument clock)"
     session_fields = [("session_name", "Session", session_name, ""),
-        ("acquisition_dates", "acquisition dates", dates, ""),
-        ("acquisition_starts", "first to last acquisition start (recorded clock)", starts, ""),
+        ("acquisition_starts", "acquisition starts", starts or dates, ""),
         ("operator", "operator", settings.operator or ", ".join(acquisition.get("users", [])), ""),
         ("instrument", "instrument", acquisition.get("machine") or qtegra.get("machine"), ""),
         ("laboratory", "laboratory", settings.laboratory, ""),
@@ -743,7 +759,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     for region in ("baseline", "plateau"):
         duration = _numeric(selections, region + "_end_times") - _numeric(selections, region + "_start_times")
         duration = duration.loc[np.isfinite(duration) & duration.ge(0)]
-        windows.append(f"{region} median duration {fmt('method', region + '_duration_s', float(duration.median()) if len(duration) else None, 's')}")
+        windows.append(f"{region} median duration {fmt('method', region + '_duration_s', float(duration.median()) if len(duration) else None, 's', '.1f')}")
     tune = fmt("method", "tune_names", ", ".join(acquisition.get("tune_names", [])))
     laser_output = fmt("method", "laser_output_settings_percent", ", ".join(acquisition.get("laser_output_settings_percent", [])), "%")
     sentence("method", f"Dwell times per channel (median over acquisitions): {dwell}. "
@@ -759,17 +775,24 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         measurements = pd.DataFrame(columns=("standard", "quantity", "role", "value", "source"))
     registry = measurements.attrs.get("sources", {})
     library_archive = build_standard_archive(measurements) if not measurements.empty else pd.DataFrame()
-    def citations(note, field, records):
+    def citations(note, field, records, compact=False):
         values = []
         for display in records.source.unique():
             entries = [entry for entry in registry.values() if entry["display"] == display]
             entry = entries[0] if len(entries) == 1 else {}
             doi = entry.get("doi")
             text = display
+            if compact:
+                author_year = re.match(r"(.+?)\s*\((\d{4})\)", display)
+                if author_year:
+                    text = f"{author_year[1]}, {author_year[2]}"
+                elif "UPbR26plus" in display:
+                    text = "UPbR26plus archive value"
             if doi and doi not in text:
                 text += f", doi:{doi}"
             elif not doi:
-                text += "; DOI " + fmt(note, field + ".doi", None)
+                missing_doi = fmt(note, field + ".doi", None)
+                text += ", no DOI" if compact else "; DOI " + missing_doi
             values.append(text)
         return "; ".join(values) if values else fmt(note, field + ".citation", None)
     standard_text = []
@@ -780,6 +803,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         for name in (tuple(dict.fromkeys(primaries.values())) if role == "Primary" else context["secondary_standards"]):
             systems = [s for s in SYSTEMS if primaries[s] == name] if role == "Primary" else SYSTEMS
             row = pipeline.standard_archive.loc[name] if name in pipeline.standard_archive.index else pd.Series(dtype=float)
+            parts, first_citation = [], None
             for system in systems:
                 field = f"{role.lower()}.{name or 'unassigned'}.{system}"
                 reference_records = _reference_records(measurements, pipeline.standard_archive, name, system)
@@ -793,17 +817,22 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
                 # Reference-age inputs can supply uncertainty independently of
                 # the ratio defining accepted_dates; cite both provenances.
                 reference_records = pd.concat([reference_records, age_records]).drop_duplicates()
-                citation = citations("standards", field, reference_records)
+                citation = citations("standards", field, reference_records, compact=True)
                 if ratio_source_missing and not age_records.empty:
                     citation = ("accepted-ratio citation " + fmt("standards", field + ".citation", None)
                                 + "; reference-age citation " + citation)
-                standard_text.append(f"{role} standard for {system}: {fmt('standards', field + '.name', name)}, "
-                    f"accepted ratio {fmt('standards', field + '.ratio', row.get(system + '*'))}, "
-                    f"date {fmt('standards', field + '.date', dates.loc[name, system], 'Ma')} "
-                    f"({citation})")
+                if first_citation is None:
+                    first_citation = citation
+                extra = f"; {citation}" if citation != first_citation else ""
+                parts.append(f"{system} {fmt('standards', field + '.ratio', row.get(system + '*'), precision='.5g')} "
+                    f"({fmt('standards', field + '.date', dates.loc[name, system], 'Ma', '.2f')}{extra})")
+            standard_text.append(f"{role} standard {fmt('standards', role.lower() + '.name', name)} ({first_citation}): " + ", ".join(parts))
+    glasses = {}
     for name in context["active_concentration_standards"]:
         records = measurements.loc[measurements.standard.eq(name) & measurements.role.eq("concentration")]
-        standard_text.append(f"Concentration reference glass: {name} ({citations('standards', 'glass.' + name, records)})")
+        glasses.setdefault(citations('standards', 'glass.' + name, records, compact=True), []).append(name)
+    for citation, glass_names in glasses.items():
+        standard_text.append(f"Concentration reference glasses {' and '.join(glass_names)} ({citation})")
     sentence("standards", ". ".join(standard_text) + ".")
 
     propagated = "is propagated" if uncertainty["propagate_baseline"] else "is not propagated (disabled in settings)"
@@ -811,7 +840,13 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     model_text = []
     for model in ("downhole", "session"):
         fit = config.get(model, {})
-        options = ", ".join(f"{key} = {value}" for key, value in sorted(fit.get("options", {}).items())) or "no options"
+        # Option dictionaries carry defaults for every model; name only the
+        # options the chosen method reads.
+        used_by = {"degree": {"polynomial", "orthogonal_polynomial"},
+                   "exponential_initial_decay": {"exponential"},
+                   "running_mean_window": {"running_mean"}}
+        options = ", ".join(f"{key} = {value}" for key, value in sorted(fit.get("options", {}).items())
+                            if fit.get("method") in used_by.get(key, {fit.get("method")})) or "no options"
         rejection = (f"outlier sigma = {fit['outlier_sigma']}" if fit.get("outlier_sigma") is not None
                      else "outlier rejection disabled")
         model_text.append(f"{model.capitalize()} model: {fmt('corrections', model + '.method', fit.get('method'))} "
@@ -850,7 +885,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     reference_terms = []
     for system, term in context["primary_reference_terms"].items():
         value = term["relative_ratio_1s"] * 100 if term["available"] else None
-        reference_terms.append(f"{system} ({term['standard']}): {fmt('uncertainty', 'primary_reference_terms.' + system, value, '% (relative 1s)')}")
+        reference_terms.append(f"{system} ({term['standard']}): {fmt('uncertainty', 'primary_reference_terms.' + system, value, '% (relative 1s)', '.2g')}")
     physical = "; ".join(f"lambda{mass} 1s = {uncertainty['lambda_' + mass + '_1s']:.8g} yr^-1" for mass in ("238", "235", "232"))
     sentence("uncertainty", "All ±2s values are absolute 2s unless the unit is %. Spot analytical 2s are two standard errors of the mean. "
         + "Analytical 2s includes counting statistics, "
@@ -863,7 +898,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         + "Primary reference-value terms in ratio space are " + "; ".join(reference_terms) + ". "
         + "Reference terms with no recorded uncertainty are omitted, not estimated. "
         + f"Physical uncertainty inputs: {physical}; 238U/235U 1s = {uncertainty['u238_u235_1s']:.8g}. "
-        + f"Long-term term: {context['long_term_relative_1s'] * 100:.8g}% (relative ratio 1s; mode {uncertainty['long_term_reproducibility_mode']}). "
+        + f"Long-term term: {context['long_term_relative_1s'] * 100:.2g}% (relative ratio 1s; mode {uncertainty['long_term_reproducibility_mode']}). "
         + "Ratio-space terms are mapped to dates with the local ratio–date derivative. Systematic terms are included in ±2s-sys regardless of the selected-systematic switches. "
         + "Weighted means report analytical 2s and add shared systematic terms once to the mean.")
     sentence("constants", f"Decay constants are lambda238 = {lambda_238:.8g} yr^-1 and lambda235 = {lambda_235:.8g} yr^-1 "
@@ -886,10 +921,10 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     compositions = []
     for name, abundances in pb.get("glass_mass_abundances", {}).items():
         row = pipeline.standard_archive.loc[name]
-        values = ", ".join(f"{mass}Pb/204Pb_i = {row[str(mass) + 'Pb/204Pb_i']:.8g}" for mass in (206, 207, 208))
+        values = ", ".join(f"{mass}Pb/204Pb_i = {row[str(mass) + 'Pb/204Pb_i']:.4g}" for mass in (206, 207, 208))
         records = measurements.loc[measurements.standard.eq(name) & measurements.role.eq("initial_ratio")]
         compositions.append(f"{name}: {values}; isotope mass abundances "
-                            + ", ".join(f"{isotope} {value:.8g}" for isotope, value in abundances.items())
+                            + ", ".join(f"{isotope} {value:.4g}" for isotope, value in abundances.items())
                             + f" ({citations('total_pb', 'glass.' + name, records)})")
     composition_text = "; ".join(compositions) or fmt("total_pb", "glass_mass_abundances", None)
     contributing = len(table.rows) - len(pb["omitted_204_spots"])
@@ -900,7 +935,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     sentence("pb204", "206Pb/204Pb uses Hg-corrected mass 204 and is blank when 204Pb is not detected; its uncertainty is absolute ±1s.")
     sentence("chondrite", "Chondrite-normalized values use Sun and McDonough (1989), doi:10.1144/GSL.SP.1989.042.01.19. "
         + "CI chondrite concentrations (µg/g) are " + ", ".join(f"{el} {value:g}" for el, value in CHONDRITE_REE.items())
-        + ". Subscript _N denotes chondrite normalization. Trace-element ratios are mass ratios of µg/g values unless subscript _N; ΣREE sums La to Lu, excluding Pm and Y.")
+        + ". Subscript _N denotes chondrite normalization. Ratios are mass ratios of µg/g values unless subscript N; ΣREE sums La to Lu, excluding Pm and Y. U_i and Th_i restore radioactive decay using the preferred date.")
     sentence("ti_in_zircon", f"Ti-in-zircon temperatures use Ferry and Watson (2007), doi:10.1007/s00410-007-0201-0, "
         + f"with assumed aSiO2 = {settings.a_sio2:g} and aTiO2 = {settings.a_tio2:g}.")
     for key, citation in {
@@ -910,12 +945,10 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         "roberts2024": "Roberts et al. (2024), doi:10.1016/j.epsl.2024.118638",
         "loucks2024": "Loucks et al. (2024), doi:10.5382/econgeo.5071",
     }.items():
-        sentence(key, citation + ". Ratios are mass ratios of µg/g values unless subscript _N, which denotes chondrite normalization."
-                 + (" U_i and Th_i restore radioactive decay using the preferred date." if key == "loucks2024" else ""))
+        sentence(key, citation + ".")
     sentence("software", f"Reduced with UPbRPy {fmt('software', 'upbrpy_version', manifest.get('upbrpy_version'))}, "
-        + f"git commit {fmt('software', 'git_commit', _git_commit())}; reference library version "
-        + f"{fmt('software', 'reference_library_version', manifest.get('reference_library_version'))}, "
-        + f"SHA-256 {fmt('software', 'reference_library_sha256', (manifest.get('reference_library_sha256') or '')[:12])}. "
+        + f"git commit {fmt('software', 'git_commit', (_git_commit() or '')[:12])}; reference library version "
+        + f"{fmt('software', 'reference_library_version', manifest.get('reference_library_version') or (manifest.get('reference_library_sha256') or '')[:12])}. "
         + f"Data-reduction date: {date.today().isoformat()}.")
     vocabulary = {
         "excluded": "Excluded analyses remain in the table and are omitted from weighted means.",
@@ -982,3 +1015,280 @@ def footnotes_markdown(footnotes: Iterable[Footnote]) -> str:
 __all__ = ["CHONDRITE_REE", "ExportSettings", "ExportColumn", "ExportTable", "Footnote",
            "build_export_table", "build_footnotes", "column_heading", "footnotes_text", "footnotes_markdown",
            "summarize_reference_materials_by_system", "secondary_summary_wide"]
+
+
+def format_value(column: ExportColumn, value, *, full_precision: bool = False) -> str:
+    """Render a cell using section 4.6; non-finite and missing cells are blank."""
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, str):
+        return value
+    if not np.isfinite(value):
+        return ""
+    if column.kind == "text":
+        return str(value)
+    if full_precision:
+        return str(value)
+    kind = column.kind
+    if kind == "ratio_el":
+        return format(value, ".3g")
+    if kind == "conc":
+        decimals = 2 if abs(value) < 10 else 1 if abs(value) < 100 else 0
+    elif kind == "pct_2s" and column.key != "disc_2s_pct":
+        decimals = 2 if abs(value) < 1 else 1
+    else:
+        decimals = {"date": 1, "date_2s": 1, "ratio_68": 5, "ratio_76": 5,
+                    "ratio_82": 5, "ratio_75": 4, "ratio_86": 3,
+                    "rho": 2, "pct": 1, "pct_2s": 1, "int": 0, "temp": 0}.get(kind, 2)
+    return f"{value:.{decimals}f}"
+
+
+def update_export_settings(table: ExportTable, settings: ExportSettings) -> ExportTable:
+    """Apply presentation choices and derived display quantities without engine calls.
+
+    The returned table owns its changed rows and context. Preferred dates and
+    sample statistics do not depend on these settings and are retained.
+    """
+    updated = replace(table, rows=table.rows.copy(), settings=settings, context=dict(table.context))
+    rows = updated.rows
+    if settings.discordance_definition != table.settings.discordance_definition:
+        other = SYSTEMS[1] if settings.discordance_definition == "7/5-6/8" else SYSTEMS[2]
+        a, b = _numeric(rows, SYSTEMS[0] + "_age"), _numeric(rows, other + "_age").replace(0, np.nan)
+        ea = _numeric(rows, SYSTEMS[0] + "_age_2e_no_calibration")
+        eb = _numeric(rows, other + "_age_2e_no_calibration")
+        rho = _numeric(rows, "err_corr_no_calibration").fillna(0).clip(-1, 1) if other == SYSTEMS[1] else 0.
+        rows["disc_pct"] = 100 * (1 - a / b)
+        rows["disc_2s_pct"] = 100 * np.sqrt(np.maximum(0, (ea / b)**2 + (a * eb / b**2)**2 - 2 * rho * ea * eb * a / b**3))
+    if (settings.a_sio2, settings.a_tio2) != (table.settings.a_sio2, table.settings.a_tio2):
+        rows["Ti_in_zircon_C"] = Ti_in_zircon_thermometry(
+            _numeric(rows, "Ti").where(_numeric(rows, "Ti") > 0), settings.a_sio2, settings.a_tio2)
+    discordant = (rows.disc_pct.abs() - rows.disc_2s_pct > settings.discordance_threshold_percent) & ~rows.role.eq("glass")
+    def notes(text, flagged):
+        words = [w for w in str(text).split(", ") if w and w != "discordant"]
+        if flagged:
+            words.insert(int("excluded" in words), "discordant")
+        return ", ".join(words)
+    rows["notes"] = [notes(text, flag) for text, flag in zip(rows.notes, discordant)]
+    manifest = dict(updated.context["manifest"])
+    manifest["metadata"] = {**manifest.get("metadata", {}), "export_settings": settings.to_dict()}
+    updated.context["manifest"] = manifest
+    return updated
+
+
+def _table_footnotes(table):
+    # Only library provenance and channel names are required, never reduction stages.
+    from types import SimpleNamespace
+    if table.context.get("legacy_audit"):
+        return [Footnote("legacy", 1, "Legacy audit results: publication quantities and acquisition metadata are unavailable in this cached frame.", ())]
+    source = SimpleNamespace(reference_library_path=table.context.get("reference_library_path"),
+        standard_archive=pd.DataFrame.from_dict(table.context["reference_values"], orient="index"),
+        channels=table.context.get("channels", ()))
+    return build_footnotes(table, source)
+
+
+def _display_rows(table):
+    """Yield (kind, summary text, data) in publication order."""
+    summaries = table.sample_summaries.set_index("sample") if not table.sample_summaries.empty else pd.DataFrame()
+    previous_role = previous_sample = None
+    for record in table.rows.to_dict("records"):
+        role, sample = record["role"], record["sample"]
+        if role != previous_role and role != "unknown":
+            if previous_role in {None, "unknown"}:
+                yield "section", "Reference materials", None
+            yield "section", {"primary": "Primary standard", "secondary": "Secondary standards", "glass": "Reference glasses"}[role], None
+        if sample != previous_sample:
+            text = summaries.loc[sample, "summary_text"] if sample in summaries.index else str(sample)
+            text = re.sub(r"\bnan\b", "not available", text, flags=re.I)
+            yield "sample", text, None
+        yield "analysis", "", record
+        previous_role, previous_sample = role, sample
+
+
+def export_table_preview(table: ExportTable, n_rows: int = 8) -> dict:
+    """Return group/heading rows, up to n display rows, and numbered footnotes."""
+    from itertools import islice
+    columns, notes = table.visible_columns(), _table_footnotes(table)
+    rows, kinds = [], []
+    for kind, text, record in islice(_display_rows(table), max(0, n_rows)):
+        rows.append([format_value(c, record.get(c.key)) for c in columns] if record is not None
+                    else [text] + [""] * max(0, len(columns) - 1))
+        kinds.append(kind)
+    return dict(groups=[c.group for c in columns], headings=[column_heading(c, notes) for c in columns],
+                rows=rows, row_kinds=kinds, footnotes=footnotes_text(notes),
+                missing_fields={field: note.number for note in notes for field in note.missing_fields})
+
+
+def _export_path(path, suffix):
+    target = Path(path).with_suffix(suffix)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def write_export_csv(table: ExportTable, path: str | Path) -> list[Path]:
+    """Write a flat BOM-encoded CSV, sample summaries, and numbered footnotes."""
+    import csv
+    target = _export_path(path, ".csv")
+    columns, notes = table.visible_columns(), _table_footnotes(table)
+    with target.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["Sample", *(f"{c.group}: {column_heading(c, notes)}" for c in columns)])
+        for row in table.rows.to_dict("records"):
+            writer.writerow([row["sample"], *(format_value(c, row.get(c.key),
+                full_precision=table.settings.csv_full_precision) for c in columns)])
+    samples = target.with_name(target.stem + "_samples.csv")
+    table.sample_summaries.to_csv(samples, index=False, encoding="utf-8-sig", na_rep="")
+    footnote_path = target.with_name(target.stem + "_footnotes.txt")
+    footnote_path.write_text(footnotes_text(notes) + "\n", encoding="utf-8-sig")
+    return [target, samples, footnote_path]
+
+
+def write_export_markdown(table: ExportTable, path: str | Path) -> Path:
+    """Write a GitHub-flavoured table with sample rows and numbered notes."""
+    target = _export_path(path, ".md")
+    columns, notes = table.visible_columns(), _table_footnotes(table)
+    def safe(value):
+        return str(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>").replace("\r", "")
+    def line(values):
+        return "| " + " | ".join(safe(x) for x in values) + " |"
+    lines = [line(column_heading(c, notes, "markdown") for c in columns), line("---" for c in columns)]
+    for kind, text, record in _display_rows(table):
+        lines.append(line([escape(format_value(c, record.get(c.key))) for c in columns]) if record is not None
+                     else line(["**" + escape(text) + "**"] + [""] * max(0, len(columns) - 1)))
+    target.write_text("\n".join(lines) + "\n\n" + footnotes_markdown(notes) + "\n", encoding="utf-8")
+    return target
+
+
+def _excel_format(column):
+    if column.kind in {"conc", "ratio_el"}:
+        return "[<10]0.00;[<100]0.0;0"
+    if column.kind == "pct_2s" and column.key != "disc_2s_pct":
+        return "[<1]0.00;0.0"
+    return {"text": "General", "date": "0.0", "date_2s": "0.0", "ratio_68": "0.00000",
+            "ratio_76": "0.00000", "ratio_82": "0.00000", "ratio_75": "0.0000",
+            "ratio_86": "0.000", "rho": "0.00", "pct": "0.0", "pct_2s": "0.0",
+            "int": "0", "temp": "0"}.get(column.kind, "General")
+
+
+def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
+    """Write full-precision publication cells, rich headings and reference summaries."""
+    import math
+    import xlsxwriter
+    from .results import publication_column_width
+    target = _export_path(path, ".xlsx")
+    columns, notes = table.visible_columns(), _table_footnotes(table)
+    if not columns:
+        raise ValueError("Select at least one populated export column")
+    with xlsxwriter.Workbook(target, {"strings_to_formulas": False, "strings_to_urls": False}) as workbook:
+        sheet = workbook.add_worksheet("Table")
+        header = workbook.add_format(dict(bold=True, bg_color="#e9eff7", text_wrap=True, valign="top"))
+        title_format = workbook.add_format(dict(bold=True, font_size=13, text_wrap=True, valign="top"))
+        wrapped = workbook.add_format(dict(text_wrap=True, valign="top"))
+        normal = workbook.add_format(dict(bold=True))
+        superscript = workbook.add_format(dict(bold=True, font_script=1))
+        formats = [workbook.add_format(dict(num_format=_excel_format(c), valign="top", text_wrap=c.key == "notes")) for c in columns]
+        last = len(columns) - 1
+        def merged(row, start, end, text, style):
+            if end > start:
+                sheet.merge_range(row, start, row, end, text, style)
+            else:
+                sheet.write_string(row, start, str(text), style)
+        session = table.context.get("session_name", "session")
+        title = table.settings.table_title or f"U-Pb isotope ratios, dates and trace-element concentrations by LA-ICP-MS: {session}"
+        merged(0, 0, last, title, title_format)
+        sheet.set_row(0, 38)
+        start = 0
+        while start < len(columns):
+            end = start
+            while end < last and columns[end + 1].group == columns[start].group:
+                end += 1
+            merged(1, start, end, columns[start].group, header)
+            start = end + 1
+        for i, column in enumerate(columns):
+            segments = column_heading(column, notes, "rich")
+            if len(segments) > 1:
+                args = [x for value, sup in segments for x in (superscript if sup else normal, value)]
+                sheet.write_rich_string(2, i, *args, header)
+            else:
+                sheet.write_string(2, i, column_heading(column, notes), header)
+            sheet.set_column(i, i, publication_column_width(table.rows[column.key], column_heading(column, notes)), formats[i])
+        sheet.set_row(2, 64)
+        analysis_end = next((i + 1 for i, c in enumerate(columns) if c.key == "spot_name"), 0)
+        sheet.freeze_panes(3, analysis_end)
+        row = 3
+        ratio_formats = {}
+        for kind, text, record in _display_rows(table):
+            if record is None:
+                merged(row, 0, last, text, header)
+                sheet.set_row(row, 32 if kind == "sample" else 22)
+            else:
+                for i, column in enumerate(columns):
+                    value = record.get(column.key)
+                    if value is None or pd.isna(value) or (not isinstance(value, str) and not np.isfinite(value)):
+                        sheet.write_blank(row, i, None, formats[i])
+                    elif isinstance(value, str):
+                        sheet.write_string(row, i, value, formats[i])
+                    else:
+                        style = formats[i]
+                        if column.kind == "ratio_el" and value != 0:
+                            # Excel's two conditional sections cannot cover all
+                            # orders of magnitude; choose a display-only style.
+                            exponent = math.floor(math.log10(abs(value)))
+                            digits = max(0, 2 - exponent)
+                            code = "0.00E+00" if exponent >= 3 or exponent < -4 else "0" + ("." + "0" * digits if digits else "")
+                            if code not in ratio_formats:
+                                ratio_formats[code] = workbook.add_format(dict(num_format=code, valign="top"))
+                            style = ratio_formats[code]
+                        sheet.write_number(row, i, value, style)
+                if record.get("notes"):
+                    sheet.set_row(row, 32)
+            row += 1
+        table_end = row - 1
+        row += 2
+        for note in notes:
+            if last >= 1:
+                sheet.write_number(row, 0, note.number, wrapped)
+                merged(row, 1, last, note.text, wrapped)
+            else:
+                sheet.write_string(row, 0, f"[{note.number}] {note.text}", wrapped)
+            sheet.set_row(row, max(30, 15 * math.ceil(len(note.text) / max(60, min(180, len(columns) * 12)))))
+            row += 1
+        sheet.set_landscape()
+        sheet.set_paper(9)
+        sheet.fit_to_pages(1, 0)
+        sheet.repeat_rows(0, 2)
+        sheet.print_area(0, 0, max(table_end, row - 1), last)
+        reference = workbook.add_worksheet("Reference materials")
+        names = dict(sample="Material", system="System", n="n", weighted_mean="Weighted mean (Ma)",
+                     weighted_mean_2e="±2s (Ma)", mswd="MSWD", probability="P(χ²)", accepted_date="Accepted (Ma)",
+                     offset_ma="Offset (Ma)", offset_percent="Offset (%)",
+                     **{f"{p}_{m}": f"{s} {t}" for p, s in (("68", "206Pb/238U"), ("76", "207Pb/206Pb"))
+                        for m, t in (("weighted_mean", "weighted mean (Ma)"), ("weighted_mean_2e", "±2s (Ma)"),
+                                     ("accepted_date", "accepted (Ma)"), ("offset_percent", "offset (%)"))})
+        number_formats = {}
+        def reference_format(key):
+            code = ("0" if key == "n" else "0.00" if key in {"mswd", "probability"} or key.endswith("percent")
+                    else "0.0" if key != "sample" and key != "system" else None)
+            if code is None:
+                return None
+            if code not in number_formats:
+                number_formats[code] = workbook.add_format(dict(num_format=code))
+            return number_formats[code]
+        offset = 0
+        for label, frame in (("Per-system secondary summary (Ma)", table.secondary_summary),
+                             ("206/238 and 207/206 (Ma)", secondary_summary_wide(table.secondary_summary))):
+            reference.write_string(offset, 0, label, header)
+            for i, key in enumerate(frame.columns):
+                reference.write_string(offset + 1, i, names.get(key, str(key)), header)
+                reference.set_column(i, i, publication_column_width(frame[key], names.get(key, str(key))))
+            for r, values in enumerate(frame.itertuples(index=False, name=None), offset + 2):
+                for i, value in enumerate(values):
+                    if pd.notna(value) and (isinstance(value, str) or np.isfinite(value)):
+                        style = None if isinstance(value, str) else reference_format(frame.columns[i])
+                        reference.write(r, i, value, style)
+            offset += len(frame) + 4
+        reference.freeze_panes(2, 1)
+    return target
+
+
+__all__ += ["format_value", "export_table_preview", "update_export_settings",
+            "write_export_xlsx", "write_export_csv", "write_export_markdown"]

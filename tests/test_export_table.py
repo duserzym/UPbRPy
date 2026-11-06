@@ -355,3 +355,31 @@ def test_complete_note_vocabulary_and_long_term_term():
     base = "206Pb/238U_age_2e_sys"
     assert external.rows.iloc[0][base]**2 - original.rows.iloc[0][base]**2 == pytest.approx(
         4 * relative_ratio_date_component(560., "206Pb/238U", .02)**2)
+
+
+def test_supervisor_corrections_glass_mixed_methods_and_unmeasured_standards(tmp_path):
+    """Audit fixes of 2026-11-06 found on the DemoSession session."""
+    from UPbRPy.export_table import write_export_xlsx
+
+    pipeline = synthetic_pipeline()
+    pipeline.config = replace(pipeline.config, secondary_standards=("91500", "FC1"))
+    frame = pipeline.run_finalize().parallel_results
+    frame["flag_reverse_fractionation"] = True
+    frame.loc[frame["sample"].eq("B"), "preferred_date_method"] = ["206Pb/238U", "207Pb/206Pb"]
+    table = build_export_table(pipeline, excluded_spots=("NIST612_5",))
+    rows = table.rows.set_index("spot_name")
+    # Studio hides glasses from the concordia by default; that is not an exclusion,
+    # and U-Pb screening flags do not apply to a glass.
+    assert not rows.loc["NIST612_5", "excluded"]
+    assert rows.loc["NIST612_5", "notes"] == "concentration reference glass"
+    summaries = table.sample_summaries.set_index("sample")
+    assert summaries.loc["NIST612", "status"] == "glass"
+    text = summaries.loc["B", "summary_text"]
+    assert "mixed methods (206Pb/238U 1, 207Pb/206Pb 1)" in text and "MSWD" not in text
+    # FC1 is configured but was not analysed: it must not be cited.
+    assert table.context["secondary_standards"] == ("91500",)
+    workbook = write_export_xlsx(table, tmp_path / "t.xlsx")
+    import zipfile
+    with zipfile.ZipFile(workbook) as archive:
+        strings = archive.read("xl/sharedStrings.xml").decode()
+    assert "Table &lt;n&gt;" not in strings and "Weighted mean (Ma)" in strings

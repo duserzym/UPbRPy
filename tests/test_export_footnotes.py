@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import date
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -262,3 +263,37 @@ def test_git_commit_loose_packed_detached_and_worktree(tmp_path):
     head.write_text("ref: refs/../../outside\n")
     assert _git_commit(tmp_path) is None
     assert _git_commit(tmp_path / "installed-without-checkout") is None
+
+
+def test_compact_journal_prose_preserves_values_sources_and_clock(monkeypatch):
+    import UPbRPy.export_table as module
+    pipeline = fixture_pipeline()
+    monkeypatch.setattr(module, '_git_commit', lambda: 'abcdef0123456789' * 2 + '12345678')
+    table = build_export_table(pipeline)
+    notes = {n.id: n for n in build_footnotes(table, pipeline)}
+    standards = notes['standards'].text
+    assert standards.count('Primary standard S513') == 1
+    assert standards.count('Luo et al., 2025') == 1
+    assert '206Pb/238U 0.090955 (561.18 Ma)' in standards
+    assert '207Pb/235U 0.73873 (561.66 Ma)' in standards
+    assert '207Pb/206Pb 0.058932 (563.62 Ma)' in standards
+    assert '208Pb/232Th 0.028154 (561.18 Ma; UPbR26plus archive value, no DOI)' in standards
+    assert 'Concentration reference glasses NIST610 and NIST612 (Jochum et al., 2011' in standards
+    assert standards.count('Jochum') == 1
+    assert 'acquisition starts: 2026-11-04 15:55 to 16:01 (instrument clock)' in notes['session'].text
+    assert notes['session'].text.count('2026-11-04') == 1
+    assert 'baseline median duration' in notes['method'].text
+    assert re.search(r'median duration \d+\.\d s', notes['method'].text)
+    assert 'git commit abcdef012345;' in notes['software'].text
+    assert notes['software'].text.count('version') == 1
+    assert 'SHA-256' not in notes['software'].text
+    # All scheme-specific footnotes now carry the citation only; the shared
+    # mass-ratio and decay-restoration definitions occur once.
+    for col in table.columns:
+        table.rows[col.key] = 'present'
+    all_notes = {n.id: n for n in build_footnotes(table, pipeline)}
+    text = footnotes_text(all_notes.values())
+    assert text.count('Ratios are mass ratios of µg/g values unless subscript N') == 1
+    assert text.count('U_i and Th_i restore radioactive decay') == 1
+    assert all('Ratios are' not in all_notes[key].text for key in
+               ('grimes2015', 'itano24', 'lu_pizarro', 'roberts2024', 'loucks2024'))
