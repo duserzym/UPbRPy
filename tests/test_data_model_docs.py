@@ -116,3 +116,22 @@ def test_public_dataclass_fields_are_documented(model):
     assert {row["Name"] for row in rows} == {
         field.name for field in fields(model) if not field.name.startswith("_")
     }
+
+
+def test_export_table_catalogue_and_settings_are_documented():
+    from UPbRPy.export_table import ExportSettings, _catalogue, _ELEMENT_MASSES
+    path = DOCS / "export-table.md"
+    rows = pipe_table(path, "Columns")
+    columns = _catalogue(sorted(_ELEMENT_MASSES, key=_ELEMENT_MASSES.get))
+    assert {row["Key"] for row in rows} == {col.key for col in columns}
+    indexed = {row["Key"]: row for row in rows}
+    for col in columns:
+        row = indexed[col.key]
+        assert row["Group"] == col.group
+        assert row["Label"] == col.label
+        assert row["Unit"] == col.unit
+        assert row["Default/optional"] == ("Optional" if col.optional else "Default")
+        assert row["Footnote ids"] == (", ".join(col.footnotes) or "—")
+        assert row["Source quantity"]
+    settings = pipe_table(path, "ExportSettings fields")
+    assert {row["Name"] for row in settings} == {field.name for field in fields(ExportSettings)}

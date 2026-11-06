@@ -344,12 +344,46 @@ or calculated tables. **File → Open Project** resolves portable relative paths
 first, re-imports the raw files, restores the saved parameters and selections,
 and recalculates the stages that were complete when the project was saved.
 
-Use **File → Export Publication + Reproducibility Bundle** to write a formatted
+Use **File → Export results…** to write a formatted
 Excel workbook, companion CSV tables, selection windows, spot and depth-profile
 data, a reduction manifest, and a Jupyter notebook. The notebook embeds the
 reviewed GUI selections and recreates the same TOML-first reference-material
 library with legacy CSV fallback, so it can replay the complete GUI reduction
 with the shared Python core.
+
+#### Exporting a publication table
+
+Studio's **Export results…** writes `<session>_results_table.xlsx`, `.csv`
+and `.md` by default. Choose the folder, file stem and formats in the dialog.
+The Excel table retains full precision with publication display formats,
+grouped headings and a Reference materials sheet; CSV has flat headings and
+separate `_samples.csv` and `_footnotes.txt` files; Markdown includes the
+sample blocks and numbered footnotes. The checked **Audit files and replay
+notebook** option also writes `UPbRPy_publication_results.xlsx`, its companion
+tables, selection windows, spot/depth results, the reduction manifest and the
+replay notebook.
+
+Use **Columns** to select groups or individual columns and **Defaults** to
+restore the default selection. Optional isotope concentrations and uncertainty
+columns start unticked; zircon-only columns appear only for zircon. Final
+review exclusions stay in the exported table with an `excluded` note and are
+omitted from weighted means. **Preview** shows headings, sample summaries and
+the generated footnotes before export.
+
+In **Settings**, fill in laboratory, laser system, spot diameter, repetition
+rate and fluence; missing acquisition metadata is reported as “not recorded”
+in the footnotes. Operator override and table title are optional. Check the
+discordance definition/threshold and the assumed aSiO2 and aTiO2 activities.
+CSV uses displayed values unless **CSV full precision** is checked. Settings
+and column choices are retained when you save the project, and recorded under
+`metadata.export_settings` in the reduction manifest.
+
+![Export results dialog, Preview tab, at 1280x800](docs/screenshots/studio_export_preview_1280x800.png)
+
+The table follows the UPbR26plus Table S2/S3 layout with explicit uncertainty
+branches and per-system reference comparisons; see the
+[publication-table contract](docs/export_table_spec.md) and
+[export data model](docs/data-model/export-table.md).
 
 #### Database mode (optional)
 

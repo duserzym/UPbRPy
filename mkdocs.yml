@@ -32,6 +32,7 @@ exclude_docs: |
   !/data-model/acquisition-model.md
   !/data-model/reference-materials.md
   !/data-model/project-and-bundle.md
+  !/data-model/export-table.md
   !/qtegra_export_formats.md
 nav:
   - Data model: data-model/index.md
@@ -40,4 +41,5 @@ nav:
   - Acquisition model: data-model/acquisition-model.md
   - Reference materials: data-model/reference-materials.md
   - Projects and bundles: data-model/project-and-bundle.md
+  - Export table: data-model/export-table.md
   - 'Decision record: Qtegra exports': qtegra_export_formats.md

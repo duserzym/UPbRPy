@@ -5,6 +5,13 @@ uncertainties as separate result branches. The GUI and reproducibility
 notebook serialize the same `UncertaintySettings`, so choosing an uncertainty
 scope never changes the reported central ratio or date.
 
+Studio's **Export results…** also writes a grouped publication table in XLSX,
+CSV and Markdown. Its analytical ±2s and ±2s-sys columns have explicit,
+separate definitions and numbered provenance footnotes. See the
+[publication-table contract](export_table_spec.md) and
+[export data model](data-model/export-table.md) for column sources, settings
+and output files. The existing audit workbook remains available by default.
+
 ## Analytical uncertainty
 
 Raw isotope-ratio errors include Poisson counting statistics and the
