@@ -6,6 +6,7 @@ from html import escape
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from GUI.standards_updates import STANDARDS_PAGE
 from GUI.theme import active_theme
 from GUI.updater import DOWNLOAD_PAGE
 
@@ -41,6 +42,7 @@ class VersionChip(QtWidgets.QToolButton):
         self.setToolTip("Studio version and updates")
         self.clicked.connect(self.open_dialog)
         updater.stateChanged.connect(self._changed)
+        updater.standardsChanged.connect(self._standards_changed)
         QtWidgets.QApplication.instance().installEventFilter(self)
         self._changed(updater.state)
 
@@ -103,8 +105,13 @@ class VersionChip(QtWidgets.QToolButton):
         }.get(state.status, f"v{self.updater.version}")
         if self._show_none:
             text = "Up to date"
+        if self.updater.standards_warning:
+            text += " · Standards warning"
         self.setText(text)
         self._style()
+
+    def _standards_changed(self):
+        self._changed(self.updater.state)
 
     def _clear_none(self):
         self._show_none = False
@@ -195,7 +202,26 @@ class UpdatesDialog(QtWidgets.QDialog):
         self.notes_link = QtWidgets.QLabel()
         self.notes_link.setOpenExternalLinks(True)
         layout.addWidget(self.notes_link)
+        self.standards_status = QtWidgets.QLabel()
+        self.standards_status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.standards_status.setWordWrap(True)
+        layout.addWidget(self.standards_status)
+        standards_row = QtWidgets.QHBoxLayout()
+        self.standards_check = QtWidgets.QPushButton("Check standards")
+        self.standards_check.clicked.connect(updater.check_standards)
+        standards_row.addWidget(self.standards_check)
+        self.standards_ack = QtWidgets.QPushButton("Acknowledge library change")
+        self.standards_ack.clicked.connect(updater.acknowledge_standards)
+        standards_row.addWidget(self.standards_ack)
+        standards_page = QtWidgets.QPushButton("Standards on GitHub")
+        standards_page.clicked.connect(
+            lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl(STANDARDS_PAGE)))
+        standards_row.addWidget(standards_page)
+        standards_row.addStretch()
+        layout.addLayout(standards_row)
         updater.stateChanged.connect(self._changed)
+        updater.standardsChanged.connect(self._standards_changed)
+        self._standards_changed()
         QtWidgets.QApplication.instance().installEventFilter(self)
         self._style()
         self._changed(updater.state)
@@ -253,3 +279,13 @@ class UpdatesDialog(QtWidgets.QDialog):
                                 + self.updater.prefs.value("updates/last_result", "Not checked yet", type=str))
         self.notes.setPlainText(info.get("body") or "")
         self._set_notes_link(info)
+
+    def _standards_changed(self):
+        status = self.updater.standards
+        message = "Checking standards…" if self.updater.standards_checking else status.message
+        if self.updater.standards_library_changed:
+            message += " Warning: the configured library changed since you last reviewed it."
+        self.standards_status.setText(message)
+        self.standards_status.setToolTip(escape("\n".join(status.changed)))
+        self.standards_check.setEnabled(not self.updater.standards_checking)
+        self.standards_ack.setVisible(self.updater.standards_library_changed)

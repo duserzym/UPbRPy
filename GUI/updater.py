@@ -17,6 +17,7 @@ import zipfile
 
 from PySide6 import QtCore, QtWidgets
 
+from GUI.standards_updates import StandardsCheck, check_standards
 from GUI.updates import (
     CHANNELS, UpdateState, can_replace, compare_versions, find_asset,
     install_root, installed_version, is_frozen, parse_sha256sums,
@@ -207,10 +208,23 @@ class UpdateWorker(QtCore.QThread):
             self.result.emit(("failed", str(exc)))
 
 
+class _StandardsWorker(QtCore.QThread):
+    result = QtCore.Signal(object)
+
+    def __init__(self, path, checkout, parent):
+        super().__init__(parent)
+        self.path = path
+        self.checkout = checkout
+
+    def run(self):
+        self.result.emit(check_standards(self.path, self.checkout))
+
+
 class Updater(QtCore.QObject):
     """One application-wide updater; previews and injected I/O never need a network."""
 
     stateChanged = QtCore.Signal(object)
+    standardsChanged = QtCore.Signal()
 
     def __init__(self, parent=None, *, opener=None, runner=None, preview=None,
                  version=None, settings=None):
@@ -221,6 +235,8 @@ class Updater(QtCore.QObject):
         self._opener = opener or urllib.request.urlopen
         self._runner = runner or _detached_runner
         self._jobs = []
+        self._standards_job = None
+        self.standards = StandardsCheck("Standards have not been checked.")
         self._started = False
         self._closing = False
         self._reason = ""
@@ -232,6 +248,9 @@ class Updater(QtCore.QObject):
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(6 * 60 * 60 * 1000)
         self._timer.timeout.connect(self.check)
+        self._standards_timer = QtCore.QTimer(self)
+        self._standards_timer.setInterval(self._initial_timer.interval())
+        self._standards_timer.timeout.connect(self._scheduled_standards_check)
         if self._preview:
             if self._preview not in {"none", "available", "downloading", "ready", "error", "unsupported"}:
                 raise ValueError(f"Unknown update preview: {self._preview}")
@@ -274,10 +293,11 @@ class Updater(QtCore.QObject):
         return ""
 
     def start_scheduler(self):
-        """Start once, only for a replaceable frozen copy; clear an old backup."""
+        """Schedule standards checks and app checks supported by this install."""
         if self._started or self._preview:
             return
         self._started = True
+        self._standards_timer.start()
         self._reason = self._support_reason()
         if self._reason:
             self._emit(("unsupported", self._reason))
@@ -290,7 +310,58 @@ class Updater(QtCore.QObject):
         self._initial_timer.start()
         self._timer.start()
 
+    @property
+    def standards_library_changed(self):
+        previous = self.prefs.value("standards/reviewed_digest", "", type=str)
+        return bool(previous and self.standards.digest and previous != self.standards.digest)
+
+    @property
+    def standards_warning(self):
+        return self.standards.warning or self.standards_library_changed
+
+    def acknowledge_standards(self):
+        if self.standards.digest:
+            self.prefs.setValue("standards/reviewed_digest", self.standards.digest)
+            self.standardsChanged.emit()
+
+    def _scheduled_standards_check(self):
+        self._standards_timer.setInterval(self._timer.interval())
+        self.check_standards()
+
+    def check_standards(self):
+        if self._preview or self._standards_job is not None or self._closing:
+            return
+        from GUI.services import current_standard_archive_path
+
+        default_checkout = Path.home() / "UPbRPy" / "upb-standards"
+        checkout = Path(os.environ.get("UPB_STANDARDS_DIR") or default_checkout)
+        job = _StandardsWorker(current_standard_archive_path(), checkout.expanduser(), self)
+        self._standards_job = job
+        job.result.connect(self._standards_result)
+        job.finished.connect(self._standards_finished)
+        job.start()
+        self.standardsChanged.emit()
+
+    @property
+    def standards_checking(self):
+        return self._standards_job is not None
+
+    @QtCore.Slot(object)
+    def _standards_result(self, result):
+        self.standards = result
+        if result.digest and not self.prefs.value("standards/reviewed_digest", "", type=str):
+            self.prefs.setValue("standards/reviewed_digest", result.digest)
+        self.standardsChanged.emit()
+
+    @QtCore.Slot()
+    def _standards_finished(self):
+        self._standards_job.deleteLater()
+        self._standards_job = None
+        self.standardsChanged.emit()
+
     def check(self, manual=False):
+        if manual:
+            self.check_standards()
         if self._preview or self._jobs or self._closing:
             return
         self._reason = self._support_reason()
@@ -361,8 +432,11 @@ class Updater(QtCore.QObject):
         self._closing = True
         self._initial_timer.stop()
         self._timer.stop()
+        self._standards_timer.stop()
         for thread in self._jobs:
             thread.requestInterruption()
             thread.quit()
         for thread in self._jobs:
             thread.wait()
+        if self._standards_job is not None:
+            self._standards_job.wait()

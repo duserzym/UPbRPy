@@ -207,3 +207,34 @@ def test_updates_dialog_follows_a_moved_tab(app, prefs, monkeypatch):
             source.close()
         target.close()
         pump(app)
+
+
+def test_standards_check_and_warning_are_independent_of_app_updates(app, prefs, monkeypatch):
+    from GUI.standards_updates import StandardsCheck
+
+    updater = Updater(settings=prefs)
+    monkeypatch.setattr(updater, "_support_reason", lambda: "Checkout build")
+    checks = []
+    monkeypatch.setattr(updater, "check_standards", lambda: checks.append(True))
+    chip = VersionChip(updater)
+    dialog = UpdatesDialog(updater)
+    try:
+        updater.start_scheduler()
+        assert not updater._timer.isActive()
+        assert updater._standards_timer.isActive()
+        assert updater._standards_timer.interval() == 8000
+        updater._standards_timer.timeout.emit()
+        assert checks == [True]
+        assert updater._standards_timer.interval() == 6 * 60 * 60 * 1000
+
+        updater._standards_result(StandardsCheck("Standards match.", digest="previous"))
+        updater._standards_result(StandardsCheck("Standards match.", digest="updated"))
+        assert "Standards warning" in chip.text()
+        assert "changed since you last reviewed it" in dialog.standards_status.text()
+        dialog.standards_ack.click()
+        assert not updater.standards_warning
+    finally:
+        updater._shutdown()
+        chip.deleteLater()
+        dialog.deleteLater()
+        pump(app)
