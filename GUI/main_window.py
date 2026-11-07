@@ -193,6 +193,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.channel_colors: dict[str, str] = {}
         self._is_populating = False
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
+        self._review_flags: dict[str, str] = {}
         self.pending_region_updates: dict[str, tuple[float, float]] = {}
         self.workflow_preset = get_workflow_preset("zircon")
         self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
@@ -621,6 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "channel_colors": self.channel_colors,
                 "selection_colors": self.selection_colors,
                 "spot_folder_overrides": self._spot_folder_overrides,
+                "review_flags": self._review_flags,
             },
             "selections": selection_export_frame(
                 self.session.experiment
@@ -3218,6 +3220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "export_settings": self.export_settings.to_dict(),
             "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
+            "review_flags": dict(self._review_flags),
             "include_export_concentrations": (
                 self.session.include_export_concentrations
             ),
@@ -3422,6 +3425,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 for spot, folder in folder_overrides.items()
             }
             if isinstance(folder_overrides, dict)
+            else {}
+        )
+        saved_flags = workspace.get("review_flags", {})
+        self._review_flags = (
+            {
+                spot: saved_flags[spot].strip()
+                for spot in restored.session.spot_names
+                if isinstance(saved_flags.get(spot), str) and saved_flags[spot].strip()
+            }
+            if isinstance(saved_flags, dict)
             else {}
         )
         saved_channel_colors = workspace.get("channel_colors", {})
@@ -3768,6 +3781,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
         self.session = loaded_session
+        if project_path is None:
+            self._review_flags.clear()
         self._sync_qtegra_controls()
         self.project_path = (
             None
@@ -4370,6 +4385,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from laicpmsdb "
                         f"(label sample {override['label_sample']})",
                     )
+                if reason := self._review_flags.get(sn):
+                    spot_item.setIcon(
+                        0, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+                    )
+                    spot_item.setToolTip(0, f"{spot_item.toolTip(0)}\nReview flag: {reason}")
                 spot_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, sn)
                 spot_item.setFlags(
                     spot_item.flags()
@@ -4451,6 +4471,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if is_spot:
             rename_act = menu.addAction("Rename spot…\tF2")
+            name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            menu.addAction("Edit review flag…").setData(("edit_review_flag", name))
+            clear_flag = menu.addAction("Clear review flag")
+            clear_flag.setData(("clear_review_flag", name))
+            clear_flag.setEnabled(name in self._review_flags)
             menu.addSeparator()
             move_menu = menu.addMenu("Move to folder")
             for folder_name in self._get_all_folder_names():
@@ -4479,6 +4504,16 @@ class MainWindow(QtWidgets.QMainWindow):
             spot_name = leaf_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
             self._spot_folder_overrides[spot_name] = folder_name
             self._populate_spot_tree()
+        elif isinstance(data, tuple) and data[0] == "edit_review_flag":
+            _, name = data
+            reason, accepted = QtWidgets.QInputDialog.getText(
+                self, "Spot review flag", f"Reason to review {name}:",
+                text=self._review_flags.get(name, ""),
+            )
+            if accepted:
+                self._set_spot_review_flag(name, reason)
+        elif isinstance(data, tuple) and data[0] == "clear_review_flag":
+            self._set_spot_review_flag(data[1], "")
         elif is_spot and chosen.text().startswith("Rename"):
             self.spot_list.editItem(item, 0)
         elif is_spot and chosen.text().startswith("Remove"):
@@ -4538,6 +4573,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 del self._spot_folder_overrides[k]
         self._populate_spot_tree()
 
+    def _set_spot_review_flag(self, spot_name: str, reason: str) -> None:
+        """Set or clear a project annotation without changing the reduction."""
+        if spot_name not in self.session.spot_names:
+            return
+        if reason := reason.strip():
+            self._review_flags[spot_name] = reason
+        else:
+            self._review_flags.pop(spot_name, None)
+        self._populate_spot_tree()
+        self.refresh_view()
+        self.update_project_window_title()
+
     def _on_spot_tree_delete(self) -> None:
         item = self.spot_list.currentItem()
         if item is None:
@@ -4555,6 +4602,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if spot_name in self.session.spot_names:
             self.session.spot_names = [s for s in self.session.spot_names if s != spot_name]
         self._spot_folder_overrides.pop(spot_name, None)
+        self._review_flags.pop(spot_name, None)
         self._clear_reduction_cache()
         self._populate_spot_tree()
         self.refresh_view()
@@ -5153,7 +5201,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         .astype(str)
                         .drop_duplicates()
                     )
-                self.results_table.show_results(finalized)
+                self.results_table.show_results(finalized, review_flags=self._review_flags)
             return
 
         if self.session.plot_mode == "depth_profile":
@@ -5491,6 +5539,8 @@ class MainWindow(QtWidgets.QMainWindow):
             stages.append("session correction")
 
         extras = []
+        if selected_spot is not None and (reason := self._review_flags.get(selected_spot)):
+            extras.append(f"Review flag: {reason}")
         if stages:
             extras.append("Computed stages: " + ", ".join(stages) + ".")
         materials = reference_material_summary(self.session, self.workflow_preset)

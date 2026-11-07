@@ -245,6 +245,10 @@ all visible spots; Space toggles inclusion for the selection. The right-click
 menu also provides selection and inclusion actions. **Select** drag mode selects
 spots inside a rectangle. Double-click the plot to reset its view.
 
+Right-click a spot in the spot tree and choose **Edit review flag** to record a
+reason for review. Flags appear in the tree and final results and are saved in
+the project. They do not change the reduction.
+
 Concordia age labels adjust their spacing and precision as you zoom. Hover over
 a point for spot metadata, ratios, and reduced ages. Spot points and ellipses
 use **Sample** colours and a legend by default; **Spot** gives each spot its own

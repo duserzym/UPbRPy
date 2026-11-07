@@ -112,6 +112,32 @@ def test_two_formats_titles_dirty_marker_and_active_panels(loaded, app, tmp_path
     assert shell.tabs.tabText(1) == "• saved-project"
 
 
+def test_spot_review_flag_survives_project_reopen(loaded, tmp_path):
+    _, rich, spots = loaded
+    name = rich.current_spot_name()
+    reason = "Suspected mixed ablation"
+    path = tmp_path / "flagged.upbr"
+    rich.save_project(path)
+    assert not rich.has_unsaved_changes()
+    rich._set_spot_review_flag(name, reason)
+    assert rich.has_unsaved_changes()
+    assert reason in rich.spot_list.currentItem().toolTip(0)
+    assert not rich.spot_list.currentItem().icon(0).isNull()
+    assert reason in rich._compose_notes(name)
+    assert not spots.project_workspace_state()["review_flags"]
+    rich.save_project()
+    rich.load_project_file(str(path), background=False)
+    assert rich.project_workspace_state()["review_flags"] == {name: reason}
+    assert reason in rich.spot_list.currentItem().toolTip(0)
+    assert not rich.has_unsaved_changes()
+    rich._set_spot_review_flag(name, "")
+    assert reason not in rich.spot_list.currentItem().toolTip(0)
+    assert rich.has_unsaved_changes()
+    rich.load_project_file(str(path), background=False)
+    rich.load_experiment_directory(str(RICH), background=False)
+    assert rich.project_workspace_state()["review_flags"] == {}
+
+
 def test_shortcuts_route_only_to_active_tab_and_cycle_from_table(loaded, app, monkeypatch):
     shell, first, second = loaded
     saved = []

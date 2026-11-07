@@ -1897,6 +1897,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             if self._has_value(value):
                 add(label, format(float(value), spec), suffix)
         add("Automatic flags", row.get("automatic_flags"))
+        add("Review flag", row.get("review_flag"))
         add("Included in review", "yes" if self._include_flags.get(name, True) else "no")
         return "\n".join(lines)
 
@@ -3620,10 +3621,20 @@ class ResultsTableWidget(QtWidgets.QWidget):
         )
         return view, model
 
-    def show_results(self, finalized: object) -> None:
-        """Display a FinalizedReduction without duplicating reduction logic."""
+    def show_results(
+        self, finalized: object, *, review_flags: dict[str, str] | None = None
+    ) -> None:
+        """Display calculated results with optional project review annotations."""
         final_frame = getattr(finalized, "selected_results", pd.DataFrame())
         parallel_frame = getattr(finalized, "parallel_results", pd.DataFrame())
+        if review_flags:
+            def annotated(frame: pd.DataFrame) -> pd.DataFrame:
+                if "spot_name" not in frame:
+                    return frame
+                return frame.assign(review_flag=frame["spot_name"].map(review_flags).fillna(""))
+
+            final_frame = annotated(final_frame)
+            parallel_frame = annotated(parallel_frame)
         # Capture acquisition order before any table or grouped-view sorting.
         self._spot_sample_order = self._sample_order(parallel_frame, final_frame)
         secondary = getattr(
