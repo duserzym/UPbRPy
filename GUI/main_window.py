@@ -317,7 +317,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if sys.platform == "win32":
             register_action = database_menu.addAction("Register upbr:// Links")
             register_action.setToolTip(
-                "Let browsers and UPb Studio open database links in this "
+                "Let browsers and UPb Lab open database links in this "
                 "Studio (writes HKCU\\Software\\Classes\\upbr)."
             )
             register_action.triggered.connect(self.register_url_scheme)

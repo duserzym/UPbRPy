@@ -7,7 +7,7 @@ handoff code, fetch, auto-pick, reduce, submit, prefer; preferred dates equal
 to laicpmsdb's own script reduction of the same bundle). The Windows
 registration (`--register-url-scheme`) and a frozen-app launch by a real
 `upbr://` click are not yet tried on a machine. Part of the cross-repository
-contract `upbstudio/docs/WORKFLOW.md` v1 (sections 3.2, 3.3 and 4), which wins
+contract `upblab/docs/WORKFLOW.md` v1 (sections 3.2, 3.3 and 4), which wins
 where the two differ; laicpmsdb's `docs/workflow_api.md` gives the server's
 exact shapes. `GUI/roadmap.md` keeps the architecture of Studio itself.
 

@@ -5,7 +5,7 @@ folders on disk, and records every call. Run it by hand for manual checks::
 
     python tests/fake_laicpmsdb.py --port 8765 --bundle path/to/<session_key>
 
-Routes follow ``upbstudio/docs/WORKFLOW.md`` v1 and laicpmsdb's plan 8.1-8.4.
+Routes follow ``upblab/docs/WORKFLOW.md`` v1 and laicpmsdb's plan 8.1-8.4.
 """
 
 from __future__ import annotations

@@ -399,7 +399,7 @@ branches and per-system reference comparisons; see the
 Everything above works without a server and stays unchanged. A lab that runs
 [laicpmsdb](https://github.com/duserzym/laicpmsdb) can also move sessions and
 reductions over HTTP; the cross-repository contract is
-`upbstudio/docs/WORKFLOW.md` v1 and the plan is
+`upblab/docs/WORKFLOW.md` v1 and the plan is
 [`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md).
 Install the optional extra (`requests` and `keyring`):
 

@@ -317,7 +317,7 @@ def export_reduction_bundle(
 
     Input files are hashed by default (``hash_inputs=True``): the SHA-256 of
     every raw CSV is what lets a database match the bundle to the session it
-    came from (``upbstudio/docs/WORKFLOW.md`` section 3.3).
+    came from (``upblab/docs/WORKFLOW.md`` section 3.3).
     """
     formats = tuple(dict.fromkeys(formats))
     excluded_spots = tuple(excluded_spots)

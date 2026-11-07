@@ -1,6 +1,6 @@
 """Unpack session-bundle zips into Studio's session cache.
 
-A session bundle (``upbstudio/docs/WORKFLOW.md`` section 3.2) arrives either
+A session bundle (``upblab/docs/WORKFLOW.md`` section 3.2) arrives either
 from a laicpmsdb server (:mod:`UPbRPy.integration.laicpmsdb`) or as a zip a
 colleague sent by hand. Both routes end here, so the files on disk are the
 same however the bundle came. No HTTP, no Qt.

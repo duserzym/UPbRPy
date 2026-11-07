@@ -1,7 +1,7 @@
 """Client for a laicpmsdb server: database mode of UPbRPy Studio.
 
 Thin, typed and free of Qt. It moves the two bundles of
-``upbstudio/docs/WORKFLOW.md`` (sections 3.2 and 3.3) over HTTP and nothing
+``upblab/docs/WORKFLOW.md`` (sections 3.2 and 3.3) over HTTP and nothing
 else; everything scientific stays in the engine.
 
 Endpoints (all under ``<server>/v1/``, bearer token unless noted)::

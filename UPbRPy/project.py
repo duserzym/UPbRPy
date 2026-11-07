@@ -7,7 +7,7 @@ source data and recalculates the stages that had been completed when the
 project was saved.
 
 Format version 2 adds one optional block, ``origin``, naming the database
-session a project was exported from (``upbstudio/docs/WORKFLOW.md`` section
+session a project was exported from (``upblab/docs/WORKFLOW.md`` section
 3.2)::
 
     "origin": {

@@ -1,6 +1,6 @@
 """Read the ``session_manifest.toml`` of a database session bundle.
 
-A session bundle (``upbstudio/docs/WORKFLOW.md`` section 3.2) is a folder::
+A session bundle (``upblab/docs/WORKFLOW.md`` section 3.2) is a folder::
 
     <session_key>/
       raw/                    original Qtegra CSVs, byte-identical
