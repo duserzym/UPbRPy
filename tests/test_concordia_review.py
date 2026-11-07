@@ -546,3 +546,22 @@ def test_zoom_respects_axes_and_pan_moves_both(review, app, mode, enabled):
         assert (np.ptp(wheeled[axis]) < np.ptp(boxed[axis])) == changed
         assert not np.allclose(panned[axis], wheeled[axis])
         np.testing.assert_allclose(np.ptp(panned[axis]), np.ptp(wheeled[axis]))
+
+
+def test_inclusion_keeps_concordia_geometry_and_view(review, app):
+    widget, _ = review
+    plot = widget.spot_concordia
+    set_age_range(plot, 570, 900)
+    app.processEvents()
+    view = plot._plot_item.vb.viewRange()
+    items = plot._curve, plot._scatter, plot._hover_text, tuple(plot._ellipses)
+    plot._set_hover(2)
+    widget.set_spot_included({"A_12"}, False)
+    assert plot._hover_index is None
+    assert "A_12" not in {point[0] for point in plot._points}
+    assert not next(item for name, item, _ in plot._ellipses if name == "A_12").isVisible()
+    widget.set_spot_included({"A_12"}, True)
+    assert "A_12" in {point[0] for point in plot._points}
+    assert next(item for name, item, _ in plot._ellipses if name == "A_12").isVisible()
+    assert items == (plot._curve, plot._scatter, plot._hover_text, tuple(plot._ellipses))
+    np.testing.assert_allclose(plot._plot_item.vb.viewRange(), view)

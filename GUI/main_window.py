@@ -1817,6 +1817,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Diagnostic plots and the final publication-oriented review table.
         self.calibration_slopes_plot = CalibrationSlopesWidget()
+        self.calibration_channel_combo = StyledComboBox()
+        self.calibration_channel_combo.setToolTip(
+            "Inspect the measured glass spots and fit for one element on its own ppm and cps axes."
+        )
+        self.calibration_channel_combo.setFixedWidth(153)
+        self.calibration_channel_combo.hide()
+        self.calibration_channel_combo.currentIndexChanged.connect(
+            lambda _index: self.calibration_slopes_plot.set_channel(
+                self.calibration_channel_combo.currentData()
+            )
+        )
         self.downhole_frac_plot = DownholeFractionationWidget()
         self.session_frac_plot = SessionFractionationWidget()
         self.downhole_frac_plot.set_sigma_level(self.sigma_level)
@@ -1941,6 +1952,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout.addWidget(ratio_row_lbl)
         self.ratio_combo.setFixedWidth(153)
         cb_layout.addWidget(self.ratio_combo)
+        cb_layout.addWidget(self.calibration_channel_combo)
         self.inspector_toggle = QtWidgets.QToolButton()
         self.inspector_toggle.setText("Inspector")
         self.inspector_toggle.setCheckable(True)
@@ -4981,12 +4993,18 @@ class MainWindow(QtWidgets.QMainWindow):
         """Keep the compact Inspector toggle available on table pages."""
         layout = self.plot_control_bar.layout()
         target = self._current_plot_interaction_target()
+        calibration = self.session.plot_mode == "calibration_slopes"
+        self.ratio_combo.setVisible(not calibration)
+        self.ratio_toolbar_label.setText("Element" if calibration else "Ratio")
+        self.calibration_channel_combo.setVisible(calibration)
         for index in range(layout.count()):
             widget = layout.itemAt(index).widget()
             if widget is None or widget is self.inspector_toggle:
                 continue
             available = enabled
-            if widget is self.ratio_combo:
+            if widget is self.calibration_channel_combo:
+                available = enabled and calibration and widget.count() > 0
+            elif widget is self.ratio_combo:
                 available = enabled and self.session.plot_mode in {
                     "raw_ratios", "downhole_ratios", "session_ratios",
                 }
@@ -5202,7 +5220,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.plot_mode == "calibration_slopes":
             data = get_calibration_slope_data(self.session, self.workflow_preset)
             if theme:
-                self.calibration_slopes_plot.show_data(data, theme)
+                combo = self.calibration_channel_combo
+                channels = data["channels"] if data is not None else []
+                previous = combo.currentData()
+                previous_valid = combo.currentIndex() >= 0 and (
+                    previous is None or previous in channels
+                )
+                selected = previous if previous_valid else (
+                    "238U" if "238U" in channels else next(iter(channels), None)
+                )
+                with QtCore.QSignalBlocker(combo):
+                    combo.clear()
+                    for channel in channels:
+                        combo.addItem(channel, channel)
+                    if channels:
+                        combo.addItem("All elements", None)
+                        combo.setCurrentIndex(
+                            combo.findData(selected) if selected is not None else combo.count() - 1
+                        )
+                combo.setEnabled(bool(channels))
+                self.calibration_slopes_plot.show_data(data, theme, channel=selected)
             return
 
         if self.session.plot_mode == "downhole_ratios":

@@ -20,6 +20,7 @@ from GUI.workflows import (
     resolve_reference_standards,
 )
 from UPbRPy.calibration import evaluate_correction_result
+from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.constants import standard_archive_legacy
 from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
 from UPbRPy.qtegra import QtegraSession, open_qtegra
@@ -602,23 +603,25 @@ def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
     global _active_standard_archive
     global _active_standard_archive_path
 
+    target_path = Path(path).expanduser().resolve() if path else Path(DEFAULT_REFERENCE_LIBRARY_PATH)
     if not path:
-        _active_standard_archive = standard_archive.combine_first(
-            standard_archive_legacy
-        )
-        _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
-        return _active_standard_archive
-
-    target_path = Path(path).expanduser().resolve()
-    if target_path.suffix.lower() == ".csv":
+        loaded_archive = standard_archive.combine_first(standard_archive_legacy)
+    elif target_path.suffix.lower() == ".csv":
         loaded_archive = pd.read_csv(target_path, index_col=0)
     else:
         measurements = load_standard_measurements(target_path)
         loaded_archive = build_standard_archive(measurements).combine_first(
             standard_archive_legacy
         )
-    _active_standard_archive = loaded_archive
-    _active_standard_archive_path = str(target_path)
+    # Other tabs may have cached reductions using the same archive. Keep
+    # that identity when opening or restoring a tab with the same library.
+    if (
+        str(target_path) != _active_standard_archive_path
+        or not loaded_archive.equals(_active_standard_archive)
+        or loaded_archive.attrs != _active_standard_archive.attrs
+    ):
+        _active_standard_archive = loaded_archive
+        _active_standard_archive_path = str(target_path)
     return _active_standard_archive
 
 
@@ -1504,6 +1507,15 @@ def slice_region(frame: pd.DataFrame, region: tuple[float, float] | None) -> pd.
 
 # ── Diagnostic plot data helpers ──────────────────────────────────────────
 
+def _fractionation_standard(session: ReductionSession, preset: WorkflowPreset, ratio_name: str) -> str:
+    if preset.common_pb_calibration == "tera_wasserburg":
+        if ratio_name == "207Pb/206Pb":
+            return session.primary_76_standard or preset.pb_ratio_standard
+        if ratio_name == "208Pb/232Th":
+            return session.primary_82_standard or preset.th_ratio_standard
+    return session.primary_68_standard or preset.primary_standard
+
+
 def get_downhole_plot_data(
     session: ReductionSession,
     preset: WorkflowPreset,
@@ -1519,9 +1531,7 @@ def get_downhole_plot_data(
     downhole_results = session.reduction_cache.get("downhole_results")
     if not isinstance(raw_ratios, pd.DataFrame) or raw_ratios.empty:
         return None
-    primary_standard = (
-        session.primary_68_standard or preset.primary_standard
-    )
+    primary_standard = _fractionation_standard(session, preset, ratio_name)
     if not primary_standard:
         return None
     if ratio_name not in raw_ratios.columns:
@@ -1630,9 +1640,7 @@ def get_session_plot_data(
     if not isinstance(session_results, dict) or not isinstance(downhole_results, dict):
         return None
 
-    primary_standard = (
-        session.primary_68_standard or preset.primary_standard
-    )
+    primary_standard = _fractionation_standard(session, preset, ratio_name)
     if not primary_standard:
         return None
     try:
@@ -1753,8 +1761,7 @@ def get_calibration_slope_data(
     preset: WorkflowPreset,
 ) -> dict | None:
     """Return a dict of arrays for drawing the concentration calibration slopes."""
-    if session.loaded:
-        ensure_shared_pipeline(session, preset)
+    pipeline = ensure_shared_pipeline(session, preset) if session.loaded else None
     conc_results = session.reduction_cache.get("concentration_results")
     if not isinstance(conc_results, dict):
         return None
@@ -1765,46 +1772,34 @@ def get_calibration_slope_data(
     normalized = session.reduction_cache.get("normalized_plateau_data")
     if not isinstance(normalized, pd.DataFrame) or normalized.empty:
         return None
-    if not preset.concentration_standards:
+    standards = conc_results.get("active_standards", preset.concentration_standards)
+    calibrants = normalized[normalized["sample"].isin(standards)]
+    if calibrants.empty:
         return None
 
-    nist_data = normalized[normalized["sample"].isin(preset.concentration_standards)].reset_index(drop=True)
-    if nist_data.empty:
-        return None
-
-    try:
-        archive = current_standard_archive()
-    except Exception:
-        return None
-
-    channels = list(calibration.index)
+    archive = pipeline.standard_archive if pipeline is not None else current_standard_archive()
+    channels = [channel for channel in calibration.index if channel in calibrants]
+    groups = calibrants.groupby("spot_name", sort=False)
+    means = groups[channels].mean()
+    samples = groups["sample"].first().astype(str)
     channel_data: dict[str, dict] = {}
     for channel in channels:
-        if channel not in nist_data.columns:
-            continue
-        cps_vals: list[float] = []
-        ppm_vals: list[float] = []
-        sample_labels: list[str] = []
-        for sn in nist_data["spot_name"].unique():
-            this_spot = nist_data[nist_data["spot_name"] == sn]
-            sample = str(this_spot["sample"].values[0])
-            if sample not in archive.index or channel not in archive.columns:
+        concentrations = {}
+        for sample in samples.unique():
+            try:
+                concentrations[sample], _ = resolve_element_concentration(archive, sample, channel)
+            except (KeyError, ValueError):
                 continue
-            known_ppm = float(archive.loc[sample, channel])
-            if not np.isfinite(known_ppm) or known_ppm <= 0:
-                continue
-            mean_cps = float(this_spot[channel].mean())
-            if not np.isfinite(mean_cps):
-                continue
-            cps_vals.append(mean_cps)
-            ppm_vals.append(known_ppm)
-            sample_labels.append(sample)
-        if len(cps_vals) >= 2:
+        ppm = samples.map(concentrations).to_numpy(dtype=float)
+        cps = means[channel].to_numpy(dtype=float)
+        valid = np.isfinite(ppm) & (ppm > 0) & np.isfinite(cps)
+        if valid.any():
             channel_data[channel] = {
-                "cps": np.array(cps_vals),
-                "ppm": np.array(ppm_vals),
+                "cps": cps[valid],
+                "ppm": ppm[valid],
                 "slope": float(calibration[channel]),
-                "labels": sample_labels,
+                "labels": samples[valid].tolist(),
+                "spot_names": means.index[valid].astype(str).tolist(),
             }
 
     if not channel_data:

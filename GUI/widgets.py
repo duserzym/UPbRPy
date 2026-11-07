@@ -805,12 +805,19 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         include_flags: dict[str, bool] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.frame = pd.DataFrame() if frame is None else frame.copy()
         self.include_flags = include_flags
+        self._replace_frame(frame)
+
+    def _replace_frame(self, frame: pd.DataFrame | None) -> None:
+        self.frame = pd.DataFrame() if frame is None else frame.copy()
+        # Qt can query thousands of cells during a header resize. Retain
+        # column arrays so each lookup avoids pandas slicing and attrs copies.
+        self._columns = tuple(column.array for _name, column in self.frame.items())
+        self._spot_names = self.frame["spot_name"].array if "spot_name" in self.frame else None
 
     def spot_name(self, row: int) -> str:
         """Return the stable spot key for a source-model row."""
-        return str(self.frame.iloc[row]["spot_name"]) if "spot_name" in self.frame else ""
+        return str(self._spot_names[row]) if self._spot_names is not None else ""
 
     def flags(self, index):
         """Allow checking only the optional include column."""
@@ -834,7 +841,7 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         """Replace the displayed frame with one model reset notification."""
         self.beginResetModel()
-        self.frame = pd.DataFrame() if frame is None else frame.copy()
+        self._replace_frame(frame)
         self.endResetModel()
 
     def rowCount(
@@ -860,13 +867,18 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
             return None
         offset = int(self.include_flags is not None)
         if offset and index.column() == 0:
+            if role not in (QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole):
+                return None
             included = self.include_flags.get(self.spot_name(index.row()), True)
             if role == QtCore.Qt.ItemDataRole.CheckStateRole:
                 return QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked
-            if role == QtCore.Qt.ItemDataRole.UserRole:
-                return included
+            return included
+        if role not in (
+            QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.TextAlignmentRole,
+            QtCore.Qt.ItemDataRole.UserRole,
+        ):
             return None
-        value = self.frame.iat[index.row(), index.column() - offset]
+        value = self._columns[index.column() - offset][index.row()]
         if role == int(QtCore.Qt.ItemDataRole.DisplayRole):
             if pd.isna(value):
                 return ""
@@ -1112,6 +1124,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._points = []
         self._point_xy = np.empty((0, 2))
         self._point_rows = []
+        self._all_points = []
+        self._all_point_rows = []
+        self._point_errors = np.empty((0, 2))
+        self._included_spots: set[str] | None = None
+        self._legend_samples: list[str] = []
         self._metadata_by_spot = {}
         self._include_flags = {}
         self._spot_colors = {}
@@ -1187,7 +1204,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if names or not (control or shift):
             self.select_spots(names, extend=shift, toggle=control)
 
-    def _update_selection_style(self):
+    def _update_selection_style(self, *, positions_changed=False):
         if self._scatter is None or self._kind != "spot":
             return
         theme = self._theme
@@ -1199,6 +1216,12 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             brushes.append(pg.mkBrush(fill))
             pens.append(pg.mkPen(theme.accent if selected else theme.axis_text, width=2 if selected else 0.7))
             sizes.append(11 if selected else 8)
+        if positions_changed:
+            self._scatter.setData(
+                x=self._point_xy[:, 0], y=self._point_xy[:, 1],
+                brush=brushes, pen=pens, size=sizes,
+            )
+            return
         self._scatter.setBrush(brushes)
         self._scatter.setPen(pens)
         self._scatter.setSize(sizes)
@@ -1225,10 +1248,12 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         reset_view: bool = True,
         colour_mode: str = "sample",
         depth_colormap: str = "plasma",
+        included_spots: set[str] | None = None,
     ) -> None:
         """Display selected spot means or one spot's corrected sweeps."""
         preserve_view = (not reset_view and self._diagram == diagram and self._kind == kind)
         self._frame = frame.copy()
+        self._included_spots = included_spots
         self._diagram = (
             "tera_wasserburg"
             if diagram == "tera_wasserburg"
@@ -1250,6 +1275,47 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                                        for i, name in enumerate(samples)}
         self.setBackground(theme.plot_background)
         self._draw(preserve_view=preserve_view)
+
+    def set_included_spots(self, names: set[str]) -> None:
+        """Update spot visibility while retaining the plotted geometry and view."""
+        previous = self._included_spots
+        if previous == names:
+            return
+        self._included_spots = names
+        if self._scatter is None:
+            return
+        hovered = self._points[self._hover_index][0] if self._hover_index is not None else None
+        if hovered is not None and hovered not in names:
+            self._set_hover(None)
+        self._update_visible_points()
+        changed = previous ^ names if previous is not None else None
+        for name, ellipse, _color in self._ellipses:
+            if changed is None or name in changed:
+                ellipse.setVisible(name in names)
+        self._update_selection_style(positions_changed=True)
+        old_rect = self._legend.sceneBoundingRect() if self._legend is not None else None
+        self._update_sample_legend()
+        self._position_sample_legend()
+        new_rect = self._legend.sceneBoundingRect() if self._legend is not None else None
+        if old_rect != new_rect:
+            self._schedule_labels()
+        self._default_range = self._initial_range(*self._concordia_coordinates)
+        if hovered is not None and hovered in names:
+            self._hover_index = next(i for i, point in enumerate(self._points) if point[0] == hovered)
+            self._position_hover()
+
+    def _update_visible_points(self) -> None:
+        included = self._included_spots
+        indices = [
+            index for index, point in enumerate(self._all_points)
+            if included is None or point[0] in included
+        ]
+        self._points = [self._all_points[index] for index in indices]
+        self._point_rows = [self._all_point_rows[index] for index in indices]
+        self._point_xy = np.asarray(
+            [(x, y) for _name, x, y, _color in self._points], dtype=float
+        ).reshape(-1, 2)
+        self._visible_errors = self._point_errors[indices]
 
     def set_concordia_age(self, age_ma: float | None) -> None:
         """Mark the fitted age on the curve without fitting or changing the view."""
@@ -1426,11 +1492,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._points = []
         self._point_xy = np.empty((0, 2))
         self._point_rows = []
+        self._all_points = []
+        self._all_point_rows = []
         self._hover_index = None
         self._age_items = []
         self._label_ages = np.array([])
         self._default_range = None
         self._legend = None
+        self._legend_samples = []
         if self._colorbar is not None:
             self._colorbar.hide()
         theme = self._theme
@@ -1481,6 +1550,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             color=theme.axis_text,
             size="13pt",
         )
+        self._concordia_coordinates = concordia_x, concordia_y
         self._curve = plot.plot(
             concordia_x,
             concordia_y,
@@ -1568,52 +1638,43 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                 for index, row in enumerate(frame.to_dict("records"))
             ]
 
-        for index in np.flatnonzero(finite):
-            ellipse_x, ellipse_y = self.ellipse_coordinates(
-                float(x_values[index]),
-                float(y_values[index]),
-                float(x_errors[index]),
-                float(y_errors[index]),
-                float(rho_values[index]),
-            )
+        point_indices = np.flatnonzero(finite)
+        self._all_point_rows = frame.loc[finite].to_dict("records")
+        self._all_points = [
+            (str(row.get("spot_name", "")), float(x_values[index]),
+             float(y_values[index]), brushes[index])
+            for row, index in zip(self._all_point_rows, point_indices)
+        ]
+        self._point_errors = np.column_stack((x_errors[finite], y_errors[finite]))
+        self._update_visible_points()
+
+        for (name, x, y, color), (sx, sy), index in zip(
+            self._all_points, self._point_errors, point_indices
+        ):
+            ellipse_x, ellipse_y = self.ellipse_coordinates(x, y, sx, sy, float(rho_values[index]))
             if ellipse_x.size:
-                ellipse_color = QtGui.QColor(brushes[index])
+                ellipse_color = QtGui.QColor(color)
                 ellipse_color.setAlpha(155)
                 ellipse = plot.plot(
-                    ellipse_x,
-                    ellipse_y,
-                    pen=pg.mkPen(ellipse_color, width=1.0),
+                    ellipse_x, ellipse_y, pen=pg.mkPen(ellipse_color, width=1.0)
                 )
-                self._ellipses.append((str(frame.iloc[index].get("spot_name", "")), ellipse, brushes[index]))
-        self._points = [(str(frame.iloc[index].get("spot_name", "")), float(x_values[index]),
-                         float(y_values[index]), brushes[index]) for index in np.flatnonzero(finite)]
-        self._point_xy = np.column_stack((x_values[finite], y_values[finite]))
-        self._point_rows = frame.loc[finite].to_dict("records")
+                ellipse.setVisible(self._included_spots is None or name in self._included_spots)
+                self._ellipses.append((name, ellipse, color))
         self._scatter = pg.ScatterPlotItem(
-            x=x_values[finite],
-            y=y_values[finite],
+            x=self._point_xy[:, 0], y=self._point_xy[:, 1],
             symbol="o",
             size=6 if self._kind == "depth" else 8,
             pen=pg.mkPen(theme.axis_text, width=0.7),
-            brush=[brushes[index] for index in np.flatnonzero(finite)],
+            brush=[color for _name, _x, _y, color in self._points],
         )
         plot.addItem(self._scatter)
         self._scatter.sigClicked.connect(self._spot_clicked)
         self._update_selection_style()
 
-        self._set_initial_range(
-            plot,
-            x_values[finite],
-            y_values[finite],
-            x_errors[finite],
-            y_errors[finite],
-            concordia_x,
-            concordia_y,
-        )
-        self._default_range = plot.vb.viewRange()
-        if retained_range is not None:
-            plot.setRange(xRange=retained_range[0], yRange=retained_range[1], padding=0)
-        self._update_sample_legend(finite)
+        self._default_range = self._initial_range(concordia_x, concordia_y)
+        view = retained_range if retained_range is not None else self._default_range
+        plot.setRange(xRange=view[0], yRange=view[1], padding=0)
+        self._update_sample_legend()
         self.set_concordia_age(self._concordia_age_ma)
         if hovered is not None:
             index = next((i for i, point in enumerate(self._points) if point[0] == hovered), None)
@@ -1777,10 +1838,20 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         y = max(bounds.top(), min(scene_pos.y(), bounds.bottom() - rect.height()))
         item.setPos(item.parentItem().mapFromScene(QtCore.QPointF(x, y)))
 
-    def _update_sample_legend(self, finite):
-        if self._kind != "spot" or self._colour_mode != "sample" or "sample" not in self._frame:
+    def _update_sample_legend(self):
+        if self._kind != "spot" or self._colour_mode != "sample":
             return
-        samples = sorted(set(self._frame.loc[finite, "sample"].dropna().astype(str)))
+        samples = sorted({
+            str(row["sample"]) for row in self._point_rows
+            if self._has_value(row.get("sample"))
+        })
+        if samples == self._legend_samples:
+            return
+        self._legend_samples = samples
+        if self._legend is not None:
+            self.scene().removeItem(self._legend)
+            self._legend.deleteLater()
+            self._legend = None
         if len(samples) < 2:
             return
         self._legend = pg.LegendItem(labelTextColor=self._theme.axis_text,
@@ -1947,20 +2018,12 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         super().showEvent(event)
         self._schedule_labels()
 
-    @staticmethod
-    def _set_initial_range(
-        plot: pg.PlotItem,
-        x_values: np.ndarray,
-        y_values: np.ndarray,
-        x_errors: np.ndarray,
-        y_errors: np.ndarray,
-        concordia_x: np.ndarray,
-        concordia_y: np.ndarray,
-    ) -> None:
+    def _initial_range(self, concordia_x: np.ndarray, concordia_y: np.ndarray):
         """Frame observations plus their nearest concordia neighborhood."""
-        if not x_values.size:
-            plot.autoRange()
-            return
+        if not len(self._point_xy):
+            return [[0, 1], [0, 1]]
+        x_values, y_values = self._point_xy.T
+        x_errors, y_errors = self._visible_errors.T
         finite_xe = np.where(np.isfinite(x_errors), np.abs(x_errors), 0.0)
         finite_ye = np.where(np.isfinite(y_errors), np.abs(y_errors), 0.0)
         x_low = float(np.min(x_values - finite_xe))
@@ -1983,11 +2046,10 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         y_high = max(y_high, float(concordia_y[nearest]))
         x_padding = max((x_high - x_low) * 0.12, 1e-6)
         y_padding = max((y_high - y_low) * 0.12, 1e-6)
-        plot.setRange(
-            xRange=(x_low - x_padding, x_high + x_padding),
-            yRange=(max(0.0, y_low - y_padding), y_high + y_padding),
-            padding=0.0,
-        )
+        return [
+            [x_low - x_padding, x_high + x_padding],
+            [max(0.0, y_low - y_padding), y_high + y_padding],
+        ]
 
 
 class ElidedLabel(QtWidgets.QLabel):
@@ -2299,8 +2361,14 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         if drift.times_s is not None:
             point_color = QtGui.QColor(theme.accent)
             point_color.setAlpha(90)
-            self.plot.plot(drift.times_s / 60, drift.raw_factors, pen=None, symbol="o",
-                           symbolSize=4, symbolBrush=point_color, symbolPen=None).setZValue(1)
+            scatter = pg.ScatterPlotItem(
+                x=drift.times_s / 60, y=drift.raw_factors,
+                size=6, brush=point_color, pen=None, hoverable=True, hoverSize=10,
+                data=drift.acquisition_labels,
+                tip=lambda x, y, spot: f"{spot}\nSession time: {x:.2f} min\nFactor: {y:.5g}",
+            )
+            scatter.setZValue(3)
+            self.plot.addItem(scatter)
             self.plot.plot(drift.times_s / 60, drift.factors,
                            pen=pg.mkPen(theme.accent, width=3)).setZValue(2)
 
@@ -3063,8 +3131,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                                [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
         self._update_group_inclusion()
         self._update_sample_chips()
-        self.refresh_spot_concordia()
-        self.refresh_depth_concordia(reset_view=False)
+        self.refresh_spot_concordia(inclusions_only=True)
+        self.refresh_depth_concordia(reset_view=False, inclusions_only=True)
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
         """Share spot selection, keeping the origin view's scroll position."""
@@ -3476,27 +3544,26 @@ class ResultsTableWidget(QtWidgets.QWidget):
             view = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
             self.set_spot_included(self._visible_spot_names(view), False)
 
-    def refresh_spot_concordia(self, *, reset_view: bool = False) -> None:
-        """Redraw only the checked final spot means."""
+    def refresh_spot_concordia(
+        self, *, reset_view: bool = False, inclusions_only: bool = False,
+    ) -> None:
+        """Refresh the checked spot means, reusing geometry for inclusion changes."""
         if self._theme is None:
             return
         selected_names = {name for name, included in self.include_flags.items() if included}
-        selected = self._spot_frame
-        if selected_names and "spot_name" in selected.columns:
-            selected = selected[selected["spot_name"].astype(str).isin(selected_names)]
-        elif not selected_names:
-            selected = selected.iloc[0:0]
-        self.spot_concordia.show_data(
-            selected,
-            diagram=self.selected_diagram(self.spot_diagram_buttons),
-            kind="spot",
-            include_calibration_uncertainty=(
-                self._include_calibration_uncertainty
-            ),
-            theme=self._theme,
-            reset_view=reset_view,
-            colour_mode=self.spot_colour_mode(),
-        )
+        if inclusions_only:
+            self.spot_concordia.set_included_spots(selected_names)
+        else:
+            self.spot_concordia.show_data(
+                self._spot_frame,
+                diagram=self.selected_diagram(self.spot_diagram_buttons),
+                kind="spot",
+                include_calibration_uncertainty=self._include_calibration_uncertainty,
+                theme=self._theme,
+                reset_view=reset_view,
+                colour_mode=self.spot_colour_mode(),
+                included_spots=selected_names,
+            )
         self.spot_concordia.set_concordia_age(None)
         self._readout_timer.start(0)
 
@@ -3565,7 +3632,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._depth_sample_choices = False
         self.refresh_depth_concordia()
 
-    def refresh_depth_concordia(self, *, reset_view: bool = True) -> None:
+    def refresh_depth_concordia(
+        self, *, reset_view: bool = True, inclusions_only: bool = False,
+    ) -> None:
         """Redraw corrected sweeps for the chosen depth-profile spot."""
         if self._theme is None:
             return
@@ -3579,6 +3648,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if not self._depth_sample_choices and not self.include_flags.get(spot_name, self._show_glasses
                                       if spot_name in self._glass_spot_names() else True):
             selected = selected.iloc[0:0]
+        if inclusions_only and selected.equals(self.depth_concordia._frame):
+            return
         self.depth_concordia.show_data(
             selected,
             diagram=self.selected_diagram(self.depth_diagram_buttons),
@@ -3616,9 +3687,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
         view.setWordWrap(False)
         view.verticalHeader().setVisible(False)
         view.horizontalHeader().setStretchLastSection(False)
-        view.horizontalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
+        if include_flags is None:
+            view.horizontalHeader().setSectionResizeMode(
+                QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
         return view, model
 
     def show_results(
@@ -3663,6 +3735,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         sort_column = next((final_frame.columns.get_loc(name) + 1
                             for name in ("sample", "spot_name") if name in final_frame), -1)
         self.results_table.sortByColumn(sort_column, QtCore.Qt.SortOrder.AscendingOrder)
+        # Data replacement can change column widths. Review checkboxes cannot.
+        self.results_table.resizeColumnsToContents()
         self.secondary_model.set_frame(secondary)
         self._spot_frame = parallel_frame.copy()
         decision = getattr(finalized, "decision", None)
@@ -3865,6 +3939,10 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._plot_item: pg.PlotItem | None = None
+        self._spot_segments: list[tuple[str, np.ndarray, np.ndarray]] = []
+        self._hover_proxy = pg.SignalProxy(
+            self.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
+        )
         self._sigma_level = 2
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
@@ -3887,6 +3965,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
 
     def _draw(self) -> None:
         self.clear()
+        self._spot_segments.clear()
         self._plot_item = None
         theme = self._theme
         data = self._data
@@ -3920,6 +3999,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         )
 
         # Individual spot traces (thin, semi-transparent)
+        spot_names = data.get("spot_names", [])
         for i, (rel_t, r) in enumerate(zip(data["spot_times"], data["spot_ratios"])):
             with np.errstate(divide="ignore", invalid="ignore"):
                 frac = np.where(r > 0, data["known_ratio"] / r, np.nan)
@@ -3927,6 +4007,11 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
             c = pg.mkColor(color)
             c.setAlpha(120)
             p.plot(rel_t, frac, pen=pg.mkPen(c, width=1.2))
+            if i < len(spot_names):
+                points = np.column_stack((rel_t, frac))
+                valid = np.all(np.isfinite(points), axis=1)
+                segments = valid[:-1] & valid[1:]
+                self._spot_segments.append((spot_names[i], points[:-1][segments], points[1:][segments]))
 
         # Residual scatter is the uncertainty model currently retained by the
         # reduction core.  The toolbar chooses whether one or two standard
@@ -3973,6 +4058,38 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
                                        style=QtCore.Qt.PenStyle.DotLine))
         self._apply_zoom_mode()
         self._apply_interaction_mode()
+
+    def _on_mouse_moved(self, event: tuple) -> None:
+        if self._plot_item is None or not event:
+            return
+        vb = self._plot_item.vb
+        scene_pos = event[0]
+        if vb.sceneBoundingRect().contains(scene_pos):
+            pos = vb.mapSceneToView(scene_pos)
+            scale = np.abs(vb.viewPixelSize())
+            if np.all(np.isfinite(scale)) and np.all(scale > 0):
+                name = self._nearest_trace(np.array([pos.x(), pos.y()]), scale)
+                if name:
+                    QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), name, self)
+                    return
+        QtWidgets.QToolTip.hideText()
+
+    def _nearest_trace(self, pos: np.ndarray, scale: np.ndarray) -> str:
+        name = ""
+        closest = 6.0 ** 2
+        for spot, start, end in self._spot_segments:
+            delta = (end - start) / scale
+            offset = (pos - start) / scale
+            length_sq = np.sum(delta * delta, axis=1)
+            projection = np.divide(
+                np.sum(offset * delta, axis=1), length_sq,
+                out=np.zeros_like(length_sq), where=length_sq > 0,
+            )
+            residual = offset - np.clip(projection, 0, 1)[:, None] * delta
+            distance_sq = np.min(np.sum(residual * residual, axis=1), initial=np.inf)
+            if distance_sq < closest:
+                name, closest = spot, distance_sq
+        return name
 
     def set_sigma_level(self, sigma_level: int) -> None:
         """Redraw the diagnostic with a one- or two-sigma envelope."""
@@ -4120,6 +4237,10 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
             size=8,
             pen=pg.mkPen(point_color, width=1.2),
             brush=pg.mkBrush(point_color),
+            hoverable=True,
+            hoverSize=12,
+            data=data.get("spot_names", [primary_standard] * len(t_arr)),
+            tip=lambda x, y, name: f"{name}\nSession time: {x:,.2f} s\nFactor: {y:.5g}",
         )
         p.addItem(scatter)
 
@@ -4168,7 +4289,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
 
 
 class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
-    """Grid of origin-anchored calibration slope plots (cps vs. known ppm).
+    """Measured glass points and origin-anchored fits (cps vs. known ppm).
 
     Data is supplied via :meth:`show_data`.  Accepts the dict returned by
     ``services.get_calibration_slope_data``.
@@ -4178,6 +4299,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
         super().__init__()
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
+        self._channel: str | None = None
         self._scatter_for_line: dict[pg.PlotDataItem, pg.ScatterPlotItem] = {}
         self._plot_item: pg.PlotItem | None = None
         self._zoom_mode = "xy"
@@ -4189,9 +4311,11 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
-        # Rebuild legend column layout when width changes.
-        if hasattr(self, "_theme") and hasattr(self, "_data") and self._theme is not None and self._data is not None:
-            self._draw()
+        plot = getattr(self, "_plot_item", None)
+        if plot is not None and plot.legend is not None:
+            columns = self._legend_column_count(len(self._scatter_for_line))
+            if plot.legend.columnCount != columns:
+                plot.legend.setColumnCount(columns)
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -4199,11 +4323,25 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
         if self._data is not None:
             self._draw()
 
-    def show_data(self, data: dict | None, theme: ThemeSpec) -> None:
+    def show_data(
+        self, data: dict | None, theme: ThemeSpec, *, channel: str | None = None,
+    ) -> None:
+        """Display the requested channel or all calibrated channels."""
         self._theme = theme
         self._data = data
+        self._channel = channel
         self.setBackground(theme.plot_background)
         self._draw()
+
+    def set_channel(self, channel: str | None) -> None:
+        """Switch the plotted channel. A value of None displays all channels."""
+        if channel != self._channel:
+            self._channel = channel
+            self._draw()
+
+    def restore_default_view(self) -> None:
+        if self._plot_item is not None:
+            self._plot_item.enableAutoRange()
 
     def _draw(self) -> None:
         self.clear()
@@ -4223,43 +4361,44 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             lbl.setPos(0.5, 0.5)
             return
 
-        channels = data["channels"]
+        all_channels = data["channels"]
+        channels = [self._channel] if self._channel in all_channels else all_channels
         p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
         self._plot_item = p
         _make_diag_axis(p, theme)
-        p.setTitle("Calibration slopes by element", color=theme.axis_text, size="10pt")
+        title = f"{channels[0]} calibration · measured glass spots" if len(channels) == 1 else "Calibration slopes by element"
+        p.setTitle(title, color=theme.axis_text, size="10pt")
         p.setLabel("left", "cps", color=theme.axis_text, size="9px")
         p.setLabel("bottom", "ppm", color=theme.axis_text, size="9px")
         legend = _rounded_legend(p, offset=(12, 12), labelTextColor=theme.axis_text, labelTextSize="9pt")
         if legend is not None:
             legend.setColumnCount(self._legend_column_count(len(channels)))
 
-        global_xmax = 0.0
         for channel in channels:
-            ch_data = data["channel_data"][channel]
-            ppm = np.asarray(ch_data["ppm"], dtype=float)
-            if ppm.size:
-                global_xmax = max(global_xmax, float(np.nanmax(ppm)))
-        if global_xmax <= 0:
-            global_xmax = 1.0
-        line_xmax = global_xmax * 1.05
-
-        for idx, channel in enumerate(channels):
             ch_data = data["channel_data"][channel]
             ppm = np.asarray(ch_data["ppm"], dtype=float)
             cps = np.asarray(ch_data["cps"], dtype=float)
             slope = float(ch_data["slope"])
-            color = _DIAG_SPOT_COLORS[idx % len(_DIAG_SPOT_COLORS)]
-
-            # Scatter points for calibration standards
+            color = _DIAG_SPOT_COLORS[all_channels.index(channel) % len(_DIAG_SPOT_COLORS)]
+            labels = ch_data.get("labels", [channel] * len(ppm))
+            spot_names = ch_data.get("spot_names", labels)
+            sample_symbols = dict(zip(dict.fromkeys(labels), ("o", "s", "t", "d")))
             scatter = pg.ScatterPlotItem(
                 x=ppm,
                 y=cps,
-                symbol="o",
-                size=7,
-                pen=pg.mkPen(color, width=1.2),
+                symbol=[sample_symbols.get(label, "o") for label in labels],
+                size=9,
+                pen=pg.mkPen(theme.axis_text, width=0.9),
                 brush=pg.mkBrush(color),
+                hoverable=True,
+                hoverSize=13,
+                data=list(zip(spot_names, labels, [channel] * len(ppm))),
+                tip=lambda x, y, spot: (
+                    f"{spot[0]} · {spot[1]} · {spot[2]}\n"
+                    f"Reference: {x:,.4g} ppm\nMeasured: {y:,.5g} cps"
+                ),
             )
+            scatter.setZValue(5)
             p.addItem(scatter)
 
             # Dashed origin-anchored slope line. Keep this as the legend item;
@@ -4267,6 +4406,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             # Notebook calibration slope is ppm/cps. In this plot x=ppm, y=cps,
             # so the physically consistent origin-anchored line is y = x / slope.
             if np.isfinite(slope) and slope > 0:
+                line_xmax = float(np.nanmax(ppm)) * 1.05
                 line_item = p.plot(
                     [0.0, line_xmax],
                     [0.0, line_xmax / slope],
@@ -4330,6 +4470,21 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
         else:
             self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+
+
+def _spot_time_spans(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Index acquisition intervals for spot tooltips on session-time axes."""
+    if frame.empty or "spot_name" not in frame or "Time" not in frame:
+        return np.array([]), np.array([]), []
+    bounds = frame.groupby("spot_name", sort=False)["Time"].agg(["min", "max"])
+    bounds = bounds.dropna().sort_values("min")
+    return bounds["min"].to_numpy(), bounds["max"].to_numpy(), bounds.index.astype(str).tolist()
+
+
+def _spot_at_time(spans: tuple[np.ndarray, np.ndarray, list[str]], time: float) -> str:
+    starts, ends, names = spans
+    index = int(np.searchsorted(starts, time, side="right")) - 1
+    return names[index] if index >= 0 and time <= ends[index] else ""
 
 
 class TracePlotWidget(RoundedPlotWidget):
@@ -4561,6 +4716,8 @@ class TracePlotWidget(RoundedPlotWidget):
         self._signal_boundaries = {}
         self._signal_markers = {}
         self._hover_series = {}
+        self._hover_spans = _spot_time_spans(pd.DataFrame())
+        self._hover_spot_name = None
         self._measurement_layers = {}
         self._selection_times = np.array([], dtype=float)
         self._selection_channel = None
@@ -4664,6 +4821,8 @@ class TracePlotWidget(RoundedPlotWidget):
 
         self._reset_items()
         self._update_spot_label(spot_name)
+        self._hover_spans = _spot_time_spans(spot_data)
+        self._hover_spot_name = spot_name if "spot_name" not in spot_data else None
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("left", y_label, **label_style)
         x_values = spot_data["Time"].to_numpy(dtype=float)
@@ -4783,6 +4942,7 @@ class TracePlotWidget(RoundedPlotWidget):
             return
 
         self._reset_items()
+        self._hover_spans = _spot_time_spans(frame)
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("left", y_label, **label_style)
         x_values = frame["Time"].to_numpy(dtype=float)
@@ -5392,12 +5552,14 @@ class TracePlotWidget(RoundedPlotWidget):
         if not event:
             return
         scene_position = event[0]
-        if not self.sceneBoundingRect().contains(scene_position) or not self._hover_series:
+        if not self.plot_item.vb.sceneBoundingRect().contains(scene_position) or not self._hover_series:
             QtWidgets.QToolTip.hideText()
             return
         mouse_point = self.plot_item.vb.mapSceneToView(scene_position)
         x_value = float(mouse_point.x())
-        tooltip_lines = [f"Time: {x_value:,.2f} s"]
+        spot = _spot_at_time(self._hover_spans, x_value) or self._hover_spot_name
+        tooltip_lines = [f"Spot: {spot}"] if spot else []
+        tooltip_lines.append(f"Time: {x_value:,.2f} s")
 
         for name, (x_values, y_values) in list(self._hover_series.items())[:6]:
             if len(x_values) == 0:
@@ -5423,6 +5585,9 @@ class SessionOverviewWidget(RoundedPlotWidget):
         self._theme = active_theme()
         self._window_region: pg.LinearRegionItem | None = None
         self._sync_guard = False
+        self._hover_proxy = pg.SignalProxy(
+            self.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
+        )
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         self._configure_plot()
         self.show_preview()
@@ -5461,6 +5626,7 @@ class SessionOverviewWidget(RoundedPlotWidget):
     def _reset_items(self) -> None:
         self.plot_item.clear()
         self._window_region = None
+        self._hover_spans = _spot_time_spans(pd.DataFrame())
         self._configure_plot()
 
     def show_preview(self) -> None:
@@ -5502,6 +5668,7 @@ class SessionOverviewWidget(RoundedPlotWidget):
         if not finite_mask.any():
             self.show_preview()
             return
+        self._hover_spans = _spot_time_spans(frame)
         x_values = x_values[finite_mask]
         y_values = y_values[finite_mask]
         curve = self.plot_item.plot(x_values, y_values, pen=pg.mkPen(color, width=1.4))
@@ -5509,6 +5676,21 @@ class SessionOverviewWidget(RoundedPlotWidget):
         curve.setClipToView(True)
         self._ensure_window_region(current_window)
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
+
+    def _on_mouse_moved(self, event: tuple) -> None:
+        if not event:
+            return
+        vb = self.plot_item.vb
+        scene_pos = event[0]
+        if vb.sceneBoundingRect().contains(scene_pos):
+            time = vb.mapSceneToView(scene_pos).x()
+            name = _spot_at_time(self._hover_spans, time)
+            if name:
+                QtWidgets.QToolTip.showText(
+                    QtGui.QCursor.pos(), f"Spot: {name}\nSession time: {time:,.2f} s", self
+                )
+                return
+        QtWidgets.QToolTip.hideText()
 
     def set_window(self, bounds: tuple[float, float]) -> None:
         self._ensure_window_region(bounds)
