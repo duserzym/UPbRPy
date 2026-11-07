@@ -325,10 +325,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Quit")
+        exit_action.setMenuRole(QtGui.QAction.MenuRole.QuitRole)
         exit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
         application = QtWidgets.QApplication.instance()
         if application is not None:
-            exit_action.triggered.connect(application.closeAllWindows)
+            exit_action.triggered.connect(application.quit)
 
         workflow_menu = self.menuBar().addMenu("Workflow")
         mineral_menu = workflow_menu.addMenu("Mineral Preset")
@@ -623,6 +624,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "selection_colors": self.selection_colors,
                 "spot_folder_overrides": self._spot_folder_overrides,
                 "review_flags": self._review_flags,
+                "review_spot_colour": self.results_table.spot_colour_mode(),
+                "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
+                "review_show_glasses": self.results_table.show_glasses(),
+                "bias_controls": self.bias_controls.state(),
             },
             "selections": selection_export_frame(
                 self.session.experiment
@@ -640,6 +645,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.loaded:
             return False
         if self.pending_region_updates:
+            return True
+        concentration = self.concentration_standards_edit
+        secondary = self.secondary_standards_edit
+        if concentration.isModified():
+            names = self._standard_names(concentration)
+            if names and names != self.session.concentration_standards:
+                return True
+        if secondary.isModified() and self._standard_names(secondary) != self.session.secondary_standards:
             return True
         if self._saved_project_fingerprint is None:
             return True
@@ -671,11 +684,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         dialog = QtWidgets.QMessageBox(self)
         dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("Save reduction project?")
-        dialog.setText("This reduction has changes that are not saved in a .upbr project.")
+        dialog.setWindowTitle("Unsaved reduction")
+        dialog.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        dialog.setText(f'Save changes to “{self._project_name()}” before closing?')
         dialog.setInformativeText(
-            "Save the lightweight project before closing, discard these changes, "
-            "or cancel and continue working."
+            "Your changes will be lost if you close without saving."
         )
         dialog.setStandardButtons(
             QtWidgets.QMessageBox.StandardButton.Save
@@ -683,6 +696,8 @@ class MainWindow(QtWidgets.QMainWindow):
             | QtWidgets.QMessageBox.StandardButton.Cancel
         )
         dialog.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Save)
+        dialog.setEscapeButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        dialog.button(QtWidgets.QMessageBox.StandardButton.Discard).setText("Don't Save")
         choice = dialog.exec()
         if choice == QtWidgets.QMessageBox.StandardButton.Discard:
             self.persist_layout_state()
@@ -1833,6 +1848,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.downhole_frac_plot.set_sigma_level(self.sigma_level)
         self.session_frac_plot.set_sigma_level(self.sigma_level)
         self.results_table = ResultsTableWidget(settings=self.settings)
+        self.results_table.appearance_changed.connect(self.update_project_window_title)
         self.results_table.tabs.currentChanged.connect(
             self.on_results_review_tab_changed
         )
@@ -2255,6 +2271,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.concentration_standards_edit.editingFinished.connect(
             self.on_concentration_standards_changed
         )
+        self.concentration_standards_edit.textEdited.connect(self.update_project_window_title)
         standards_layout.addRow(
             "Concentration",
             self.concentration_standards_edit,
@@ -2266,6 +2283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.secondary_standards_edit.editingFinished.connect(
             self.on_secondary_standards_changed
         )
+        self.secondary_standards_edit.textEdited.connect(self.update_project_window_title)
         standards_layout.addRow("Secondary", self.secondary_standards_edit)
         calibration_layout.addWidget(standards_card, 0)
 
@@ -2937,15 +2955,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._invalidate_downhole_fit_cache()
         self._refresh_workflow_status()
 
+    @staticmethod
+    def _standard_names(edit: QtWidgets.QLineEdit) -> tuple[str, ...]:
+        names = (part.strip() for part in edit.text().split(","))
+        return tuple(name for name in names if name)
+
     def on_concentration_standards_changed(self) -> None:
         """Parse comma-separated elemental calibration materials."""
         if self._is_populating:
             return
-        values = tuple(
-            value.strip()
-            for value in self.concentration_standards_edit.text().split(",")
-            if value.strip()
-        )
+        values = self._standard_names(self.concentration_standards_edit)
         if not values:
             self.statusBar().showMessage(
                 "Keep at least one concentration standard."
@@ -2969,11 +2988,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Parse materials used for weighted-mean and MSWD summaries."""
         if self._is_populating:
             return
-        values = tuple(
-            value.strip()
-            for value in self.secondary_standards_edit.text().split(",")
-            if value.strip()
-        )
+        values = self._standard_names(self.secondary_standards_edit)
         if values == self.session.secondary_standards:
             return
         self.session.secondary_standards = values
@@ -3266,22 +3281,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_pending_project_edits(self) -> None:
         """Commit visible controls and dragged windows before saving."""
-        concentration_values = tuple(
-            value.strip()
-            for value in self.concentration_standards_edit.text().split(",")
-            if value.strip()
-        )
+        concentration_values = self._standard_names(self.concentration_standards_edit)
         if (
             concentration_values
             and concentration_values
             != self.session.concentration_standards
         ):
             self.on_concentration_standards_changed()
-        secondary_values = tuple(
-            value.strip()
-            for value in self.secondary_standards_edit.text().split(",")
-            if value.strip()
-        )
+        secondary_values = self._standard_names(self.secondary_standards_edit)
         if secondary_values != self.session.secondary_standards:
             self.on_secondary_standards_changed()
         if not self.pending_region_updates:
@@ -3579,14 +3586,16 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{restored.project_path.name}"
         )
 
+    def _project_name(self) -> str:
+        if self.project_path is not None:
+            return self.project_path.stem
+        if self.session.directory:
+            return Path(self.session.directory).name
+        return "Untitled"
+
     def update_project_window_title(self) -> None:
         """Show the active project name without exposing a long path."""
-        if self.project_path is not None:
-            label = self.project_path.stem
-        elif self.session.directory:
-            label = Path(self.session.directory).name
-        else:
-            label = "Untitled"
+        label = self._project_name()
         if self.has_unsaved_changes():
             label = f"• {label}"
         suffix = f" — {label}"
@@ -4546,6 +4555,7 @@ class MainWindow(QtWidgets.QMainWindow):
             spot_name = leaf_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
             self._spot_folder_overrides[spot_name] = folder_name
             self._populate_spot_tree()
+            self.update_project_window_title()
         elif isinstance(data, tuple) and data[0] == "edit_review_flag":
             _, name = data
             reason, accepted = QtWidgets.QInputDialog.getText(
@@ -4614,6 +4624,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if v == folder_name:
                 del self._spot_folder_overrides[k]
         self._populate_spot_tree()
+        self.update_project_window_title()
 
     def _set_spot_review_flag(self, spot_name: str, reason: str) -> None:
         """Set or clear a project annotation without changing the reduction."""
@@ -4666,6 +4677,7 @@ class MainWindow(QtWidgets.QMainWindow):
             old_name = str(role_data)
             if old_name in self._spot_folder_overrides:
                 self._spot_folder_overrides[new_text] = self._spot_folder_overrides.pop(old_name)
+                self.update_project_window_title()
             # Update UserRole so navigation still works
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, new_text)
             if old_name != new_text:
@@ -4943,6 +4955,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_bias_controls_changed(self, state: dict) -> None:
         """Redraw the bias graph after a date, quantity or scale change."""
         self.bias_plot.set_per_sample_trends(bool(state.get("per_sample_trends", False)))
+        self.update_project_window_title()
         if self.session.loaded and self.session.plot_mode == "standard_bias":
             app = QtWidgets.QApplication.instance()
             self._refresh_bias_plot(active_theme(app) if app else None)

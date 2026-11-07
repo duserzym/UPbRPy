@@ -2537,6 +2537,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     selectedSpotsChanged = QtCore.Signal(object)
     showGlassesChanged = QtCore.Signal(bool)
+    appearance_changed = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
@@ -2657,6 +2658,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _glass_toggled(self, enabled):
         self.set_show_glasses(enabled)
         self.showGlassesChanged.emit(self._show_glasses)
+        self.appearance_changed.emit()
 
     def _create_glass_button(self):
         button = QtWidgets.QToolButton()
@@ -3579,6 +3581,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if self._settings is not None:
             self._settings.setValue("review_spot_colour_v1", mode)
         self.refresh_spot_concordia()
+        self.appearance_changed.emit()
 
     def set_depth_colormap(self, name: str) -> None:
         """Choose a built-in depth map, recolouring without changing the view."""
@@ -3591,6 +3594,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if self._settings is not None:
             self._settings.setValue("review_depth_colormap_v1", name)
         self.refresh_depth_concordia(reset_view=False)
+        self.appearance_changed.emit()
 
     def _update_age_readout(self):
         frame = self._spot_frame

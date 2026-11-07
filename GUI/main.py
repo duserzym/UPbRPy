@@ -41,6 +41,7 @@ class StudioWindowController(QtCore.QObject):
         self.app_icon = app_icon
         self.windows: dict[int, StudioWindow] = {}
         self._last_active: StudioWindow | None = None
+        self._checking_quit = False
         self._database = None
         self.updater = Updater(self)
         self.updater.start_scheduler()
@@ -77,6 +78,29 @@ class StudioWindowController(QtCore.QObject):
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if (
+            event.type() != QtCore.QEvent.Type.Quit
+            or watched is not QtWidgets.QApplication.instance()
+        ):
+            return False
+        if self._checking_quit:
+            event.ignore()
+            return True
+        self._checking_quit = True
+        try:
+            # A Cancel in any window must leave every window and tab open.
+            windows = tuple(self.windows.values())
+            for window in windows:
+                if not window.confirm_close():
+                    event.ignore()
+                    return True
+            for window in windows:
+                window.close_confirmed()
+        finally:
+            self._checking_quit = False
+        return False
 
     def move_tab_to_new_window(self, source: StudioWindow, reduction: MainWindow) -> StudioWindow:
         """Move the existing reduction and its running work into another shell."""
@@ -308,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     if instance is not None:
         instance.received.connect(controller.open_target)
         instance.listen()
+        app.installEventFilter(controller)
     # macOS delivers upbr:// links and Finder opens as QFileOpenEvent.
     file_open_filter = FileOpenFilter(controller.open_target, app)
     app.installEventFilter(file_open_filter)

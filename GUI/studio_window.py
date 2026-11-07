@@ -134,6 +134,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         self._connections: dict[MainWindow, list[tuple[object, Callable]]] = {}
         self._shortcuts: dict[MainWindow, dict[QtGui.QAction, list[QtGui.QKeySequence]]] = {}
         self._shown_menus: list[_MirrorMenu] = []
+        self._checking_close = False
+        self._close_confirmed = False
         self.setMinimumSize(760, 620)
         self.setProperty("wallpaperRoot", True)
         if app_icon is not None:
@@ -275,6 +277,10 @@ class StudioWindow(QtWidgets.QMainWindow):
             return
         self.tabs.setTabText(index, title)
         source = reduction.project_path or reduction.session.directory
+        if title.startswith("• "):
+            self.tabs.tabBar().setAccessibleTabName(index, f"{title[2:]}, unsaved changes")
+        else:
+            self.tabs.tabBar().setAccessibleTabName(index, title)
         self.tabs.setTabToolTip(index, str(Path(source).resolve()) if source else "")
         if reduction is self.active_reduction:
             self.setWindowTitle(reduction.windowTitle())
@@ -340,13 +346,34 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.add_tab()
         return True
 
+    def confirm_close(self) -> bool:
+        """Ask about unsaved tabs without removing any of them."""
+        if self._checking_close:
+            return False
+        self._checking_close = True
+        try:
+            for index in range(self.tabs.count()):
+                reduction = self.tabs.widget(index)
+                if reduction._active_worker is not None or reduction.has_unsaved_changes():
+                    self.tabs.setCurrentIndex(index)
+                if not reduction.request_close():
+                    return False
+            return True
+        finally:
+            self._checking_close = False
+
+    def close_confirmed(self) -> None:
+        """Close after every Studio window has approved application quit."""
+        self._close_confirmed = True
+        try:
+            self.close()
+        finally:
+            self._close_confirmed = False
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802 - Qt API
-        # Preflight all reductions before removing any: Cancel preserves every tab.
-        for index in range(self.tabs.count()):
-            self.tabs.setCurrentIndex(index)
-            if not self.tabs.widget(index).request_close():
-                event.ignore()
-                return
+        if not self._close_confirmed and not self.confirm_close():
+            event.ignore()
+            return
         self.persist_layout_state()
         while self.tabs.count():
             self.take_tab(self.tabs.widget(0)).deleteLater()

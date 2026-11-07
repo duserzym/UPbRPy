@@ -47,6 +47,8 @@ def app():
 
 @pytest.fixture
 def controller(app, monkeypatch):
+    # The document tests do not need live background update checks.
+    monkeypatch.setenv("UPBRPY_UPDATE_PREVIEW", "none")
     settings = QtCore.QSettings("UPbRPy", "Studio")
     settings.clear()
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args: pytest.fail(str(args[1:])))
@@ -110,6 +112,26 @@ def test_two_formats_titles_dirty_marker_and_active_panels(loaded, app, tmp_path
     spots._workflow_step_allows_region_edits = lambda: True
     spots.on_plot_region_changed("plateau", (8.0, 12.0))
     assert shell.tabs.tabText(1) == "• saved-project"
+
+
+def test_tab_dot_follows_unsaved_calibration_text_and_review_options(loaded, tmp_path):
+    shell, first, second = loaded
+    first.save_project(tmp_path / "first.upbr")
+    second.save_project(tmp_path / "second.upbr")
+    second.secondary_standards_edit.setFocus()
+    second.secondary_standards_edit.selectAll()
+    QtTest.QTest.keyClicks(second.secondary_standards_edit, "Example")
+    assert second.session.secondary_standards != ("Example",)
+    assert shell.tabs.tabText(1) == "• second"
+    assert shell.tabs.tabBar().accessibleTabName(1) == "second, unsaved changes"
+    assert shell.tabs.tabText(0) == "first"
+    second.save_project()
+    assert second.session.secondary_standards == ("Example",)
+    assert shell.tabs.tabText(1) == "second"
+    second.results_table._glass_toggled(True)
+    assert shell.tabs.tabText(1) == "• second"
+    second.results_table._glass_toggled(False)
+    assert shell.tabs.tabText(1) == "second"
 
 
 def test_spot_review_flag_survives_project_reopen(loaded, tmp_path):
@@ -348,6 +370,60 @@ def test_window_close_cancel_preserves_all_tabs(loaded, app, monkeypatch):
     assert not shell.close()
     assert shell.isVisible() and shell.tabs.count() == 2
     assert shell.tabs.widget(0) is first and shell.tabs.widget(1) is second
+
+
+def test_app_quit_prompts_for_each_window_before_closing_any(
+    loaded, controller, app, tmp_path, monkeypatch
+):
+    shell, first, second = loaded
+    other = controller.move_tab_to_new_window(shell, second)
+    first.save_project(tmp_path / "first.upbr")
+    second.save_project(tmp_path / "second.upbr")
+    first._set_spot_review_flag(first.current_spot_name(), "Keep this note")
+    second._set_spot_review_flag(second.current_spot_name(), "Discard this note")
+    before = first.project_path.read_bytes(), second.project_path.read_bytes()
+    buttons = QtWidgets.QMessageBox.StandardButton
+    choices = iter([buttons.Discard, buttons.Cancel])
+    prompts = []
+
+    def choose(dialog):
+        prompts.append(dialog.text())
+        assert dialog.button(buttons.Discard).text() == "Don't Save"
+        assert dialog.defaultButton() is dialog.button(buttons.Save)
+        assert dialog.escapeButton() is dialog.button(buttons.Cancel)
+        return next(choices)
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", choose)
+    app.installEventFilter(controller)
+    try:
+        event = QtCore.QEvent(QtCore.QEvent.Type.Quit)
+        assert app.sendEvent(app, event)
+        assert not event.isAccepted()
+    finally:
+        app.removeEventFilter(controller)
+    assert shell.active_reduction is first and other.active_reduction is second
+    assert shell.isVisible() and other.isVisible()
+    assert first.has_unsaved_changes() and second.has_unsaved_changes()
+    assert "first" in prompts[0] and "second" in prompts[1]
+    assert (first.project_path.read_bytes(), second.project_path.read_bytes()) == before
+
+    paths = first.project_path, second.project_path
+    choices = iter([buttons.Save, buttons.Discard])
+    event = QtCore.QEvent(QtCore.QEvent.Type.Quit)
+    assert not controller.eventFilter(app, event)
+    assert shell.tabs.count() == other.tabs.count() == 0
+    assert not shell.isVisible() and not other.isVisible()
+    assert paths[0].read_bytes() != before[0]
+    assert paths[1].read_bytes() == before[1]
+
+
+def test_quit_stays_open_when_save_as_is_cancelled(loaded, monkeypatch):
+    shell, first, _ = loaded
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: QtWidgets.QMessageBox.StandardButton.Save)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    assert not shell.close()
+    assert shell.isVisible() and shell.tabs.count() == 2
+    assert first.has_unsaved_changes()
 
 
 def test_close_save_and_busy_guard(loaded, monkeypatch):
