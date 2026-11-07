@@ -230,6 +230,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             "filter_percentile": 80,
             "baseline_offset": 2,
             "plateau_offset": 2,
+            "selection_options": {"plateau_width_mode": "signal"},
         },
         internal_material="rutile",
         supports_depth_profiles=True,
@@ -460,6 +461,12 @@ def format_import_defaults(preset: WorkflowPreset) -> str:
         "baseline_offset": "baseline offset",
         "plateau_offset": "plateau offset",
     }
+    signal_width = (
+        preset.read_kwargs.get("selection_options", {}).get("plateau_width_mode") == "signal"
+    )
     for key, value in preset.read_kwargs.items():
-        ordered_pairs.append(f"{label_map.get(key, key)} {value}")
+        if key == "selection_options" and signal_width:
+            ordered_pairs.append("plateau follows detected ablation")
+        elif key != "peak_sweep_n" or not signal_width:
+            ordered_pairs.append(f"{label_map.get(key, key)} {value}")
     return "; ".join(ordered_pairs) + "."

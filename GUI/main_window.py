@@ -726,10 +726,11 @@ class MainWindow(QtWidgets.QMainWindow):
         settings_layout = QtWidgets.QVBoxLayout(self.compact_settings_panel)
         settings_layout.setContentsMargins(16, 12, 16, 12)
         settings_title = QtWidgets.QToolButton()
-        settings_title.setText("Workflow settings  ×")
-        settings_title.setToolTip("Close workflow settings")
+        settings_title.setText("Auto-pick settings  ×")
+        settings_title.setToolTip("Close auto-pick settings")
         settings_title.clicked.connect(lambda: self.autopick_settings_toggle.setChecked(False))
         settings_layout.addWidget(settings_title)
+        settings_layout.addWidget(self.autopick_controls_scroll)
         self.compact_settings_panel.hide()
         self.workspace_splitter.addWidget(self.sidebar_panel)
         self.workspace_splitter.addWidget(self.main_panel)
@@ -928,6 +929,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Remember a valid user-adjusted three-panel layout."""
         self.persist_layout_state()
+        if self.autopick_settings_toggle.isChecked():
+            self._position_compact_panels()
 
     def set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
         """Expose responsive side panels through the View menu."""
@@ -937,6 +940,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else self.inspector_panel
         )
         widget.setVisible(visible)
+        if panel == "sidebar" and not visible:
+            self.autopick_settings_toggle.setChecked(False)
         action = (
             self.sidebar_action
             if panel == "sidebar"
@@ -1007,17 +1012,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sidebar_panel.setMaximumWidth(80 if compact else 16777215)
         self.sidebar_panel.layout().setContentsMargins(*((8, 8, 8, 8) if narrow else (10, 12, 10, 12)))
         self.workflow_step_list.setStyleSheet("font-size: 11px;" if narrow else "")
-        # Settings remain the same widgets and retain their signals and values.
-        # In compact mode they open over the plot instead of widening the rail.
+        # Keep the workflow selector accessible from the settings popup
+        # when the rail is too narrow to show it.
         rail_layout = self.sidebar_panel.layout()
         if compact and previous != "compact":
             self._inspector_was_visible = not self.inspector_panel.isHidden()
             self.inspector_panel.setParent(self.centralWidget())
             self.inspector_panel.setFixedWidth(310)
             self.inspector_panel.hide()
-            for control in (self.workflow_combo, self.autopick_controls_scroll):
-                rail_layout.removeWidget(control)
-                self.compact_settings_panel.layout().addWidget(control)
+            rail_layout.removeWidget(self.workflow_combo)
+            self.compact_settings_panel.layout().insertWidget(1, self.workflow_combo)
             self.autopick_settings_toggle.setChecked(False)
         elif not compact and previous == "compact":
             self.compact_settings_panel.hide()
@@ -1025,9 +1029,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.inspector_panel.setMaximumWidth(16777215)
             self.workspace_splitter.addWidget(self.inspector_panel)
             self.inspector_panel.setVisible(self._inspector_was_visible)
-            for index, control in ((1, self.workflow_combo), (3, self.autopick_controls_scroll)):
-                self.compact_settings_panel.layout().removeWidget(control)
-                rail_layout.insertWidget(index, control)
+            self.compact_settings_panel.layout().removeWidget(self.workflow_combo)
+            rail_layout.insertWidget(1, self.workflow_combo)
             self.autopick_settings_toggle.setChecked(False)
             self.inspector_action.setChecked(self._inspector_was_visible)
         short = dict(zip(PLOT_MODE_LABELS, ("Raw", "Base", "Norm", "Cal", "Ratios", "Down", "Drift", "Bias", "Depth", "Final")))
@@ -1146,22 +1149,41 @@ class MainWindow(QtWidgets.QMainWindow):
         return icon
 
     def _position_compact_panels(self) -> None:
-        if getattr(self, "_width_mode", None) != "compact":
+        central = self.centralWidget()
+        area = central.rect().adjusted(8, 4, -8, -4)
+        if getattr(self, "_width_mode", None) == "compact":
+            top = self.plot_card.mapTo(central, QtCore.QPoint()).y()
+            # Keep the Inspector toggle reachable while the panel is open.
+            bottom = min(area.bottom(), self.plot_control_bar.mapTo(central, QtCore.QPoint()).y() - 4)
+            self.inspector_panel.setGeometry(area.right() - 309, top, 310, bottom - top + 1)
+            self.inspector_panel.raise_()
+        if not self.autopick_settings_toggle.isChecked():
             return
-        area = self.centralWidget().rect().adjusted(8, 4, -8, -4)
-        top = self.plot_card.mapTo(self.centralWidget(), QtCore.QPoint()).y()
-        # Leave the toolbar's Inspector toggle reachable while the panel is open.
-        bottom = min(area.bottom(), self.plot_control_bar.mapTo(self.centralWidget(), QtCore.QPoint()).y()-4)
-        self.inspector_panel.setGeometry(area.right()-309, top, 310, bottom-top+1)
-        self.inspector_panel.raise_()
-        self.compact_settings_panel.setGeometry(self.sidebar_panel.geometry().right()+6, area.top()+48, 280, min(340, area.height()-48))
-        self.compact_settings_panel.raise_()
+        panel = self.compact_settings_panel
+        scroll = self.autopick_controls_scroll
+        layout = panel.layout()
+        layout.invalidate()
+        stack = self.selection_parameter_stack
+        stack.setFixedHeight(stack.currentWidget().sizeHint().height())
+        scroll.widget().layout().invalidate()
+        body_height = scroll.widget().sizeHint().height() + 4
+        extra_height = layout.totalSizeHint().height() - layout.itemAt(layout.count() - 1).sizeHint().height()
+        scroll.setFixedHeight(min(body_height, max(80, area.height() - extra_height)))
+        height = layout.totalSizeHint().height()
+        anchor = self.autopick_settings_toggle.mapTo(central, QtCore.QPoint())
+        left = self.sidebar_panel.geometry().right() + 6
+        top = max(area.top(), min(anchor.y(), area.bottom() - height + 1))
+        panel.setGeometry(left, top, min(380, area.right() - left + 1), height)
+        panel.raise_()
 
     def _toggle_compact_settings(self, checked: bool) -> None:
-        if getattr(self, "_width_mode", None) == "compact":
-            self.compact_settings_panel.setVisible(checked)
+        if getattr(self, "_width_mode", None) != "compact":
+            self.autopick_settings_toggle.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+        self.compact_settings_panel.setVisible(checked)
+        if checked:
             self._position_compact_panels()
-        self.adapt_workflow_rail_height(self.height())
 
     def _adapt_icon_rail_height(self) -> None:
         """Use the full rail's height budget with optional copy folded away."""
@@ -1169,10 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
                        self.step_actions_caption, self.workflow_status_label,
                        self.reference_library_button, self.database_origin_label):
             widget.hide()
-        for widget in (self.workflow_combo, self.autopick_controls_scroll,
-                       self.selection_method_combo, self.selection_parameter_stack,
-                       self.plateau_width_control, self.plateau_filter_combo):
-            widget.show()
+        self.workflow_combo.show()
         self.autopick_settings_toggle.show()
         self.autopick_settings_toggle.setArrowType(QtCore.Qt.ArrowType.NoArrow)
         layout = self.sidebar_panel.layout()
@@ -1206,19 +1225,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_width_mode", None) == "compact":
             self._adapt_icon_rail_height()
             return
-        compact = height < 940
         very_compact = height < 700
         toggle = self.autopick_settings_toggle
-        toggle.setVisible(compact)
-        show_autopick = not compact or toggle.isChecked()
+        toggle.show()
         toggle.setArrowType(
             QtCore.Qt.ArrowType.DownArrow if toggle.isChecked() else QtCore.Qt.ArrowType.RightArrow
         )
-        self.selection_method_combo.setVisible(show_autopick)
-        self.selection_parameter_stack.setVisible(show_autopick)
-        self.plateau_width_control.setVisible(show_autopick)
-        self.plateau_filter_combo.setVisible(show_autopick)
-        self.autopick_controls_scroll.setVisible(show_autopick)
         self.workflow_combo.setVisible(not very_compact)
         # Collapse optional copy before tightening rows. The rail may live in
         # a tabbed Studio shell, so use its actual height rather than the screen.
@@ -1356,8 +1368,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.workflow_combo)
 
-        # On short screens the auto-pick controls fold away behind this
-        # toggle so every workflow stage stays in view; one click opens them.
+        # Keep optional auto-pick controls folded until requested.
         self.autopick_settings_toggle = QtWidgets.QToolButton()
         self.autopick_settings_toggle.setObjectName("AutopickSettingsToggle")
         self.autopick_settings_toggle.setProperty("modeToggle", True)
@@ -1376,13 +1387,20 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.autopick_settings_toggle)
 
         self.selection_method_combo = StyledComboBox()
+        method_tips = {
+            "threshold": "Find the onset when the signal exceeds the selected percentage of the high-signal reference mean.",
+            "rolling_sigma": "Find the onset when the signal rises the selected number of standard deviations above the preceding rolling baseline.",
+            "excel_expanding_sigma": "Find the onset using the reference workbook's expanding baseline and the selected number of standard deviations.",
+        }
         for method in SELECTION_METHODS:
-            self.selection_method_combo.addItem(
-                selection_method_label(method),
-                method,
+            self.selection_method_combo.addItem(selection_method_label(method), method)
+            self.selection_method_combo.setItemData(
+                self.selection_method_combo.count() - 1,
+                method_tips.get(method, selection_method_label(method)),
+                QtCore.Qt.ItemDataRole.ToolTipRole,
             )
         self.selection_method_combo.setToolTip(
-            "Baseline and signal auto-pick method"
+            "Choose how Studio detects the rise from baseline. Hover over a method to see how it works."
         )
         self.selection_method_combo.currentIndexChanged.connect(
             self.on_selection_method_changed
@@ -1428,8 +1446,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_reference_percentile_spin.setSingleStep(1.0)
         self.selection_reference_percentile_spin.setSuffix(" %ile")
         self.selection_reference_percentile_spin.setToolTip(
-            "Percentile used to identify the high-signal reference "
-            "population before thresholding."
+            "Average the sweeps above this percentile to estimate the high-signal "
+            "reference. For example, the 80th percentile uses the upper 20% of sweeps."
         )
         self.selection_reference_percentile_spin.valueChanged.connect(
             self.on_selection_reference_percentile_changed
@@ -1458,7 +1476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selection_sigma_spin.valueChanged.connect(
             self.on_selection_sigma_changed
         )
-        sigma_layout.addRow("Onset threshold", self.selection_sigma_spin)
+        sigma_layout.addRow("Onset", self.selection_sigma_spin)
         self.selection_parameter_stack.addWidget(sigma_page)
         layout.addWidget(self.selection_parameter_stack)
 
@@ -1474,20 +1492,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plateau_duration_spin = QtWidgets.QDoubleSpinBox()
         self.plateau_duration_spin.setRange(0.0, 600.0)
         self.plateau_duration_spin.setDecimals(1)
+        self.plateau_duration_spin.setKeyboardTracking(False)
         self.plateau_duration_spin.setSingleStep(5.0)
         self.plateau_duration_spin.setSuffix(" s")
         self.plateau_duration_spin.setSpecialValueText("Workflow auto")
         self.plateau_duration_spin.setToolTip(
-            "Workflow auto uses the mineral preset: signal-aware width for "
-            "apatite depth profiles and preset sweep counts where retained. "
-            "Enter a duration to impose the same plateau width on every spot "
-            "the next time Re-pick all spots is used."
+            "Workflow auto follows the detected ablation for rutile and apatite. "
+            "Other presets may use a fixed number of sweeps. Enter seconds to "
+            "limit the plateau to that duration, ending earlier if washout is detected. "
+            "Use Re-pick all spots to apply the setting."
         )
         self.plateau_duration_spin.valueChanged.connect(
             self.on_plateau_duration_changed
         )
         plateau_width_layout.addRow(
-            "Plateau width",
+            "Width",
             self.plateau_duration_spin,
         )
         layout.addWidget(self.plateau_width_control)
@@ -1515,14 +1534,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autopick_controls_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.autopick_controls_scroll.setWidgetResizable(True)
         self.autopick_controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.autopick_controls_scroll.setMaximumHeight(180)
-        for form in settings_body.findChildren(QtWidgets.QWidget):
-            if isinstance(form.layout(), QtWidgets.QFormLayout):
-                form.layout().setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapAllRows)
-        for spin in settings_body.findChildren(QtWidgets.QAbstractSpinBox):
-            spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        for form in (threshold_layout, sigma_layout, plateau_width_layout):
+            for spin in form.parentWidget().findChildren(QtWidgets.QAbstractSpinBox):
+                spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+                form.labelForField(spin).setToolTip(spin.toolTip())
+        self.autopick_duration_label = QtWidgets.QLabel()
+        self.autopick_duration_label.setWordWrap(True)
+        self.autopick_duration_label.setToolTip(
+            "Measured widths of the current spot's applied plateau and full signal windows."
+        )
+        self.autopick_duration_label.hide()
+        settings_layout.addWidget(self.autopick_duration_label)
         self.autopick_controls_scroll.setWidget(settings_body)
-        layout.addWidget(self.autopick_controls_scroll)
 
         self.repick_all_spots_button = QtWidgets.QPushButton(
             "Re-pick all spots"
@@ -3987,9 +4010,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 if plateau_mode == "duration"
                 else 0.0
             )
+            self.plateau_duration_spin.setSpecialValueText(
+                f"{settings.get('peak_sweep_n', 20)} sweeps"
+                if self.session.loaded and plateau_mode == "sweeps" else "Workflow auto"
+            )
             self.plateau_duration_spin.setValue(plateau_duration)
         finally:
             self._is_populating = False
+        if self.autopick_settings_toggle.isChecked():
+            self._position_compact_panels()
 
     def _sync_plateau_filter_control(self) -> None:
         """Reflect the active spot's saved spot-mean filtering decision."""
@@ -4235,6 +4264,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Plateau width restored to the workflow auto rule for the "
                 "next session-wide re-pick."
             )
+        self._sync_selection_parameter_controls()
         self._clear_reduction_cache()
         self.statusBar().showMessage(message)
         self.append_log(message)
@@ -5422,12 +5452,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_project_window_title()
         self._sync_workflow_step_locks()
         if not self.session.loaded:
+            self.autopick_duration_label.hide()
             message = "Open an experiment to begin"
             self.workflow_status_label.setText(message)
             self._workflow_full_status = message
             self._update_step_actions_tooltips()
             return
-        quality = selection_quality(self.session, self.current_spot_name())
+        spot_name = self.current_spot_name()
+        regions = get_selection_regions(self.session, spot_name)
+        durations = [
+            f"{label} {bounds[1] - bounds[0]:.1f} s"
+            for key, label in (("plateau", "Plateau"), ("signal", "Signal"))
+            if (bounds := regions[key]) is not None
+        ]
+        self.autopick_duration_label.setText(" · ".join(durations))
+        self.autopick_duration_label.setVisible(bool(durations))
+        if self.autopick_settings_toggle.isChecked():
+            self._position_compact_panels()
+        quality = selection_quality(self.session, spot_name)
         parts = [
             f"Baseline {quality['baseline_points']} pts",
             f"Plateau {quality['plateau_points']} pts",
