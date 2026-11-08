@@ -38,6 +38,18 @@ def test_reference_material_matching_ignores_case_and_punctuation():
     }
 
 
+def test_reference_alias_matches_krag_and_ignores_ambiguous_names():
+    data = pd.DataFrame({"sample": ["Krag", "KNW", "Unknown"]})
+    assert canonicalize_reference_material_samples(data, standard_archive)["sample"].tolist() == [
+        "KNW", "KNW", "Unknown",
+    ]
+    archive = pd.DataFrame(index=["A", "B"])
+    archive.attrs["standard_aliases"] = {"A": ("shared",), "B": ("shared", "A")}
+    assert canonicalize_reference_material_samples(
+        pd.DataFrame({"sample": ["shared", "A"]}), archive,
+    )["sample"].tolist() == ["shared", "A"]
+
+
 def test_normalized_archive_has_unique_documented_values_and_provenance():
     assert tuple(standard_measurements.columns) == REQUIRED_COLUMNS
     assert not standard_measurements.duplicated(["standard", "quantity"]).any()
@@ -170,7 +182,10 @@ def test_documented_ratios_take_precedence_over_age_derived_values():
 
 
 def test_independent_knw_system_ages_derive_their_own_ratios():
-    row = standard_archive.loc["KNW"]
+    table3_ratios = (standard_measurements["standard"] == "KNW") & (
+        standard_measurements["role"] == "radiogenic_ratio"
+    )
+    row = build_standard_archive(standard_measurements.loc[~table3_ratios]).loc["KNW"]
     expected_68 = np.expm1(lambda_238 * 1088.2e6)
     expected_75 = np.expm1(lambda_235 * 1086.6e6)
     expected_76 = (
@@ -181,6 +196,17 @@ def test_independent_knw_system_ages_derive_their_own_ratios():
     assert np.isclose(row["206Pb/238U*"], expected_68)
     assert np.isclose(row["207Pb/235U*"], expected_75)
     assert np.isclose(row["207Pb/206Pb*"], expected_76)
+
+
+def test_knw_table3_ratios_have_provenance_and_take_precedence():
+    knw = standard_measurements.query("standard == 'KNW' and role == 'radiogenic_ratio'").set_index("quantity")
+    assert knw["notes"].str.startswith("Table 3, KNW1–KNW7.").all()
+    assert knw["status"].eq("provisional").all()
+    assert knw["uncertainty_type"].eq("2sd").all()
+    assert knw["value"].to_dict() == {"206Pb/238U*": 0.183870, "207Pb/235U*": 1.91596, "207Pb/206Pb*": 0.075539}
+    for ratio, value in knw["value"].items():
+        assert standard_archive.loc["KNW", ratio] == value
+    assert not standard_measurements.query("standard == 'KNW' and role == 'initial_ratio'").size
 
 
 def test_rutile_literature_values_include_uncertainty_semantics():

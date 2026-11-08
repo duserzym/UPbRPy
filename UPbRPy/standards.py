@@ -852,6 +852,12 @@ def build_standard_archive(
     archive.attrs["source_library"] = "TOML"
     archive.attrs["measurement_count"] = int(len(measurements))
     archive.attrs["derived_values_included"] = bool(include_derived)
+    if "aliases" in measurements:
+        archive.attrs["standard_aliases"] = {
+            name: tuple(aliases.split(";"))
+            for name, aliases in measurements[["standard", "aliases"]].drop_duplicates().itertuples(index=False)
+            if isinstance(aliases, str) and aliases
+        }
     return archive
 
 
@@ -863,13 +869,14 @@ standard_archive_v2 = standard_archive
 
 
 def canonicalize_reference_material_samples(data, archive):
-    """Return a copy whose known sample labels match reference-library case.
+    """Return a copy with unambiguous reference-material labels canonicalized.
 
     Instrument files and reference libraries commonly differ only by case,
     spaces, underscores, or hyphens (for example ``TR-1`` versus ``TR1``).
     Matching on an alphanumeric case-folded key keeps calibration lookup
     independent of filename typography while leaving unknown sample labels
-    untouched. Ambiguous library keys are deliberately not substituted.
+    untouched. Canonical names take priority over aliases. Ambiguous aliases
+    and ambiguous canonical spellings are deliberately not substituted.
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data must be a pandas DataFrame")
@@ -894,6 +901,18 @@ def canonicalize_reference_material_samples(data, archive):
             ambiguous.add(normalized)
         else:
             candidates[normalized] = name
+    canonical_keys = set(candidates)
+    for name, aliases in archive.attrs.get("standard_aliases", {}).items():
+        if name not in archive.index:
+            continue
+        for alias in aliases:
+            normalized = key(alias)
+            if not normalized or normalized in canonical_keys:
+                continue
+            if normalized in candidates and candidates[normalized] != name:
+                ambiguous.add(normalized)
+            else:
+                candidates[normalized] = name
     for normalized in ambiguous:
         candidates.pop(normalized, None)
 
