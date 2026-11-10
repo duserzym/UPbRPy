@@ -40,3 +40,33 @@ def test_load_session_picks_s513_from_the_rich_fixture():
     session = load_session(str(FIXTURE / "Zircon_04Nov26_slice_Rich.csv"), preset=WORKFLOW_PRESETS["zircon"])
     assert session.primary_68_standard == "S513"
     assert session.primary_82_standard == "S513"
+
+
+def test_infer_label_separator():
+    from GUI.workflows import infer_label_separator
+
+    assert infer_label_separator(["MADUCSB_778", "Tuve-gc1_107", "nothing"], " ") == "_"
+    assert infer_label_separator(["MADUCSB 778", "AFB1 3"], "_") == " "
+    assert infer_label_separator(["nothing", "blank"], " ") == " "
+
+
+def test_apatite_secondaries_are_the_measured_reference_materials():
+    measured = ["NIST612", "NIST610", "Tuve_gc1", "BR5", "AFB1", "OL2", "MADUCSB"]
+    chosen = resolve_reference_standards(
+        WORKFLOW_PRESETS["apatite"], measured, ["NIST612", "NIST610", "BR5", "AFB1", "OL2", "MADUCSB"])
+    assert chosen["primary_68_standard"] == "MADUCSB"
+    assert chosen["primary_76_standard"] == "NIST610"
+    assert chosen["secondary_standards"] == ("BR5", "AFB1", "OL2")
+
+
+def test_load_session_groups_underscore_labels_under_the_apatite_preset():
+    pytest.importorskip("PySide6")
+    from GUI.services import load_session
+
+    session = load_session(str(FIXTURE / "Zircon_04Nov26_slice_Rich.csv"), primary_channel="29Si",
+                           preset=WORKFLOW_PRESETS["apatite"])
+    assert session.import_settings["sep"] == "_"
+    samples = set(session.experiment["sample"])
+    assert {"NIST612", "NIST610", "S513"} <= samples
+    assert not any(name.startswith("NIST612_") for name in samples)
+    assert "MADJCU" not in session.secondary_standards

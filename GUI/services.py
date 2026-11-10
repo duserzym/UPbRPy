@@ -15,6 +15,7 @@ from GUI.state import ReductionSession
 from GUI.workflows import (
     WorkflowPreset,
     format_import_defaults,
+    infer_label_separator,
     get_workflow_preset,
     infer_workflow_preset,
     resolve_reference_standards,
@@ -681,6 +682,21 @@ def normalize_import_settings(
     return result
 
 
+def measured_reference_materials(samples: Iterable[str]) -> list[str]:
+    """Measured sample names that the reference library knows (aliases and
+    typography resolved), in measurement order, Iolite duplicates excluded."""
+    from UPbRPy import standard_archive
+    from UPbRPy.standards import canonicalize_reference_material_samples
+
+    archive = standard_archive.combine_first(standard_archive_legacy)
+    names = [str(s) for s in samples]
+    canonical = canonicalize_reference_material_samples(pd.DataFrame({"sample": names}), archive)["sample"]
+    known = set(archive.index.astype(str))
+    return list(dict.fromkeys(
+        str(c) for c in canonical if str(c) in known and not str(c).upper().startswith("IOLITE_")
+    ))
+
+
 def load_session(
     directory: str,
     primary_channel: str | None = None,
@@ -711,6 +727,13 @@ def load_session(
     qtegra = open_qtegra(
         raw_directory_for(directory) if manifest is not None else directory,
     )
+    if manifest is None and "sep" not in explicit:
+        # The preset's separator is only a fallback: labels such as
+        # ``MADUCSB_778`` must group by sample even under a preset written
+        # for ``MADUCSB 778``.
+        sep = infer_label_separator(qtegra.labels, read_kwargs.get("sep"))
+        if sep is not None:
+            read_kwargs["sep"] = sep
     experiment, channels, total_data = read_experiment_data(
         qtegra,
         primary_channel=effective_primary,
@@ -725,13 +748,15 @@ def load_session(
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
+    measured_samples = list(experiment["sample"].astype(str).unique()) if "sample" in experiment else []
     # Reference materials: the session manifest's plan (laicpmsdb) wins, else
     # the preset, preferring its preferred primaries that this session measured.
     standards: dict[str, object] = {
         "concentration_standards": workflow_preset.concentration_standards,
         **resolve_reference_standards(
             workflow_preset,
-            experiment["sample"].astype(str).unique() if "sample" in experiment else (),
+            measured_samples,
+            measured_reference_materials(measured_samples),
         ),
     }
     if manifest is not None:

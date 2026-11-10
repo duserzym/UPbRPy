@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -419,13 +420,42 @@ def infer_workflow_preset(directory: str) -> WorkflowPreset:
     return WORKFLOW_PRESETS["zircon"]
 
 
-def resolve_reference_standards(preset: WorkflowPreset, measured: Iterable[str]) -> dict[str, object]:
+GLASSES = ("NIST610", "NIST612", "NIST614")
+
+
+def infer_label_separator(labels: Iterable[str], default: str | None = None) -> str | None:
+    """The separator between sample name and spot number in ``labels``.
+
+    Lab labels look like ``MADUCSB_778`` or, in older notebooks, ``MADUCSB 778``.
+    The separator that ends the most labels in a spot number wins; ``default``
+    when no label ends in one.
+    """
+    counts = {sep: 0 for sep in ("_", " ")}
+    for label in labels:
+        text = str(label).strip()
+        for sep in counts:
+            if re.fullmatch(rf".+{re.escape(sep)}\d+", text):
+                counts[sep] += 1
+    best = max(counts, key=counts.get)
+    return best if counts[best] else default
+
+
+def resolve_reference_standards(
+    preset: WorkflowPreset,
+    measured: Iterable[str],
+    reference_materials: Iterable[str] | None = None,
+) -> dict[str, object]:
     """Primary and secondary standards for a session that measured ``measured``.
 
     The first of ``preset.preferred_primary_standards`` found among the
     measured sample names (case-insensitive) replaces the preset primary,
     including the Pb and Th ratio standards that default to it; the displaced
     preset primary becomes a secondary when it was measured.
+
+    ``reference_materials`` (the measured names found in the reference
+    library) makes every measured reference material that is neither a
+    primary nor a glass a secondary, and drops preset secondaries that were
+    not measured.
     """
     names = {str(name).casefold(): str(name) for name in measured}
     primary = preset.primary_standard
@@ -440,12 +470,19 @@ def resolve_reference_standards(preset: WorkflowPreset, measured: Iterable[str])
     secondaries = [s for s in preset.secondary_standards if s != primary]
     if primary != preset.primary_standard and preset.primary_standard.casefold() in names:
         secondaries.append(preset.primary_standard)
-    return {
+    chosen = {
         "primary_68_standard": primary,
         "primary_76_standard": swap(preset.pb_ratio_standard),
         "primary_82_standard": swap(preset.th_ratio_standard or preset.pb_ratio_standard),
-        "secondary_standards": tuple(dict.fromkeys(secondaries)),
     }
+    if reference_materials is not None:
+        used = {name.casefold() for name in chosen.values() if name}
+        used |= {name.casefold() for name in (*preset.concentration_standards, *GLASSES)}
+        secondaries = [s for s in secondaries if s.casefold() in names]
+        secondaries += [str(s) for s in reference_materials if str(s).casefold() not in used]
+        secondaries = [s for s in secondaries if s.casefold() not in used]
+    chosen["secondary_standards"] = tuple(dict.fromkeys(secondaries))
+    return chosen
 
 
 def format_import_defaults(preset: WorkflowPreset) -> str:
