@@ -64,10 +64,13 @@ def wait_for(condition, timeout=30.0):
 
 
 @pytest.fixture()
-def controller(app, tmp_path):
+def controller(app, tmp_path, monkeypatch):
     from GUI.icon import build_app_icon
     from GUI.main import StudioWindowController
 
+    # No live standards or update checks: a git fetch thread still running
+    # when a later test collects this controller makes Qt abort.
+    monkeypatch.setenv("UPBRPY_UPDATE_PREVIEW", "none")
     controller = StudioWindowController(theme_mode="light", app_icon=build_app_icon())
     controller.database.settings = QtCore.QSettings(
         str(tmp_path / "settings.ini"), QtCore.QSettings.Format.IniFormat
