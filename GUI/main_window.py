@@ -624,6 +624,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "selection_colors": self.selection_colors,
                 "spot_folder_overrides": self._spot_folder_overrides,
                 "review_flags": self._review_flags,
+                "review_excluded_spots": sorted(self.results_table.excluded_spots),
+                "review_fit_settings": self.results_table.fit_settings(),
+                "review_fits": self.results_table.fit_records(),
                 "review_spot_colour": self.results_table.spot_colour_mode(),
                 "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
                 "review_show_glasses": self.results_table.show_glasses(),
@@ -3271,6 +3274,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
             "review_flags": dict(self._review_flags),
+            "review_excluded_spots": sorted(self.results_table.excluded_spots),
+            "review_fit_settings": self.results_table.fit_settings(),
+            "review_fits": self.results_table.fit_records(),
             "include_export_concentrations": (
                 self.session.include_export_concentrations
             ),
@@ -3567,6 +3573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_project_window_title()
         self._update_reference_library_labels()
         self.refresh_view()
+        self.results_table.restore_review_state(workspace, restored.session.spot_names)
         self._saved_project_fingerprint = self.scientific_project_fingerprint()
         self.update_project_window_title()
         stage_count = len(
@@ -3720,7 +3727,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._require_loaded() or self.session.pipeline is None:
             return
         pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
-        excluded = tuple(name for name, included in self.results_table.include_flags.items() if not included)
+        excluded = tuple(sorted(self.results_table.excluded_spots))
 
         def show_result(bundle) -> None:
             for path in bundle.files:
@@ -3749,6 +3756,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 file_stem = dialog.stem_edit.text().strip()
                 include_audit = dialog.audit_check.isChecked()
                 prepared_table = dialog.table
+                isochron_fits = self.results_table.fit_records()
                 self.run_background("Exporting results", lambda: export_reduction_bundle(
                     pipeline, target,
                     include_depth_profile=self.workflow_preset.supports_depth_profiles,
@@ -3757,7 +3765,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     include_depth_concentrations=self.session.include_export_depth_concentrations,
                     export_settings=export_settings, formats=formats,
                     excluded_spots=excluded, file_stem=file_stem,
-                    include_audit_files=include_audit, table=prepared_table), show_result)
+                    include_audit_files=include_audit, table=prepared_table,
+                    isochron_fits=isochron_fits), show_result)
             dialog.finished.connect(finished)
             dialog.open()
 
@@ -3825,6 +3834,14 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
         self.session = loaded_session
+        self.results_table.set_selected_spots(set())
+        self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)
+        self.results_table.include_flags.clear()
+        self.results_table._spot_frame = pd.DataFrame()
+        self.results_table._depth_frame = pd.DataFrame()
+        for panel in self.results_table.fit_panels.values():
+            panel.invalidate()
+            panel.records = []
         if project_path is None:
             self._review_flags.clear()
         self._sync_qtegra_controls()

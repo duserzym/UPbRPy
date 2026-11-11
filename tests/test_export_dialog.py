@@ -130,7 +130,7 @@ def test_studio_routes_review_exclusions_and_logs_files(app, tmp_path, monkeypat
     pipeline = synthetic_pipeline()
     window.session.pipeline = pipeline
     window.session.directory = str(tmp_path/'session')
-    window.results_table.include_flags.update({'B_0': True, 'B_3': False})
+    window.results_table.set_spot_excluded({'B_3'}, True)
     monkeypatch.setattr(window, '_require_loaded', lambda: True)
     monkeypatch.setattr(main_module, 'ensure_shared_pipeline', lambda *args: pipeline)
     built = []

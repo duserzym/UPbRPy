@@ -237,13 +237,53 @@ See [in-app updates](docs/in-app-updates.md) for the mechanism and release flow.
 
 #### Final review (step 9)
 
-The include check boxes choose which spots appear on the Spot concordia and
-enter its live concordia age readout. They affect review only; reduced results
-and exports stay unchanged. Click to select a spot, Shift-click to select a
-range, and Cmd/Ctrl-click to add or remove individual spots. Cmd/Ctrl+A selects
-all visible spots; Space toggles inclusion for the selection. The right-click
-menu also provides selection and inclusion actions. **Select** drag mode selects
-spots inside a rectangle. Double-click the plot to reset its view.
+The check boxes choose which spots are **shown** in both concordia pages.
+Chips, All/Clear and the Glasses toggle also control visibility. These choices
+last while the session tab is open and do not change publication exports.
+Select multiple samples or spots with Shift-click and Cmd/Ctrl-click;
+Cmd/Ctrl+A selects all chooser rows and Space toggles their visibility.
+**Selection actions** offers Show only selected, Hide selected and Show all.
+The depth chooser lists samples and acquisitions; its checks return to the
+multi-acquisition view, while **Focus one acquisition** focuses a single run.
+
+**Exclude selected from calculations** is a separate decision. Excluded spots
+stay visible as hollow markers with dashed, muted outlines, and their chooser
+and table text is muted and italic. They are omitted from the live concordia
+age, isochron fits and publication weighted means. Exclusions are saved in
+the project. On either canvas, click a point to select its acquisition,
+Shift-click to extend, or Cmd/Ctrl-click to toggle. H hides the selection,
+Shift+H shows all, E toggles calculation exclusions, Escape clears selection,
+and Cmd/Ctrl+A selects all shown. The context menu offers these actions and
+**Fit selected**. **Select** drag mode selects points inside a rectangle.
+Double-click the plot to reset its view.
+
+Turn **Fit** on for live discordia / isochron fits, one per sample by default.
+Fits use selected, shown, non-excluded points, or all shown non-excluded
+points if nothing is selected. **Fit options…** offers models 1–3, common-Pb,
+Stacey–Kramers and age anchors, decay-constant uncertainty, a combined fit,
+and bootstrap resamples (2000) and seed (1). Depth fits use corrected intervals,
+account for successive-interval autocorrelation and bootstrap acquisitions
+(or moving blocks for fewer than three acquisitions). Spot means use a
+parametric bootstrap. Analytical results appear first, followed by 250
+resamples and the full result, without blocking the canvas. Studio uses
+125-resample chunks; chunk k uses seed + k, starting at zero. That rule and
+the seed are retained with the records for reproducibility.
+
+The panel reports n of N before exclusions, 2s intercept uncertainties,
+95 % bootstrap intervals and fit diagnostics. Lines, 95 % envelopes and
+concordia intercept markers use the sample colour. **Export fits…** in the
+options menu writes fit tables, footnotes, SVG and PNG. **Export results…**
+adds the last fits from both pages to the bundle. Fit settings and last
+results are saved with the project; settings also supply Studio defaults.
+
+The methods (York regression, IsoplotR models 1–3, anchors, intercept
+uncertainties, the bootstrap and the treatment of autocorrelated depth
+intervals), their validation against IsoplotR and Isoplot.jl, and the places
+where UPbRPy chooses differently are described in
+[`docs/isochron_regression.md`](docs/isochron_regression.md). A depth-profile
+fit is only as good as the per-interval uncertainties: when its MSWD is far
+above one, the sweep uncertainties underestimate the scatter and the spot-mean
+fit is the one to report.
 
 Right-click a spot in the spot tree and choose **Edit review flag** to record a
 reason for review. Flags appear in the tree and final results and are saved in
@@ -257,8 +297,8 @@ the colour-map picker offers other maps, always with the lighter end indicating
 shallower, earlier sweeps. The bar shows time in ablation or sweep position.
 
 Use **Group by sample** to browse sample groups and the filter to find spots or
-samples. The live readout fits the included spots in your selection, or all
-included spots when nothing is selected, using the current diagram and
+samples. The live readout fits shown spots in your selection after calculation exclusions,
+or all shown non-excluded spots when nothing is selected, using the current diagram and
 calibration uncertainty setting. It reports the concordia age with 2SE, MSWD,
 and spot count, and marks the fitted age on the curve. Colour preferences are
 remembered in Studio settings and saved with the project's workspace.
@@ -375,7 +415,7 @@ replay notebook.
 Use **Columns** to select groups or individual columns and **Defaults** to
 restore the default selection. Optional isotope concentrations and uncertainty
 columns start unticked; zircon-only columns appear only for zircon. Final
-review exclusions stay in the exported table with an `excluded` note and are
+review calculation exclusions stay in the exported table with an `excluded` note and are
 omitted from weighted means. **Preview** shows headings, sample summaries and
 the generated footnotes before export.
 

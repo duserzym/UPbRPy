@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import weakref
 from collections.abc import Iterable
 from html import escape
@@ -18,6 +19,7 @@ from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard_archive
 from GUI.state import ReductionSession
+from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
 from UPbRPy.isochron import concordia_age_readout, tera_wasserburg_point, wetherill_point
@@ -806,6 +808,7 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
     ) -> None:
         super().__init__(parent)
         self.include_flags = include_flags
+        self.excluded_spots = set()
         self._replace_frame(frame)
 
     def _replace_frame(self, frame: pd.DataFrame | None) -> None:
@@ -865,6 +868,15 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
     ) -> object:
         if not index.isValid():
             return None
+        if self.spot_name(index.row()) in self.excluded_spots:
+            if role == QtCore.Qt.ItemDataRole.FontRole:
+                font = QtGui.QFont()
+                font.setItalic(True)
+                return font
+            if role == QtCore.Qt.ItemDataRole.ForegroundRole:
+                return QtGui.QBrush(QtGui.QColor((getattr(self, "review_theme", None) or active_theme()).muted))
+            if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+                return "Excluded from calculations"
         offset = int(self.include_flags is not None)
         if offset and index.column() == 0:
             if role not in (QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole):
@@ -907,7 +919,7 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
             return None
         if orientation == QtCore.Qt.Orientation.Horizontal:
             if self.include_flags is not None and section == 0:
-                return "Include"
+                return "Include"  # Legacy model API; the view proxy labels this Shown.
             return str(self.frame.columns[section - int(self.include_flags is not None)])
         return str(section + 1)
 
@@ -925,6 +937,21 @@ class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
         self._grouped = grouped
         self.setRecursiveFilteringEnabled(grouped)
         self.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
+
+    def headerData(self, section, orientation, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        value = super().headerData(section, orientation, role)
+        if orientation == QtCore.Qt.Orientation.Horizontal and section == 0 and value == "Include":
+            return "Shown"
+        return value
+
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
+        value = super().data(index, role)
+        # Keep legacy source-model labels for callers while presenting viewing
+        # choices as Show/Hide in the UI.
+        if (self._grouped and not index.parent().isValid() and isinstance(value, str)
+                and role in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole)):
+            value = value.replace(" included)", " shown)").replace(" included /", " shown /")
+        return value
 
     def set_spot_filter(self, text):
         """Apply a literal, case-insensitive spot or sample substring."""
@@ -1071,8 +1098,14 @@ class _ConcordiaViewBox(AxisZoomViewBox):
         self.review = weakref.proxy(review)
 
     def mouseClickEvent(self, event):
+        self.review.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         if event.double() and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.review._reset_from_double_click(event.scenePos())
+            event.accept()
+        elif (event.button() == QtCore.Qt.MouseButton.RightButton
+                or (sys.platform == "darwin" and event.button() == QtCore.Qt.MouseButton.LeftButton
+                    and event.modifiers() & QtCore.Qt.KeyboardModifier.MetaModifier)):
+            self.review.customContextMenuRequested.emit(self.review.mapFromScene(event.scenePos()))
             event.accept()
         elif self.review.supports_select_mode() and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.review._select_at(event.scenePos(), event.modifiers())
@@ -1121,6 +1154,7 @@ class _ConcordiaEllipse:
         self.x, self.y = x, y
         self.opts = {"pen": pen}
         self.outline_color = outline_color
+        self._style_key = None
         self.visible = True
 
     def getData(self):
@@ -1136,7 +1170,20 @@ class _ConcordiaEllipse:
             self.visible = visible
             self._mark_dirty()
 
+    def style_key(self):
+        """Cache the effective outline style across visibility-only redraws."""
+        if self._style_key is None:
+            pen = self.opts["pen"]
+            color = pen.color()
+            if self.outline_color is not None:
+                alpha = color.alpha()
+                color = QtGui.QColor(self.outline_color)
+                color.setAlpha(alpha)
+            self._style_key = color.rgba(), pen.widthF(), pen.style()
+        return self._style_key
+
     def _mark_dirty(self):
+        self._style_key = None
         owner = self.owner()
         if owner is not None:
             owner.dirty = True
@@ -1163,24 +1210,17 @@ class _ConcordiaEllipseBatch(pg.GraphicsObject):
         for handle in self.handles:
             if not handle.visible:
                 continue
-            pen = handle.opts["pen"]
-            color = pen.color()
-            if handle.outline_color is not None:
-                alpha = color.alpha()
-                color = QtGui.QColor(handle.outline_color)
-                color.setAlpha(alpha)
-            key = color.rgba(), pen.widthF()
-            groups.setdefault(key, []).append(handle)
+            groups.setdefault(handle.style_key(), []).append(handle)
         paths = []
         bounds = QtCore.QRectF()
-        for (rgba, width), handles in groups.items():
+        for (rgba, width, style), handles in groups.items():
             # Finite connections close each ellipse and skip its NaN separator.
             x = np.full((len(handles), len(handles[0].x) + 1), np.nan)
             y = np.full_like(x, np.nan)
             x[:, :-1] = [handle.x for handle in handles]
             y[:, :-1] = [handle.y for handle in handles]
             path = pg.arrayToQPath(x.ravel(), y.ravel(), connect="finite")
-            pen = pg.mkPen(QtGui.QColor.fromRgba(rgba), width=width)
+            pen = pg.mkPen(QtGui.QColor.fromRgba(rgba), width=width, style=style)
             paths.append((pen, path))
             bounds = bounds.united(path.boundingRect())
         self.prepareGeometryChange()
@@ -1211,6 +1251,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     selectionChanged = QtCore.Signal(object)
     spotHovered = QtCore.Signal(str)
+    reviewAction = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1231,6 +1272,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
         self.selected_spots: set[str] = set()
+        self.excluded_spots: set[str] = set()
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self._scatter = None
         self._ellipses = []
         self._points = []
@@ -1287,7 +1330,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     def supports_select_mode(self) -> bool:
         """Return whether this canvas shows selectable spot means."""
-        return self._kind == "spot"
+        return True
 
     def select_spots(self, spot_names, *, extend: bool = False, toggle: bool = False) -> None:
         """Select spot keys, optionally extending or toggling the selection."""
@@ -1323,37 +1366,99 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._scatter_brush_cache[key] = pg.mkBrush(color)
         return self._scatter_brush_cache[key]
 
+    def set_excluded_spots(self, names: set[str]) -> None:
+        """Draw excluded analyses hollow with a muted dashed outline."""
+        self.excluded_spots = set(names)
+        self._update_selection_style()
+
+    def keyPressEvent(self, event):
+        action = None
+        if event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
+            self.select_spots({p[0] for p in self._points})
+        elif event.key() == QtCore.Qt.Key.Key_Escape:
+            self.select_spots(set())
+        elif event.key() == QtCore.Qt.Key.Key_H:
+            action = "all" if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier else "hide"
+        elif event.key() == QtCore.Qt.Key.Key_E:
+            action = "exclude_toggle"
+        else:
+            return super().keyPressEvent(event)
+        if action:
+            self.reviewAction.emit(action)
+        event.accept()
+
     def _update_selection_style(self, *, positions_changed=False):
         if self._scatter is None:
             return
-        if self._kind == "depth":
+        # Preserve the fast full-colour depth path when no review styling is needed.
+        if self._kind == "depth" and not self.selected_spots and not self.excluded_spots:
             if positions_changed:
-                self._scatter.setData(x=self._point_xy[:, 0], y=self._point_xy[:, 1],
+                self._scatter.setData(x=self._point_xy[:, 0], y=self._point_xy[:, 1], size=6,
+                                      pen=pg.mkPen(self._theme.axis_text, width=.7),
                                       brush=[self._scatter_brush(p[3]) for p in self._points])
+            else:
+                self._scatter.setBrush([self._scatter_brush(p[3]) for p in self._points])
+                self._scatter.setPen(pg.mkPen(self._theme.axis_text, width=.7))
+                self._scatter.setSize(6)
+            pens = {}
+            for name, ellipse, color in self._ellipses:
+                if not getattr(ellipse, "review_styled", False):
+                    continue
+                ellipse.review_styled = False
+                key = color.rgba()
+                if key not in pens:
+                    line = QtGui.QColor(color)
+                    line.setAlpha(155)
+                    pens[key] = pg.mkPen(line, width=1.)
+                ellipse.setPen(pens[key])
+                if hasattr(ellipse, "original_outline") and ellipse.outline_color != ellipse.original_outline:
+                    ellipse.outline_color = ellipse.original_outline
+                    ellipse._mark_dirty()
+            self._ellipse_batch.rebuild()
             return
         theme = self._theme
         brushes, pens, sizes = [], [], []
+        styles = {}
+        hollow = pg.mkBrush(None)
         for name, _x, _y, color in self._points:
-            selected = name in self.selected_spots
-            fill = QtGui.QColor(color)
-            fill.setAlpha(100 if self.selected_spots and not selected else 255)
-            brushes.append(pg.mkBrush(fill))
-            pens.append(pg.mkPen(theme.accent if selected else theme.axis_text, width=2 if selected else 0.7))
-            sizes.append(11 if selected else 8)
+            selected, excluded = name in self.selected_spots, name in self.excluded_spots
+            dimmed = bool(self.selected_spots) and not selected
+            key = color.rgba(), selected, excluded, dimmed
+            if key not in styles:
+                fill = QtGui.QColor(color)
+                fill.setAlpha(100 if dimmed else 255)
+                line = QtGui.QColor(theme.muted if excluded else color)
+                line.setAlpha(70 if dimmed else 255 if selected else 155)
+                ellipse_pen = pg.mkPen(line, width=1.8 if selected else 1.,
+                    style=QtCore.Qt.PenStyle.DashLine if excluded else QtCore.Qt.PenStyle.SolidLine)
+                point_pen = (ellipse_pen if excluded else
+                             pg.mkPen(theme.accent if selected else theme.axis_text, width=2 if selected else .7))
+                styles[key] = hollow if excluded else self._scatter_brush(fill), point_pen, ellipse_pen
+            brush, pen, _ = styles[key]
+            brushes.append(brush)
+            pens.append(pen)
+            sizes.append(11 if selected else 6 if self._kind == "depth" else 8)
         if positions_changed:
-            self._scatter.setData(
-                x=self._point_xy[:, 0], y=self._point_xy[:, 1],
-                brush=brushes, pen=pens, size=sizes,
-            )
-            return
-        self._scatter.setBrush(brushes)
-        self._scatter.setPen(pens)
-        self._scatter.setSize(sizes)
+            self._scatter.setData(x=self._point_xy[:, 0], y=self._point_xy[:, 1],
+                                  brush=brushes, pen=pens, size=sizes)
+        else:
+            self._scatter.setBrush(brushes)
+            self._scatter.setPen(pens)
+            self._scatter.setSize(sizes)
         for name, ellipse, color in self._ellipses:
-            selected = name in self.selected_spots
-            line = QtGui.QColor(color)
-            line.setAlpha(70 if self.selected_spots and not selected else 255 if selected else 155)
-            ellipse.setPen(pg.mkPen(line, width=1.8 if selected else 1.0))
+            selected, excluded = name in self.selected_spots, name in self.excluded_spots
+            ellipse.review_styled = True
+            dimmed = bool(self.selected_spots) and not selected
+            key = color.rgba(), selected, excluded, dimmed
+            if key in styles:
+                ellipse.setPen(styles[key][2])
+            # Depth outlines keep their quantised colour except for excluded data.
+            if not hasattr(ellipse, "original_outline"):
+                ellipse.original_outline = ellipse.outline_color
+            outline = theme.muted if excluded else ellipse.original_outline
+            if ellipse.outline_color != outline:
+                ellipse.outline_color = outline
+                ellipse._mark_dirty()
         if self._ellipse_batch is not None:
             self._ellipse_batch.rebuild()
 
@@ -1918,6 +2023,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._scatter is None:
             self._scatter = pg.ScatterPlotItem(symbol="o", size=6 if self._kind == "depth" else 8,
                                              pen=pg.mkPen(theme.axis_text, width=.7))
+            self._scatter.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
             self._plot_item.addItem(self._scatter)
             self._scatter.sigClicked.connect(self._spot_clicked)
         self._update_selection_style(positions_changed=True)
@@ -1941,8 +2047,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._apply_interaction_mode()
 
     def _spot_clicked(self, _scatter, _points, event):
+        self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         if event.double():
             self._reset_from_double_click(event.scenePos())
+        elif (sys.platform == "darwin" and event.modifiers() & QtCore.Qt.KeyboardModifier.MetaModifier):
+            self.customContextMenuRequested.emit(self.mapFromScene(event.scenePos()))
         elif self.supports_select_mode():
             self._select_at(event.scenePos(), event.modifiers())
 
@@ -2162,6 +2271,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._kind == "spot":
             row.update(self._metadata_by_spot.get(name, {}))
         lines = [name] if name else []
+        lines.append("Shown: yes" + (" · Excluded from calculations" if name in self.excluded_spots else ""))
 
         def add(label, value, suffix=""):
             if self._has_value(value):
@@ -2231,7 +2341,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._hover_ring.setData([x], [y])
         self._hover_text.setHtml('<div style="color:' + self._theme.axis_text +
                                  '; padding:3px; font-size:11px">' +
-                                 escape(self.tooltip_text(index)).replace("\n", "<br>") + '</div>')
+                                 escape("\n".join(line for line in self.tooltip_text(index).splitlines()
+                                                   if not line.startswith("Included in review:"))).replace("\n", "<br>") + '</div>')
         self._hover_text.show()
         self._position_hover()
         if self._kind == "spot":
@@ -2779,6 +2890,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     selectedSpotsChanged = QtCore.Signal(object)
     showGlassesChanged = QtCore.Signal(bool)
     appearance_changed = QtCore.Signal()
+    excludedSpotsChanged = QtCore.Signal(object)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
@@ -2786,6 +2898,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._settings = settings
         self.include_flags: dict[str, bool] = {}
+        self.excluded_spots: set[str] = set()
+        self.fit_panels = {}
         self.selected_spots: set[str] = set()
         self._spot_samples: dict[str, str] = {}
         self._spot_sample_order: list[str] = []
@@ -2849,15 +2963,206 @@ class ResultsTableWidget(QtWidgets.QWidget):
             view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             view.customContextMenuRequested.connect(self._show_spot_menu)
         self.spot_choice_list.itemSelectionChanged.connect(self._chooser_selection_changed)
-        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
             view.selectionModel().selectionChanged.connect(
                 lambda *args, view=view: self._group_selection_changed(view))
         self.spot_concordia.selectionChanged.connect(
             lambda names: self.set_selected_spots(names, origin=self.spot_concordia)
         )
+        self.depth_concordia.selectionChanged.connect(
+            lambda names: self.set_selected_spots(names, origin=self.depth_concordia))
+        for kind, canvas in (("spot", self.spot_concordia), ("depth", self.depth_concordia)):
+            canvas.reviewAction.connect(lambda action, kind=kind: self._review_action(action, kind))
+            canvas.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            canvas.customContextMenuRequested.connect(lambda pos, kind=kind: self._canvas_menu(pos, kind))
         self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
+
+    def _fit_panel(self, kind):
+        panel = ReviewFitPanel(self, kind)
+        self.fit_panels[kind] = panel
+        return panel
+
+    def _schedule_fits(self):
+        for panel in self.fit_panels.values():
+            panel.invalidate()
+
+    def fit_settings(self) -> dict:
+        """Return each page's fit controls for the project workspace."""
+        return {kind: panel.settings() for kind, panel in self.fit_panels.items()}
+
+    def fit_records(self) -> list[dict]:
+        """Return the last fit records of both pages for saving or export."""
+        return [dict(record) for panel in self.fit_panels.values() for record in panel.records]
+
+    def restore_review_state(self, workspace: dict, spot_names) -> None:
+        """Restore calculation decisions and fits, ignoring unknown spot keys."""
+        self.excluded_spots.clear()
+        saved = workspace.get("review_excluded_spots", [])
+        saved = saved if isinstance(saved, (list, tuple, set)) else []
+        self.set_spot_excluded(set(saved) & set(spot_names), True)
+        settings = workspace.get("review_fit_settings", {})
+        records = workspace.get("review_fits", [])
+        records = records if isinstance(records, list) else []
+        for kind, panel in self.fit_panels.items():
+            if isinstance(settings, dict) and isinstance(settings.get(kind), dict):
+                panel.restore_settings(settings[kind])
+            saved_space = next((r.get("space") for r in records if isinstance(r, dict)
+                                and r.get("view") == panel.view_name), None)
+            buttons = getattr(self, kind + "_diagram_buttons")
+            if saved_space in buttons:
+                buttons[saved_space].setChecked(True)
+        self.refresh_spot_concordia()
+        self.refresh_depth_concordia(reset_view=False)
+        for panel in self.fit_panels.values():
+            panel.records = [{k: (np.nan if v is None else v) for k, v in r.items()}
+                             for r in records if isinstance(r, dict) and r.get("view") == panel.view_name]
+            panel.show_records()
+            if panel.records:
+                # Visibility is deliberately not saved. Keep the recorded fit
+                # scope until the viewer makes a new selection or setting edit.
+                panel._timer.stop()
+                if panel.fit_button.isChecked() and all(r.get("space") == panel.canvas._diagram for r in panel.records):
+                    panel._analytical_complete = True
+                    panel._draw_records()
+
+    def set_spot_excluded(self, names, excluded: bool) -> None:
+        """Set calculation exclusions independently of spot visibility."""
+        names = {names} if isinstance(names, str) else set(names)
+        if excluded:
+            self.excluded_spots.update(names)
+        else:
+            self.excluded_spots.difference_update(names)
+        self._update_group_inclusion()
+        self._update_exclusion_styles()
+        for canvas in (self.spot_concordia, self.depth_concordia):
+            canvas.set_excluded_spots(self.excluded_spots)
+        self._readout_timer.start(0)
+        self._schedule_fits()
+        self.excludedSpotsChanged.emit(set(self.excluded_spots))
+        self.appearance_changed.emit()
+
+    def _update_exclusion_styles(self):
+        for model in (self.results_model, self.depth_model):
+            model.excluded_spots = self.excluded_spots
+            if model.rowCount():
+                model.dataChanged.emit(model.index(0, 0), model.index(model.rowCount()-1, model.columnCount()-1),
+                    [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole])
+        blocker = QtCore.QSignalBlocker(self.spot_choice_list)
+        for i in range(self.spot_choice_list.count()):
+            item = self.spot_choice_list.item(i)
+            excluded = item.text() in self.excluded_spots
+            font = item.font()
+            font.setItalic(excluded)
+            item.setFont(font)
+            item.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
+            item.setToolTip(item.text() + (" · Excluded from calculations" if excluded else ""))
+        del blocker
+        self._updating_groups = True
+        try:
+            for model in (self.results_group_model, self.secondary_group_model,
+                          self.spot_choice_group_model, self.depth_choice_group_model):
+                for row in range(model.rowCount()):
+                    parent = model.item(row)
+                    names = parent.data(_SPOT_NAMES_ROLE) or []
+                    excluded = bool(names) and all(n in self.excluded_spots for n in names)
+                    font = parent.font()
+                    font.setItalic(excluded)
+                    parent.setFont(font)
+                    parent.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
+                    for child_row in range(parent.rowCount()):
+                        names = parent.child(child_row).data(_SPOT_NAMES_ROLE) or []
+                        excluded = bool(names) and all(n in self.excluded_spots for n in names)
+                        for column in range(parent.columnCount()):
+                            child = parent.child(child_row, column)
+                            if child is None:
+                                continue
+                            font = child.font()
+                            font.setItalic(excluded)
+                            child.setFont(font)
+                            child.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
+                            child.setToolTip(" · ".join(names) + (" · Excluded from calculations" if excluded else ""))
+        finally:
+            self._updating_groups = False
+
+    def _build_depth_choices(self):
+        self._updating_groups = True
+        try:
+            model = self.depth_choice_group_model
+            model.clear()
+            model.setHorizontalHeaderLabels(["Acquisitions shown"])
+            samples = self._sample_names(self._depth_frame)
+            for sample in dict.fromkeys(samples.values()):
+                names = [name for name, value in samples.items() if value == sample]
+                parent = self._group_row({}, [], names, sample)[0]
+                model.appendRow(parent)
+                for name in names:
+                    child = self._group_row({}, [], [name], sample)[0]
+                    child.setText(name)
+                    parent.appendRow(child)
+        finally:
+            self._updating_groups = False
+        self.depth_choice_tree.expandAll()
+        self._update_group_inclusion()
+        self._update_exclusion_styles()
+
+    def show_only_selected(self) -> None:
+        """Show exactly the selected spots on both concordia pages."""
+        self._depth_sample_choices = True
+        self._set_spot_inclusions({n: n in self.selected_spots for n in self.include_flags})
+
+    def hide_selected(self) -> None:
+        """Hide selected spots without excluding them from calculations."""
+        self.exclude_selected()
+
+    def show_all(self) -> None:
+        """Show all spots, respecting the Glasses default."""
+        self.set_all_spot_choices(True)
+
+    def _review_action(self, action, kind):
+        if action == "only":
+            self.show_only_selected()
+        elif action == "hide":
+            self.hide_selected()
+        elif action == "all":
+            self.show_all()
+        elif action == "show":
+            self.include_selected()
+        elif action in {"exclude", "include", "exclude_toggle"}:
+            excluded = action == "exclude" or (action == "exclude_toggle" and not self.selected_spots <= self.excluded_spots)
+            self.set_spot_excluded(self.selected_spots, excluded)
+        elif action == "fit":
+            self.fit_panels[kind].fit_button.setChecked(True)
+            self.fit_panels[kind].invalidate()
+
+    def _action_menu(self, parent, kind):
+        menu = QtWidgets.QMenu(parent)
+        for text, action in (("Show only selected", "only"), ("Show selected", "show"),
+                             ("Hide selected\tH", "hide"), ("Show all\tShift+H", "all"),
+                             ("Exclude selected from calculations", "exclude"),
+                             ("Include selected in calculations", "include"),
+                             ("Toggle calculation exclusion\tE", "exclude_toggle"),
+                             ("Fit selected", "fit")):
+            menu.addAction(text, lambda checked=False, action=action: self._review_action(action, kind))
+        menu.addSeparator()
+        menu.addAction("Select all shown\tCmd/Ctrl+A", lambda: self.set_selected_spots(
+            {p[0] for p in getattr(self, kind + "_concordia")._points}))
+        menu.addAction("Clear selection\tEscape", lambda: self.set_selected_spots(set()))
+        return menu
+
+    def _selection_actions(self, kind):
+        button = QtWidgets.QToolButton()
+        button.setText("Selection actions")
+        button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setMenu(self._action_menu(button, kind))
+        return button
+
+    def _canvas_menu(self, pos, kind):
+        canvas = getattr(self, kind + "_concordia")
+        menu = self._action_menu(canvas, kind)
+        menu.exec(canvas.mapToGlobal(pos))
+        menu.deleteLater()
 
     _sample_names_cache = {}
 
@@ -2919,7 +3224,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         button.setText("Glasses")
         button.setCheckable(True)
         button.setProperty("modeToggle", True)
-        button.setToolTip("Include or exclude all glass reference spots")
+        button.setToolTip("Show or hide all glass reference spots")
         button.setChecked(self._show_glasses)
         button.setVisible(False)
         button.toggled.connect(self._glass_toggled)
@@ -3064,7 +3369,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _review_views(self):
         return (self.results_table, self.results_tree, self.secondary_tree,
-                self.spot_choice_list, self.spot_choice_tree)
+                self.spot_choice_list, self.spot_choice_tree, self.depth_choice_tree)
 
     def _create_grouped_view(self):
         view = QtWidgets.QTreeView()
@@ -3155,6 +3460,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _group_include_changed(self, item):
         if not getattr(self, "_updating_groups", False) and item.column() == 0 and item.isCheckable():
+            if item.model() is self.depth_choice_group_model:
+                self._depth_sample_choices = True
             self.set_spot_included(item.data(_SPOT_NAMES_ROLE) or [],
                                    item.checkState() != QtCore.Qt.CheckState.Unchecked)
 
@@ -3162,7 +3469,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         frame = self.results_model.frame
         if not {"spot_name", "preferred_date", "preferred_date_2e"}.issubset(frame.columns):
             return ""
-        included = [name for name in names if self.include_flags.get(name, True)]
+        included = [name for name in names if self.include_flags.get(name, True) and name not in self.excluded_spots]
         spots = frame.loc[frame.spot_name.astype(str).isin(included)]
         result = weighted_mean_and_mswd(pd.to_numeric(spots.preferred_date, errors="coerce"),
                                         pd.to_numeric(spots.preferred_date_2e, errors="coerce"))
@@ -3276,7 +3583,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         finally:
             self._updating_groups = False
         self._update_group_inclusion()
-        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
             model = view.model()
             columns = [model.headerData(column, QtCore.Qt.Orientation.Horizontal)
                        for column in range(model.columnCount())]
@@ -3290,7 +3597,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _update_group_inclusion(self):
         self._updating_groups = True
         try:
-            for model in (self.results_group_model, self.secondary_group_model, self.spot_choice_group_model):
+            for model in (self.results_group_model, self.secondary_group_model, self.spot_choice_group_model, self.depth_choice_group_model):
                 for row in range(model.rowCount()):
                     parent = model.item(row)
                     names = parent.data(_SPOT_NAMES_ROLE) or []
@@ -3302,10 +3609,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
                     if model is self.results_group_model:
                         summary = self._sample_summary(names)
                         parent.setText(f"{sample} · {len(names)} spots ({count} included)" + (f" · {summary}" if summary else ""))
-                    elif model is self.spot_choice_group_model:
+                    elif model in (self.spot_choice_group_model, self.depth_choice_group_model):
                         parent.setText(f"{sample} · {count}/{len(names)}")
-                    parent.setToolTip(f"{sample} ({count} included / {len(names)})"
-                                      if model is self.spot_choice_group_model else parent.text())
+                    tooltip = (f"{sample} ({count} included / {len(names)})"
+                               if model in (self.spot_choice_group_model, self.depth_choice_group_model) else parent.text())
+                    excluded_count = len(set(names) & self.excluded_spots)
+                    parent.setToolTip(tooltip + (f" · {excluded_count} excluded from calculations" if excluded_count else ""))
                     for child_row in range(parent.rowCount()):
                         child = parent.child(child_row)
                         included = self.include_flags.get(child.data(_SPOT_NAMES_ROLE)[0], True)
@@ -3369,7 +3678,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def set_spot_included(self, spot_names, included: bool) -> None:
         """Set review inclusion for spot keys and update both views once."""
-        self._set_spot_inclusions(dict.fromkeys(spot_names, bool(included)))
+        self._set_spot_inclusions(dict.fromkeys([spot_names] if isinstance(spot_names, str) else spot_names, bool(included)))
 
     def _set_spot_inclusions(self, changes):
         """Apply mixed inclusion changes before notifying views or fitting."""
@@ -3417,7 +3726,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                (self.spot_choice_list, chooser_rows)):
                 if view is not origin:
                     self._scroll_selection_into_view(view, rows)
-            for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+            for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
                 selection = QtCore.QItemSelection()
                 rows = []
                 for index in self._tree_rows(view):
@@ -3434,10 +3743,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
                         view.expand(index.parent())
                     self._scroll_selection_into_view(view, rows)
             self.spot_concordia.select_spots(self.selected_spots)
+            self.depth_concordia.select_spots(self.selected_spots)
         finally:
             self._syncing_selection = False
         self.selectedSpotsChanged.emit(set(self.selected_spots))
         self._readout_timer.start(0)
+        self._schedule_fits()
 
     @staticmethod
     def _scroll_selection_into_view(view, rows) -> None:
@@ -3467,7 +3778,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                     | (self.selected_spots & hidden), origin=self.spot_choice_list)
 
     def _visible_spot_names(self, view):
-        if view in (self.results_tree, self.secondary_tree, self.spot_choice_tree):
+        if view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
             return {name for index in self._tree_rows(view) if index.parent().isValid()
                     for name in index.data(_SPOT_NAMES_ROLE) or []}
         if view is self.spot_choice_list:
@@ -3505,8 +3816,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _show_spot_menu(self, pos):
         view = self.sender()
         menu = QtWidgets.QMenu(view)
-        for text, callback in (("Include selected", self.include_selected),
-                               ("Exclude selected", self.exclude_selected),
+        for text, callback in (("Show selected", self.include_selected),
+                               ("Hide selected", self.exclude_selected),
+                               ("Show only selected", self.show_only_selected),
+                               ("Show all", self.show_all),
+                               ("Exclude selected from calculations", lambda: self.set_spot_excluded(self.selected_spots, True)),
+                               ("Include selected in calculations", lambda: self.set_spot_excluded(self.selected_spots, False)),
                                ("Invert selection", lambda: self.invert_selection(view)),
                                ("Select same sample", self.select_same_sample)):
             menu.addAction(text, callback)
@@ -3630,7 +3945,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.spot_colour_buttons[key] = button
         colour_row.addStretch(1)
         controls_layout.addLayout(colour_row)
-        self.concordia_age_label = QtWidgets.QLabel("Included: No concordia age for this set")
+        self.concordia_age_label = QtWidgets.QLabel("Shown: No concordia age for this set")
         self.concordia_age_label.setObjectName("SecondaryText")
         self.concordia_age_label.setWordWrap(True)
         self.concordia_age_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
@@ -3639,6 +3954,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                               QtWidgets.QSizePolicy.Policy.Preferred)
         self.concordia_age_label.setMaximumHeight(self.concordia_age_label.fontMetrics().lineSpacing() * 3 + 6)
         controls_layout.addWidget(self.concordia_age_label)
+        controls_layout.addWidget(self._selection_actions("spot"))
+        controls_layout.addWidget(self._fit_panel("spot"))
         self.spot_concordia = ConcordiaReviewWidget()
         self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                           QtWidgets.QSizePolicy.Policy.Ignored)
@@ -3662,7 +3979,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         controls = QtWidgets.QVBoxLayout(chooser)
         controls.setContentsMargins(0, 0, 0, 0)
         review_row.addWidget(chooser)
-        controls.addWidget(QtWidgets.QLabel("Depth-profile spot"))
+        controls.addWidget(QtWidgets.QLabel("Focus one acquisition"))
         self.depth_spot_combo = StyledComboBox(elide_mode=QtCore.Qt.TextElideMode.ElideMiddle)
         self.depth_spot_combo.currentTextChanged.connect(self.depth_spot_combo.setToolTip)
         self.depth_spot_combo.setMinimumContentsLength(8)
@@ -3675,6 +3992,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
         controls.addWidget(self.depth_spot_combo)
         self.depth_glasses_toggle = self._create_glass_button()
         controls.addWidget(self.depth_glasses_toggle, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.depth_choice_tree, self.depth_choice_group_model = self._create_grouped_view()
+        self.depth_choice_tree.setHeaderHidden(True)
+        self.depth_choice_tree.setMinimumHeight(80)
+        self.depth_choice_tree.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
+        self.depth_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.depth_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        controls.addWidget(self.depth_choice_tree, 1)
         controls.addLayout(self._create_spot_bulk_buttons())
         diagram_row, self.depth_diagram_buttons = self.create_diagram_buttons(
             self.refresh_depth_concordia
@@ -3699,7 +4023,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         cmap_row.addWidget(self.depth_colormap_combo)
         cmap_row.addStretch(1)
         controls.addLayout(cmap_row)
-        controls.addStretch(1)
+        controls.addWidget(self._selection_actions("depth"))
+        controls.addWidget(self._fit_panel("depth"))
         self.depth_concordia = ConcordiaReviewWidget()
         self.depth_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                            QtWidgets.QSizePolicy.Policy.Ignored)
@@ -3719,6 +4044,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Theme and redraw both embedded concordia canvases."""
         self._theme = theme
+        self.results_model.review_theme = self.depth_model.review_theme = theme
+        self._update_exclusion_styles()
         self.refresh_spot_concordia()
         self.refresh_depth_concordia()
 
@@ -3758,7 +4085,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def supports_select_mode(self) -> bool:
         """Return whether the active result canvas supports spot selection."""
         target = self.active_concordia()
-        return target is not None and target.supports_select_mode()
+        # Preserve the toolbar's spot-mean rectangle-selection contract.
+        # Depth acquisitions are selected directly by canvas clicks or its tree.
+        return target is self.spot_concordia
 
     def restore_default_view(self) -> None:
         """Restore the current concordia view without changing table state."""
@@ -3823,6 +4152,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             )
         self.spot_concordia.set_concordia_age(None)
         self._readout_timer.start(0)
+        self._schedule_fits()
 
     def spot_colour_mode(self) -> str:
         """Return the spot ellipse and point colour mode."""
@@ -3855,7 +4185,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         frame = self._spot_frame
         selected = bool(self.selected_spots)
         names = {name for name, included in self.include_flags.items() if included
-                 and (not selected or name in self.selected_spots)}
+                 and name not in self.excluded_spots and (not selected or name in self.selected_spots)}
         frame = (frame.loc[frame.spot_name.astype(str).isin(names)] if "spot_name" in frame
                  else frame.iloc[0:0])
         self.concordia_readout = concordia_age_readout(
@@ -3872,7 +4202,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                     f"MSWD {format_mswd(result.mswd)} · n = {result.n}")
             tooltip = f"{prefix}: {result.text}"
             if selected and len(names) < len(self.selected_spots):
-                tooltip += f"\n{len(names)} of {len(self.selected_spots)} selected are included"
+                tooltip += f"\n{len(names)} of {len(self.selected_spots)} selected are included (shown and used)"
         self.concordia_age_label.setText(text)
         self.concordia_age_label.setToolTip(tooltip)
         self.spot_concordia.set_concordia_age(result.age_ma if result else None)
@@ -3923,6 +4253,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             reset_view=reset_view,
             depth_colormap=self.depth_colormap_combo.currentText(),
         )
+        self._schedule_fits()
 
     def create_table(
         self,
@@ -4019,7 +4350,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._spot_samples = self._sample_names(final_frame, self._spot_frame)
         glass_spots = self._glass_spot_names()
         retained_flags = {name: self.include_flags.get(
-            name, self._show_glasses if name in glass_spots else True) for name in spot_names}
+            name, self._show_glasses if name in glass_spots else True) for name in dict.fromkeys([*spot_names, *self._sample_names(self._depth_frame)])}
         self.include_flags.clear()
         self.include_flags.update(retained_flags)
         self._update_glass_buttons()
@@ -4036,6 +4367,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.spot_choice_list.addItem(item)
         self.spot_choice_list.blockSignals(False)
         self._build_grouped_views()
+        self._update_exclusion_styles()
         self._rebuild_sample_chips()
         self._syncing_selection = False
         self.filter_spot_choices(self.spot_filter.text())
@@ -4105,6 +4437,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         glasses = self._glass_spot_names()
         for name in self._sample_names(self._depth_frame):
             self.include_flags.setdefault(name, self._show_glasses if name in glasses else True)
+        self._build_depth_choices()
         self._rebuild_sample_chips()
         self._update_glass_buttons()
         existing_spot = self.depth_spot_combo.currentText()
@@ -6007,6 +6340,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
 
     selectionChanged = QtCore.Signal(object)
     spotHovered = QtCore.Signal(str)
+    reviewAction = QtCore.Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent=parent)
