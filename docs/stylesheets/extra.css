@@ -31,3 +31,13 @@
 .md-typeset h1 abbr, .md-typeset h2 abbr, .md-typeset h3 abbr, .md-typeset a abbr {
   text-decoration: none;
 }
+/* Figures: white card so plots stay readable in dark mode. */
+.md-typeset figure img {
+  background: #fff;
+  border-radius: 0.3rem;
+  box-shadow: 0 0 0 1px var(--md-default-fg-color--lightest);
+}
+.md-typeset figcaption {
+  max-width: 42rem;
+  font-size: 0.7rem;
+}

@@ -49,6 +49,8 @@ markdown_extensions:
   - md_in_html
   - def_list
   - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
@@ -67,6 +69,11 @@ exclude_docs: |
   !/index.md
   !/guide/
   !/guide/*.md
+  !/images/
+  !/images/*.svg
+  !/screenshots/
+  !/screenshots/studio_tabs_rich_1280x800.png
+  !/screenshots/studio_final_spot_concordia_1440x900.png
   !/stylesheets/
   !/stylesheets/*.css
   !/assets/

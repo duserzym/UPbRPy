@@ -1,4 +1,5 @@
 ---
+icon: material/home
 hide:
   - navigation
   - toc
@@ -64,6 +65,26 @@ flowchart TD
     D -. saved as .-> H[".upbr project"]
     F -. saved as .-> I["Reduction bundle"]
 ```
+
+## What UPbRPy Studio looks like
+
+UPbRPy Studio is the desktop program built on UPbRPy. You review each laser
+spot, choose its gas blank and signal windows, and step through the reduction
+from the list on the left.
+
+=== "Reviewing a spot"
+
+    <figure markdown="span">
+      ![UPbRPy Studio showing one spot's signal with the gas blank and signal windows marked](screenshots/studio_tabs_rich_1280x800.png){ loading=lazy }
+      <figcaption>Step 1, Import: the signal of one spot against time, with the chosen signal window marked by the green and orange lines. Below it, the whole session at a glance; on the right, the spot list and isotope picker.</figcaption>
+    </figure>
+
+=== "Checking results"
+
+    <figure markdown="span">
+      ![UPbRPy Studio concordia diagram of spot means coloured by sample](screenshots/studio_final_spot_concordia_1440x900.png){ loading=lazy }
+      <figcaption>Step 9, Final review: spot means on a concordia diagram, coloured by sample. Selecting spots reports their concordia age and MSWD.</figcaption>
+    </figure>
 
 !!! info "Recent change that affects uncertainties (2026-11-11)"
     Before this date, UPbRPy calculated the counting uncertainty of each sweep

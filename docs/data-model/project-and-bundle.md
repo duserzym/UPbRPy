@@ -1,3 +1,7 @@
+---
+icon: material/package-variant-closed
+---
+
 # Projects and bundles
 
 !!! abstract "In short"

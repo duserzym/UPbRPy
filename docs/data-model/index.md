@@ -1,3 +1,7 @@
+---
+icon: material/book-open-variant
+---
+
 # Data model reference
 
 !!! abstract "In short"

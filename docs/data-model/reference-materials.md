@@ -1,3 +1,7 @@
+---
+icon: material/diamond-stone
+---
+
 # Reference-material TOML
 
 !!! abstract "In short"

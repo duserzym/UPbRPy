@@ -1,3 +1,7 @@
+---
+icon: material/sitemap-outline
+---
+
 # Acquisition model
 
 !!! abstract "In short"

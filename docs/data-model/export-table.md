@@ -1,3 +1,7 @@
+---
+icon: material/table-arrow-right
+---
+
 # Export table
 
 !!! abstract "In short"

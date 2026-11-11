@@ -1,3 +1,7 @@
+---
+icon: material/lightbulb-on-outline
+---
+
 # Key ideas
 
 This page explains the words used throughout this site. Each term has a short
@@ -20,6 +24,14 @@ Acquisition "91500_12"  (one laser spot, about 60 s)
 │     ▼ laser on: sample signal
 └── sweep 140 ...
 ```
+
+Here is a real acquisition from the test data shipped with UPbRPy. Each dot is
+one sweep of one isotope.
+
+<figure markdown="span">
+  ![Count rate of 29Si, 238U, 206Pb and 207Pb against time for one laser spot on zircon S513](../images/acquisition-anatomy.svg){ loading=lazy }
+  <figcaption>One laser spot on the reference zircon S513 (Zircon_04Nov26 session). Before the laser fires, Pb sits at a few tens of counts per second: the gas blank. When the laser fires, every isotope jumps by orders of magnitude. The signal fades as the laser is switched off. 29Si stays high throughout because it is also present in the background gas.</figcaption>
+</figure>
 
 | Term | Plain meaning | Example |
 | --- | --- | --- |

@@ -1,3 +1,7 @@
+---
+icon: material/file-table-outline
+---
+
 # Rich single CSV
 
 !!! abstract "In short"

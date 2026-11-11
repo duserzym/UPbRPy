@@ -1,3 +1,7 @@
+---
+icon: material/file-export-outline
+---
+
 # Choosing an export
 
 !!! tip "Recommendation"

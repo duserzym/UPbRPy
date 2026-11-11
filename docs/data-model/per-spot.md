@@ -1,3 +1,7 @@
+---
+icon: material/folder-table-outline
+---
+
 # Per-spot CSV and folder
 
 !!! abstract "In short"

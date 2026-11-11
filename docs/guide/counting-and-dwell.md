@@ -1,3 +1,7 @@
+---
+icon: material/counter
+---
+
 # Counting and dwell time
 
 !!! abstract "In short"
@@ -43,6 +47,16 @@ the real number of ions underestimates it by a factor of
 | 0.025 s | 6.3× |
 | 0.005 s | 14× |
 
+The figure shows what this means for error bars. The same simulated sweeps are
+drawn twice. With the old calculation the bars are too short: only about half
+of them reach the true value, where about 95 % should. With the dwell time
+included, the bars match the actual scatter.
+
+<figure markdown="span">
+  ![Simulated 207Pb/206Pb sweeps with error bars computed the old way (too short) and the new way](../images/error-bars-before-after.svg){ loading=lazy }
+  <figcaption>Simulated sweeps (750 206Pb ions and about 45 207Pb ions each). Left: error bars from treating 10,000 cps as 10,000 ions. Right: error bars from the real number of ions.</figcaption>
+</figure>
+
 ## What this changes, and what it does not
 
 **Affected** (anything built from the counting uncertainty of single sweeps):
@@ -73,6 +87,11 @@ You do not need to type it in. UPbRPy takes it from the data in this order:
    between these values is 1 / dwell time. On a session exported both ways,
    this recovered the recorded dwell time of every pulse-counting isotope to
    within 0.1 %.
+
+   <figure markdown="span">
+     ![Histogram of 206Pb gas-blank readings showing values only at multiples of 16.67 cps](../images/count-steps.svg){ loading=lazy }
+     <figcaption>Real gas-blank readings of 206Pb from the zircon test data. Every reading is a whole number of ions divided by the dwell time (here 0.06 s), so the readings pile up on steps of 16.67 cps and nothing falls in between.</figcaption>
+   </figure>
 3. **Estimated from timing.** Isotopes measured only in analog mode (very
    high signals, such as the internal-standard element) never show single-ion
    steps. UPbRPy then uses the time between one isotope's reading and the

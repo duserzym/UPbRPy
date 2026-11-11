@@ -1,3 +1,7 @@
+---
+icon: material/scale-balance
+---
+
 # Qtegra export formats: which one is the record (2026-11-04)
 
 !!! abstract "In short"
