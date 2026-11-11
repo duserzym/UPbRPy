@@ -312,8 +312,14 @@ def export_reduction_bundle(
     file_stem: str | None = None,
     include_audit_files: bool = True,
     table: ExportTable | None = None,
+    isochron_fits: Iterable[dict] = (),
 ) -> ExportBundle:
     """Export publication tables, audit data, provenance, and a notebook.
+
+    ``isochron_fits`` are records from :func:`UPbRPy.regression.fit_record`
+    (with Studio's ``label``, ``view`` and ``items`` keys); when given they are
+    written as ``<stem>_isochron_fits.csv``/``.md`` with footnotes and stored
+    in the manifest metadata.
 
     Input files are hashed by default (``hash_inputs=True``): the SHA-256 of
     every raw CSV is what lets a database match the bundle to the session it
@@ -352,13 +358,18 @@ def export_reduction_bundle(
             path = root / (stem + "." + fmt)
             written = {"xlsx": write_export_xlsx, "csv": write_export_csv, "md": write_export_markdown}[fmt](table, path)
             files.extend(written if isinstance(written, list) else [written])
+    isochron_fits = [dict(record) for record in isochron_fits]
+    if isochron_fits:
+        from .regression import write_isochron_fits
+
+        files.extend(write_isochron_fits(isochron_fits, root, f"{stem}_isochron_fits"))
     if not include_audit_files:
         return ExportBundle(root, tuple(files), tuple(warnings))
     depth_profile = (
         pipeline.run_depth_profile() if include_depth_profile else None
     )
     manifest = pipeline.manifest(hash_inputs=hash_inputs, metadata={"export_settings": settings.to_dict(),
-        "excluded_spots": list(excluded_spots)})
+        "excluded_spots": list(excluded_spots), "isochron_fits": isochron_fits})
     tables = build_publication_tables(
         finalized,
         metadata={
