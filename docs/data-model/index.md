@@ -1,4 +1,10 @@
-# UPbRPy data model
+# Data model reference
+
+!!! abstract "In short"
+    This section is the exact reference: every file UPbRPy reads or writes and
+    every field it keeps. For an introduction, start with
+    [Key ideas](../guide/key-ideas.md). The table below says which files UPbRPy
+    accepts and what happens when optional information is missing.
 
 **UPbRPy data model 1.0, 2026-11-05**
 
@@ -24,16 +30,14 @@ The [decision record](../qtegra_export_formats.md) explains the choice of
 Rich as the record. Its historical comparisons and intended downstream
 contracts are distinct from the implemented behavior specified here.
 
-!!! warning "Y is a count rate: counting errors need the dwell time"
-    Qtegra Y values are cps, not detected ions. The Poisson variance of one
-    reading is `Y / dwell`, not `Y`. Treating cps as counts understates every
-    sweep counting uncertainty by `1 / sqrt(dwell)`: 3.65x at 75 ms, 6.3x at
-    25 ms. Spot means from sweep scatter are unaffected; sweep ratio errors,
-    sweep error correlations, depth-profile concentration errors and the
-    Poisson term of 206Pb/204Pb are. Per-spot exports record the dwell; for
-    Rich input UPbRPy recovers it from the cps value of one count. See
-    [Counting dwell](acquisition-model.md#counting-dwell). UPbRPy before
-    2026-11-11 used `Y` as the variance.
+!!! warning "The signal in Qtegra files is a rate, not a number of ions"
+    Qtegra writes every signal as ions **per second**, but the detector
+    listens to each isotope for only a few hundredths of a second per sweep.
+    Counting uncertainty must use the number of ions actually detected
+    (rate × dwell time), which is much smaller. UPbRPy does this since
+    2026-11-11; before, sweep-level uncertainties were 3 to 14 times too small.
+    Spot averages were not affected.
+    [Plain-language explanation](../guide/counting-and-dwell.md).
 
 ## Minimum for a reduction
 

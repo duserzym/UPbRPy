@@ -1,5 +1,10 @@
 # Export table
 
+!!! abstract "In short"
+    The export table is the publication-ready results table that UPbRPy Studio
+    writes as Excel, CSV and Markdown. This page lists every column, the
+    settings that control it, and the files written.
+
 Implementation: `UPbRPy/export_table.py` (quantities, footnotes and file writers),
 `UPbRPy/reproducibility.py` (bundles), `GUI/export_dialog.py` (Studio dialog).
 The [publication-table specification](https://github.com/duserzym/UPbRPy/blob/main/docs/export_table_spec.md) defines the

@@ -1,5 +1,12 @@
 # Acquisition model
 
+!!! abstract "In short"
+    After reading a file, UPbRPy holds the data in a few Python objects: a
+    **session** containing **acquisitions** (one per laser spot), each with its
+    **channels** (isotopes) and a signal value for every sweep. This page lists
+    those objects field by field, the tables built from them for reduction, and
+    how the dwell time and detector calibration are obtained.
+
 Implementation: [qtegra.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/qtegra.py),
 [io.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/io.py) and
 [calibration.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/calibration.py).
@@ -130,16 +137,13 @@ field: threshold and unrounded clock offset remain on QtegraSession.
 
 ## Counting dwell
 
-!!! warning "Do not use cps as counts"
-    A sweep reading of `Y` cps over a dwell of `t` s is `Y * t` detected
-    ions, with relative Poisson error `1 / sqrt(Y * t)`. Using `Y` as its own
-    variance is correct only for `t = 1` s. For the Apatite_10Nov26 session
-    (Pb 75 ms, U 25 ms) it made sweep errors 3.65x too small for
-    207Pb/206Pb: the robust spread of sweep residuals in units of their
-    stated 1s fell from 3.4-4.1 to 1.0-1.2 when the dwell was included
-    (238U/206Pb: 5.3-9.8 to 1.4-2.4). UPbRPy before 2026-11-11 had this error.
-    Counting statistics remain a lower bound; 206Pb/238U sweeps still show
-    non-Poisson excess scatter.
+!!! warning "Multiply the rate by the dwell time before counting statistics"
+    A reading of 10,000 cps on a channel with a 0.075 s dwell is 750 ions,
+    not 10,000. Its counting uncertainty is √750 ≈ 3.65 %, not
+    √10,000 = 1 %. UPbRPy before 2026-11-11 used the rate as the number of
+    ions, which made every sweep uncertainty 1 / √(dwell) too small.
+    On an apatite session this was 3.65× for 207Pb/206Pb.
+    [Plain-language explanation and before/after numbers](../guide/counting-and-dwell.md).
 
 Y is a count rate (cps). Poisson uncertainties need integrated counts,
 `counts = Y * dwell`, so the Poisson variance of one reading is `Y / dwell`

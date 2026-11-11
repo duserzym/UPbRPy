@@ -1,5 +1,12 @@
 # Projects and bundles
 
+!!! abstract "In short"
+    Three kinds of saved output exist. A **.upbr project** stores your settings
+    and review choices so you can reopen a reduction. A **session bundle** keeps
+    the raw instrument files together with sample names. A **reduction bundle**
+    holds the results, their provenance and a notebook that repeats the
+    reduction.
+
 Implementation: [project.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/project.py),
 [session_manifest.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/session_manifest.py),
 [session_bundle.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/session_bundle.py),

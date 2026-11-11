@@ -1,5 +1,12 @@
 # Qtegra export formats: which one is the record (2026-11-04)
 
+!!! abstract "In short"
+    This is the record of why UPbRPy uses the Qtegra Rich CSV (with the
+    per-spot folder as a companion) and stopped accepting the UPbR CSV. For a
+    practical summary, see [Choosing an export](guide/choosing-an-export.md).
+    The comparison tables below are historical; the
+    [reference pages](data-model/index.md) describe current behaviour.
+
 ## Decision 2026-11-05
 
 The UPbR single CSV is dropped because it has no time information: it

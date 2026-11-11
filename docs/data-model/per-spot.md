@@ -1,5 +1,11 @@
 # Per-spot CSV and folder
 
+!!! abstract "In short"
+    The per-spot export writes one CSV file per laser spot. It lacks some of the
+    Rich file's information but records the dwell time and detector conversion
+    factor of every isotope. UPbRPy can reduce a per-spot folder on its own, or
+    combine it with a Rich file from the same session.
+
 Implementation: [UPbRPy/qtegra.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/qtegra.py).
 
 `read_spot_file(path) -> Acquisition` reads one file, with
