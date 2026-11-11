@@ -26,6 +26,8 @@ markdown_extensions:
 exclude_docs: |
   **
   !/index.html
+  !/assets/
+  !/assets/**
   !/data-model/
   !/data-model/index.md
   !/data-model/rich-csv.md
