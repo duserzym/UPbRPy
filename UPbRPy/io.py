@@ -16,7 +16,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from .qtegra import QtegraSession, open_qtegra
+from .qtegra import QtegraSession, counting_dwell, open_qtegra
 
 
 class SelectionError(ValueError):
@@ -1155,6 +1155,9 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
     sample equivalent to the prefix or its alias preserves the derived name;
     other non-empty samples override it in both tables and are recorded in
     ``experiment.attrs["sample_overrides"]``.
+    ``experiment.attrs["counting_dwell"]["dwell_s"]`` maps each channel to
+    the integration time that converts its cps to counts, and ``"source"``
+    says how it was obtained; see :func:`UPbRPy.qtegra.counting_dwell`.
     """
     if not session.acquisitions:
         raise ValueError("Cannot build an experiment from an empty QtegraSession.")
@@ -1257,6 +1260,12 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
     ):
         experiment[column] = None
     experiment.attrs["sample_overrides"] = sample_overrides
+    # Y is in cps; Poisson variances need the integration time per reading.
+    dwell = counting_dwell(session)
+    experiment.attrs["counting_dwell"] = {
+        "dwell_s": {name: value for name, (value, _source) in dwell.items()},
+        "source": {name: source for name, (_value, source) in dwell.items()},
+    }
     experiment.attrs["qtegra"] = {
         "format": session.format,
         "capabilities": sorted(session.capabilities),

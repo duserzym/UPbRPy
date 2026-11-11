@@ -694,6 +694,16 @@ class ReductionPipeline:
         }
         return self.cache.set(PipelineStage.CONCENTRATION, result)
 
+    @property
+    def counting_dwell_s(self) -> dict[str, float | None]:
+        """Per-channel integration time that converts cps to counts.
+
+        Set by the readers in ``experiment.attrs["counting_dwell"]``; empty
+        for hand-built tables, whose signals are then taken as counts.
+        """
+        record = self._source_experiment.attrs.get("counting_dwell") or {}
+        return dict(record.get("dwell_s") or {})
+
     def run_ratios(self) -> dict[str, pd.DataFrame]:
         """Calculate filtered plateau and complete signal isotope ratios."""
         from .ratios import calc_raw_ratios
@@ -708,6 +718,7 @@ class ReductionPipeline:
                 self.total_data,
                 baseline,
                 region=region,
+                dwell_s=self.counting_dwell_s,
             )
             for region in ("plateau", "signal")
         }
@@ -938,6 +949,7 @@ class ReductionPipeline:
                 analytes,
                 concentration_result["calibration"],
                 internal_channel=self.config.primary_channel,
+                dwell_s=self.counting_dwell_s,
             )
             result = construct_final_depthpro_df(
                 concentration_profile,

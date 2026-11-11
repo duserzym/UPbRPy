@@ -569,6 +569,92 @@ def recover_xcal(session_or_acquisition) -> dict[str, float]:
     return {name: float(np.median(np.concatenate(values))) for name, values in ratios.items()}
 
 
+def _count_quantum(values, *, max_counts=20, tolerance=0.05, min_points=10):
+    """Return the cps step of one pulse count, or None when Y is not quantized.
+
+    Pulse-counting Y is ``n / dwell`` (dead-time corrected), so low positive
+    values are integer multiples of ``1 / dwell``. The five smallest gaps
+    between the lowest distinct values are tried as the step, smallest first;
+    a step is accepted when at least 98 % of the values up to ``max_counts``
+    steps lie within ``tolerance`` counts of an integer and they span at least
+    three distinct counts. The accepted step is refined as the median of
+    ``value / count``; dead-time correction is negligible at these rates.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size < min_points:
+        return None
+    distinct = np.unique(np.round(values, 6))[:200]
+    gaps = np.diff(distinct)
+    # Rounding and dead-time correction split one count into near-equal values.
+    gaps = np.unique(gaps[gaps > 1e-3 * distinct[1:]])
+    for step in gaps[:5]:
+        low = values[values <= (max_counts + 0.5) * step]
+        if low.size < min_points:
+            continue
+        counts = np.round(low / step)
+        integral = (np.abs(low / step - counts) <= tolerance) & (counts > 0)
+        if integral.mean() < 0.98 or np.unique(counts[integral]).size < 3:
+            continue
+        return float(np.median(low[integral] / counts[integral]))
+    return None
+
+
+def counting_dwell(session: QtegraSession) -> dict[str, tuple[float | None, str | None]]:
+    """Return each channel's dwell time in seconds and how it was obtained.
+
+    Qtegra Y is a count rate in cps; Poisson statistics apply to the
+    integrated counts ``Y * dwell``. The value per channel is
+
+    - ``"recorded"``: the median exported dwell (per-spot files);
+    - ``"count_quantization"``: ``1 / step``, where ``step`` is the cps value
+      of one pulse count recovered from the low pulse-counting values of all
+      acquisitions (Rich files carry no dwell);
+    - ``"channel_timing"``: the median time between this channel's and the
+      next channel's reading (the last channel uses the sweep spacing). This
+      includes the settling time and so overestimates the dwell slightly;
+    - ``(None, None)`` when none of these is available.
+    """
+    names = list(session.channel_names)
+    result = {}
+    for name in names:
+        recorded = [
+            channel.dwell_s
+            for acquisition in session.acquisitions
+            for channel in acquisition.channels
+            if channel.name == name and channel.dwell_s is not None
+            and np.isfinite(channel.dwell_s) and channel.dwell_s > 0
+        ]
+        if recorded:
+            result[name] = (float(np.median(recorded)), "recorded")
+            continue
+        values = [
+            acquisition.y[:, acquisition.channel_index(name)]
+            for acquisition in session.acquisitions
+            if name in acquisition.channel_names
+        ]
+        step = _count_quantum(np.concatenate(values)) if values else None
+        if step is not None and 1e-5 < 1 / step < 10:
+            result[name] = (1 / step, "count_quantization")
+            continue
+        gaps = []
+        for acquisition in session.acquisitions:
+            if not acquisition.time_per_channel or name not in acquisition.channel_names:
+                continue
+            index = acquisition.channel_index(name)
+            time = acquisition.time
+            if index + 1 < time.shape[1]:
+                gap = time[:, index + 1] - time[:, index]
+            elif time.shape[0] > 1:
+                gap = time[1:, 0] - time[:-1, index]
+            else:
+                continue
+            gaps.append(gap[np.isfinite(gap) & (gap > 0)])
+        gaps = np.concatenate(gaps) if gaps else np.array([])
+        result[name] = (float(np.median(gaps)), "channel_timing") if gaps.size else (None, None)
+    return result
+
+
 def _has_start_time_footer(path):
     # Scan metadata backwards to the last MainRuns row. Complete rows are
     # assembled across chunks so wide acquisition columns remain supported.

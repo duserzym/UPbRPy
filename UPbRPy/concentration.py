@@ -474,6 +474,7 @@ def calc_concentration_depth_profile(
     *,
     internal_channel=None,
     confidence=0.95,
+    dwell_s=None,
 ):
     """Calculate sweep-wise concentrations and counting uncertainties.
 
@@ -506,6 +507,10 @@ def calc_concentration_depth_profile(
         input table or calibration metadata.
     confidence : float
         Two-sided normal confidence level used for the compatibility interval.
+    dwell_s : mapping of str to float, optional
+        Integration time per channel in seconds. Signals are count rates, so
+        ``I = rate * dwell`` enters the Poisson terms. A channel without a
+        dwell, or ``dwell_s=None``, is taken to hold integrated counts.
     """
     del sep  # Kept in the public signature for backward compatibility.
     if not 0 < float(confidence) < 1:
@@ -533,9 +538,15 @@ def calc_concentration_depth_profile(
         unknown_standard_data['internal_normalization_factor'],
         errors='coerce',
     )
+    def channel_dwell(channel):
+        value = (dwell_s or {}).get(channel)
+        value = np.nan if value is None else float(value)
+        return value if np.isfinite(value) and value > 0 else 1.0
+
     raw_internal_counts = (
         pd.to_numeric(unknown_standard_data[internal_channel], errors='coerce')
         / normalization_factor
+        * channel_dwell(internal_channel)
     )
     confidence_multiplier = float(norm.ppf((1 + float(confidence)) / 2))
 
@@ -546,7 +557,9 @@ def calc_concentration_depth_profile(
         )
         concentration = normalized_signal * concentration_calibration[channel]
         concentration = concentration.mask(concentration < 0, np.nan)
-        raw_analyte_counts = normalized_signal / normalization_factor
+        raw_analyte_counts = (
+            normalized_signal / normalization_factor * channel_dwell(channel)
+        )
         with np.errstate(divide='ignore', invalid='ignore'):
             relative_1s = np.sqrt(
                 1 / raw_analyte_counts + 1 / raw_internal_counts

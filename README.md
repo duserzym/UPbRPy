@@ -561,7 +561,12 @@ by label after checking Y values and sweep times.
 | Instrument state (tune settings, readbacks) | Yes | Yes |
 | Sample-list fields | Yes | No |
 
-Both contain Y (cps used for reduction). The UPbR single CSV was dropped
+Both contain Y (cps used for reduction). Y is a rate, so Poisson errors use
+integrated counts `Y * dwell`. Per-spot exports record the dwell; for a Rich
+file alone UPbRPy recovers it from the cps value of one pulse count in the gas
+blank (`experiment.attrs["counting_dwell"]`). Before 2026-11-11 UPbRPy used
+cps as counts, which made sweep-level errors `1 / sqrt(dwell)` too small
+(3.65x at 75 ms); spot means were unaffected. The UPbR single CSV was dropped
 2026-11-05 because it contains only Y and has no time information. Opening
 one raises `UnsupportedQtegraFormat` with instructions to export Rich or
 per-spot data. Folder discovery skips it with a warning when usable exports

@@ -24,6 +24,17 @@ The [decision record](../qtegra_export_formats.md) explains the choice of
 Rich as the record. Its historical comparisons and intended downstream
 contracts are distinct from the implemented behavior specified here.
 
+!!! warning "Y is a count rate: counting errors need the dwell time"
+    Qtegra Y values are cps, not detected ions. The Poisson variance of one
+    reading is `Y / dwell`, not `Y`. Treating cps as counts understates every
+    sweep counting uncertainty by `1 / sqrt(dwell)`: 3.65x at 75 ms, 6.3x at
+    25 ms. Spot means from sweep scatter are unaffected; sweep ratio errors,
+    sweep error correlations, depth-profile concentration errors and the
+    Poisson term of 206Pb/204Pb are. Per-spot exports record the dwell; for
+    Rich input UPbRPy recovers it from the cps value of one count. See
+    [Counting dwell](acquisition-model.md#counting-dwell). UPbRPy before
+    2026-11-11 used `Y` as the variance.
+
 ## Minimum for a reduction
 
 A loadable reduced Rich file has the two header rows, channel Y rows and
