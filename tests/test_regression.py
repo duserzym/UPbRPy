@@ -393,3 +393,19 @@ def test_fit_records_export_with_footnotes(tmp_path):
     text = (tmp_path / "fits.md").read_text()
     assert "Stacey and Kramers" in text and "Bootstrap intervals" in text
     assert {p.name for p in paths} == {"fits.csv", "fits.md", "fits_footnotes.txt"}
+
+
+@pytest.mark.parametrize("anchor", [Anchor("common_pb", 0.88, 0.01), Anchor("age", 1000.0, 15.0)])
+@pytest.mark.parametrize("model", [1, 2])
+def test_bootstrap_of_prior_anchors_tracks_the_estimator(anchor, model):
+    data = tw_mixtures(40, seed=13)
+    fit = fit_discordia(*data, model=model, anchor=anchor)
+    boot = bootstrap_discordia(*data, model=model, anchor=anchor, n_resamples=3000, seed=2, fit=fit)
+    stats = boot.interval("lower_ma")
+    if model == 1:
+        # Centred on the analytical estimate, and with the same spread.
+        assert stats["median"] == pytest.approx(fit.lower.age_ma, abs=0.35 * fit.lower.sigma_ma)
+        assert (stats["high"] - stats["low"]) / 2 == pytest.approx(1.96 * fit.lower.sigma_ma, rel=0.25)
+    else:
+        # Model 2 draws the anchor and holds it fixed (an approximation).
+        assert stats["low"] < fit.lower.age_ma < stats["high"]

@@ -302,67 +302,91 @@ def york_fit_batch(x, y, sx, sy, rho, *, anchor_xy=None, tol: float = 1e-12, max
     sx = np.asarray(sx, dtype=float)
     sy = np.asarray(sy, dtype=float)
     rho = np.asarray(rho, dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        wx = 1.0 / sx ** 2
-        wy = 1.0 / sy ** 2
-    alpha = np.sqrt(wx * wy)
-    ra = rho * alpha
+    x, y, sx, sy, rho = np.broadcast_arrays(x, y, sx, sy, rho)
+    B = x.shape[0]
+    with np.errstate(over="ignore", invalid="ignore"):
+        vx = sx * sx
+        vy = sy * sy
+        cxy = rho * sx * sy
+    # Points with infinite or invalid errors (padding) get zero weight.
+    m = (np.isfinite(vx) & np.isfinite(vy) & np.isfinite(cxy) & (vx > 0) & (vy > 0)
+         & np.isfinite(x) & np.isfinite(y)).astype(float)
+    ok_pts = m > 0
+    vx = np.where(ok_pts, vx, 1.0)
+    vy = np.where(ok_pts, vy, 1.0)
+    cxy = np.where(ok_pts, cxy, 0.0)
+    x = np.where(ok_pts, x, 0.0)
+    y = np.where(ok_pts, y, 0.0)
     if anchor_xy is not None:
-        x0 = np.asarray(anchor_xy[0], dtype=float)[:, None]
-        y0 = np.asarray(anchor_xy[1], dtype=float)[:, None]
-        u0 = x - x0
-        v0 = y - y0
+        x0 = np.broadcast_to(np.asarray(anchor_xy[0], dtype=float), (B,))
+        y0 = np.broadcast_to(np.asarray(anchor_xy[1], dtype=float), (B,))
+        u0 = x - x0[:, None]
+        v0 = y - y0[:, None]
+        wy = m / vy
         with np.errstate(divide="ignore", invalid="ignore"):
             slope = np.sum(wy * u0 * v0, axis=1) / np.sum(wy * u0 * u0, axis=1)
     else:
         # Start from the y-weighted least-squares slope.
-        ws = wy / np.sum(wy, axis=1, keepdims=True)
-        xm = np.sum(ws * x, axis=1, keepdims=True)
-        ym = np.sum(ws * y, axis=1, keepdims=True)
+        wy = m / vy
+        sw = np.sum(wy, axis=1, keepdims=True)
+        xm = np.sum(wy * x, axis=1, keepdims=True) / sw
+        ym = np.sum(wy * y, axis=1, keepdims=True) / sw
         with np.errstate(divide="ignore", invalid="ignore"):
-            slope = np.sum(ws * (x - xm) * (y - ym), axis=1) / np.sum(ws * (x - xm) ** 2, axis=1)
+            slope = np.sum(wy * (x - xm) * (y - ym), axis=1) / np.sum(wy * (x - xm) ** 2, axis=1)
     slope = np.where(np.isfinite(slope), slope, 0.0)
-    active = np.ones(slope.shape, dtype=bool)
     # Per-row damping: York's fixed point can oscillate between two slopes
     # when some error correlations are close to +-1. A row whose update
     # changes sign halves its step (Isoplot.jl and IsoplotR do not damp; on
     # well-behaved data the undamped and damped iterations agree).
-    omega = np.ones(slope.shape)
-    last_step = np.zeros(slope.shape)
-    xbar = np.zeros(slope.shape)
-    ybar = np.zeros(slope.shape)
+    omega = np.ones(B)
+    last_step = np.zeros(B)
+    xbar = np.zeros(B)
+    ybar = np.zeros(B)
+    done = np.zeros(B, dtype=bool)
+    rows = np.arange(B)  # rows still iterating; arrays below are compacted to them
+    X, Y, VX, VY, C, M = x, y, vx, vy, cxy, m
+    if anchor_xy is not None:
+        U0, V0 = u0, v0
     for _ in range(max_iter):
-        b = slope[:, None]
+        b = slope[rows][:, None]
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            W = wx * wy / (wx + b * b * wy - 2.0 * b * ra)
-            W = np.where(np.isfinite(W), W, 0.0)
+            W = M / (VY + b * b * VX - 2.0 * b * C)
             if anchor_xy is None:
                 sw = np.sum(W, axis=1)
-                xbar = np.sum(W * x, axis=1) / sw
-                ybar = np.sum(W * y, axis=1) / sw
-                U = x - xbar[:, None]
-                V = y - ybar[:, None]
+                xb = np.sum(W * X, axis=1) / sw
+                yb = np.sum(W * Y, axis=1) / sw
+                xbar[rows], ybar[rows] = xb, yb
+                U = X - xb[:, None]
+                V = Y - yb[:, None]
             else:
-                U, V = u0, v0
-            beta = W * (U / wy + b * V / wx - (b * U + V) * rho / alpha)
-            beta = np.where(np.isfinite(beta), beta, 0.0)
-            new = np.sum(W * beta * V, axis=1) / np.sum(W * beta * U, axis=1)
-        new = np.where(active, new, slope)
-        step = new - slope
+                U, V = U0, V0
+            beta = W * (U * VY + b * V * VX - (b * U + V) * C)
+            WB = W * beta
+            new = np.sum(WB * V, axis=1) / np.sum(WB * U, axis=1)
+        old = slope[rows]
+        step = new - old
         with np.errstate(invalid="ignore"):
             change = np.abs(step) <= tol * np.maximum(np.abs(new), 1e-300)
-            flip = step * last_step < 0
-        omega = np.where(flip, np.maximum(0.5 * omega, 1.0 / 64), omega)
-        last_step = np.where(active, step, last_step)
-        slope = np.where(change, new, slope + omega * step)
-        active &= ~change & np.isfinite(slope)
-        if not active.any():
+            flip = step * last_step[rows] < 0
+        om = np.where(flip, np.maximum(0.5 * omega[rows], 1.0 / 64), omega[rows])
+        omega[rows] = om
+        last_step[rows] = step
+        slope[rows] = np.where(change, new, old + om * step)
+        finished = change | ~np.isfinite(slope[rows])
+        done[rows] = change & np.isfinite(slope[rows])
+        if finished.all():
             break
+        if finished.any():
+            keep = ~finished
+            rows = rows[keep]
+            X, Y, VX, VY, C, M = X[keep], Y[keep], VX[keep], VY[keep], C[keep], M[keep]
+            if anchor_xy is not None:
+                U0, V0 = U0[keep], V0[keep]
     if anchor_xy is not None:
-        intercept = y0[:, 0] - slope * x0[:, 0]
+        intercept = y0 - slope * x0
     else:
         intercept = ybar - slope * xbar
-    converged = ~active & np.isfinite(slope)
+    converged = done & np.isfinite(slope)
     return intercept, slope, converged
 
 
@@ -1294,13 +1318,19 @@ def bootstrap_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg"
     anchor = anchor or Anchor()
     if method not in {"parametric", "resample"}:
         raise ValueError("method must be 'parametric' or 'resample'")
+    early_notes = []
+    if model == 2 and method == "parametric":
+        # Model 2 ignores the analytical uncertainties, so perturbing points
+        # by them says nothing about its scatter; resample points instead.
+        method = "resample"
+        early_notes.append("Model 2: points resampled with replacement (its fit ignores analytical errors).")
     x, y, sx, sy, rho, mask = _clean(x, y, sx, sy, rho)
     group_labels = None if groups is None else np.asarray(list(groups))[mask]
     x, y, sx, sy, rho = x[mask], y[mask], sx[mask], sy[mask], rho[mask]
     n = x.size
     if fit is None:
         fit = fit_discordia(x, y, sx, sy, rho, space=space, model=model, anchor=anchor, decay=decay)
-    notes: list[str] = []
+    notes: list[str] = list(early_notes)
     rng = np.random.default_rng(seed)
     B = int(n_resamples)
     # Model-3 dispersion is kept at its fitted value in every resample.
@@ -1396,46 +1426,54 @@ def bootstrap_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg"
 
 
 def _refit_batch(xs, ys, sx, sy, rho, space, model, anchor, decay, rng, l8, l5, uu):
-    """Refit lines to resampled data sets (rows of the arrays)."""
+    """Refit lines to resampled data sets (rows of the arrays).
+
+    Anchors with an uncertainty (models 1 and 3 use it differently, as in
+    IsoplotR) are refitted as the same estimator: a Gaussian prior on the
+    Tera-Wasserburg intercept is exactly an extra point at x = 0 with that
+    y uncertainty, and a prior on a concordia age is, to first order, an
+    extra point on concordia whose error ellipse lies along the curve. Their
+    centres are drawn from the prior in each resample.
+    """
     B = xs.shape[0]
     if model == 2:
-        finite = np.isfinite(sx)
-        wgt = finite.astype(float)
-        cnt = wgt.sum(axis=1, keepdims=True)
-        xm = np.sum(np.where(finite, xs, 0) , axis=1, keepdims=True) / cnt
-        ym = np.sum(np.where(finite, ys, 0), axis=1, keepdims=True) / cnt
-        dx = np.where(finite, xs - xm, 0)
-        dy = np.where(finite, ys - ym, 0)
-        sxx = np.sum(dx * dx, axis=1)
-        syy = np.sum(dy * dy, axis=1)
-        sxy = np.sum(dx * dy, axis=1)
-        if anchor.kind == "none":
-            # Major axis of the 2x2 scatter matrix.
-            slope = (syy - sxx + np.sqrt((syy - sxx) ** 2 + 4 * sxy ** 2)) / (2 * sxy)
-            return ym[:, 0] - slope * xm[:, 0], slope, np.isfinite(slope)
+        return _refit_model2(xs, ys, sx, space, anchor, decay, rng, l8, l5, uu)
+    draw = anchor.sigma > 0 and model != 3
     if anchor.kind == "none":
-        a, b, ok = york_fit_batch(xs, ys, sx, sy, rho)
-        return a, b, ok
+        return york_fit_batch(xs, ys, sx, sy, rho)
     if anchor.kind == "common_pb":
-        value = np.full(B, anchor.value)
-        if anchor.sigma > 0:
+        if draw:
             value = rng.normal(anchor.value, anchor.sigma, B)
+            if space == "tera_wasserburg":
+                px, py = np.zeros(B), value
+                psx, psy = np.full(B, 1e-12), np.full(B, anchor.sigma)
+            else:
+                # Prior on the slope 1/(r76 U): a distant point along the line.
+                finite = np.isfinite(sx)
+                cnt = finite.sum(axis=1)
+                xm = np.where(finite, xs, 0).sum(axis=1) / cnt
+                ym = np.where(finite, ys, 0).sum(axis=1) / cnt
+                span = np.nanmax(np.where(finite, xs, np.nan), axis=1) - np.nanmin(np.where(finite, xs, np.nan), axis=1)
+                L = 1e4 * np.maximum(span, 1e-12)
+                b0 = 1.0 / (value * uu)
+                sigma_b = anchor.sigma / (anchor.value ** 2 * uu)
+                px, py = xm + L, ym + b0 * L
+                psx, psy = 1e-12 * np.abs(px), L * sigma_b
+            return york_fit_batch(*_append_point(xs, ys, sx, sy, rho, px, py, psx, psy, np.zeros(B)))
         if space == "tera_wasserburg":
-            x0, y0 = np.zeros(B), value
-            a, b, ok = york_fit_batch(xs, ys, sx, sy, rho, anchor_xy=(x0, y0))
-            return a, b, ok
-        # Wetherill: fixed slope; the intercept is the weighted mean offset.
-        slope = 1.0 / (value * uu)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            v = sy ** 2 + slope[:, None] ** 2 * sx ** 2 - 2 * slope[:, None] * rho * sx * sy
-            wgt = 1.0 / v
-            a = np.sum(wgt * (ys - slope[:, None] * xs), axis=1) / np.sum(wgt, axis=1)
-        return a, slope, np.isfinite(a)
+            return york_fit_batch(xs, ys, sx, sy, rho, anchor_xy=(np.zeros(B), np.full(B, anchor.value)))
+        slope = 1.0 / (anchor.value * uu)
+        return _fixed_slope_batch(xs, ys, sx, sy, rho, slope)
     if anchor.kind == "age":
-        age = np.full(B, anchor.value)
-        if anchor.sigma > 0:
+        if draw:
             age = rng.normal(anchor.value, anchor.sigma, B)
-        x0, y0 = concordia_xy(age, space, l8=l8, l5=l5, u=uu)
+            px, py = concordia_xy(age, space, l8=l8, l5=l5, u=uu)
+            dX, dY = _concordia_derivatives(age, space, l8, l5, uu)["t"]
+            psx = np.abs(dX) * anchor.sigma
+            psy = np.abs(dY) * anchor.sigma
+            prho = np.sign(dX * dY) * 0.999999
+            return york_fit_batch(*_append_point(xs, ys, sx, sy, rho, px, py, psx, psy, prho))
+        x0, y0 = concordia_xy(np.full(B, anchor.value), space, l8=l8, l5=l5, u=uu)
         return york_fit_batch(xs, ys, sx, sy, rho, anchor_xy=(x0, y0))
     # Stacey-Kramers: alternate between the anchored line and the model age.
     a, b, ok = york_fit_batch(xs, ys, sx, sy, rho)
@@ -1443,22 +1481,87 @@ def _refit_batch(xs, ys, sx, sy, rho, space, model, anchor, decay, rng, l8, l5, 
     t = np.where(np.isfinite(t), t, 1000.0)
     for _ in range(30):
         r76 = stacey_kramers_76(t, decay)
-        X, Y = concordia_xy(t, space, l8=l8, l5=l5, u=uu)
         if space == "tera_wasserburg":
             a, b, ok = york_fit_batch(xs, ys, sx, sy, rho, anchor_xy=(np.zeros(B), r76))
         else:
-            slope = 1.0 / (r76 * uu)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                v = sy ** 2 + slope[:, None] ** 2 * sx ** 2 - 2 * slope[:, None] * rho * sx * sy
-                wgt = 1.0 / v
-                a = np.sum(wgt * (ys - slope[:, None] * xs), axis=1) / np.sum(wgt, axis=1)
-            b, ok = slope, np.isfinite(a)
+            a, b, ok = _fixed_slope_batch(xs, ys, sx, sy, rho, 1.0 / (r76 * uu))
         t_new, _ = _roots_batch(a, b, space, l8, l5, uu)
         done = np.abs(t_new - t) <= 1e-6 * np.maximum(1.0, np.abs(t))
         t = np.where(np.isfinite(t_new), t_new, t)
         if np.all(done | ~np.isfinite(t_new)):
             break
     return a, b, ok & np.isfinite(t)
+
+
+def _append_point(xs, ys, sx, sy, rho, px, py, psx, psy, prho):
+    """Append one pseudo-observation to every resample."""
+    def add(a, v):
+        return np.concatenate([np.asarray(a, dtype=float), np.asarray(v, dtype=float)[:, None]], axis=1)
+    return add(xs, px), add(ys, py), add(sx, psx), add(sy, psy), add(rho, prho)
+
+
+def _fixed_slope_batch(xs, ys, sx, sy, rho, slope):
+    """Best intercept for a known slope (weighted mean offset)."""
+    slope = np.asarray(slope, dtype=float)[:, None]
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        v = sy ** 2 + slope ** 2 * sx ** 2 - 2 * slope * rho * sx * sy
+        wgt = np.where(np.isfinite(v) & (v > 0), 1.0 / v, 0.0)
+        a = np.sum(wgt * np.where(wgt > 0, ys - slope * xs, 0.0), axis=1) / np.sum(wgt, axis=1)
+    return a, slope[:, 0], np.isfinite(a)
+
+
+def _tls_batch(X, Y, valid, x0=None, y0=None):
+    """Major axis (orthogonal regression) per row, optionally through (x0, y0)."""
+    w = valid.astype(float)
+    if x0 is None:
+        cnt = w.sum(axis=1)
+        x0 = np.sum(w * np.where(valid, X, 0), axis=1) / cnt
+        y0 = np.sum(w * np.where(valid, Y, 0), axis=1) / cnt
+    dx = np.where(valid, X - x0[:, None], 0.0)
+    dy = np.where(valid, Y - y0[:, None], 0.0)
+    sxx, syy, sxy = np.sum(dx * dx, axis=1), np.sum(dy * dy, axis=1), np.sum(dx * dy, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slope = (syy - sxx + np.sqrt((syy - sxx) ** 2 + 4 * sxy ** 2)) / (2 * sxy)
+    return y0 - slope * x0, slope
+
+
+def _refit_model2(xs, ys, sx, space, anchor, decay, rng, l8, l5, uu):
+    """Model-2 refits in Tera-Wasserburg coordinates (as the point estimate)."""
+    B = xs.shape[0]
+    valid = np.isfinite(sx)
+    if space == "wetherill":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            X = 1.0 / ys
+            Y = xs / (uu[:, None] * ys)
+    else:
+        X, Y = xs, ys
+    draw = anchor.sigma > 0
+    if anchor.kind == "none":
+        A, Bs = _tls_batch(X, Y, valid)
+    elif anchor.kind == "common_pb":
+        value = rng.normal(anchor.value, anchor.sigma, B) if draw else np.full(B, anchor.value)
+        A, Bs = _tls_batch(X, Y, valid, np.zeros(B), value)
+    elif anchor.kind == "age":
+        age = rng.normal(anchor.value, anchor.sigma, B) if draw else np.full(B, anchor.value)
+        x0, y0 = concordia_xy(age, "tera_wasserburg", l8=l8, l5=l5, u=uu)
+        A, Bs = _tls_batch(X, Y, valid, x0, y0)
+    else:
+        A, Bs = _tls_batch(X, Y, valid)
+        t, _ = _roots_batch(A, Bs, "tera_wasserburg", l8, l5, uu)
+        t = np.where(np.isfinite(t), t, 1000.0)
+        for _ in range(30):
+            A, Bs = _tls_batch(X, Y, valid, np.zeros(B), stacey_kramers_76(t, decay))
+            t_new, _ = _roots_batch(A, Bs, "tera_wasserburg", l8, l5, uu)
+            done = np.abs(t_new - t) <= 1e-6 * np.maximum(1.0, np.abs(t))
+            t = np.where(np.isfinite(t_new), t_new, t)
+            if np.all(done | ~np.isfinite(t_new)):
+                break
+    if space == "wetherill":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            a, b = -Bs / A, 1.0 / (uu * A)
+    else:
+        a, b = A, Bs
+    return a, b, np.isfinite(a) & np.isfinite(b)
 
 
 def fit_record(fit: DiscordiaFit, boot: BootstrapResult | None = None) -> dict:
