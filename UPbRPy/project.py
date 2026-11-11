@@ -32,6 +32,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .pipeline import PipelineStage, ReductionPipeline
@@ -424,6 +425,10 @@ def restore_project_selections(
         values = imported_key.map(saved[column])
         mask = imported_key.isin(common_names)
         restored.loc[mask, column] = values.loc[mask].to_numpy()
+        saved_values = saved[column].dropna()
+        if len(saved_values) and saved_values.map(lambda value: isinstance(value, (bool, np.bool_))).all():
+            # Keep flag columns boolean after the masked overlay.
+            restored[column] = restored[column].where(restored[column].notna(), False).astype(bool)
     return restored
 
 

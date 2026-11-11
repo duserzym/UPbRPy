@@ -404,6 +404,8 @@ def test_repick_all_is_one_compound_undo_and_autosaves(windows, app):
     window.flush_selection_edits()
     before = window._selection_snapshot(window.session.spot_names)
     count = len(window._selection_undo)
+    # Hand-edited spots are kept unless the overwrite box is ticked.
+    window.repick_overwrite_manual_check.setChecked(True)
     window.run_autopick_all_spots()
     idle(app, window)
     after = window._selection_snapshot(window.session.spot_names)

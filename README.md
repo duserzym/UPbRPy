@@ -359,6 +359,25 @@ where to save; until then edits are kept in a recovery copy in
 again offers to restore them. **Reset current spot**, **Re-pick all spots**
 and every drag or keyboard nudge can be undone.
 
+#### Nominal on-peak duration and batch re-picks
+
+On short ablations the apatite and rutile presets' plateau, which follows the
+detected signal to its end, keeps the first two or three falling washout
+sweeps: the signal end is the last sweep still above baseline plus 5 % of the
+signal elevation. **Auto-pick settings → Nominal on-peak** sets the laser-on
+time (`signal_duration_limit_seconds`): the signal, and with it the plateau,
+then ends no later than detected signal start plus that duration, and a
+shorter detected signal is kept. *Auto* leaves the detected washout in charge.
+Below the field Studio shows the median and 10–90 % range of the detected
+on-peak times of the session's spots. The value is saved with the project.
+
+**Re-pick all spots** (Ctrl+Shift+R) applies the settings to every spot,
+**Workflow → Selection Windows → Re-pick Current Sample** (Ctrl+Alt+R) to the
+current spot's sample, and **Re-pick All Open Tabs** (Ctrl+Alt+Shift+R) to
+every tab, each with its own settings. Spots whose windows were edited by hand
+are left alone unless **Also overwrite manual edits** is ticked; the status
+bar says how many were skipped. A batch re-pick is one undo step.
+
 #### Keyboard shortcuts
 
 **Help → Keyboard Shortcuts** (**Ctrl+/**) lists every shortcut of the active
@@ -378,6 +397,7 @@ focus; the selection keys work on steps 1 and 2.
 | Undo / redo a selection edit | Ctrl+Z / Ctrl+Shift+Z |
 | Reset current spot (re-pick it) | R |
 | Re-pick all spots | Ctrl+Shift+R |
+| Re-pick the current sample / all open tabs | Ctrl+Alt+R / Ctrl+Alt+Shift+R |
 | Exclude / include the current spot in calculations | Ctrl+E |
 | Return to raw traces | T |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab, or Ctrl+Shift+] / Ctrl+Shift+[ |

@@ -219,6 +219,7 @@ class StudioWindow(QtWidgets.QMainWindow):
             (reduction.next_tab_requested, self.next_tab),
             (reduction.previous_tab_requested, self.previous_tab),
             (reduction.tab_index_requested, self.select_tab),
+            (reduction.repick_all_tabs_requested, self.repick_all_tabs),
             (reduction.close_tab_requested, lambda: self.close_tab(self.tabs.indexOf(reduction))),
             (reduction.move_to_new_window_requested, lambda: self.move_tab_requested.emit(reduction)),
             (reduction.open_project_requested, self.open_project),
@@ -295,6 +296,13 @@ class StudioWindow(QtWidgets.QMainWindow):
     def _update_move_actions(self) -> None:
         for index in range(self.tabs.count()):
             self.tabs.widget(index).move_tab_action.setEnabled(self.tabs.count() > 1)
+
+    def repick_all_tabs(self) -> None:
+        """Re-pick every tab's spots with that tab's own auto-pick settings."""
+        for index in range(self.tabs.count()):
+            reduction = self.tabs.widget(index)
+            if reduction.session.loaded:
+                reduction.run_autopick_all_spots()
 
     def select_tab(self, index: int) -> None:
         """Show tab ``index``; -1 shows the last tab."""

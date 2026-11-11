@@ -62,6 +62,8 @@ re-imports dependencies and recalculates the saved completed stages.
 | selections[].selection_channel | Written when column exists | String | `29Si` | Channel used for selection |
 | selections[].plateau_filter_method | Written when column exists | String | `none` | Plateau filtering choice |
 | selections[].plateau_filter_channel | Written when column exists | String | `29Si` | Filtering channel |
+| selections[].selection_manual | Written by Studio | Boolean | `true` | Windows edited by hand (drag, keyboard nudge, undo/redo); a batch re-pick skips these unless told to overwrite them. Projects without it are inferred on opening: a spot whose saved windows differ from a fresh auto-pick under the saved settings counts as edited |
+| selections[].selection_falling_edge_index | Written when column exists | Integer | `23` | Sweep index (within the spot) where the falling washout edge starts, or −1; Studio shows the median time from signal start to this sweep next to Nominal on-peak |
 | selections[].selection_* | Optional additional columns | JSON-safe values | Selection diagnostics | All other experiment columns beginning `selection_` are also exported |
 | workspace | Optional | Object | `{}` | Caller-defined GUI state; default empty; non-object rejected; engine imposes no child-key schema |
 | origin | Optional | Object or null | See below | Database provenance; absent/null means no origin |

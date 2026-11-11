@@ -22,6 +22,8 @@ from GUI.services import (
     RestoredProject,
     autopick_all_selection_regions,
     autopick_selection_regions,
+    detected_on_peak_summary,
+    manual_selection_spots,
     build_channel_colors,
     build_notes,
     clear_reduction_cache,
@@ -176,6 +178,7 @@ class MainWindow(QtWidgets.QMainWindow):
     new_tab_requested = QtCore.Signal()
     next_tab_requested = QtCore.Signal()
     tab_index_requested = QtCore.Signal(int)
+    repick_all_tabs_requested = QtCore.Signal()
     previous_tab_requested = QtCore.Signal()
     move_to_new_window_requested = QtCore.Signal()
     close_tab_requested = QtCore.Signal()
@@ -611,8 +614,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "Reset Current Spot", ["R"], self.run_autopick_current_spot,
             "Re-pick the current spot with the auto-pick settings (undo with the Undo key).")
         self.repick_all_action = add(
-            "Re-pick All Spots", ["Ctrl+Shift+R"], self.run_autopick_all_spots,
+            "Re-pick All Spots", ["Ctrl+Shift+R"], lambda: self.run_autopick_all_spots(),
             "Re-pick every spot with the auto-pick settings (one undo step).")
+        self.repick_sample_action = add(
+            "Re-pick Current Sample", ["Ctrl+Alt+R"], self.run_autopick_current_sample,
+            "Re-pick every spot of the current spot's sample.")
+        self.repick_tabs_action = add(
+            "Re-pick All Open Tabs", ["Ctrl+Alt+Shift+R"], self.repick_all_tabs_requested.emit,
+            "Re-pick every spot in every open tab, each with its own auto-pick settings.")
 
     def go_to_adjacent_spot(self, step: int) -> None:
         """Select the previous or next analysis in the spot list."""
@@ -1809,9 +1818,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self.on_plateau_duration_changed
         )
         plateau_width_layout.addRow(
-            "Width",
+            "Plateau width",
             self.plateau_duration_spin,
         )
+        self.on_peak_duration_spin = QtWidgets.QDoubleSpinBox()
+        self.on_peak_duration_spin.setObjectName("OnPeakDurationSpin")
+        self.on_peak_duration_spin.setRange(0.0, 600.0)
+        self.on_peak_duration_spin.setDecimals(1)
+        self.on_peak_duration_spin.setKeyboardTracking(False)
+        self.on_peak_duration_spin.setSingleStep(0.5)
+        self.on_peak_duration_spin.setSuffix(" s")
+        self.on_peak_duration_spin.setSpecialValueText("Auto")
+        self.on_peak_duration_spin.setToolTip(
+            "Nominal on-peak (laser-on) duration. When set, the plateau and "
+            "signal end no later than the detected signal start plus this "
+            "duration, so the pick cannot run into the washout; a shorter "
+            "detected signal is kept. Auto uses the detected washout. Applies "
+            "at the next re-pick."
+        )
+        self.on_peak_duration_spin.valueChanged.connect(self.on_on_peak_duration_changed)
+        plateau_width_layout.addRow("Nominal on-peak", self.on_peak_duration_spin)
+        self.on_peak_detected_label = QtWidgets.QLabel()
+        self.on_peak_detected_label.setObjectName("OnPeakDetectedLabel")
+        self.on_peak_detected_label.setWordWrap(True)
+        self.on_peak_detected_label.setToolTip(
+            "Detected signal start to the start of the falling edge, across "
+            "the spots of this session."
+        )
+        plateau_width_layout.addRow("", self.on_peak_detected_label)
         layout.addWidget(self.plateau_width_control)
 
         self.plateau_filter_combo = StyledComboBox()
@@ -1863,9 +1897,17 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{self._shortcut_text([QtGui.QKeySequence.StandardKey.Undo])}."
         )
         self.repick_all_spots_button.clicked.connect(
-            self.run_autopick_all_spots
+            lambda _checked=False: self.run_autopick_all_spots()
         )
         layout.addWidget(self.repick_all_spots_button)
+        self.repick_overwrite_manual_check = QtWidgets.QCheckBox("Also overwrite manual edits")
+        self.repick_overwrite_manual_check.setObjectName("RepickOverwriteManual")
+        self.repick_overwrite_manual_check.setToolTip(
+            "Unticked, re-picking leaves spots whose windows were edited by hand "
+            "unchanged and reports how many were skipped."
+        )
+        settings_layout.insertWidget(settings_layout.indexOf(self.autopick_duration_label),
+                                     self.repick_overwrite_manual_check)
 
         section_label = QtWidgets.QLabel("Reduction workflow")
         self.workflow_section_label = section_label
@@ -4434,8 +4476,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.session.loaded and plateau_mode == "sweeps" else "Workflow auto"
             )
             self.plateau_duration_spin.setValue(plateau_duration)
+            on_peak = settings.get(
+                "signal_duration_limit_seconds",
+                method_options.get("signal_duration_limit_seconds"),
+            )
+            self.on_peak_duration_spin.setValue(float(on_peak) if on_peak else 0.0)
         finally:
             self._is_populating = False
+        self._sync_on_peak_detected_label()
         if self.autopick_settings_toggle.isChecked():
             self._position_compact_panels()
 
@@ -4688,6 +4736,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(message)
         self.append_log(message)
         self.update_project_window_title()
+
+    def _sync_on_peak_detected_label(self) -> None:
+        summary = detected_on_peak_summary(self.session) if self.session.loaded else None
+        if summary is None:
+            self.on_peak_detected_label.setText("")
+            self.on_peak_detected_label.hide()
+            return
+        self.on_peak_detected_label.setText(
+            f"Detected: median {summary['median']:.1f} s "
+            f"(10–90 %: {summary['p10']:.1f}–{summary['p90']:.1f} s, {summary['count']} spots)"
+        )
+        self.on_peak_detected_label.show()
+
+    def on_on_peak_duration_changed(self, value: float) -> None:
+        """Set or clear the session's nominal on-peak duration."""
+        if self._is_populating or not self.session.loaded:
+            return
+        settings = self.session.import_settings
+        options = settings.get("selection_options")
+        if isinstance(options, dict):
+            options.pop("signal_duration_limit_seconds", None)
+        if value > 0.0:
+            # The reader's signal_duration_limit_seconds is the nominal
+            # on-peak duration: it caps the signal end, and the plateau ends
+            # at or before the signal end.
+            settings["signal_duration_limit_seconds"] = float(value)
+            message = (
+                f"Nominal on-peak duration set to {value:g} s for the next re-pick "
+                f"({self._shortcut_text(['Ctrl+Shift+R'])} re-picks all spots)."
+            )
+        else:
+            settings["signal_duration_limit_seconds"] = None
+            message = "Nominal on-peak duration cleared; the next re-pick uses the detected washout."
+        self.statusBar().showMessage(message)
+        self.append_log(message)
+        self.update_project_window_title()
+
+    def run_autopick_current_sample(self) -> None:
+        """Re-pick every spot of the current spot's sample."""
+        spot = self.current_spot_name()
+        if not self.session.loaded or not spot:
+            return
+        experiment = self.session.experiment
+        names = experiment["spot_names"].astype(str)
+        if "sample" in experiment:
+            sample = str(experiment.loc[names.eq(spot), "sample"].iloc[0])
+            spots = names[experiment["sample"].astype(str).eq(sample)].tolist()
+        else:
+            sample, spots = spot, [spot]
+        self.run_autopick_all_spots(spots, scope=f"sample {sample}")
 
     def on_plateau_filter_method_changed(self, index: int) -> None:
         """Set the current spot's plateau outlier rule and display channel."""
@@ -5216,12 +5314,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _selection_regions(self, spot_name: str | None) -> dict:
         regions = get_selection_regions(self.session, spot_name)
-        regions.update(self.pending_region_updates.get(spot_name, {}))
+        pending = self.pending_region_updates.get(spot_name, {})
+        regions.update({key: value for key, value in pending.items() if key in regions})
         return regions
 
     def _selection_snapshot(self, spots) -> dict:
-        """Capture all six window columns, grouped by spot and interval."""
-        return {spot: get_selection_regions(self.session, spot) for spot in spots}
+        """Capture all six window columns and the manual-edit flag per spot."""
+        manual = manual_selection_spots(self.session)
+        return {
+            spot: {**get_selection_regions(self.session, spot), "manual": spot in manual}
+            for spot in spots
+        }
 
     def _remember_completed_selection_stages(self) -> None:
         if self.session.pipeline is not None:
@@ -5261,15 +5364,17 @@ class MainWindow(QtWidgets.QMainWindow):
             for spot, edits in queued.items():
                 before = self._selection_snapshot([spot])
                 completed = set(self.session.pipeline.cache.stages()) if self.session.pipeline else set()
+                edits = dict(edits)
+                manual = bool(edits.pop("manual", True))
                 try:
-                    update_selection_region(self.session, spot, **edits)
+                    update_selection_region(self.session, spot, **edits, manual=manual)
                 except (ValueError, KeyError):
                     # Try independent windows if the complete proposal is
                     # invalid, so one bad interval cannot discard good edits.
                     accepted = False
                     for name, bounds in edits.items():
                         try:
-                            update_selection_region(self.session, spot, **{name: bounds})
+                            update_selection_region(self.session, spot, **{name: bounds}, manual=manual)
                         except (ValueError, KeyError) as error:
                             message = f"{name.capitalize()} selection update for {spot} rejected: {error}"
                             self.statusBar().showMessage(message)
@@ -5327,6 +5432,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redo_selection_action.setEnabled(bool(idle and self._selection_redo))
         self.reset_spot_action.setEnabled(bool(idle))
         self.repick_all_action.setEnabled(bool(idle))
+        self.repick_sample_action.setEnabled(bool(idle))
         spot = self.current_spot_name() if self.session.loaded else None
         self.exclude_spot_action.setEnabled(bool(spot) and not editing)
         self.exclude_spot_action.setChecked(bool(spot) and spot in self.results_table.excluded_spots)
@@ -6380,14 +6486,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"Re-applied {selection_method_label(method)} auto-pick for {spot_name}.")
         self.refresh_view()
 
-    def run_autopick_all_spots(self) -> None:
-        """Apply the current selection settings to every imported spot."""
+    def run_autopick_all_spots(self, spot_names=None, *, scope: str = "all spots") -> None:
+        """Apply the current selection settings to every (or the given) spot.
+
+        Spots edited by hand are skipped unless "Also overwrite manual edits"
+        is ticked; the status bar reports how many were skipped.
+        """
         if not self.flush_selection_edits():
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
         if not self._require_loaded():
             return
-        before = self._selection_snapshot(self.session.spot_names)
+        targets = list(self.session.spot_names if spot_names is None else spot_names)
+        overwrite = self.repick_overwrite_manual_check.isChecked()
+        before = self._selection_snapshot(targets)
         self._remember_completed_selection_stages()
         method = str(
             self.session.import_settings.get(
@@ -6400,14 +6512,24 @@ class MainWindow(QtWidgets.QMainWindow):
             selected_count = int(summary.get("selected_count", 0))
             failures = summary.get("failures", {})
             failure_count = len(failures) if isinstance(failures, dict) else 0
+            skipped = list(summary.get("skipped_manual", []))
             self._push_selection_history(before, self._selection_snapshot(before))
-            self._spots_edited_since_write.update(before)
+            self._spots_edited_since_write.update(name for name in before if name not in skipped)
             self._selection_edits_written()
             self.set_plot_mode("raw", refresh=False)
+            self._sync_on_peak_detected_label()
             message = (
-                f"Re-picked {selected_count} spots with "
+                f"Re-picked {selected_count} spots ({scope}) with "
                 f"{selection_method_label(method)}"
             )
+            on_peak = self.session.import_settings.get("signal_duration_limit_seconds")
+            if on_peak:
+                message += f", nominal on-peak {float(on_peak):g} s"
+            if skipped:
+                message += (
+                    f"; skipped {len(skipped)} hand-edited "
+                    f"{'spot' if len(skipped) == 1 else 'spots'}"
+                )
             if failure_count:
                 message += f"; {failure_count} spots need review"
             message += "."
@@ -6416,8 +6538,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_view()
 
         self.run_background(
-            "Re-picking all spots",
-            lambda: autopick_all_selection_regions(self.session),
+            "Re-picking all spots" if spot_names is None else f"Re-picking {scope}",
+            lambda: autopick_all_selection_regions(
+                self.session,
+                None if spot_names is None else targets,
+                overwrite_manual=overwrite,
+            ),
             finish_repick,
         )
 

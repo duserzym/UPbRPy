@@ -667,6 +667,17 @@ def select_signal_regions(
     ``'duration'`` instead uses ``plateau_duration_seconds`` while still
     capping the plateau before washout. The default ``'sweeps'`` preserves the
     traditional fixed ``peak_sweep_n`` behavior.
+
+    ``signal_duration_limit_seconds`` acts as a nominal on-peak (laser-on)
+    duration: because the plateau end is an exclusive boundary at or before
+    the signal end, every plateau sweep is then measured before detected
+    signal start plus that duration, whatever the width mode, and a shorter
+    detected signal is kept. With ``plateau_width_mode='signal'`` and no
+    limit, the plateau runs to the last sweep above the washout retention
+    threshold, which on short ablations includes the first falling sweeps.
+    The diagnostics report ``on_peak_detected_seconds``: detected signal start
+    to the start of the falling edge (or to the signal end when no falling
+    edge is found).
     """
     values = coerce_trace(data)
     times: np.ndarray | None = None
@@ -780,6 +791,13 @@ def select_signal_regions(
             "signal_duration_limit_index": -1,
             "signal_duration_limit_applied": 0,
         }
+    falling_edge_index = int(end_diagnostics.get("signal_end_falling_edge_start", -1))
+    on_peak_diagnostics: dict[str, float] = {}
+    if times is not None:
+        detected_end = falling_edge_index if falling_edge_index >= 0 else unrestricted_signal_end
+        on_peak_diagnostics["on_peak_detected_seconds"] = float(
+            times[detected_end] - times[signal_start]
+        )
     windows = selection_windows(
         detection_index,
         size=values.size,
@@ -856,6 +874,7 @@ def select_signal_regions(
             **diagnostics,
             **start_diagnostics,
             **end_diagnostics,
+            **on_peak_diagnostics,
             **plateau_diagnostics,
         },
     )
@@ -1441,6 +1460,9 @@ def auto_select_baseline_peak(experiment,
         )
         experiment.loc[row_mask, 'selection_washout_start_index'] = selection.washout_start
         experiment.loc[row_mask, 'selection_post_baseline_start_index'] = selection.washout_start
+        experiment.loc[row_mask, 'selection_falling_edge_index'] = (
+            selection.diagnostics.get('signal_end_falling_edge_start', -1)
+        )
         if 'sigma_threshold' in selection.diagnostics:
             experiment.loc[row_mask, 'selection_sigma_threshold'] = selection.diagnostics['sigma_threshold']
         experiment.loc[row_mask, 'selection_error'] = None

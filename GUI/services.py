@@ -745,6 +745,8 @@ def load_session(
         )
     if "plateau_filter_channel" not in experiment.columns:
         experiment["plateau_filter_channel"] = effective_primary
+    if MANUAL_SELECTION_COLUMN not in experiment.columns:
+        experiment[MANUAL_SELECTION_COLUMN] = False
     clean_channels = [str(channel) for channel in channels if str(channel)]
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
@@ -891,11 +893,16 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         import_settings=restored_import_settings,
     )
     if document["selections"]:
+        auto_picks = session.experiment.copy()
         session.experiment = restore_project_selections(
             session.experiment,
             document["selections"],
             strict_spot_names=True,
         )
+        if not any(MANUAL_SELECTION_COLUMN in record for record in document["selections"]):
+            session.experiment[MANUAL_SELECTION_COLUMN] = infer_manual_selections(
+                auto_picks, session.experiment
+            )
     # else: a project fresh from a session bundle has no reviewed windows
     # yet; the auto-picked windows of this import are the starting point.
     session.origin = project_origin(document) or session.origin
@@ -1012,6 +1019,43 @@ def clear_reduction_cache(session: ReductionSession) -> None:
         session.pipeline.cache.invalidate(PipelineStage.BASELINE)
 
 
+MANUAL_SELECTION_COLUMN = "selection_manual"
+SELECTION_WINDOW_COLUMNS = (
+    "baseline_start_times",
+    "baseline_end_times",
+    "plateau_start_times",
+    "plateau_end_times",
+    "signal_start_times",
+    "signal_end_times",
+)
+
+
+def infer_manual_selections(
+    auto_picks: pd.DataFrame,
+    restored: pd.DataFrame,
+    *,
+    tolerance: float = 1e-6,
+) -> pd.Series:
+    """Flag spots whose restored windows differ from a fresh auto-pick.
+
+    Projects saved before ``selection_manual`` existed do not record which
+    windows were edited by hand. ``auto_picks`` is the same import picked
+    with the project's saved settings; any window that differs from it is
+    treated as a manual edit, so a later batch re-pick leaves it alone.
+    """
+    auto = auto_picks.set_index(auto_picks["spot_names"].astype(str))
+    names = restored["spot_names"].astype(str)
+    manual = pd.Series(False, index=restored.index)
+    for column in SELECTION_WINDOW_COLUMNS:
+        if column not in restored.columns or column not in auto.columns:
+            continue
+        expected = names.map(auto[column]).to_numpy(dtype=float)
+        actual = pd.to_numeric(restored[column], errors="coerce").to_numpy(dtype=float)
+        both_missing = np.isnan(expected) & np.isnan(actual)
+        manual |= ~(both_missing | (np.abs(actual - expected) <= tolerance))
+    return manual
+
+
 def update_selection_region(
     session: ReductionSession,
     spot_name: str,
@@ -1020,8 +1064,14 @@ def update_selection_region(
     plateau: tuple[float, float] | None = None,
     signal: tuple[float, float] | None = None,
     refresh_pipeline: bool = True,
+    manual: bool | None = None,
 ) -> None:
-    """Save reviewed windows while requiring signal bounds to contain plateau."""
+    """Save reviewed windows while requiring signal bounds to contain plateau.
+
+    ``manual=True`` marks the spot as edited by hand, so a batch re-pick
+    that is told to keep manual edits skips it; ``False`` clears the mark
+    (undo and redo restore it); ``None`` leaves it unchanged.
+    """
     if not session.loaded:
         return
     row_mask = session.experiment["spot_names"].eq(spot_name)
@@ -1078,6 +1128,10 @@ def update_selection_region(
         session.experiment.loc[row_mask, "signal_end_times"] = (
             effective_signal[1]
         )
+    if manual is not None:
+        if MANUAL_SELECTION_COLUMN not in session.experiment:
+            session.experiment[MANUAL_SELECTION_COLUMN] = False
+        session.experiment.loc[row_mask, MANUAL_SELECTION_COLUMN] = bool(manual)
     if refresh_pipeline:
         clear_reduction_cache(session)
 
@@ -1176,22 +1230,75 @@ def autopick_selection_regions(
     session.experiment.loc[row_mask, "selection_post_baseline_start_index"] = (
         selection.washout_start
     )
+    session.experiment.loc[row_mask, "selection_falling_edge_index"] = (
+        selection.diagnostics.get("signal_end_falling_edge_start", -1)
+    )
+    session.experiment.loc[row_mask, MANUAL_SELECTION_COLUMN] = False
     if refresh_pipeline:
         clear_reduction_cache(session)
     return {"baseline": baseline, "plateau": plateau, "signal": signal}
 
 
+def manual_selection_spots(session: ReductionSession) -> set[str]:
+    """Return the spots whose windows were edited by hand."""
+    if not session.loaded or MANUAL_SELECTION_COLUMN not in session.experiment:
+        return set()
+    flags = session.experiment[MANUAL_SELECTION_COLUMN].fillna(False).astype(bool)
+    return set(session.experiment.loc[flags, "spot_names"].astype(str))
+
+
+def detected_on_peak_summary(session: ReductionSession) -> dict[str, float] | None:
+    """Median and range of the detected on-peak durations, in seconds.
+
+    Each duration runs from the spot's signal start to the first sweep of
+    its falling edge (``selection_falling_edge_index``).
+    """
+    column = "selection_falling_edge_index"
+    experiment = session.experiment if session.loaded else None
+    if experiment is None or column not in experiment or "signal_start_times" not in experiment:
+        return None
+    edges = pd.to_numeric(experiment[column], errors="coerce")
+    starts = pd.to_numeric(experiment["signal_start_times"], errors="coerce")
+    times = session.total_data.groupby("spot_name", sort=False)["Time"]
+    durations = []
+    for name, edge, start in zip(experiment["spot_names"].astype(str), edges, starts):
+        if not np.isfinite(edge) or edge < 0 or not np.isfinite(start):
+            continue
+        try:
+            spot_times = times.get_group(name).to_numpy(dtype=float)
+        except KeyError:
+            continue
+        if int(edge) < spot_times.size:
+            durations.append(spot_times[int(edge)] - start)
+    values = pd.Series(durations, dtype=float)
+    values = values[values > 0]
+    if values.empty:
+        return None
+    return {
+        "median": float(values.median()),
+        "p10": float(values.quantile(0.1)),
+        "p90": float(values.quantile(0.9)),
+        "count": int(values.size),
+    }
+
+
 def autopick_all_selection_regions(
     session: ReductionSession,
+    spot_names: Iterable[str] | None = None,
+    *,
+    overwrite_manual: bool = True,
 ) -> dict[str, object]:
-    """Re-pick every spot and refresh the shared pipeline only once.
+    """Re-pick spots and refresh the shared pipeline only once.
 
-    Grouping the sweep table before selection avoids repeatedly scanning the
-    complete session.  Individual failures are retained in the experiment
-    table and returned to the GUI, while valid spots remain usable.
+    ``spot_names`` limits the re-pick to those spots (default: every spot).
+    With ``overwrite_manual=False`` spots edited by hand are skipped and
+    listed under ``skipped_manual``. Grouping the sweep table before
+    selection avoids repeatedly scanning the complete session. Individual
+    failures are retained in the experiment table and returned to the GUI,
+    while valid spots remain usable.
     """
     if not session.loaded:
-        return {"selected_count": 0, "failures": {}}
+        return {"selected_count": 0, "failures": {}, "skipped_manual": []}
 
     spot_frames = {
         str(spot_name): frame.reset_index(drop=True)
@@ -1199,7 +1306,13 @@ def autopick_all_selection_regions(
             "spot_name", sort=False
         )
     }
-    spot_names = session.experiment["spot_names"].astype(str).tolist()
+    all_names = session.experiment["spot_names"].astype(str).tolist()
+    if spot_names is not None:
+        wanted = {str(name) for name in spot_names}
+        all_names = [name for name in all_names if name in wanted]
+    manual = set() if overwrite_manual else manual_selection_spots(session)
+    skipped = [name for name in all_names if name in manual]
+    spot_names = [name for name in all_names if name not in manual]
     failures: dict[str, str] = {}
     selected_count = 0
     for spot_name in spot_names:
@@ -1221,7 +1334,7 @@ def autopick_all_selection_regions(
             session.experiment.loc[row_mask, "selection_error"] = message
 
     clear_reduction_cache(session)
-    return {"selected_count": selected_count, "failures": failures}
+    return {"selected_count": selected_count, "failures": failures, "skipped_manual": skipped}
 
 
 def get_spot_data(session: ReductionSession, spot_name: str | None) -> pd.DataFrame:
