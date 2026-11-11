@@ -249,6 +249,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-reduction", metavar="DIR", help="Run a full reduction/export smoke check on an experiment and exit")
     parser.add_argument("--verification-output", metavar="DIR", help="Output directory required by --verify-reduction")
     parser.add_argument(
+        "--verify-through",
+        metavar="STAGE",
+        default="export",
+        help=(
+            "Last pipeline stage for --verify-reduction (for example concentration); "
+            "the default, export, runs every stage and writes the export bundle"
+        ),
+    )
+    parser.add_argument(
         "--register-url-scheme",
         action="store_true",
         help="Windows: register upbr:// links for this user (HKCU\\Software\\Classes\\upbr) and exit",
@@ -304,9 +313,24 @@ def main(argv: list[str] | None = None) -> int:
         from GUI.services import load_session, ensure_shared_pipeline
         from GUI.workflows import infer_workflow_preset
         from UPbRPy.reproducibility import export_reduction_bundle
+        from UPbRPy.pipeline import PipelineStage
         preset = infer_workflow_preset(args.verify_reduction)
         session = load_session(args.verify_reduction, preset=preset)
         pipeline = ensure_shared_pipeline(session, preset)
+        through = PipelineStage(args.verify_through)
+        if through != PipelineStage.EXPORT:
+            pipeline.run_to(through)
+            report = {
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "workflow": preset.key,
+                "through": through.value,
+                "spots": int(session.experiment["spot_names"].nunique()),
+                "stages": [stage.value for stage in pipeline.cache.stages()],
+            }
+            Path(args.verification_output).mkdir(parents=True, exist_ok=True)
+            Path(args.verification_output, "verification.json").write_text(json.dumps(report, indent=2))
+            print(json.dumps(report, indent=2))
+            return 0
         bundle = export_reduction_bundle(pipeline, args.verification_output, hash_inputs=True)
         if bundle.warnings:
             raise RuntimeError("; ".join(bundle.warnings))
@@ -322,11 +346,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.export:
+        # Scripted export: report load errors on stderr and fail instead of
+        # opening a modal dialog that nobody can dismiss offscreen.
+        errors: list[str] = []
+
+        def record_error(_parent, title, text, *_args, **_kwargs):
+            errors.append(f"{title}: {text}")
+            print(f"{title}: {text}", file=sys.stderr)
+            return QtWidgets.QMessageBox.StandardButton.Ok
+
+        QtWidgets.QMessageBox.critical = staticmethod(record_error)
+        QtWidgets.QMessageBox.warning = staticmethod(record_error)
+        reduction = window.active_reduction
         if target is not None and target.kind == "directory":
-            window.active_reduction.load_experiment_directory(args.open, background=False)
+            reduction.load_experiment_directory(args.open, background=False, offer_restore=False)
         elif target is not None and target.kind == "project":
-            window.active_reduction.load_project_file(target.path, background=False)
+            reduction.load_project_file(target.path, background=False)
         export_window(window, args.export)
+        if errors or (target is not None and not reduction.session.loaded):
+            if not errors:
+                print(f"Could not open {args.open}", file=sys.stderr)
+            return 1
         return 0
 
     if instance is not None:

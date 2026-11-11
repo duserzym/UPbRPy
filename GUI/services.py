@@ -685,7 +685,10 @@ def normalize_import_settings(
 def measured_reference_materials(samples: Iterable[str]) -> list[str]:
     """Measured sample names that the reference library knows (aliases and
     typography resolved), in measurement order, Iolite duplicates excluded."""
-    from UPbRPy import standard_archive
+    # Import from the defining module: ``from UPbRPy import standard_archive``
+    # goes through the package's lazy legacy API, which loads UPbRPy.UPbRPy
+    # (and matplotlib), and that module is not in the packaged app.
+    from UPbRPy.standards import standard_archive
     from UPbRPy.standards import canonicalize_reference_material_samples
 
     archive = standard_archive.combine_first(standard_archive_legacy)

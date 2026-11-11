@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -142,39 +143,106 @@ def run_pyinstaller(
     return application
 
 
-def smoke_test_application(
-    application: Path,
-    work_directory: Path,
-) -> Path:
-    """Launch the frozen GUI offscreen and verify it renders a real window."""
-    screenshot = work_directory / "UPbRPy-Studio-smoke.png"
-    screenshot.parent.mkdir(parents=True, exist_ok=True)
-    if screenshot.exists():
-        screenshot.unlink()
+SMOKE_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "qtegra" / "Zircon_04Nov26_slice"
+SMOKE_CSV = SMOKE_FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
+
+
+def _run_frozen(application: Path, arguments: list[str], work_directory: Path) -> subprocess.CompletedProcess:
+    """Run the frozen app offscreen with isolated settings and autosaves."""
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     environment.pop("PYTHONHOME", None)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["MPLCONFIGDIR"] = str(work_directory / "matplotlib")
-    subprocess.run(
-        [
-            str(application_executable(application)),
-            "--theme",
-            "light",
-            "--export",
-            str(screenshot),
-        ],
+    environment["UPBRPY_AUTOSAVE_DIR"] = str(work_directory / "autosave")
+    result = subprocess.run(
+        [str(application_executable(application)), "--theme", "light", *arguments],
         cwd=work_directory,
         env=environment,
-        check=True,
-        timeout=180,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
-    if not screenshot.exists() or screenshot.stat().st_size < 10_000:
+    if result.returncode != 0 or "Traceback" in result.stderr:
         raise RuntimeError(
-            "The frozen GUI exited without producing a valid smoke-test "
-            f"screenshot: {screenshot}"
+            f"The frozen app failed on {' '.join(arguments)} "
+            f"(exit {result.returncode}):\n{result.stderr[-4000:]}"
         )
-    return screenshot
+    return result
+
+
+def _write_smoke_project(work_directory: Path) -> Path:
+    """Save a project for the fixture with the build environment's sources."""
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from GUI.services import ensure_shared_pipeline, load_session
+    from GUI.workflows import infer_workflow_preset
+    from UPbRPy.pipeline import PipelineStage
+    from UPbRPy.project import write_reduction_project
+
+    preset = infer_workflow_preset(str(SMOKE_CSV))
+    session = load_session(str(SMOKE_CSV), preset=preset)
+    pipeline = ensure_shared_pipeline(session, preset)
+    return write_reduction_project(
+        pipeline,
+        work_directory / "smoke-project.upbr",
+        resume_stage=PipelineStage.SELECTION,
+    )
+
+
+def smoke_test_application(
+    application: Path,
+    work_directory: Path,
+) -> Path:
+    """Exercise the frozen app on real data, not only a launch.
+
+    1. Render the empty window.
+    2. Open a Qtegra Rich CSV fixture and render it.
+    3. Open a saved project for that fixture and render it.
+    4. Run ``--verify-reduction`` on the fixture through concentrations, and
+       through the export bundle on ``$UPBRPY_SMOKE_SESSION`` when it is set.
+    Load errors make the frozen app exit non-zero (see ``--export`` in
+    GUI/main.py), so a module missing from the bundle fails the build.
+    """
+    work_directory.mkdir(parents=True, exist_ok=True)
+    screenshots = {
+        "empty": (work_directory / "UPbRPy-Studio-smoke.png", []),
+        "csv": (work_directory / "UPbRPy-Studio-smoke-csv.png", ["--open", str(SMOKE_CSV)]),
+    }
+    project = _write_smoke_project(work_directory)
+    screenshots["project"] = (work_directory / "UPbRPy-Studio-smoke-project.png", ["--open", str(project)])
+    for name, (screenshot, arguments) in screenshots.items():
+        if screenshot.exists():
+            screenshot.unlink()
+        _run_frozen(application, [*arguments, "--export", str(screenshot)], work_directory)
+        if not screenshot.exists() or screenshot.stat().st_size < 10_000:
+            raise RuntimeError(
+                f"The frozen GUI did not produce a valid {name} screenshot: {screenshot}"
+            )
+    # The repository fixture is a slice without 202Hg, so its reduction can
+    # run through concentrations; a complete session given in
+    # UPBRPY_SMOKE_SESSION (kept outside the repository) runs every stage
+    # and writes the export bundle.
+    checks = [(SMOKE_CSV, "concentration")]
+    full_session = os.environ.get("UPBRPY_SMOKE_SESSION")
+    if full_session:
+        checks.append((Path(full_session).expanduser(), "export"))
+    for index, (source, through) in enumerate(checks):
+        verification = work_directory / f"verify-reduction-{index}"
+        if verification.exists():
+            shutil.rmtree(verification)
+        _run_frozen(
+            application,
+            ["--verify-reduction", str(source), "--verification-output", str(verification),
+             "--verify-through", through],
+            work_directory,
+        )
+        report = json.loads((verification / "verification.json").read_text())
+        if not report.get("frozen") or report.get("spots", 0) <= 0:
+            raise RuntimeError(f"The frozen reduction check returned an incomplete report: {report}")
+        if through != "export" and through not in report.get("stages", []):
+            raise RuntimeError(f"The frozen reduction check did not reach {through}: {report}")
+        print(f"Frozen reduction check ({source.name}, through {through}): {report['spots']} spots")
+    return screenshots["empty"][0]
 
 
 def archive_application(
