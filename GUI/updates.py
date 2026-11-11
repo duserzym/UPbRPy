@@ -15,6 +15,58 @@ import tomllib
 CHANNELS = ("stable", "beta")
 
 
+def friendly_update_error(raw: str) -> str:
+    """Translate updater diagnostics into a short message for the user."""
+    message = raw.strip()
+    lower = message.lower()
+    if any(word in lower for word in ("pubkey", "public key", "base64", "decode", "not configured")):
+        return "Updates are not configured for this build yet."
+    if any(word in lower for word in ("404", "release json", "could not fetch a valid release",
+                                      "not found", "no assets")):
+        return "No release has been published yet."
+    if any(word in lower for word in ("error sending request", "dns", "connect", "timed out",
+                                      "timeout", "offline", "network", "failed to fetch",
+                                      "enotfound", "urlerror")):
+        return "Can't reach the update server. Check your internet connection and try again."
+    return "The update check failed: " + (message[:117] + "…" if len(message) > 120 else message)
+
+
+@dataclass(frozen=True)
+class CheckButtonView:
+    """Text and actions derived from the shared updater state."""
+
+    text: str
+    action: str | None
+    badge: bool
+    busy: bool
+
+
+def check_button_view(state: UpdateState, version: str, auto_download: bool = True) -> CheckButtonView:
+    """Describe the compact update popover without changing updater state."""
+    target = "v" + (state.info or {}).get("version", "").removeprefix("v")
+    current = "v" + version.removeprefix("v")
+    percent = min(100, max(0, int(100 * state.progress / state.total))) if state.total else 0
+    text = {
+        "idle": "Check for a new version of Studio.",
+        "checking": "Checking for updates…",
+        "none": f"Up to date ({current})",
+        "available": f"Update available: {target}\nCurrent version: {current}",
+        "downloading": f"Downloading {target}… {percent}%",
+        "ready": f"{target} is ready",
+        "installing": "Installing and restarting…",
+        "error": friendly_update_error(state.message),
+        "unsupported": (f"Update available: {target}\nCurrent version: {current}"
+                        if state.info else state.message),
+    }[state.status]
+    action = ("download" if state.status == "available" and not auto_download else
+              "restart" if state.status == "ready" else
+              "page" if state.status == "unsupported" and state.info else None)
+    return CheckButtonView(text, action,
+                           state.status in {"available", "ready"}
+                           or (state.status == "unsupported" and bool(state.info)),
+                           state.status in {"checking", "downloading"})
+
+
 def parse_version(s: str) -> tuple[int, int, int, int, int]:
     """Compare X.Y.Z releases, beta and release candidates, optionally prefixed by v."""
     match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:(b|rc)(\d+))?", s.strip())

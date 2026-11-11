@@ -80,7 +80,7 @@ from GUI.widgets import (
 )
 from GUI.workers import FunctionWorker
 from GUI.updater import Updater
-from GUI.update_widgets import VersionChip
+from GUI.update_widgets import CheckUpdatesButton, VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 from UPbRPy.io import SELECTION_METHODS, selection_method_label
 from UPbRPy.export_table import ExportSettings, build_export_table
@@ -785,6 +785,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capabilities_badge.setObjectName("QtegraCapabilitiesBadge")
         self.capabilities_badge.hide()
         self.statusBar().addPermanentWidget(self.capabilities_badge)
+        self.check_updates_button = CheckUpdatesButton(self.updater, self.version_chip.open_dialog)
+        self.statusBar().addPermanentWidget(self.check_updates_button)
 
         self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
         self._populate_workflow_ui()

@@ -7,8 +7,9 @@ from html import escape
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from GUI.standards_updates import STANDARDS_PAGE
-from GUI.theme import active_theme
+from GUI.theme import active_theme, theme_color
 from GUI.updater import DOWNLOAD_PAGE
+from GUI.updates import check_button_view
 
 
 def _percent(state):
@@ -19,6 +20,212 @@ def _last_check(updater):
     value = updater.prefs.value("updates/last_check", "", type=str)
     date = QtCore.QDateTime.fromString(value, QtCore.Qt.DateFormat.ISODate)
     return date.toLocalTime().toString("HH:mm") if date.isValid() else "Never"
+
+
+class UpdatePopover(QtWidgets.QFrame):
+    """A compact view of the shared updater, anchored above its status button."""
+
+    def __init__(self, button, open_settings):
+        super().__init__(button, QtCore.Qt.WindowType.Popup)
+        self.button = button
+        self.updater = button.updater
+        self.setObjectName("UpdatePopover")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        self.status = QtWidgets.QLabel()
+        self.status.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.status.setWordWrap(True)
+        self.status.setAccessibleName("Update status")
+        layout.addWidget(self.status)
+        self.action = QtWidgets.QPushButton()
+        self.action.clicked.connect(self._act)
+        layout.addWidget(self.action)
+        self.settings_link = QtWidgets.QLabel('<a href="settings">Update settings…</a>')
+        self.settings_link.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse
+                                                   | QtCore.Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+        self.settings_link.linkActivated.connect(lambda _url: self._settings(open_settings))
+        layout.addWidget(self.settings_link)
+        self.updater.stateChanged.connect(self._changed)
+        QtWidgets.QApplication.instance().installEventFilter(self)
+        self._style()
+        self._changed(self.updater.state)
+
+    def _settings(self, open_settings):
+        self.hide()
+        open_settings()
+
+    def _act(self):
+        action = check_button_view(self.updater.state, self.updater.version,
+                                   self.updater.auto_download).action
+        if action == "download":
+            self.updater.download()
+        elif action == "restart":
+            self.updater.install()
+        elif action == "page":
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(DOWNLOAD_PAGE))
+
+    def _style(self):
+        theme = active_theme()
+        # Only this frame is restyled, and only when the theme changes.
+        self.setStyleSheet(f"""
+            QFrame#UpdatePopover {{ background: {theme.surface}; color: {theme.text};
+                border: 1px solid {theme.input_border}; border-radius: 6px; }}
+            QFrame#UpdatePopover QLabel {{ color: {theme.text}; border: none; }}
+        """)
+        self.settings_link.setText(f'<a style="color: {theme.accent}" href="settings">Update settings…</a>')
+
+    def _changed(self, state):
+        view = check_button_view(state, self.updater.version, self.updater.auto_download)
+        self.status.setText(view.text)
+        self.action.setText({"download": "Download", "restart": "Restart to update",
+                             "page": "Open download page"}.get(view.action, ""))
+        self.action.setVisible(view.action is not None)
+        if self.isVisible():
+            self.reanchor()
+
+    def paintEvent(self, event):
+        # Popup windows are translucent under the app's rounded-corner filter.
+        # Paint an opaque surface explicitly so plot content cannot show through.
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QtGui.QColor(active_theme().surface))
+        painter.setPen(QtGui.QPen(theme_color(active_theme().input_border), 1))
+        painter.drawRoundedRect(QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+
+    def reanchor(self):
+        """Keep the popup inside both the host window and its available screen."""
+        window = self.button.window()
+        bounds = QtCore.QRect(window.mapToGlobal(QtCore.QPoint()), window.size())
+        screen = self.button.screen()
+        if screen is not None:
+            bounds = bounds.intersected(screen.availableGeometry())
+        self.setFixedWidth(min(340, max(1, bounds.width() - 12)))
+        self.adjustSize()
+        anchor = self.button.mapToGlobal(QtCore.QPoint(self.button.width(), 0))
+        x = max(bounds.left(), min(anchor.x() - self.width(), bounds.right() - self.width() + 1))
+        y = max(bounds.top(), min(anchor.y() - self.height() - 6, bounds.bottom() - self.height() + 1))
+        self.move(x, y)
+
+    def showEvent(self, event):
+        self._changed(self.updater.state)
+        self.reanchor()
+        super().showEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.DynamicPropertyChange:
+            if bytes(event.propertyName()) == b"upbrpy.resolved_theme":
+                self._style()
+        if self.isVisible():
+            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                point = event.globalPosition().toPoint()
+                button_rect = QtCore.QRect(self.button.mapToGlobal(QtCore.QPoint()), self.button.size())
+                if button_rect.contains(point):
+                    # Consume the press so Qt's popup click replay cannot reopen it.
+                    self.hide()
+                    return True
+                if not self.frameGeometry().contains(point):
+                    self.hide()
+            if watched is self.button.window():
+                if event.type() in {QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Resize}:
+                    self.reanchor()
+                elif event.type() in {QtCore.QEvent.Type.Hide, QtCore.QEvent.Type.Close}:
+                    self.hide()
+        return super().eventFilter(watched, event)
+
+
+class CheckUpdatesButton(QtWidgets.QToolButton):
+    """Always-visible manual update check, using the application updater."""
+
+    def __init__(self, updater, open_settings, parent=None):
+        super().__init__(parent)
+        self.updater = updater
+        self.setObjectName("CheckUpdatesButton")
+        self.setAccessibleName("Check for updates")
+        self.setAutoRaise(True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        # 21 px keeps the status bar at its existing height (the plots keep theirs).
+        self.setIconSize(QtCore.QSize(16, 16))
+        self.setFixedSize(21, 21)
+        self._angle = 0
+        self._rotation_timer = QtCore.QTimer(self)
+        self._rotation_timer.setInterval(40)
+        self._rotation_timer.timeout.connect(self._rotate)
+        self.popover = UpdatePopover(self, open_settings)
+        self.clicked.connect(self._toggle)
+        updater.stateChanged.connect(self._changed)
+        QtWidgets.QApplication.instance().installEventFilter(self)
+        self._changed(updater.state)
+
+    def _toggle(self):
+        if self.popover.isVisible():
+            self.popover.hide()
+            return
+        if self.updater.state.status not in {"checking", "downloading", "installing"}:
+            self.updater.check(manual=True)
+        self.popover.show()
+        self.popover.setFocus()
+
+    def _changed(self, state):
+        view = check_button_view(state, self.updater.version, self.updater.auto_download)
+        self.setProperty("badge", view.badge)
+        self.setProperty("busy", view.busy)
+        animate = bool(self.style().styleHint(QtWidgets.QStyle.StyleHint.SH_Widget_Animate, None, self))
+        if view.busy and animate and self.isVisible():
+            self._rotation_timer.start()
+        else:
+            self._rotation_timer.stop()
+            self._angle = 0
+        self.setToolTip(f"Check for updates · v{self.updater.version} · {view.text}")
+        self.update()
+
+    def _rotate(self):
+        self._angle = (self._angle + 12) % 360
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._changed(self.updater.state)
+
+    def hideEvent(self, event):
+        self._rotation_timer.stop()
+        self.popover.hide()
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QtCore.QEvent.Type.DynamicPropertyChange:
+            if bytes(event.propertyName()) == b"upbrpy.resolved_theme":
+                self.update()
+        if watched is self and event.type() == QtCore.QEvent.Type.StyleChange:
+            self._changed(self.updater.state)
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        theme = active_theme()
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.save()
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(self._angle)
+        painter.setPen(QtGui.QPen(QtGui.QColor(theme.text), 1.7,
+                                 QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap,
+                                 QtCore.Qt.PenJoinStyle.RoundJoin))
+        painter.drawArc(QtCore.QRectF(-6, -6, 12, 12), 60 * 16, 300 * 16)
+        painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(3.5, 2.5),
+                                             QtCore.QPointF(6, 0), QtCore.QPointF(8.5, 2.5)]))
+        painter.restore()
+        if self.property("badge"):
+            painter.setPen(QtGui.QPen(QtGui.QColor(theme.surface), 1.2))
+            painter.setBrush(QtGui.QColor(theme.accent))
+            painter.drawEllipse(QtCore.QPointF(self.width() - 4, 4), 2.6, 2.6)
 
 
 class VersionChip(QtWidgets.QToolButton):

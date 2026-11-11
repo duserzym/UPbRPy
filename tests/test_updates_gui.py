@@ -7,12 +7,12 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from GUI.main_window import MainWindow
 from GUI.studio_window import StudioWindow
 from GUI.theme import apply_theme, build_application
-from GUI.update_widgets import UpdatesDialog, VersionChip
+from GUI.update_widgets import CheckUpdatesButton, UpdatesDialog, VersionChip
 from GUI.updater import Updater
 from GUI.updates import UpdateState
 
@@ -97,7 +97,7 @@ def test_updates_fit_canvas_and_laptop(app, prefs, theme, size):
 
 
 @pytest.mark.parametrize("state,chip_text,status_text", [
-    ("none", "v0.1.0", "You're up to date"),
+    ("none", "Up to date", "You're up to date"),
     ("available", "Update available", "Version 0.2.0 is available"),
     ("downloading", "Downloading 43%", "Downloading 0.2.0, 43%"),
     ("ready", "Update ready, restart", "Version 0.2.0 is ready to install"),
@@ -111,6 +111,8 @@ def test_preview_states_never_use_io(app, prefs, state, chip_text, status_text):
     updater = Updater(preview=state, version="0.1.0", opener=forbidden, runner=forbidden)
     updater.start_scheduler()
     updater.check(manual=True)
+    # Manual preview checks now show a short checking phase before the scenario.
+    QtTest.QTest.qWait(700)
     updater.download()
     updater.install()
     assert not updater._timer.isActive() and not updater._jobs
@@ -237,4 +239,143 @@ def test_standards_check_and_warning_are_independent_of_app_updates(app, prefs, 
         updater._shutdown()
         chip.deleteLater()
         dialog.deleteLater()
+        pump(app)
+
+
+@pytest.mark.parametrize("scenario", ["idle", "none", "available", "ready", "error", "unsupported", "checking", "downloading"])
+def test_manual_preview_outcomes(app, prefs, scenario):
+    updater = Updater(preview=scenario, version="0.1.0", settings=prefs)
+    initial = updater.state
+    updater.check(manual=True)
+    if scenario in {"checking", "downloading"}:
+        assert updater.state is initial
+    else:
+        assert updater.state.status == "checking" and updater.state.manual
+        assert updater._preview_timer.interval() == 600
+        updater.check(manual=True)
+        QtTest.QTest.qWait(700)
+        assert updater.state.status == ("none" if scenario == "idle" else scenario)
+        assert updater.state.info == initial.info
+    updater._shutdown()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("size", [(1512, 982), (1280, 800), (760, 620)])
+def test_check_updates_button_geometry_and_dismissal(app, prefs, theme, size, monkeypatch):
+    apply_theme(app, theme)
+    updater = Updater(preview="available", version="0.1.0", settings=prefs)
+    shell = StudioWindow(theme_mode=theme, reduction_factory=lambda: MainWindow(theme_mode=theme, updater=updater))
+    window = shell.active_reduction
+    button = window.check_updates_button
+    popup = button.popover
+    checks = []
+    monkeypatch.setattr(updater, "check", lambda manual=False: checks.append(manual))
+    try:
+        shell.resize(*size)
+        shell.show()
+        pump(app)
+        assert (shell.width(), shell.height()) == size
+        assert button.objectName() == "CheckUpdatesButton"
+        assert button.accessibleName() == "Check for updates"
+        assert button.toolTip().startswith("Check for updates")
+        assert button.property("badge") is True
+        window.capabilities_badge.setText("Rich input")
+        window.capabilities_badge.show()
+        pump(app)
+        assert button.geometry().left() > window.capabilities_badge.geometry().right()
+        rect = QtCore.QRect(button.mapTo(shell, QtCore.QPoint()), button.size())
+        assert shell.rect().contains(rect)
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+        pump(app)
+        assert checks == [True] and popup.isVisible()
+        assert popup.grab().toImage().pixelColor(8, 40).alpha() == 255
+        assert "Update available: v0.2.0" in popup.status.text()
+        assert not popup.action.isVisible()  # automatic download is on
+        prefs.setValue("updates/auto_download", False)
+        updater.stateChanged.emit(updater.state)
+        assert popup.action.isVisible() and popup.action.text() == "Download"
+        bounds = QtCore.QRect(shell.mapToGlobal(QtCore.QPoint()), shell.size()).intersected(shell.screen().availableGeometry())
+        assert bounds.contains(popup.frameGeometry())
+        assert popup.geometry().bottom() < button.mapToGlobal(QtCore.QPoint()).y()
+        assert button.iconSize() == QtCore.QSize(16, 16)
+        QtTest.QTest.keyClick(popup, QtCore.Qt.Key.Key_Escape)
+        assert not popup.isVisible()
+        button.click()
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+        assert not popup.isVisible() and len(checks) == 2
+        button.click()
+        QtTest.QTest.mouseClick(shell, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(10, 10))
+        assert not popup.isVisible()
+    finally:
+        popup.hide()
+        updater._shutdown()
+        window.has_unsaved_changes = lambda: False
+        shell.close()
+        shell.deleteLater()
+        pump(app)
+        apply_theme(app, "light")
+
+
+def test_check_updates_actions_and_busy_state(app, prefs, monkeypatch):
+    updater = Updater(preview="checking", version="0.1.0", settings=prefs)
+    settings_calls, actions = [], []
+    button = CheckUpdatesButton(updater, lambda: settings_calls.append(True))
+    popup = button.popover
+    monkeypatch.setattr(updater, "check", lambda **kw: pytest.fail("Duplicate check"))
+    monkeypatch.setattr(updater, "download", lambda: actions.append("download"))
+    monkeypatch.setattr(updater, "install", lambda: actions.append("install"))
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: actions.append(url.toString()))
+    button.show()
+    try:
+        button.click()
+        assert popup.status.text() == "Checking for updates…" and button.property("busy")
+        assert button._rotation_timer.isActive()
+        for status, action in [("downloading", None), ("ready", "install"), ("unsupported", "page"), ("available", "download")]:
+            prefs.setValue("updates/auto_download", False)
+            updater._state = UpdateState(status, info={"version": "0.2.0"}, progress=43, total=100)
+            updater.stateChanged.emit(updater.state)
+            if action:
+                popup.action.click()
+            else:
+                assert popup.status.text() == "Downloading v0.2.0… 43%"
+        assert actions == ["install", "https://github.com/duserzym/UPbRPy/releases/latest", "download"]
+        assert not button._rotation_timer.isActive()
+        popup.settings_link.linkActivated.emit("settings")
+        assert settings_calls == [True] and not popup.isVisible()
+        updater._state = UpdateState("none")
+        updater.stateChanged.emit(updater.state)
+        assert not button.property("badge") and not button.property("busy")
+        assert popup.status.text() == "Up to date (v0.1.0)"
+        updater._state = UpdateState("error", message="BASE64 invalid")
+        updater.stateChanged.emit(updater.state)
+        assert popup.status.text() == "Updates are not configured for this build yet."
+        apply_theme(app, "dark")
+        assert "#e7ecf4" in popup.styleSheet()
+    finally:
+        button.close()
+        button.deleteLater()
+        updater._shutdown()
+        pump(app)
+        apply_theme(app, "light")
+
+
+def test_check_updates_reduced_motion(app, prefs):
+    class NoAnimationStyle(QtWidgets.QProxyStyle):
+        def styleHint(self, hint, option=None, widget=None, returnData=None):
+            if hint == QtWidgets.QStyle.StyleHint.SH_Widget_Animate:
+                return 0
+            return super().styleHint(hint, option, widget, returnData)
+
+    updater = Updater(preview="checking", settings=prefs)
+    button = CheckUpdatesButton(updater, lambda: None)
+    style = NoAnimationStyle()
+    button.setStyle(style)
+    button.show()
+    button.click()
+    try:
+        assert button.property("busy") and not button._rotation_timer.isActive()
+        assert button.popover.status.text() == "Checking for updates…"
+    finally:
+        button.close()
+        button.deleteLater()
         pump(app)

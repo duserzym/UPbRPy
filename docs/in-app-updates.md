@@ -43,6 +43,17 @@ behaviour is the same.
 
 ## What the user sees
 
+- **Check for updates button**: a circular-arrow icon at the far right of the
+  status bar in each reduction tab. Clicking checks immediately and opens a
+  small popup above the button with the result, current version, and the same
+  Download / Restart to update / download-page actions as the Updates dialog.
+  Download appears when automatic downloads are off. A dot marks an available
+  update, a ready download, or an update known to a build that cannot replace
+  itself. Checking and downloading animate the arrow when the Qt style permits
+  animation; the popup always reports the operation in text. Escape, an outside
+  click, or another click on the button closes the popup. "Update settings…"
+  opens the existing dialog. Opening during a check or download shows its
+  current progress without starting another check.
 - **Version chip**: a small pill in the bottom-right corner of the plot canvas
   in every reduction tab: `v0.1.0`. It becomes `Update available` or
   `Update ready, restart` with a dot when there is something to do, shows
@@ -82,3 +93,14 @@ notarization and Windows code signing remain separate, as before.)
 - `tests/test_updates_gui.py`: the chip and the dialog render offscreen at
   1440 x 900 and 1280 x 800 in light and dark; with `UPBRPY_SCREENSHOTS=1`
   the test writes `docs/screenshots/studio_updates_*.png`.
+- The button and popup are tested at 1512 x 982, 1280 x 800 and the shell's
+  minimum 760 x 620, in light and dark. `scripts/shot_check_updates.py` writes
+  `check-updates-idle.png` and `check-updates-available.png` (with popup) to
+  `SHOT_DIR`, or `docs/screenshots` by default. It supports
+  `QT_QPA_PLATFORM=offscreen` and uses temporary preferences and no network.
+- `Updater(preview=...)` (or `UPBRPY_UPDATE_PREVIEW`) accepts `idle`, `none`,
+  `available`, `downloading`, `ready`, `error`, `unsupported`, and `checking`.
+  A manual preview check shows checking for about 600 ms, then restores the
+  scenario (`idle` resolves to `none`). `checking` stays busy indefinitely;
+  opening during `downloading` preserves its progress. Preview actions never
+  download or install anything.

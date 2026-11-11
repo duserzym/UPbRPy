@@ -15,6 +15,53 @@ from GUI import updates
 from GUI.updates import UpdateState, transition
 
 
+@pytest.mark.parametrize("raw", ["PUBKEY", "Public key invalid", "bad Base64", "decode failed", "not configured"])
+def test_friendly_update_configuration_errors(raw):
+    assert updates.friendly_update_error(raw) == "Updates are not configured for this build yet."
+
+
+@pytest.mark.parametrize("raw", ["404", "release JSON", "Could not fetch a valid release", "Not Found", "No assets"])
+def test_friendly_update_missing_release(raw):
+    assert updates.friendly_update_error(raw) == "No release has been published yet."
+
+
+@pytest.mark.parametrize("raw", ["error sending request", "DNS", "connect failed", "timed out", "timeout",
+                                 "Offline", "NETWORK", "Failed to fetch", "ENOTFOUND", "URLError"])
+def test_friendly_update_network_errors(raw):
+    assert updates.friendly_update_error(raw) == (
+        "Can't reach the update server. Check your internet connection and try again.")
+
+
+def test_friendly_update_fallback():
+    assert updates.friendly_update_error("  Checksum mismatch  ") == "The update check failed: Checksum mismatch"
+    assert updates.friendly_update_error("x" * 200) == "The update check failed: " + "x" * 117 + "…"
+    assert updates.friendly_update_error("404 public key") == "Updates are not configured for this build yet."
+
+
+@pytest.mark.parametrize("status,text,action,badge,busy", [
+    ("idle", "Check for a new version of Studio.", None, False, False),
+    ("checking", "Checking for updates…", None, False, True),
+    ("none", "Up to date (v0.1.0)", None, False, False),
+    ("available", "Update available: v0.2.0\nCurrent version: v0.1.0", "download", True, False),
+    ("downloading", "Downloading v0.2.0… 43%", None, False, True),
+    ("ready", "v0.2.0 is ready", "restart", True, False),
+    ("installing", "Installing and restarting…", None, False, False),
+    ("error", "No release has been published yet.", None, False, False),
+    ("unsupported", "Update available: v0.2.0\nCurrent version: v0.1.0", "page", True, False),
+])
+def test_check_button_view(status, text, action, badge, busy):
+    state = UpdateState(status, info={"version": "0.2.0"}, message="404", progress=43, total=100)
+    view = updates.check_button_view(state, "0.1.0", auto_download=False)
+    assert (view.text, view.action, view.badge, view.busy) == (text, action, badge, busy)
+
+
+def test_check_button_view_preferences_and_unsupported_reason():
+    assert updates.check_button_view(UpdateState("available"), "0.1.0").action is None
+    view = updates.check_button_view(UpdateState("unsupported", message="Portable build"), "0.1.0")
+    assert (view.text, view.action, view.badge) == ("Portable build", None, False)
+    assert updates.check_button_view(UpdateState("downloading"), "0.1.0").text.endswith("0%")
+
+
 @pytest.mark.parametrize("left,right,expected", [
     ("0.2.0", "0.1.0", 1), ("0.10.0", "0.9.0", 1),
     ("v0.2.0", "0.2.0", 0), ("0.2.0b1", "0.2.0", -1),

@@ -186,7 +186,10 @@ class StudioWindow(QtWidgets.QMainWindow):
         reduction.menuBar().setNativeMenuBar(False)
         reduction.setParent(self.tabs)
         reduction.setWindowFlags(QtCore.Qt.WindowType.Widget)
-        reduction.setMinimumSize(760, 580)
+        # Leave room for the shell's menus and tabs at its 760 x 620 minimum,
+        # so the reduction's status bar (and its Check for updates button)
+        # is not cut off there; larger windows are unaffected.
+        reduction.setMinimumSize(760, 540)
         # Recover the tab bar's height from surrounding space, keeping the
         # existing plot and detector canvas sizes on 1280 x 800 screens.
         reduction.centralWidget().layout().setContentsMargins(10, 0, 10, 0)

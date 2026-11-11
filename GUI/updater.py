@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -241,6 +242,10 @@ class Updater(QtCore.QObject):
         self._closing = False
         self._reason = ""
         self._preview = preview or os.environ.get("UPBRPY_UPDATE_PREVIEW")
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(600)
+        self._preview_timer.timeout.connect(self._preview_checked)
         self._initial_timer = QtCore.QTimer(self)
         self._initial_timer.setSingleShot(True)
         self._initial_timer.setInterval(8000)
@@ -252,13 +257,15 @@ class Updater(QtCore.QObject):
         self._standards_timer.setInterval(self._initial_timer.interval())
         self._standards_timer.timeout.connect(self._scheduled_standards_check)
         if self._preview:
-            if self._preview not in {"none", "available", "downloading", "ready", "error", "unsupported"}:
+            if self._preview not in {"idle", "checking", "none", "available", "downloading", "ready", "error", "unsupported"}:
                 raise ValueError(f"Unknown update preview: {self._preview}")
             info = {"version": "0.2.0", "body": "Publication export, faster canvas",
                     "html_url": DOWNLOAD_PAGE, "tag_name": "v0.2.0", "assets": []}
-            self._state = UpdateState(self._preview, info=info, progress=43, total=100,
+            self._state = UpdateState(self._preview, info=info if self._preview in {
+                "available", "downloading", "ready", "unsupported"} else None, progress=43, total=100,
                                       message=CHECKOUT_REASON if self._preview == "unsupported"
-                                      else "Could not reach GitHub" if self._preview == "error" else "")
+                                      else "Network error reaching GitHub" if self._preview == "error" else "")
+        self._preview_state = self._state
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._shutdown)
@@ -360,9 +367,16 @@ class Updater(QtCore.QObject):
         self.standardsChanged.emit()
 
     def check(self, manual=False):
+        if self._closing:
+            return
         if manual:
             self.check_standards()
-        if self._preview or self._jobs or self._closing:
+        if self._jobs or self.state.status in {"checking", "downloading", "installing"}:
+            return
+        if self._preview:
+            if manual:
+                self._emit(("check_started", True))
+                self._preview_timer.start()
             return
         self._reason = self._support_reason()
         if self._reason and not manual:
@@ -372,6 +386,13 @@ class Updater(QtCore.QObject):
         self._emit(("check_started", manual))
         if self.state is not before:
             self._work("check")
+
+    def _preview_checked(self):
+        outcome = self._preview_state
+        if outcome.status == "idle":
+            outcome = UpdateState("none")
+        self._state = replace(outcome, manual=True)
+        self.stateChanged.emit(self.state)
 
     def download(self):
         if self._preview or self._jobs or self._closing or self.state.status != "available":
@@ -433,6 +454,7 @@ class Updater(QtCore.QObject):
         self._initial_timer.stop()
         self._timer.stop()
         self._standards_timer.stop()
+        self._preview_timer.stop()
         for thread in self._jobs:
             thread.requestInterruption()
             thread.quit()
