@@ -301,3 +301,19 @@ def test_reload_asks_before_discarding_selection_edits(window, app, monkeypatch)
     window.reload_current_directory()
     assert asked and "Reload" in asked[0]
     assert plateau(window, spot) == edited
+
+
+def test_focus_changes_after_a_window_is_deleted_are_ignored(app, monkeypatch, capfd):
+    monkeypatch.setattr(main_window.Updater, "start_scheduler", lambda self: None)
+    window = MainWindow(theme_mode="light")
+    window.show()
+    app.processEvents()
+    window.has_unsaved_changes = lambda: False
+    window.close()
+    window.deleteLater()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    app.processEvents()
+    capfd.readouterr()
+    QtWidgets.QApplication.instance().focusChanged.emit(None, None)
+    app.processEvents()
+    assert "already deleted" not in capfd.readouterr().err

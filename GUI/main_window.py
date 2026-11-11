@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
+import shiboken6
 
 from GUI.icon import (
     build_app_icon,
@@ -5410,6 +5411,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_selection_history_actions(self, *_args) -> None:
         if not hasattr(self, "workflow_step_list") or not hasattr(self, "results_table"):
+            return
+        # QApplication.focusChanged can still reach a window whose actions Qt
+        # is already deleting (window close, app shutdown).
+        if not all(shiboken6.isValid(action) for action in (
+            self, self.undo_selection_action, self.exclude_spot_action, self.results_table,
+        )):
             return
         focus = QtWidgets.QApplication.focusWidget()
         editing = False
