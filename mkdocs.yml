@@ -25,6 +25,7 @@ markdown_extensions:
   - pymdownx.superfences
 exclude_docs: |
   **
+  !/index.html
   !/data-model/
   !/data-model/index.md
   !/data-model/rich-csv.md
