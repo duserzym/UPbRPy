@@ -701,6 +701,10 @@ class _Problem:
         c = self.y - Y
         return np.column_stack([c * self.u, np.zeros_like(self.x)])
 
+    def max_dispersion(self):
+        """Upper bound of the model-3 dispersion (IsoplotR also bounds it)."""
+        return EARTH_AGE_MA if self.dispersion_kind == "age" else 1.0
+
     def residual_variance(self, b):
         return self.sy ** 2 + b * b * self.sx ** 2 - 2.0 * b * self.rho * self.sx * self.sy
 
@@ -720,6 +724,8 @@ class _Problem:
             value = 0.0
             if self.model == 3:
                 w = self.dispersion(theta)
+                if w > self.max_dispersion():
+                    return np.inf
                 J = self.dispersion_jacobian(a, b, theta)
                 if J is None:
                     return np.inf
@@ -1117,6 +1123,9 @@ def fit_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg", mode
             w = problem.dispersion(theta)
             line.dispersion = w
             line.dispersion_units = "Ma" if problem.dispersion_kind == "age" else "207Pb/206Pb"
+            if "logw" in problem.names and w > 0.1 * problem.max_dispersion():
+                notes.append(f"The fitted dispersion ({w:.3g} {line.dispersion_units}) is implausibly large: "
+                             "model 3 does not describe these data; check the analytical uncertainties.")
             if "logw" in problem.names:
                 i = problem.names.index("logw")
                 line.dispersion_sigma = float(w * np.sqrt(theta_cov[i, i])) if theta_cov[i, i] > 0 else float("nan")
@@ -1180,6 +1189,8 @@ def fit_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg", mode
             note = "older than the Earth"
         ages.append(InterceptAge(float(t), float(sigma), sigma_dc, float(X), float(Y),
                                  "lower" if i == 0 else "upper", note))
+    if any(not (item.sigma_ma > 0) for item in ages if item.kind == "lower" and anchor.kind != "age"):
+        notes.append("The intercept uncertainty could not be estimated (flat or degenerate likelihood).")
     if not ages:
         notes.append(f"The line does not meet concordia between 0 and {MAX_AGE_MA:g} Ma.")
     lower = ages[0] if ages else None
