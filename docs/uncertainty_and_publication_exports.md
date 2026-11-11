@@ -14,6 +14,9 @@ and output files. The existing audit workbook remains available by default.
 
 ## Analytical uncertainty
 
+Poisson terms use integrated counts, `Y * dwell`, never the cps value
+itself (see [Counting dwell](data-model/acquisition-model.md#counting-dwell));
+using cps as counts understates sweep errors by `1 / sqrt(dwell)`.
 Raw isotope-ratio errors include Poisson counting statistics and the
 uncertainty of each spot's measured baseline mean. The baseline component is
 shared by all sweeps from that spot, so it is added once to a spot-mean

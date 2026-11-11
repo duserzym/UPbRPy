@@ -344,8 +344,8 @@ def propagate_raw_ratio_uncertaintiess(nom, denom):
     Parameters
     ----------
     nom, denom
-        Integrated numerator and denominator counts. Although the instrument
-        columns are labelled ``cps``, the stored values are integrated counts.
+        Integrated numerator and denominator counts (cps times dwell; Qtegra
+        Y values are count rates, not counts).
 
     Returns
     -------
@@ -390,9 +390,12 @@ def ratio_uncertainty_components(
 ):
     """Return total and baseline-only absolute one-sigma ratio uncertainty.
 
-    The raw numerator supplies its Poisson variance. ``denominator_raw_variance``
-    is normally the raw denominator count, but may be an already-propagated
-    counting variance for Hg-corrected mass 204.
+    ``numerator_raw`` and ``denominator_raw_variance`` are the Poisson
+    variances of the unsubtracted numerator and denominator in the units of
+    the signals squared: for a count rate ``r`` read over ``dwell`` seconds
+    this is ``r / dwell`` (cps squared). Passing the raw values themselves is
+    correct only for integrated counts. The denominator may be an already
+    propagated counting variance, as for Hg-corrected mass 204.
     """
     numerator = np.asarray(numerator, dtype=float)
     denominator = np.asarray(denominator, dtype=float)
@@ -419,6 +422,7 @@ def calc_raw_ratios(
     baseline_subtracted_total_data,
     *,
     region="plateau",
+    dwell_s=None,
 ):
     """Calculate sweep-wise raw isotope ratios in a selected spot region.
 
@@ -434,12 +438,22 @@ def calc_raw_ratios(
     region
         ``"plateau"`` for spot/session calculations or ``"signal"`` for the
         complete depth-profile interval.
+    dwell_s
+        Mapping of channel to integration time in seconds. Signals are count
+        rates; the Poisson variance of a rate ``r`` is ``r / dwell``. When
+        omitted, ``experiment.attrs["counting_dwell"]["dwell_s"]`` (set by
+        the readers) is used. A channel without a dwell is treated as
+        integrated counts (dwell 1 s), the historical behaviour.
 
     Returns
     -------
     pandas.DataFrame
         Sweep-wise ratios, two-sigma counting uncertainties, Hg-corrected
-        ``204Pb``, and time relative to signal start.
+        ``204Pb``, and time relative to signal start. ``206Pb_counts``,
+        ``207Pb_counts`` and ``238U_counts`` are the baseline-subtracted
+        integrated counts (signal times dwell) used for sweep error
+        correlations. ``attrs["counting_dwell_s"]`` records the dwell applied
+        per channel.
 
     ``region='signal'`` returns the inclusive signal-start through signal-end
     interval used to construct a full downhole correction and never applies a
@@ -478,6 +492,10 @@ def calc_raw_ratios(
         "Time",
         "signal_relative_time",
         "206Pb",
+        "207Pb",
+        "206Pb_counts",
+        "207Pb_counts",
+        "238U_counts",
         "204Pb",
         "204Pb_2e",
         "204Pb_counting_2e",
@@ -504,6 +522,16 @@ def calc_raw_ratios(
             "208Pb/232Th",
         )
     )
+    if dwell_s is None:
+        dwell_s = (experiment.attrs.get("counting_dwell") or {}).get("dwell_s") or {}
+    counting_channels = (
+        "202Hg", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U"
+    )
+    dwell = {}
+    for channel in counting_channels:
+        value = dwell_s.get(channel)
+        value = float(value) if value is not None else np.nan
+        dwell[channel] = value if np.isfinite(value) and value > 0 else 1.0
     ratio_frames = []
     skipped_spots = []
     excluded_plateau_records = []
@@ -630,9 +658,14 @@ def calc_raw_ratios(
         raw_selected.index = selected.index
         baseline_variances = {
             channel: baseline_mean_variance(baseline_total[channel])
-            for channel in (
-                "202Hg", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U"
-            )
+            for channel in counting_channels
+        }
+        # Poisson variance of each unsubtracted rate r read for dwell t: r / t.
+        raw_variance = {
+            channel: np.clip(
+                pd.to_numeric(raw_selected[channel], errors="coerce"), 0, None
+            ) / dwell[channel]
+            for channel in counting_channels
         }
         baseline_202hg = baseline_total["202Hg"].mean()
         baseline_204 = baseline_total["204Hg"].mean()
@@ -641,10 +674,9 @@ def calc_raw_ratios(
             hg_204_scale = baseline_204 / baseline_202hg
             pb_204 = selected["204Hg"] - selected["202Hg"] * hg_204_scale
             raw_202 = pd.to_numeric(raw_selected["202Hg"], errors="coerce")
-            raw_204 = pd.to_numeric(raw_selected["204Hg"], errors="coerce")
             pb_204_counting_variance = (
-                np.clip(raw_204, 0, None)
-                + hg_204_scale**2 * np.clip(raw_202, 0, None)
+                raw_variance["204Hg"]
+                + hg_204_scale**2 * raw_variance["202Hg"]
             )
             # Since corrected mass 204 equals raw204 - k*raw202, propagate
             # uncertainty in both baseline means used to estimate k.
@@ -659,33 +691,37 @@ def calc_raw_ratios(
             )
             ratio_64 = selected["206Pb"] / pb_204
             ratio_64_1e, ratio_64_baseline_1e = ratio_uncertainty_components(
-                selected["206Pb"], pb_204, raw_selected["206Pb"],
+                selected["206Pb"], pb_204, raw_variance["206Pb"],
                 pb_204_counting_variance, baseline_variances["206Pb"],
                 pb_204_baseline_variance,
             )
             ratio_68pb = selected["206Pb"] / selected["208Pb"]
             ratio_68pb_1e, ratio_68pb_baseline_1e = ratio_uncertainty_components(
-                selected["206Pb"], selected["208Pb"], raw_selected["206Pb"],
-                raw_selected["208Pb"], baseline_variances["206Pb"],
+                selected["206Pb"], selected["208Pb"], raw_variance["206Pb"],
+                raw_variance["208Pb"], baseline_variances["206Pb"],
                 baseline_variances["208Pb"],
             )
             ratio_82 = selected["208Pb"] / selected["232Th"]
             ratio_68 = selected["206Pb"] / selected["238U"]
             ratio_76 = selected["207Pb"] / selected["206Pb"]
             ratio_82_1e, ratio_82_baseline_1e = ratio_uncertainty_components(
-                selected["208Pb"], selected["232Th"], raw_selected["208Pb"],
-                raw_selected["232Th"], baseline_variances["208Pb"],
+                selected["208Pb"], selected["232Th"], raw_variance["208Pb"],
+                raw_variance["232Th"], baseline_variances["208Pb"],
                 baseline_variances["232Th"],
             )
             ratio_68_1e, ratio_68_baseline_1e = ratio_uncertainty_components(
-                selected["206Pb"], selected["238U"], raw_selected["206Pb"],
-                raw_selected["238U"], baseline_variances["206Pb"],
+                selected["206Pb"], selected["238U"], raw_variance["206Pb"],
+                raw_variance["238U"], baseline_variances["206Pb"],
                 baseline_variances["238U"],
             )
             ratio_76_1e, ratio_76_baseline_1e = ratio_uncertainty_components(
-                selected["207Pb"], selected["206Pb"], raw_selected["207Pb"],
-                raw_selected["206Pb"], baseline_variances["207Pb"],
+                selected["207Pb"], selected["206Pb"], raw_variance["207Pb"],
+                raw_variance["206Pb"], baseline_variances["207Pb"],
                 baseline_variances["206Pb"],
+            )
+        for channel in ("206Pb", "207Pb", "238U"):
+            selected[channel + "_counts"] = (
+                pd.to_numeric(selected[channel], errors="coerce") * dwell[channel]
             )
         selected["204Pb"] = pb_204.where(np.isfinite(pb_204), np.nan)
         selected["204Pb_2e"] = (2 * pb_204_1s).where(
@@ -738,6 +774,7 @@ def calc_raw_ratios(
     )
     result.attrs["plateau_filter_excluded_count"] = len(excluded_plateau_records)
     result.attrs["plateau_filters"] = pd.DataFrame(applied_plateau_filters)
+    result.attrs["counting_dwell_s"] = dict(dwell)
     return result
 
 __all__ = [

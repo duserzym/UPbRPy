@@ -128,6 +128,39 @@ Spot numbers always use a trailing underscore integer, independently of `sep`.
 `software`, `machine`, `acquisition_summary`, and `warnings`. It does not include every session
 field: threshold and unrounded clock offset remain on QtegraSession.
 
+## Counting dwell
+
+!!! warning "Do not use cps as counts"
+    A sweep reading of `Y` cps over a dwell of `t` s is `Y * t` detected
+    ions, with relative Poisson error `1 / sqrt(Y * t)`. Using `Y` as its own
+    variance is correct only for `t = 1` s. For the Apatite_10Nov26 session
+    (Pb 75 ms, U 25 ms) it made sweep errors 3.65x too small for
+    207Pb/206Pb: the robust spread of sweep residuals in units of their
+    stated 1s fell from 3.4-4.1 to 1.0-1.2 when the dwell was included
+    (238U/206Pb: 5.3-9.8 to 1.4-2.4). UPbRPy before 2026-11-11 had this error.
+    Counting statistics remain a lower bound; 206Pb/238U sweeps still show
+    non-Poisson excess scatter.
+
+Y is a count rate (cps). Poisson uncertainties need integrated counts,
+`counts = Y * dwell`, so the Poisson variance of one reading is `Y / dwell`
+in cps squared. `UPbRPy.qtegra.counting_dwell(session)` returns, per
+channel, `(dwell_s, source)`; `experiment_from_session` stores the two parts
+as `experiment.attrs["counting_dwell"]["dwell_s"]` and `["source"]`.
+
+| Source | Used when | Value |
+| --- | --- | --- |
+| `recorded` | Any acquisition records a dwell (per-spot or merged input) | Median recorded dwell, s |
+| `count_quantization` | No recorded dwell (Rich input); low pulse-counting values are quantized | `1 / step`, where `step` is the cps value of one count, recovered from the gaps between the lowest distinct Y values of all acquisitions and checked to make at least 98 % of values up to 20 steps integral within 0.05 counts |
+| `channel_timing` | Y is not quantized (analog-only channels) and Time has one column per channel | Median time from this channel's reading to the next; includes settling time, so it is an upper bound on the dwell |
+| `None` | None of the above | `None`; consumers then treat Y as counts |
+
+On the zircon fixture, `count_quantization` on the Rich file reproduces the
+recorded per-spot dwell of every quantized channel to 0.1 %.
+`calc_raw_ratios` and `calc_concentration_depth_profile` take a `dwell_s`
+mapping; the pipeline passes `counting_dwell["dwell_s"]`. A channel without a dwell is
+treated as integrated counts (dwell 1 s), which understates Poisson errors by
+`1 / sqrt(dwell)` for real cps data.
+
 ## Acquisition summary
 
 `experiment.attrs["qtegra"]["acquisition_summary"]` is a small JSON-safe

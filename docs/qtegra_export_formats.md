@@ -68,6 +68,12 @@ Facts checked on this session:
    and xcal (Qtegra export options), and whether the LabBook file itself can
    be kept with the session; if it can, it is the raw archive and the CSVs are
    its exports.
+5. **Counting statistics need the dwell.** Y is in cps; Poisson errors use
+   `Y * dwell`. Without a recorded dwell (Rich alone) the reader recovers it
+   from the cps value of one pulse count (see "Counting dwell" in
+   `docs/data-model/acquisition-model.md`). Until 2026-11-11 the ratio code
+   treated cps as counts, which made sweep errors `1 / sqrt(dwell)` too
+   small (3.65x at 0.075 s).
 
 ## Contract (one in-memory model, Rich and per-spot readers)
 

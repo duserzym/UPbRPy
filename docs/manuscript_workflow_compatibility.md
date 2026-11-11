@@ -21,7 +21,9 @@ second implementation of the workflow.
 
 ## Intentional uncertainty scope
 
-- Sweep isotope-ratio uncertainty begins with integrated-count Poisson terms.
+- Sweep isotope-ratio uncertainty begins with integrated-count Poisson terms;
+  counts are `Y * dwell`, with the dwell recorded or recovered from count
+  quantization (`UPbRPy.qtegra.counting_dwell`).
 - Spot-mean uncertainty is based on the observed variation of accepted sweeps.
 - The downhole correction curve is systematic within a reduction and is not
   added as independent point-to-point noise.

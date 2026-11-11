@@ -281,9 +281,14 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
 
     Notes
     -----
-    ``*_2e_no_calibration`` contains counting uncertainty only.
+    ``*_2e_no_calibration`` contains counting and baseline uncertainty only.
     ``*_2e_with_calibration`` adds the session residual scatter in quadrature.
     The historical ``*_2e`` columns alias the calibration-inclusive branch.
+    The ``207Pb/235U`` counting uncertainty and the Wetherill and
+    Tera--Wasserburg correlations use the integrated ``206Pb_counts``,
+    ``207Pb_counts`` and ``238U_counts`` from :func:`calc_raw_ratios`; older
+    tables without them fall back to the ``206Pb``, ``207Pb`` and ``238U``
+    signals, taken as counts.
     """
     # Every operation below is row-wise; no per-spot DataFrame split is needed.
     # Evaluating whole columns avoids repeated copies and concatenations while
@@ -359,7 +364,21 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
         * depthpro_ratios[ratio_68_column]
         * common_U238_U235
     )
+    # Integrated counts (rate times dwell) carry the Poisson covariances.
+    # Tables from before the counts columns existed fall back to the signal
+    # columns, which are then taken to be counts.
     count_columns = {'238U', '206Pb', '207Pb'}
+    if {f'{channel}_counts' for channel in count_columns}.issubset(
+        depthpro_ratios.columns
+    ):
+        counts = {
+            channel: depthpro_ratios[f'{channel}_counts']
+            for channel in count_columns
+        }
+    elif count_columns.issubset(depthpro_ratios.columns):
+        counts = {channel: depthpro_ratios[channel] for channel in count_columns}
+    else:
+        counts = None
     relative_76_no = np.abs(
         depthpro_ratios[f'{ratio_76_column}_2e_no_calibration']
         / 2
@@ -370,16 +389,16 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
         / 2
         / depthpro_ratios[ratio_68_column]
     )
-    if count_columns.issubset(depthpro_ratios.columns):
+    if counts is not None:
         with np.errstate(divide='ignore', invalid='ignore'):
             relative_75_no = np.sqrt(
-                1 / depthpro_ratios['207Pb']
-                + 1 / depthpro_ratios['238U']
+                1 / counts['207Pb']
+                + 1 / counts['238U']
             )
         wetherill_rho_measurement = calc_wetherill_err_corr_from_counts(
-            depthpro_ratios['207Pb'],
-            depthpro_ratios['206Pb'],
-            depthpro_ratios['238U'],
+            counts['207Pb'],
+            counts['206Pb'],
+            counts['238U'],
         )
     else:
         # Legacy ratio-only intermediates cannot recover the cancelling 206Pb
@@ -483,11 +502,11 @@ def calc_depth_profile(fractionation_corrected_ratios, session_correction_result
     # denominator.  Fixed fractionation corrections preserve this correlation.
     # Independent session scatter increases the marginal errors without adding
     # covariance, so the inclusive correlation is attenuated accordingly.
-    if count_columns.issubset(depthpro_ratios.columns):
+    if counts is not None:
         tw_rho_measurement = calc_tw_err_corr_from_counts(
-            depthpro_ratios['238U'],
-            depthpro_ratios['206Pb'],
-            depthpro_ratios['207Pb'],
+            counts['238U'],
+            counts['206Pb'],
+            counts['207Pb'],
         )
     else:
         # Legacy intermediate tables may contain ratios without the original
