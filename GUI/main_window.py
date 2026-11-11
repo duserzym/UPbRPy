@@ -7,6 +7,7 @@ from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -174,6 +175,7 @@ class MainWindow(QtWidgets.QMainWindow):
     new_window_requested = QtCore.Signal()
     new_tab_requested = QtCore.Signal()
     next_tab_requested = QtCore.Signal()
+    tab_index_requested = QtCore.Signal(int)
     previous_tab_requested = QtCore.Signal()
     move_to_new_window_requested = QtCore.Signal()
     close_tab_requested = QtCore.Signal()
@@ -217,6 +219,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_redo: list[tuple[dict, dict]] = []
         self._flushing_selection_edits = False
         self._quiet_worker = False
+        self._active_edit_window = "plateau"
+        self._spots_edited_since_write: set[str] = set()
         self.workflow_preset = get_workflow_preset("zircon")
         self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
         self.theme_mode = theme_mode
@@ -355,15 +359,6 @@ class MainWindow(QtWidgets.QMainWindow):
             exit_action.triggered.connect(application.quit)
 
         workflow_menu = self.menuBar().addMenu("Workflow")
-        edit_menu = workflow_menu.addMenu("Edit")
-        self.undo_selection_action = edit_menu.addAction("Undo selection edit")
-        self.undo_selection_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
-        self.undo_selection_action.triggered.connect(self.undo_selection_edit)
-        self.redo_selection_action = edit_menu.addAction("Redo selection edit")
-        self.redo_selection_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
-        self.redo_selection_action.triggered.connect(self.redo_selection_edit)
-        self.undo_selection_action.setEnabled(False)
-        self.redo_selection_action.setEnabled(False)
         mineral_menu = workflow_menu.addMenu("Mineral Preset")
         self.workflow_menu_group = QtGui.QActionGroup(self)
         self.workflow_menu_group.setExclusive(True)
@@ -418,7 +413,19 @@ class MainWindow(QtWidgets.QMainWindow):
         apply_windows_action = workflow_menu.addAction(
             "Recalculate Reduction Stages"
         )
+        apply_windows_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+Return"))
+        apply_windows_action.setToolTip(
+            "Write selection edits and recalculate the completed stages now, without saving."
+        )
         apply_windows_action.triggered.connect(self.apply_current_windows)
+        self._build_selection_menu(workflow_menu.addMenu("Selection Windows"))
+        spot_menu = workflow_menu.addMenu("Spots")
+        self.previous_spot_action = spot_menu.addAction("Previous Spot")
+        self.previous_spot_action.setShortcuts([QtGui.QKeySequence("Ctrl+Up"), QtGui.QKeySequence(",")])
+        self.previous_spot_action.triggered.connect(lambda: self.go_to_adjacent_spot(-1))
+        self.next_spot_action = spot_menu.addAction("Next Spot")
+        self.next_spot_action.setShortcuts([QtGui.QKeySequence("Ctrl+Down"), QtGui.QKeySequence(".")])
+        self.next_spot_action.triggered.connect(lambda: self.go_to_adjacent_spot(1))
 
         calibration_menu = self.menuBar().addMenu("Calibration")
         downhole_menu = calibration_menu.addMenu("Downhole Model")
@@ -449,6 +456,11 @@ class MainWindow(QtWidgets.QMainWindow):
         depth_action = results_menu.addAction("Calculate Depth Profiles")
         depth_action.triggered.connect(self.run_depth_profile_review)
         results_menu.addSeparator()
+        self.exclude_spot_action = results_menu.addAction("Exclude Current Spot from Calculations")
+        self.exclude_spot_action.setCheckable(True)
+        self.exclude_spot_action.setShortcut(QtGui.QKeySequence("Ctrl+E"))
+        self.exclude_spot_action.triggered.connect(self.toggle_current_spot_excluded)
+        results_menu.addSeparator()
         results_bundle_action = results_menu.addAction(
             "Export results…"
         )
@@ -470,6 +482,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         view_menu.addSeparator()
         raw_action = view_menu.addAction("Return to Raw Traces")
+        raw_action.setShortcut(QtGui.QKeySequence("T"))
+        self.raw_traces_action = raw_action
         raw_action.triggered.connect(self.show_raw_traces)
 
         view_menu.addSeparator()
@@ -506,11 +520,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
         window_menu = self.menuBar().addMenu("Window")
         next_tab_action = window_menu.addAction("Next Tab")
-        next_tab_action.setShortcut(QtGui.QKeySequence("Meta+Tab" if sys.platform == "darwin" else "Ctrl+Tab"))
+        next_tab_action.setShortcuts([
+            QtGui.QKeySequence("Meta+Tab" if sys.platform == "darwin" else "Ctrl+Tab"),
+            QtGui.QKeySequence("Ctrl+Shift+]"), QtGui.QKeySequence("Ctrl+}"),
+        ])
         next_tab_action.triggered.connect(self.next_tab_requested.emit)
         previous_tab_action = window_menu.addAction("Previous Tab")
-        previous_tab_action.setShortcut(QtGui.QKeySequence("Meta+Shift+Tab" if sys.platform == "darwin" else "Ctrl+Shift+Tab"))
+        previous_tab_action.setShortcuts([
+            QtGui.QKeySequence("Meta+Shift+Tab" if sys.platform == "darwin" else "Ctrl+Shift+Tab"),
+            QtGui.QKeySequence("Ctrl+Shift+["), QtGui.QKeySequence("Ctrl+{"),
+        ])
         previous_tab_action.triggered.connect(self.previous_tab_requested.emit)
+        go_to_tab_menu = window_menu.addMenu("Go to Tab")
+        for number in range(1, 10):
+            label = "Last Tab" if number == 9 else f"Tab {number}"
+            tab_action = go_to_tab_menu.addAction(label)
+            tab_action.setShortcut(QtGui.QKeySequence(f"Ctrl+{number}"))
+            tab_action.triggered.connect(
+                lambda _checked=False, index=(-1 if number == 9 else number - 1):
+                self.tab_index_requested.emit(index)
+            )
         self.move_tab_action = window_menu.addAction("Move Tab to New Window")
         self.move_tab_action.setEnabled(False)
         self.move_tab_action.triggered.connect(self.move_to_new_window_requested.emit)
@@ -529,10 +558,231 @@ class MainWindow(QtWidgets.QMainWindow):
         help_menu = self.menuBar().addMenu("Help")
         updates_action = help_menu.addAction("Check for updates")
         updates_action.triggered.connect(lambda: self.version_chip.open_dialog(manual=True))
+        shortcuts_action = help_menu.addAction("Keyboard Shortcuts")
+        shortcuts_action.setShortcut(QtGui.QKeySequence("Ctrl+/"))
+        shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         guide_action = help_menu.addAction("Reduction Workflow Guide")
         guide_action.triggered.connect(self.show_pipeline_guide)
         about_action = help_menu.addAction("About UPbRPy Studio")
         about_action.triggered.connect(self.show_about_dialog)
+
+    def _build_selection_menu(self, menu: QtWidgets.QMenu) -> None:
+        """Keyboard editing of the current spot's selection windows."""
+        def add(text, sequences, slot, tip):
+            action = menu.addAction(text)
+            action.setShortcuts([QtGui.QKeySequence(sequence) for sequence in sequences])
+            action.setToolTip(tip)
+            action.triggered.connect(slot)
+            action.setEnabled(False)
+            self.selection_edit_actions.append(action)
+            return action
+
+        self.selection_edit_actions: list[QtGui.QAction] = []
+        self.undo_selection_action = add(
+            "Undo Selection Edit", [], self.undo_selection_edit,
+            "Restore the windows before the last drag, nudge, reset or re-pick.")
+        self.undo_selection_action.setShortcuts(
+            QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.Undo))
+        self.redo_selection_action = add(
+            "Redo Selection Edit", [], self.redo_selection_edit,
+            "Reapply the last undone selection edit.")
+        self.redo_selection_action.setShortcuts(
+            QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.Redo))
+        menu.addSeparator()
+        self.edit_baseline_action = add(
+            "Edit Baseline Window", ["B"], lambda: self.set_active_edit_window("baseline"),
+            "Make the baseline the window that the nudge keys move.")
+        self.edit_plateau_action = add(
+            "Edit Plateau Window", ["P"], lambda: self.set_active_edit_window("plateau"),
+            "Make the plateau the window that the nudge keys move.")
+        for action in (self.edit_baseline_action, self.edit_plateau_action):
+            action.setCheckable(True)
+        self.edit_plateau_action.setChecked(True)
+        add("Move Window Start Earlier", ["Alt+Left"], lambda: self.nudge_selection_edge("start", -1),
+            "Move the start of the active window one sweep earlier.")
+        add("Move Window Start Later", ["Alt+Right"], lambda: self.nudge_selection_edge("start", 1),
+            "Move the start of the active window one sweep later.")
+        add("Move Window End Earlier", ["Alt+Shift+Left"], lambda: self.nudge_selection_edge("end", -1),
+            "Move the end of the active window one sweep earlier.")
+        add("Move Window End Later", ["Alt+Shift+Right"], lambda: self.nudge_selection_edge("end", 1),
+            "Move the end of the active window one sweep later.")
+        menu.addSeparator()
+        self.reset_spot_action = add(
+            "Reset Current Spot", ["R"], self.run_autopick_current_spot,
+            "Re-pick the current spot with the auto-pick settings (undo with the Undo key).")
+        self.repick_all_action = add(
+            "Re-pick All Spots", ["Ctrl+Shift+R"], self.run_autopick_all_spots,
+            "Re-pick every spot with the auto-pick settings (one undo step).")
+
+    def go_to_adjacent_spot(self, step: int) -> None:
+        """Select the previous or next analysis in the spot list."""
+        if not self.session.loaded:
+            return
+        leaves = []
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.spot_list)
+        while iterator.value() is not None:
+            item = iterator.value()
+            if item.childCount() == 0 and not item.isHidden():
+                parent = item.parent()
+                while parent is not None and not parent.isHidden():
+                    parent = parent.parent()
+                if parent is None:
+                    leaves.append(item)
+            iterator += 1
+        if not leaves:
+            return
+        current = self.spot_list.currentItem()
+        index = leaves.index(current) if current in leaves else (-1 if step > 0 else len(leaves))
+        target = index + step
+        if not 0 <= target < len(leaves):
+            self.statusBar().showMessage("This is the last spot." if step > 0 else "This is the first spot.")
+            return
+        self.spot_list.setCurrentItem(leaves[target])
+        self.spot_list.scrollToItem(leaves[target])
+
+    def set_active_edit_window(self, region_name: str) -> None:
+        """Choose which window the keyboard nudges move."""
+        self._active_edit_window = region_name
+        self.edit_baseline_action.setChecked(region_name == "baseline")
+        self.edit_plateau_action.setChecked(region_name == "plateau")
+        start = self._shortcut_text(["Alt+Left"]) + " / " + self._shortcut_text(["Alt+Right"])
+        end = self._shortcut_text(["Alt+Shift+Left"]) + " / " + self._shortcut_text(["Alt+Shift+Right"])
+        self.statusBar().showMessage(
+            f"Editing the {region_name} window: {start} moves its start, {end} its end."
+        )
+
+    def nudge_selection_edge(self, edge: str, step: int) -> None:
+        """Move one edge of the active window by whole sweeps."""
+        if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
+            return
+        spot = self.current_spot_name()
+        if not spot:
+            return
+        name = self._active_edit_window
+        bounds = self._selection_regions(spot).get(name)
+        if bounds is None:
+            return
+        times = get_spot_data(self.session, spot)["Time"].to_numpy(dtype=float)
+        times = np.sort(times[np.isfinite(times)])
+        if times.size < 2:
+            return
+        position = 0 if edge == "start" else 1
+        index = int(np.argmin(np.abs(times - bounds[position])))
+        index = min(max(index + step, 0), times.size - 1)
+        moved = list(bounds)
+        moved[position] = float(times[index])
+        if moved[0] >= moved[1] or tuple(moved) == tuple(bounds):
+            return
+        self.on_plot_region_changed(name, (moved[0], moved[1]))
+        self.refresh_view()
+
+    def toggle_current_spot_excluded(self) -> None:
+        """Exclude the current spot from calculations, or include it again."""
+        spot = self.current_spot_name()
+        if not self.session.loaded or not spot:
+            return
+        excluded = spot not in self.results_table.excluded_spots
+        self.results_table.set_spot_excluded({spot}, excluded)
+        self.exclude_spot_action.setChecked(excluded)
+        self.update_project_window_title()
+        self.statusBar().showMessage(
+            f"{spot} {'excluded from' if excluded else 'included in'} calculations."
+        )
+
+    @staticmethod
+    def _shortcut_text(sequences) -> str:
+        texts = [
+            QtGui.QKeySequence(sequence).toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+            for sequence in sequences
+        ]
+        return ", ".join(text for text in texts if text)
+
+    def keyboard_shortcut_rows(self) -> list[tuple[str, str, str]]:
+        """Return (section, action, keys) for every shortcut in this window."""
+        recorded = getattr(self, "_studio_shortcuts", {})
+        rows: list[tuple[str, str, str]] = []
+        direct = QtCore.Qt.FindChildOption.FindDirectChildrenOnly
+
+        def submenus(widget: QtWidgets.QWidget) -> dict[QtGui.QAction, QtWidgets.QMenu]:
+            # Look submenus up as child widgets. QAction.menu() hands back a
+            # wrapper that can delete the menu when it is released.
+            return {menu.menuAction(): menu for menu in widget.findChildren(QtWidgets.QMenu, options=direct)}
+
+        bar = submenus(self.menuBar())
+        tops = getattr(self, "_studio_menus", None) or self.menuBar().actions()
+        stack = [(bar[top], top.text().replace("&", "")) for top in reversed(tops) if top in bar]
+        while stack:
+            menu, section = stack.pop()
+            children = submenus(menu)
+            nested = []
+            for action in menu.actions():
+                if action in children:
+                    title = children[action].title() if section in {"Workflow", "Window"} else section
+                    nested.append((children[action], title))
+                    continue
+                sequences = action.shortcuts() or recorded.get(action, [])
+                if sequences:
+                    rows.append((section, action.text().replace("&", ""), self._shortcut_text(sequences)))
+            stack.extend(reversed(nested))
+        command = "⌘" if sys.platform == "darwin" else "Ctrl+"
+        rows.extend([
+            ("Spot list", "Previous / next spot", "↑ / ↓"),
+            ("Spot list", "Remove spot from the session", "Delete"),
+            ("Spot list", "Rename folder", "F2"),
+            ("Concordia plots", "Select spots", "Click, Shift-click, " + command + "click"),
+            ("Concordia plots", "Select all shown spots", self._shortcut_text([QtGui.QKeySequence.StandardKey.SelectAll])),
+            ("Concordia plots", "Clear the selection", "Esc"),
+            ("Concordia plots", "Hide selected spots", "H"),
+            ("Concordia plots", "Show all spots", "Shift+H"),
+            ("Concordia plots", "Toggle calculation exclusion of the selection", "E"),
+        ])
+        return rows
+
+    def show_keyboard_shortcuts(self) -> None:
+        """Show every shortcut in one sheet sized for a 14-inch screen."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setObjectName("KeyboardShortcutsSheet")
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        note = QtWidgets.QLabel(
+            "Single-key shortcuts do not fire while you type in a text field. "
+            "Selection-window keys work on steps 1 and 2."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        table = QtWidgets.QTableWidget(0, 2, dialog)
+        table.setObjectName("KeyboardShortcutsTable")
+        table.setHorizontalHeaderLabels(["Action", "Keys"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        section = None
+        bold = table.font()
+        bold.setBold(True)
+        for row_section, text, keys in self.keyboard_shortcut_rows():
+            if row_section != section:
+                section = row_section
+                row = table.rowCount()
+                table.insertRow(row)
+                heading = QtWidgets.QTableWidgetItem(section)
+                heading.setFont(bold)
+                table.setItem(row, 0, heading)
+                table.setSpan(row, 0, 1, 2)
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, QtWidgets.QTableWidgetItem(text))
+            table.setItem(row, 1, QtWidgets.QTableWidgetItem(keys))
+        layout.addWidget(table)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        screen = (self.screen() or QtWidgets.QApplication.primaryScreen()).availableGeometry()
+        dialog.resize(min(640, screen.width() - 80), min(680, screen.height() - 80))
+        self._shortcut_sheet = dialog
+        dialog.open()
 
     def select_workflow_preset(self, workflow_key: str) -> None:
         """Select a mineral workflow from the native menu."""
@@ -1608,7 +1858,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.repick_all_spots_button.setToolTip(
             "Apply the displayed selection method and threshold settings to "
             "every spot, replacing their baseline, plateau, signal-start, "
-            "and signal-end auto-picks."
+            "and signal-end auto-picks. "
+            f"Shortcut {self._shortcut_text(['Ctrl+Shift+R'])}; undo with "
+            f"{self._shortcut_text([QtGui.QKeySequence.StandardKey.Undo])}."
         )
         self.repick_all_spots_button.clicked.connect(
             self.run_autopick_all_spots
@@ -1651,7 +1903,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_project_button = QtWidgets.QPushButton("Save project")
         self.save_project_button.setToolTip(
             "Save a lightweight .upbr file containing source paths, reviewed "
-            "selections, workflow settings, and display choices."
+            "selections, workflow settings, and display choices. Selection "
+            "edits are also saved automatically once the project has a file. "
+            f"Shortcut {self._shortcut_text([QtGui.QKeySequence.StandardKey.Save])}."
         )
         self.save_project_button.clicked.connect(
             lambda _checked=False: self.save_project()
@@ -2179,6 +2433,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.spot_list.customContextMenuRequested.connect(self._on_spot_tree_context_menu)
         self.spot_list.currentItemChanged.connect(self._on_spot_tree_item_changed)
+        self.spot_list.setToolTip(
+            "Analyses in this session. Previous / next spot: "
+            f"{self._shortcut_text(['Ctrl+Up'])} / {self._shortcut_text(['Ctrl+Down'])} "
+            "(or , / . when no text field has focus)."
+        )
         self.spot_list.deleteRequested.connect(self._on_spot_tree_delete)
         self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
         spots_layout.addLayout(spots_toolbar)
@@ -3429,9 +3688,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_action_error("Project save failed", exc)
             return
         self.append_log(f"Saved lightweight project: {written}")
-        self.statusBar().showMessage(f"Project saved to {written}")
+        count = getattr(self, "_last_written_edit_count", 0)
+        if count:
+            noun = "spot" if count == 1 else "spots"
+            self.statusBar().showMessage(f"Applied and saved selection edits for {count} {noun} to {written.name}.")
+        else:
+            self.statusBar().showMessage(f"Project saved to {written.name}.")
 
-    def _write_project(self, target: str | Path, *, sidecar: bool) -> Path:
+    def _write_project(self, target: str | Path, *, sidecar: bool, autosave: bool = False) -> Path:
         """Write the entire project for Save and selection autosave."""
         self.apply_pending_project_edits()
         pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
@@ -3441,6 +3705,11 @@ class MainWindow(QtWidgets.QMainWindow):
             workspace=self.project_workspace_state(),
         )
         if not sidecar:
+            if not autosave:
+                # Count edits since the last explicit save, so Cmd+S reports
+                # them even when an autosave already wrote them.
+                self._last_written_edit_count = len(self._spots_edited_since_write)
+                self._spots_edited_since_write.clear()
             self.project_path = written
             self._saved_project_fingerprint = self.scientific_project_fingerprint()
             recovery = selection_autosave_path(self.session.directory)
@@ -3460,7 +3729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sidecar = self.project_path is None
         target = selection_autosave_path(self.session.directory) if sidecar else self.project_path
         try:
-            written = self._write_project(target, sidecar=sidecar)
+            written = self._write_project(target, sidecar=sidecar, autosave=True)
         except Exception as exc:
             message = f"Selection autosave failed: {exc}"
             self.append_log(message)
@@ -3856,6 +4125,20 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda table: QtCore.QTimer.singleShot(0, lambda: open_dialog(table)))
 
     def reload_current_directory(self) -> None:
+        if not self.session.directory:
+            return
+        if self.session.loaded and (self._selection_undo or self.has_unsaved_changes()):
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Reload source",
+                f"Reload {Path(self.session.directory).name} from the source? Selection "
+                "windows and settings in this tab return to the import defaults. "
+                "Saved project files are not changed.",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
         if self.session.directory:
             self.load_experiment_directory(self.session.directory, primary_channel=self.session.primary_channel, offer_restore=False)
 
@@ -5001,6 +5284,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 if record_history:
                     self._push_selection_history(before, self._selection_snapshot([spot]))
+                self._spots_edited_since_write.add(spot)
                 wrote = True
             if wrote:
                 self._selection_edits_written()
@@ -5020,7 +5304,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_view()
 
     def _sync_selection_history_actions(self, *_args) -> None:
-        if not hasattr(self, "workflow_step_list"):
+        if not hasattr(self, "workflow_step_list") or not hasattr(self, "results_table"):
             return
         focus = QtWidgets.QApplication.focusWidget()
         editing = False
@@ -5030,9 +5314,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 editing = True
                 break
             focus = focus.parentWidget()
-        enabled = self._workflow_step_allows_region_edits() and not editing and self._active_worker is None
-        self.undo_selection_action.setEnabled(enabled and bool(self._selection_undo or self.pending_region_updates))
-        self.redo_selection_action.setEnabled(enabled and bool(self._selection_redo))
+        enabled = (
+            self.session.loaded
+            and self._workflow_step_allows_region_edits()
+            and not editing
+            and (self._active_worker is None or self._quiet_worker)
+        )
+        for action in self.selection_edit_actions:
+            action.setEnabled(bool(enabled))
+        idle = enabled and self._active_worker is None
+        self.undo_selection_action.setEnabled(bool(idle and (self._selection_undo or self.pending_region_updates)))
+        self.redo_selection_action.setEnabled(bool(idle and self._selection_redo))
+        self.reset_spot_action.setEnabled(bool(idle))
+        self.repick_all_action.setEnabled(bool(idle))
+        spot = self.current_spot_name() if self.session.loaded else None
+        self.exclude_spot_action.setEnabled(bool(spot) and not editing)
+        self.exclude_spot_action.setChecked(bool(spot) and spot in self.results_table.excluded_spots)
+        for action in (self.previous_spot_action, self.next_spot_action, self.raw_traces_action):
+            action.setEnabled(bool(self.session.loaded) and not editing)
 
     def _restore_selection_history(self, *, redo: bool) -> None:
         if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
@@ -5717,8 +6016,12 @@ class MainWindow(QtWidgets.QMainWindow):
             label = self._workflow_action_specs()[0][0]
             target = WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]
             tooltip = f"Run '{label}' first to unlock {next_row + 1} {target}"
-        self.step_next_button.setToolTip(tooltip)
-        self.step_back_button.setToolTip("Go to the previous step" if row > 0 else "This is the first step.")
+        next_keys = self._shortcut_text(["Ctrl+]"])
+        back_keys = self._shortcut_text(["Ctrl+["])
+        self.step_next_button.setToolTip(f"{tooltip} ({next_keys})")
+        self.step_back_button.setToolTip(
+            f"Go to the previous step ({back_keys})" if row > 0 else "This is the first step."
+        )
         for button, accent in ((self.step_primary_button, not ready), (self.step_next_button, ready)):
             if button is not None and button.property("accent") != accent:
                 button.setProperty("accent", accent)
@@ -6070,6 +6373,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_action_error("Auto-pick failed", exc)
             return
         self._push_selection_history(before, self._selection_snapshot([spot_name]))
+        self._spots_edited_since_write.add(spot_name)
         self._selection_edits_written()
         self.set_plot_mode("raw", refresh=False)
         method = str(self.session.import_settings.get("selection_method", "threshold"))
@@ -6097,6 +6401,7 @@ class MainWindow(QtWidgets.QMainWindow):
             failures = summary.get("failures", {})
             failure_count = len(failures) if isinstance(failures, dict) else 0
             self._push_selection_history(before, self._selection_snapshot(before))
+            self._spots_edited_since_write.update(before)
             self._selection_edits_written()
             self.set_plot_mode("raw", refresh=False)
             message = (

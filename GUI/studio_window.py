@@ -218,6 +218,7 @@ class StudioWindow(QtWidgets.QMainWindow):
             (reduction.new_window_requested, self.new_window_requested.emit),
             (reduction.next_tab_requested, self.next_tab),
             (reduction.previous_tab_requested, self.previous_tab),
+            (reduction.tab_index_requested, self.select_tab),
             (reduction.close_tab_requested, lambda: self.close_tab(self.tabs.indexOf(reduction))),
             (reduction.move_to_new_window_requested, lambda: self.move_tab_requested.emit(reduction)),
             (reduction.open_project_requested, self.open_project),
@@ -294,6 +295,12 @@ class StudioWindow(QtWidgets.QMainWindow):
     def _update_move_actions(self) -> None:
         for index in range(self.tabs.count()):
             self.tabs.widget(index).move_tab_action.setEnabled(self.tabs.count() > 1)
+
+    def select_tab(self, index: int) -> None:
+        """Show tab ``index``; -1 shows the last tab."""
+        count = self.tabs.count()
+        if count and -1 <= index < count:
+            self.tabs.setCurrentIndex(count - 1 if index < 0 else index)
 
     def next_tab(self) -> None:
         self._cycle_tab(1)

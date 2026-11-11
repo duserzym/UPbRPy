@@ -344,6 +344,48 @@ Screenshots of the steps on the Boise zircon_04Nov26 session (245 spots; a
 time-drift detector calibration at 1280 × 800) are in
 `docs/screenshots/studio_steps_*.png`.
 
+#### Editing selection windows
+
+A dragged baseline, plateau or signal window takes effect when the drag ends:
+it is written to the session about 0.15 s later, and the stages that had
+already been calculated are recalculated in the background (about 4 s for a
+111-spot, 29-channel Rich session) while Studio stays usable. Edits are never
+dropped by moving to another spot, step or tab. A project that has a file is
+saved automatically about 1 s after the last edit; **Ctrl+S** (⌘S) also writes
+any edit that is still waiting and saves. A session opened from a bare Qtegra
+CSV or folder has no project file until the first **Ctrl+S**, which asks once
+where to save; until then edits are kept in a recovery copy in
+`~/UPbRPy/autosave/` (or `$UPBRPY_AUTOSAVE_DIR`), and opening the same source
+again offers to restore them. **Reset current spot**, **Re-pick all spots**
+and every drag or keyboard nudge can be undone.
+
+#### Keyboard shortcuts
+
+**Help → Keyboard Shortcuts** (**Ctrl+/**) lists every shortcut of the active
+tab. Ctrl means ⌘ on macOS. Single keys do not fire while a text field has
+focus; the selection keys work on steps 1 and 2.
+
+| Action | Keys |
+| --- | --- |
+| Save project, including selection edits | Ctrl+S |
+| Recalculate stages now without saving | Ctrl+Shift+Return (Ctrl+Return on step 2) |
+| Previous / next spot | Ctrl+↑ / Ctrl+↓, or `,` / `.` |
+| Previous / next step | Ctrl+[ / Ctrl+] (or Ctrl+← / Ctrl+→) |
+| Run the step's primary action | Ctrl+Return |
+| Edit the baseline / plateau window | B / P |
+| Move the active window's start one sweep earlier / later | Alt+← / Alt+→ (⌥ on macOS) |
+| Move the active window's end one sweep earlier / later | Alt+Shift+← / Alt+Shift+→ |
+| Undo / redo a selection edit | Ctrl+Z / Ctrl+Shift+Z |
+| Reset current spot (re-pick it) | R |
+| Re-pick all spots | Ctrl+Shift+R |
+| Exclude / include the current spot in calculations | Ctrl+E |
+| Return to raw traces | T |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab, or Ctrl+Shift+] / Ctrl+Shift+[ |
+| Go to tab 1–8 / last tab | Ctrl+1 … Ctrl+8 / Ctrl+9 |
+| Concordia plots: hide selection / show all / toggle exclusion / clear selection | H / Shift+H / E / Esc |
+
+On macOS the tab-cycling keys Ctrl+Tab use the Control key, not ⌘.
+
 Side panels collapse on smaller
 monitors and can be restored from the View menu. File, Workflow, Calibration,
 Results, View, and Help menus expose the same operations without depending on
