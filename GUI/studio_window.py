@@ -259,6 +259,9 @@ class StudioWindow(QtWidgets.QMainWindow):
         return reduction
 
     def _activate_tab(self, index: int) -> None:
+        # The previous tab is no longer current when Qt emits currentChanged.
+        for reduction in self._shortcuts:
+            reduction.flush_selection_edits()
         self.menuBar().clear()
         for menu in self._shown_menus:
             menu.dispose()
@@ -324,6 +327,7 @@ class StudioWindow(QtWidgets.QMainWindow):
 
     def take_tab(self, reduction: MainWindow) -> MainWindow:
         """Detach a reduction without closing it or altering its session."""
+        reduction.flush_selection_edits()
         index = self.tabs.indexOf(reduction)
         if index < 0:
             raise ValueError("The reduction does not belong to this window.")

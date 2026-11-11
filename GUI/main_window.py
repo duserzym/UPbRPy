@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 
@@ -46,6 +47,7 @@ from GUI.services import (
     load_standard_archive_from_path,
     load_session,
     project_summary,
+    populate_recalculated_cache,
     reference_material_summary,
     reimport_detector_calibration,
     restore_session_from_project,
@@ -83,6 +85,7 @@ from GUI.updater import Updater
 from GUI.update_widgets import CheckUpdatesButton, VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
 from UPbRPy.io import SELECTION_METHODS, selection_method_label
+from UPbRPy.autosave import selection_autosave_path
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
 from UPbRPy.project import write_reduction_project
@@ -194,7 +197,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._is_populating = False
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
         self._review_flags: dict[str, str] = {}
-        self.pending_region_updates: dict[str, tuple[float, float]] = {}
+        self.pending_region_updates: dict[str, dict[str, tuple[float, float]]] = {}
+        self.selection_edit_debounce_ms = 150
+        self.selection_recompute_debounce_ms = 800
+        self.selection_autosave_debounce_ms = 1000
+        self._selection_edit_timer = QtCore.QTimer(self)
+        self._selection_recompute_timer = QtCore.QTimer(self)
+        self._selection_autosave_timer = QtCore.QTimer(self)
+        for timer, callback in (
+            (self._selection_edit_timer, self._flush_selection_timer),
+            (self._selection_recompute_timer, self._recompute_selection_stages),
+            (self._selection_autosave_timer, self._autosave_selection_edits),
+        ):
+            timer.setSingleShot(True)
+            timer.timeout.connect(callback)
+        self._selection_recompute_stages: set[PipelineStage] = set()
+        self._selection_autosave_pending = False
+        self._selection_undo: list[tuple[dict, dict]] = []
+        self._selection_redo: list[tuple[dict, dict]] = []
+        self._flushing_selection_edits = False
+        self._quiet_worker = False
         self.workflow_preset = get_workflow_preset("zircon")
         self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
         self.theme_mode = theme_mode
@@ -228,6 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_system_theme_updates()
         self.apply_theme_mode(self.theme_mode, persist=False)
         self._show_placeholder_state()
+        QtWidgets.QApplication.instance().focusChanged.connect(self._sync_selection_history_actions)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -332,6 +355,15 @@ class MainWindow(QtWidgets.QMainWindow):
             exit_action.triggered.connect(application.quit)
 
         workflow_menu = self.menuBar().addMenu("Workflow")
+        edit_menu = workflow_menu.addMenu("Edit")
+        self.undo_selection_action = edit_menu.addAction("Undo selection edit")
+        self.undo_selection_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        self.undo_selection_action.triggered.connect(self.undo_selection_edit)
+        self.redo_selection_action = edit_menu.addAction("Redo selection edit")
+        self.redo_selection_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
+        self.redo_selection_action.triggered.connect(self.redo_selection_edit)
+        self.undo_selection_action.setEnabled(False)
+        self.redo_selection_action.setEnabled(False)
         mineral_menu = workflow_menu.addMenu("Mineral Preset")
         self.workflow_menu_group = QtGui.QActionGroup(self)
         self.workflow_menu_group.setExclusive(True)
@@ -384,7 +416,7 @@ class MainWindow(QtWidgets.QMainWindow):
         auto_pick_all_action = workflow_menu.addAction("Auto-pick All Spots")
         auto_pick_all_action.triggered.connect(self.run_autopick_all_spots)
         apply_windows_action = workflow_menu.addAction(
-            "Apply Current Selection Windows"
+            "Recalculate Reduction Stages"
         )
         apply_windows_action.triggered.connect(self.apply_current_windows)
 
@@ -532,7 +564,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def go_to_workflow_step(self, offset: int) -> None:
         """Move by one row when the destination stage is unlocked."""
-        if not hasattr(self, "workflow_step_list") or self._active_worker is not None:
+        if not hasattr(self, "workflow_step_list") or (self._active_worker is not None and not self._quiet_worker):
             return
         self._sync_workflow_step_locks()
         row = self.workflow_step_list.currentRow()
@@ -672,6 +704,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Prevent accidental loss of an imported or edited reduction."""
+        self.flush_selection_edits()
         if self._active_worker is not None:
             QtWidgets.QMessageBox.information(
                 self,
@@ -3289,6 +3322,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_pending_project_edits(self) -> None:
         """Commit visible controls and dragged windows before saving."""
+        self.flush_selection_edits()
+        if self._active_worker is not None:
+            raise RuntimeError(f"Please wait for {self._busy_label.lower()} to finish.")
         concentration_values = self._standard_names(self.concentration_standards_edit)
         if (
             concentration_values
@@ -3299,27 +3335,6 @@ class MainWindow(QtWidgets.QMainWindow):
         secondary_values = self._standard_names(self.secondary_standards_edit)
         if secondary_values != self.session.secondary_standards:
             self.on_secondary_standards_changed()
-        if not self.pending_region_updates:
-            return
-        spot_name = self.current_spot_name()
-        regions = self.trace_plot.current_regions()
-        if not spot_name or not regions:
-            raise ValueError(
-                "The edited selection windows cannot be read from the "
-                "current plot. Apply or discard them before saving."
-            )
-        update_selection_region(
-            self.session,
-            spot_name,
-            baseline=regions.get("baseline"),
-            plateau=regions.get("plateau"),
-            signal=regions.get("signal"),
-        )
-        self.pending_region_updates.clear()
-        self._refresh_workflow_status()
-        self.append_log(
-            f"Applied pending selection edits for {spot_name} before save."
-        )
 
     def choose_project_file(self) -> None:
         """Choose a lightweight project to open in a Studio tab."""
@@ -3352,6 +3367,9 @@ class MainWindow(QtWidgets.QMainWindow):
         background: bool = True,
     ) -> None:
         """Recalculate a saved project in this window."""
+        if not self.flush_selection_edits():
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
         project_file = str(project_file)
         if background:
             self.run_background(
@@ -3387,6 +3405,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save_project(self, project_file: str | Path | None = None) -> None:
         """Save paths and parameters without embedding raw or reduced data."""
+        self.flush_selection_edits()
         if not self._require_loaded():
             return
         if self._active_worker is not None:
@@ -3405,28 +3424,81 @@ class MainWindow(QtWidgets.QMainWindow):
         if target is None:
             return
         try:
-            self.apply_pending_project_edits()
-            pipeline = ensure_shared_pipeline(
-                self.session,
-                self.workflow_preset,
-            )
-            written = write_reduction_project(
-                pipeline,
-                target,
-                resume_stage=(
-                    self.current_workflow_stage()
-                    or PipelineStage.IMPORT
-                ),
-                workspace=self.project_workspace_state(),
-            )
+            written = self._write_project(target, sidecar=False)
         except Exception as exc:
             self._handle_action_error("Project save failed", exc)
             return
-        self.project_path = written
-        self._saved_project_fingerprint = self.scientific_project_fingerprint()
-        self.update_project_window_title()
         self.append_log(f"Saved lightweight project: {written}")
         self.statusBar().showMessage(f"Project saved to {written}")
+
+    def _write_project(self, target: str | Path, *, sidecar: bool) -> Path:
+        """Write the entire project for Save and selection autosave."""
+        self.apply_pending_project_edits()
+        pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
+        written = write_reduction_project(
+            pipeline, target,
+            resume_stage=self.current_workflow_stage() or PipelineStage.IMPORT,
+            workspace=self.project_workspace_state(),
+        )
+        if not sidecar:
+            self.project_path = written
+            self._saved_project_fingerprint = self.scientific_project_fingerprint()
+            recovery = selection_autosave_path(self.session.directory)
+            if recovery.resolve() != written.resolve():
+                recovery.unlink(missing_ok=True)
+        self._selection_autosave_pending = False
+        self._selection_autosave_timer.stop()
+        self.update_project_window_title()
+        return written
+
+    def _autosave_selection_edits(self) -> None:
+        if not self._selection_autosave_pending or self._active_worker is not None:
+            return
+        if self.pending_region_updates:
+            self.flush_selection_edits()
+            return
+        sidecar = self.project_path is None
+        target = selection_autosave_path(self.session.directory) if sidecar else self.project_path
+        try:
+            written = self._write_project(target, sidecar=sidecar)
+        except Exception as exc:
+            message = f"Selection autosave failed: {exc}"
+            self.append_log(message)
+            self.statusBar().showMessage(message)
+            return
+        self.append_log(f"Autosaved selection edits to {written}.")
+
+    def _restore_selection_sidecar(self, directory: str, *, background: bool) -> bool:
+        sidecar = selection_autosave_path(directory)
+        if not sidecar.exists():
+            return False
+        modified = datetime.fromtimestamp(sidecar.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Restore selection edits")
+        dialog.setText(f"Studio kept selection edits for {Path(directory).name} from {modified}. Restore them?")
+        restore = dialog.addButton("Restore", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(QtWidgets.QMessageBox.StandardButton.Discard)
+        dialog.setDefaultButton(restore)
+        choice = dialog.exec()
+        # AcceptRole is also convenient for offscreen tests replacing exec().
+        if dialog.clickedButton() is not restore and choice != QtWidgets.QMessageBox.DialogCode.Accepted:
+            sidecar.unlink(missing_ok=True)
+            return False
+
+        def install(result):
+            self.install_restored_project(result)
+            self.project_path = None
+            self._saved_project_fingerprint = None
+            self.update_project_window_title()
+
+        if background:
+            self.run_background("Restoring selection edits", lambda: restore_session_from_project(sidecar), install)
+        else:
+            try:
+                install(restore_session_from_project(sidecar))
+            except Exception as exc:
+                self._handle_action_error("Selection restore failed", exc)
+        return True
 
     def install_restored_project(self, result: object) -> None:
         """Install a recalculated project and restore its compact UI context."""
@@ -3693,6 +3765,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def choose_notebook_export(self) -> None:
         """Save the current GUI settings and reviewed windows as a notebook."""
+        if not self.flush_selection_edits():
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
         if not self._require_loaded() or self.session.pipeline is None:
             return
         default_name = (
@@ -3726,6 +3801,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def choose_reduction_bundle_export(self) -> None:
         """Prepare one table, then edit publication and audit export choices."""
+        if not self.flush_selection_edits():
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
         if not self._require_loaded() or self.session.pipeline is None:
             return
         pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
@@ -3779,7 +3857,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def reload_current_directory(self) -> None:
         if self.session.directory:
-            self.load_experiment_directory(self.session.directory, primary_channel=self.session.primary_channel)
+            self.load_experiment_directory(self.session.directory, primary_channel=self.session.primary_channel, offer_restore=False)
 
     def load_experiment_directory(
         self,
@@ -3787,8 +3865,19 @@ class MainWindow(QtWidgets.QMainWindow):
         primary_channel: str | None = None,
         *,
         background: bool = True,
+        offer_restore: bool = True,
     ) -> None:
-        """Load an experiment, using a worker for normal interactive use."""
+        """Load an experiment, using a worker for normal interactive use.
+
+        ``offer_restore`` asks whether to restore autosaved selection edits for
+        this source. Reloads of the open session pass False.
+        """
+        if self._active_worker is not None:
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
+        self.flush_selection_edits()
+        if offer_restore and self._restore_selection_sidecar(directory, background=background):
+            return
         inferred_preset = infer_workflow_preset(directory)
         if inferred_preset.key != self.workflow_preset.key:
             self.workflow_preset = inferred_preset
@@ -3835,6 +3924,13 @@ class MainWindow(QtWidgets.QMainWindow):
         project_path: str | Path | None = None,
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
+        for timer in (self._selection_edit_timer, self._selection_recompute_timer, self._selection_autosave_timer):
+            timer.stop()
+        self.pending_region_updates.clear()
+        self._selection_undo.clear()
+        self._selection_redo.clear()
+        self._selection_recompute_stages.clear()
+        self._selection_autosave_pending = False
         self.session = loaded_session
         self.results_table.set_selected_spots(set())
         self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)
@@ -4338,6 +4434,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_workflow_step_changed(self, row: int) -> None:
         if self._is_populating:
             return
+        self.flush_selection_edits()
         self._update_workflow_hint(row)
         self._rebuild_workflow_actions()
         if self.session.loaded and self._workflow_step_allows_region_edits():
@@ -4746,14 +4843,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if channel == self.session.primary_channel:
             return
         self.append_log(f"Reloading with primary channel: {channel}")
-        self.load_experiment_directory(self.session.directory, primary_channel=channel)
+        self.load_experiment_directory(self.session.directory, primary_channel=channel, offer_restore=False)
 
     def on_spot_changed(self, spot_name: str) -> None:
         if self._is_populating:
             return
-        if self.pending_region_updates:
-            self.pending_region_updates.clear()
-            self.append_log("Discarded unapplied window edits while switching spots.")
+        self.flush_selection_edits()
         self.session.selected_spot = spot_name or None
         self._sync_plateau_filter_control()
         self.refresh_view()
@@ -4812,10 +4907,179 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_plot_region_changed(self, region_name: str, bounds: tuple[float, float]) -> None:
         if not self._workflow_step_allows_region_edits():
             return
-        self.pending_region_updates[region_name] = bounds
+        spot_name = self.current_spot_name()
+        if not spot_name:
+            return
+        if region_name in {"signal_start", "signal_end"}:
+            region_name = "signal"
+        if region_name not in {"baseline", "plateau", "signal"}:
+            return
+        edits = self.pending_region_updates.setdefault(spot_name, {})
+        edits[region_name] = tuple(bounds)
+        # The plot can extend its signal edges locally to contain a dragged
+        # plateau. Capture those coupled bounds at drag finish as well.
+        if region_name == "plateau":
+            plotted = self.trace_plot.current_regions()
+            if plotted.get("plateau") == tuple(bounds) and plotted.get("signal") is not None:
+                signal = plotted["signal"]
+                if signal != self._selection_regions(spot_name)["signal"]:
+                    edits["signal"] = signal
+        self._selection_edit_timer.start(self.selection_edit_debounce_ms)
+        self._selection_recompute_timer.stop()
+        self._selection_autosave_timer.stop()
         self.update_project_window_title()
         self._refresh_workflow_status()
-        self.statusBar().showMessage("Selection windows edited. Apply them to update the reduction stages.")
+        self.statusBar().showMessage(f"{region_name.capitalize()} window for {spot_name} updated.")
+
+    def _selection_regions(self, spot_name: str | None) -> dict:
+        regions = get_selection_regions(self.session, spot_name)
+        regions.update(self.pending_region_updates.get(spot_name, {}))
+        return regions
+
+    def _selection_snapshot(self, spots) -> dict:
+        """Capture all six window columns, grouped by spot and interval."""
+        return {spot: get_selection_regions(self.session, spot) for spot in spots}
+
+    def _remember_completed_selection_stages(self) -> None:
+        if self.session.pipeline is not None:
+            self._selection_recompute_stages.update(
+                stage for stage in self.session.pipeline.cache.stages()
+                if stage not in {PipelineStage.IMPORT, PipelineStage.SELECTION, PipelineStage.EXPORT}
+            )
+
+    def _selection_edits_written(self) -> None:
+        self._selection_autosave_pending = True
+        self._selection_recompute_timer.start(self.selection_recompute_debounce_ms)
+        self._selection_autosave_timer.start(self.selection_autosave_debounce_ms)
+        self._refresh_workflow_status()
+
+    def _push_selection_history(self, before: dict, after: dict) -> None:
+        if before != after:
+            self._selection_undo.append((before, after))
+            self._selection_redo.clear()
+        self._sync_selection_history_actions()
+
+    def flush_selection_edits(self, *, record_history: bool = True) -> bool:
+        """Write queued spot windows when the shared worker slot is idle.
+
+        Return False while a worker owns the session; queued bounds remain
+        authoritative for display until that worker finishes.
+        """
+        if self._active_worker is not None:
+            return False
+        if self._flushing_selection_edits or not self.pending_region_updates:
+            return True
+        self._flushing_selection_edits = True
+        self._selection_edit_timer.stop()
+        queued, self.pending_region_updates = self.pending_region_updates, {}
+        rejected = False
+        wrote = False
+        try:
+            for spot, edits in queued.items():
+                before = self._selection_snapshot([spot])
+                completed = set(self.session.pipeline.cache.stages()) if self.session.pipeline else set()
+                try:
+                    update_selection_region(self.session, spot, **edits)
+                except (ValueError, KeyError):
+                    # Try independent windows if the complete proposal is
+                    # invalid, so one bad interval cannot discard good edits.
+                    accepted = False
+                    for name, bounds in edits.items():
+                        try:
+                            update_selection_region(self.session, spot, **{name: bounds})
+                        except (ValueError, KeyError) as error:
+                            message = f"{name.capitalize()} selection update for {spot} rejected: {error}"
+                            self.statusBar().showMessage(message)
+                            self.append_log(message)
+                            rejected = True
+                        else:
+                            accepted = True
+                    if not accepted:
+                        continue
+                self._selection_recompute_stages.update(
+                    completed - {PipelineStage.IMPORT, PipelineStage.SELECTION, PipelineStage.EXPORT}
+                )
+                if record_history:
+                    self._push_selection_history(before, self._selection_snapshot([spot]))
+                wrote = True
+            if wrote:
+                self._selection_edits_written()
+        finally:
+            self._flushing_selection_edits = False
+        self._refresh_workflow_status()
+        if rejected:
+            if self._selection_recompute_stages:
+                self._selection_recompute_timer.start(self.selection_recompute_debounce_ms)
+            if self._selection_autosave_pending:
+                self._selection_autosave_timer.start(self.selection_autosave_debounce_ms)
+            self.refresh_view()
+        return True
+
+    def _flush_selection_timer(self) -> None:
+        if self.flush_selection_edits():
+            self.refresh_view()
+
+    def _sync_selection_history_actions(self, *_args) -> None:
+        if not hasattr(self, "workflow_step_list"):
+            return
+        focus = QtWidgets.QApplication.focusWidget()
+        editing = False
+        while focus is not None:
+            if isinstance(focus, (QtWidgets.QLineEdit, QtWidgets.QTextEdit,
+                                  QtWidgets.QPlainTextEdit, QtWidgets.QAbstractSpinBox)):
+                editing = True
+                break
+            focus = focus.parentWidget()
+        enabled = self._workflow_step_allows_region_edits() and not editing and self._active_worker is None
+        self.undo_selection_action.setEnabled(enabled and bool(self._selection_undo or self.pending_region_updates))
+        self.redo_selection_action.setEnabled(enabled and bool(self._selection_redo))
+
+    def _restore_selection_history(self, *, redo: bool) -> None:
+        if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
+            return
+        self.flush_selection_edits()
+        source = self._selection_redo if redo else self._selection_undo
+        destination = self._selection_undo if redo else self._selection_redo
+        if not source:
+            return
+        entry = source.pop()
+        values = entry[1] if redo else entry[0]
+        self.pending_region_updates.update({spot: dict(regions) for spot, regions in values.items()})
+        self.flush_selection_edits(record_history=False)
+        destination.append(entry)
+        spot = next(iter(values))
+        self.session.selected_spot = spot
+        self._select_spot_in_tree(spot)
+        self.refresh_view()
+        self._sync_selection_history_actions()
+
+    def undo_selection_edit(self) -> None:
+        """Restore the windows preceding the last selection operation."""
+        self._restore_selection_history(redo=False)
+
+    def redo_selection_edit(self) -> None:
+        """Restore the windows following an undone selection operation."""
+        self._restore_selection_history(redo=True)
+
+    def _recompute_selection_stages(self, *, quiet: bool = True) -> None:
+        if self._active_worker is not None or not self.session.loaded:
+            return
+        self.flush_selection_edits()
+        stages = set(self._selection_recompute_stages)
+        self._selection_recompute_timer.stop()
+        if not stages:
+            self._refresh_workflow_status()
+            return
+
+        def show_result(_result):
+            self._selection_recompute_stages.difference_update(stages)
+
+        self.run_background(
+            "Updating reduction stages",
+            lambda: populate_recalculated_cache(self.session, self.workflow_preset, stages),
+            show_result,
+            quiet=quiet,
+        )
 
     def checked_channels(self) -> list[str]:
         # Primary source: isotope grid (if it has any channels loaded)
@@ -5130,6 +5394,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_plot_mode("raw", refresh=True)
 
     def refresh_view(self) -> None:
+        self.flush_selection_edits()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
             self.trace_plot.show_preview(self.selection_colors)
@@ -5161,7 +5426,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session.visible_channels = visible_channels
 
         spot_data = get_spot_data(self.session, selected_spot)
-        regions = get_selection_regions(self.session, selected_spot)
+        regions = self._selection_regions(selected_spot)
         editable_regions = self._workflow_step_allows_region_edits()
 
         try:
@@ -5335,7 +5600,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if self.session.plot_mode == "baseline_subtracted":
-            baseline_subtracted = ensure_baseline_subtracted(self.session)
+            baseline_subtracted = self._trace_stage_frame(
+                "baseline_subtracted_total_data", lambda: ensure_baseline_subtracted(self.session),
+            )
             channels = [channel for channel in visible_channels if channel in baseline_subtracted.columns]
             self.trace_plot.show_spot(
                 baseline_subtracted,
@@ -5354,13 +5621,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if self.session.plot_mode == "normalized_plateau":
-            normalized = ensure_normalized_plateau(self.session, self.workflow_preset)
+            normalized = self._trace_stage_frame(
+                "normalized_plateau_data", lambda: ensure_normalized_plateau(self.session, self.workflow_preset),
+            )
             channels = [channel for channel in visible_channels if channel in normalized.columns]
             self.trace_plot.show_series(normalized, channels, self.channel_colors, y_label="Normalized plateau cps", line_style="scatter")
             return
 
         if self.session.plot_mode == "raw_ratios":
-            ratios = ensure_raw_ratios(self.session)
+            ratios = self._trace_stage_frame(
+                "plateau_data_with_raw_ratios", lambda: ensure_raw_ratios(self.session),
+            )
             self.trace_plot.show_series(ratios, [ratio_name], {ratio_name: RATIO_COLORS.get(ratio_name, "#1f63cf")}, y_label=ratio_name, line_style="scatter")
             return
 
@@ -5377,6 +5648,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_spot
             ),
         )
+
+    def _trace_stage_frame(self, key: str, calculate: Callable[[], pd.DataFrame]) -> pd.DataFrame:
+        """Leave pending selection calculations to the shared worker slot."""
+        if self._active_worker is not None or self._selection_recompute_stages:
+            return self.session.reduction_cache.get(key, pd.DataFrame())
+        return calculate()
 
     def _apply_channel_checks(self, channels: list[str]) -> None:
         self._is_populating = True
@@ -5429,9 +5706,9 @@ class MainWindow(QtWidgets.QMainWindow):
         has_next = 0 <= row and next_row < len(unlocked)
         ready = has_next and unlocked[next_row]
         self.step_back_button.setEnabled(row > 0)
-        self.step_back_action.setEnabled(row > 0 and self._active_worker is None)
+        self.step_back_action.setEnabled(row > 0 and (self._active_worker is None or self._quiet_worker))
         self.step_next_button.setEnabled(ready)
-        self.step_next_action.setEnabled(ready and self._active_worker is None)
+        self.step_next_action.setEnabled(ready and (self._active_worker is None or self._quiet_worker))
         if not has_next:
             tooltip = "This is the last step."
         elif ready:
@@ -5467,7 +5744,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
         if stage == PipelineStage.SELECTION:
             return [
-                ("Apply baseline and plateau edits", self.apply_current_windows, True),
+                ("Recalculate reduction stages", self.apply_current_windows, True),
                 ("Reset current spot", self.run_autopick_current_spot, False),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
@@ -5518,6 +5795,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _refresh_workflow_status(self) -> None:
+        self._sync_selection_history_actions()
         self.update_project_window_title()
         self._sync_workflow_step_locks()
         if not self.session.loaded:
@@ -5528,7 +5806,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_step_actions_tooltips()
             return
         spot_name = self.current_spot_name()
-        regions = get_selection_regions(self.session, spot_name)
+        regions = self._selection_regions(spot_name)
         durations = [
             f"{label} {bounds[1] - bounds[0]:.1f} s"
             for key, label in (("plateau", "Plateau"), ("signal", "Signal"))
@@ -5543,8 +5821,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Baseline {quality['baseline_points']} pts",
             f"Plateau {quality['plateau_points']} pts",
         ]
-        if self.pending_region_updates:
-            parts.append("edited windows pending apply")
+        if self._quiet_worker:
+            parts.append("Updating reduction stages…")
         if quality["warnings"]:
             parts.append("Selection checker: " + "; ".join(quality["warnings"]))
         else:
@@ -5569,6 +5847,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.session.loaded and self.session.pipeline is not None
             else set()
         )
+        if self.pending_region_updates:
+            completed.intersection_update({PipelineStage.IMPORT, PipelineStage.SELECTION})
         app = QtWidgets.QApplication.instance()
         theme = active_theme(app) if app else None
         muted_color = QtGui.QColor(theme.muted) if theme else QtGui.QColor("#888888")
@@ -5679,6 +5959,8 @@ class MainWindow(QtWidgets.QMainWindow):
         label: str,
         calculation: Callable[[], object],
         on_success: Callable[[object], None],
+        *,
+        quiet: bool = False,
     ) -> None:
         """Run one scientific task without blocking Qt event processing."""
         if self._active_worker is not None:
@@ -5687,25 +5969,29 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
+        self.flush_selection_edits()
         worker = FunctionWorker(calculation)
+        self._quiet_worker = quiet
         self._active_worker = worker
         self._busy_label = label
         self.busy_progress.setVisible(True)
-        self.step_actions_block.setEnabled(False)
-        self.step_back_action.setEnabled(False)
-        self.step_next_action.setEnabled(False)
-        self.workflow_step_list.setEnabled(False)
-        self.fit_card.setEnabled(False)
-        self.standards_card.setEnabled(False)
-        self.detector_calibration_panel.setEnabled(False)
-        self.decision_card.setEnabled(False)
-        self.primary_channel_combo.setEnabled(False)
-        self.workflow_combo.setEnabled(False)
-        self.selection_method_combo.setEnabled(False)
-        self.repick_all_spots_button.setEnabled(False)
-        self.save_project_button.setEnabled(False)
-        self.export_results_button.setEnabled(False)
+        if not quiet:
+            self.step_actions_block.setEnabled(False)
+            self.step_back_action.setEnabled(False)
+            self.step_next_action.setEnabled(False)
+            self.workflow_step_list.setEnabled(False)
+            self.fit_card.setEnabled(False)
+            self.standards_card.setEnabled(False)
+            self.detector_calibration_panel.setEnabled(False)
+            self.decision_card.setEnabled(False)
+            self.primary_channel_combo.setEnabled(False)
+            self.workflow_combo.setEnabled(False)
+            self.selection_method_combo.setEnabled(False)
+            self.repick_all_spots_button.setEnabled(False)
+            self.save_project_button.setEnabled(False)
+            self.export_results_button.setEnabled(False)
         self.statusBar().showMessage(f"{label}…")
+        self._sync_selection_history_actions()
 
         succeeded = False
 
@@ -5718,12 +6004,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._handle_action_error(f"{label} display failed", exc)
 
         def report_failure(message: str, details: str) -> None:
-            QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
+            if not quiet:
+                QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
             self.append_log(f"{label} failed: {message}")
             self.append_log(details.rstrip())
 
         def finish() -> None:
             self._active_worker = None
+            self._quiet_worker = False
             self._busy_label = ""
             self.busy_progress.setVisible(False)
             self.step_actions_block.setEnabled(True)
@@ -5740,7 +6028,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.repick_all_spots_button.setEnabled(self.session.loaded)
             self.save_project_button.setEnabled(self.session.loaded)
             self.export_results_button.setEnabled(self.session.loaded)
+            had_queued_edits = bool(self.pending_region_updates)
+            self.flush_selection_edits()
+            if quiet or label == "Updating reduction stages":
+                self.refresh_view()
             self._refresh_workflow_status()
+            if self._selection_recompute_stages and (succeeded or had_queued_edits) and not self._selection_recompute_timer.isActive():
+                self._selection_recompute_timer.start(self.selection_recompute_debounce_ms)
+            if self._selection_autosave_pending and not self._selection_autosave_timer.isActive():
+                self._autosave_selection_edits()
             if not succeeded:
                 self.statusBar().showMessage(f"{label} failed")
             elif self.statusBar().currentMessage() in ("", f"{label}…") or self.statusBar().currentMessage().startswith("Please wait for "):
@@ -5758,17 +6054,23 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def run_autopick_current_spot(self) -> None:
+        if not self.flush_selection_edits():
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
         if not self._require_loaded():
             return
         spot_name = self.current_spot_name()
         if not spot_name:
             return
+        before = self._selection_snapshot([spot_name])
+        self._remember_completed_selection_stages()
         try:
             autopick_selection_regions(self.session, spot_name)
         except Exception as exc:
             self._handle_action_error("Auto-pick failed", exc)
             return
-        self.pending_region_updates.clear()
+        self._push_selection_history(before, self._selection_snapshot([spot_name]))
+        self._selection_edits_written()
         self.set_plot_mode("raw", refresh=False)
         method = str(self.session.import_settings.get("selection_method", "threshold"))
         self.append_log(f"Re-applied {selection_method_label(method)} auto-pick for {spot_name}.")
@@ -5776,8 +6078,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def run_autopick_all_spots(self) -> None:
         """Apply the current selection settings to every imported spot."""
+        if not self.flush_selection_edits():
+            self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+            return
         if not self._require_loaded():
             return
+        before = self._selection_snapshot(self.session.spot_names)
+        self._remember_completed_selection_stages()
         method = str(
             self.session.import_settings.get(
                 "selection_method", "threshold"
@@ -5789,7 +6096,8 @@ class MainWindow(QtWidgets.QMainWindow):
             selected_count = int(summary.get("selected_count", 0))
             failures = summary.get("failures", {})
             failure_count = len(failures) if isinstance(failures, dict) else 0
-            self.pending_region_updates.clear()
+            self._push_selection_history(before, self._selection_snapshot(before))
+            self._selection_edits_written()
             self.set_plot_mode("raw", refresh=False)
             message = (
                 f"Re-picked {selected_count} spots with "
@@ -5809,31 +6117,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def apply_current_windows(self) -> None:
+        """Flush live windows and immediately recalculate completed stages."""
         if not self._require_loaded():
             return
-        spot_name = self.current_spot_name()
-        if not spot_name:
-            return
-        regions = self.trace_plot.current_regions()
-        if not regions:
-            self.statusBar().showMessage("Switch to the raw trace view to edit and apply windows.")
-            return
-        try:
-            update_selection_region(
-                self.session,
-                spot_name,
-                baseline=regions.get("baseline"),
-                plateau=regions.get("plateau"),
-                signal=regions.get("signal"),
-            )
-        except Exception as exc:
-            self._handle_action_error("Selection update failed", exc)
-            return
-        self.pending_region_updates.clear()
-        self.append_log(
-            f"Applied baseline, plateau, and signal limits for {spot_name}."
-        )
-        self.refresh_view()
+        if self.flush_selection_edits():
+            self._remember_completed_selection_stages()
+            self._recompute_selection_stages(quiet=False)
+            self.refresh_view()
 
     def run_baseline_preview(self) -> None:
         if not self._require_loaded():

@@ -16,9 +16,15 @@ from __future__ import annotations
 import importlib.abc
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+
+# Install before collection, including GUI modules with import-time defaults.
+_autosave_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-autosave-")
+os.environ["UPBRPY_AUTOSAVE_DIR"] = _autosave_folder.name
 
 
 class _BlockedImports(importlib.abc.MetaPathFinder):
@@ -73,6 +79,12 @@ def _isolate_qt_settings() -> Path | None:
 
 
 _qt_settings_folder = _isolate_qt_settings()
+
+
+@pytest.fixture(autouse=True)
+def isolate_selection_autosaves(tmp_path, monkeypatch):
+    """Keep recoverable projects local to each test, including its windows."""
+    monkeypatch.setenv("UPBRPY_AUTOSAVE_DIR", str(tmp_path / "autosave"))
 
 
 @pytest.fixture
