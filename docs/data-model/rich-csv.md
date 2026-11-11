@@ -1,4 +1,14 @@
+---
+icon: material/file-table-outline
+---
+
 # Rich single CSV
+
+!!! abstract "In short"
+    The Rich single CSV is Qtegra's most complete export: one file for the whole
+    session, one column per laser spot, and one row per isotope, sweep and kind
+    of reading. UPbRPy treats it as the main record of a session. This page lists
+    every row type, whether it is required, and what is lost without it.
 
 Implementation: [UPbRPy/qtegra.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/qtegra.py).
 

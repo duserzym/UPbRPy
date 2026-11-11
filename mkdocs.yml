@@ -1,31 +1,81 @@
-site_name: UPbRPy data model
+site_name: UPbRPy documentation
+site_description: How UPbRPy reads LA-ICP-MS U-Pb data, what it keeps, and what it writes.
+site_url: https://duserzym.github.io/UPbRPy/
+repo_url: https://github.com/duserzym/UPbRPy
+repo_name: duserzym/UPbRPy
 docs_dir: docs
 theme:
   name: material
+  icon:
+    logo: material/atom-variant
+    repo: fontawesome/brands/github
   palette:
-    - scheme: default
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: deep orange
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    - scheme: slate
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: deep orange
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   features:
+    - navigation.tabs
     - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
     - content.code.copy
+    - content.tooltips
+extra_css:
+  - stylesheets/extra.css
 plugins:
   - search
 markdown_extensions:
   - tables
+  - abbr
   - admonition
+  - attr_list
+  - md_in_html
+  - def_list
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.snippets:
+      base_path: [docs/includes]
+      auto_append: [abbreviations.md]
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - toc:
       permalink: true
-  - attr_list
-  - pymdownx.superfences
 exclude_docs: |
   **
-  !/index.html
+  !/index.md
+  !/guide/
+  !/guide/*.md
+  !/images/
+  !/images/*.svg
+  !/screenshots/
+  !/screenshots/studio_tabs_rich_1280x800.png
+  !/screenshots/studio_final_spot_concordia_1440x900.png
+  !/stylesheets/
+  !/stylesheets/*.css
   !/assets/
   !/assets/**
   !/data-model/
@@ -38,11 +88,18 @@ exclude_docs: |
   !/data-model/export-table.md
   !/qtegra_export_formats.md
 nav:
-  - Data model: data-model/index.md
-  - Rich single CSV: data-model/rich-csv.md
-  - Per-spot CSV and folder: data-model/per-spot.md
-  - Acquisition model: data-model/acquisition-model.md
-  - Reference materials: data-model/reference-materials.md
-  - Projects and bundles: data-model/project-and-bundle.md
-  - Export table: data-model/export-table.md
-  - 'Decision record: Qtegra exports': qtegra_export_formats.md
+  - Home: index.md
+  - Guide:
+      - Key ideas: guide/key-ideas.md
+      - Counting and dwell time: guide/counting-and-dwell.md
+      - Choosing an export: guide/choosing-an-export.md
+  - Reference:
+      - Overview: data-model/index.md
+      - Rich single CSV: data-model/rich-csv.md
+      - Per-spot CSV and folder: data-model/per-spot.md
+      - Acquisition model: data-model/acquisition-model.md
+      - Reference materials: data-model/reference-materials.md
+      - Projects and bundles: data-model/project-and-bundle.md
+      - Export table: data-model/export-table.md
+  - Decisions:
+      - Qtegra exports: qtegra_export_formats.md

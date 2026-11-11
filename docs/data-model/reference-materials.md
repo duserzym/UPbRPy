@@ -1,4 +1,14 @@
+---
+icon: material/diamond-stone
+---
+
 # Reference-material TOML
+
+!!! abstract "In short"
+    Reference materials (standards) are materials of known composition measured
+    alongside the unknowns. UPbRPy keeps their accepted values, uncertainties and
+    literature sources in small plain-text TOML files, one per material. This page
+    describes those files and how values are combined.
 
 Implementation: [standards.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/standards.py).
 Packaged examples: [library.toml](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/reference_materials/library.toml),
