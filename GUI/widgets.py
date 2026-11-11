@@ -1096,6 +1096,110 @@ class _ConcordiaViewBox(AxisZoomViewBox):
             super().mouseDragEvent(event, axis=axis)
 
 
+class _ConcordiaRows:
+    """Materialize only tooltip rows, preserving edits to already read rows."""
+
+    def __init__(self, frame, positions):
+        self.frame = frame
+        self.positions = np.asarray(positions, dtype=int)
+        self.rows = {}
+
+    def __len__(self):
+        return len(self.positions)
+
+    def __getitem__(self, index):
+        if index not in self.rows:
+            self.rows[index] = self.frame.iloc[self.positions[index]].to_dict()
+        return self.rows[index]
+
+
+class _ConcordiaEllipse:
+    """A per-row ellipse handle; the canvas owns the single graphics item."""
+
+    def __init__(self, owner, x, y, pen, outline_color=None):
+        self.owner = weakref.ref(owner)
+        self.x, self.y = x, y
+        self.opts = {"pen": pen}
+        self.outline_color = outline_color
+        self.visible = True
+
+    def getData(self):
+        return self.x, self.y
+
+    def setPen(self, pen):
+        if pen != self.opts["pen"]:
+            self.opts["pen"] = pen
+            self._mark_dirty()
+
+    def setVisible(self, visible):
+        if self.visible != visible:
+            self.visible = visible
+            self._mark_dirty()
+
+    def _mark_dirty(self):
+        owner = self.owner()
+        if owner is not None:
+            owner.dirty = True
+
+    def isVisible(self):
+        return self.visible
+
+
+class _ConcordiaEllipseBatch(pg.GraphicsObject):
+    """Cache ellipse paths by pen, with no per-ellipse scene objects."""
+
+    def __init__(self):
+        super().__init__()
+        self.handles = []
+        self.paths = []
+        self.dirty = True
+        self._bounds = QtCore.QRectF()
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+
+    def rebuild(self):
+        if not self.dirty:
+            return
+        groups = {}
+        for handle in self.handles:
+            if not handle.visible:
+                continue
+            pen = handle.opts["pen"]
+            color = pen.color()
+            if handle.outline_color is not None:
+                alpha = color.alpha()
+                color = QtGui.QColor(handle.outline_color)
+                color.setAlpha(alpha)
+            key = color.rgba(), pen.widthF()
+            groups.setdefault(key, []).append(handle)
+        paths = []
+        bounds = QtCore.QRectF()
+        for (rgba, width), handles in groups.items():
+            # Finite connections close each ellipse and skip its NaN separator.
+            x = np.full((len(handles), len(handles[0].x) + 1), np.nan)
+            y = np.full_like(x, np.nan)
+            x[:, :-1] = [handle.x for handle in handles]
+            y[:, :-1] = [handle.y for handle in handles]
+            path = pg.arrayToQPath(x.ravel(), y.ravel(), connect="finite")
+            pen = pg.mkPen(QtGui.QColor.fromRgba(rgba), width=width)
+            paths.append((pen, path))
+            bounds = bounds.united(path.boundingRect())
+        self.prepareGeometryChange()
+        self._bounds = bounds
+        self.paths = paths
+        self.dirty = False
+        self.update()
+
+    def boundingRect(self):
+        return self._bounds
+
+    def paint(self, painter, *_args):
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        for pen, path in self.paths:
+            painter.setPen(pen)
+            painter.drawPath(path)
+
+
 class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     """Lightweight native concordia review with two-sigma ratio ellipses.
 
@@ -1112,6 +1216,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         super().__init__()
         self._theme: ThemeSpec | None = None
         self._frame = pd.DataFrame()
+        self._source_frame = self._frame
+        self._source_positions = np.array([], dtype=int)
+        self._geometry_cache = {}
+        self._row_draw_cache = {}
+        self._scatter_brush_cache = {}
+        self._render_key = None
+        self._ellipse_batch = None
+        self._empty_message = None
         self._diagram = "wetherill"
         self._kind = "spot"
         self._include_calibration_uncertainty = True
@@ -1204,8 +1316,20 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if names or not (control or shift):
             self.select_spots(names, extend=shift, toggle=control)
 
+    def _scatter_brush(self, color):
+        # ScatterPlotItem keys its symbol atlas by brush object identity.
+        key = color.getRgbF()
+        if key not in self._scatter_brush_cache:
+            self._scatter_brush_cache[key] = pg.mkBrush(color)
+        return self._scatter_brush_cache[key]
+
     def _update_selection_style(self, *, positions_changed=False):
-        if self._scatter is None or self._kind != "spot":
+        if self._scatter is None:
+            return
+        if self._kind == "depth":
+            if positions_changed:
+                self._scatter.setData(x=self._point_xy[:, 0], y=self._point_xy[:, 1],
+                                      brush=[self._scatter_brush(p[3]) for p in self._points])
             return
         theme = self._theme
         brushes, pens, sizes = [], [], []
@@ -1230,10 +1354,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             line = QtGui.QColor(color)
             line.setAlpha(70 if self.selected_spots and not selected else 255 if selected else 155)
             ellipse.setPen(pg.mkPen(line, width=1.8 if selected else 1.0))
+        if self._ellipse_batch is not None:
+            self._ellipse_batch.rebuild()
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Apply a theme and redraw the retained concordia data."""
         self._theme = theme
+        self._render_key = None
+        self._row_draw_cache.clear()
         self.setBackground(theme.plot_background)
         self._draw(preserve_view=True)
 
@@ -1249,8 +1377,34 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         colour_mode: str = "sample",
         depth_colormap: str = "plasma",
         included_spots: set[str] | None = None,
+        source_frame: pd.DataFrame | None = None,
+        row_positions: np.ndarray | None = None,
     ) -> None:
-        """Display selected spot means or one spot's corrected sweeps."""
+        """Display reduced rows, optionally retaining geometry from a source frame.
+
+        A supplied source is immutable until replaced by new results. Positions
+        identify the displayed rows within that source, including duplicate index
+        labels. Without a source, each call reads the input anew.
+        """
+        source = frame if source_frame is None else source_frame
+        positions = np.arange(len(source)) if row_positions is None else np.asarray(row_positions, dtype=int)
+        if positions.ndim != 1 or len(positions) != len(frame):
+            raise ValueError("row_positions must identify each displayed row within source_frame")
+        if np.any(positions < 0) or np.any(positions >= len(source)):
+            raise ValueError("row_positions must be within source_frame")
+        if source_frame is None or source is not self._source_frame:
+            self._geometry_cache.clear()
+            self._row_draw_cache.clear()
+            self._scatter_brush_cache.clear()
+            self._render_key = None
+        self._source_frame = source
+        render_key = (id(source), diagram, kind, bool(include_calibration_uncertainty),
+                      id(theme), colour_mode, depth_colormap,
+                      tuple(self._sample_colors.items()), tuple(self._spot_colors.items()))
+        same_render = self._render_key == render_key and self._plot_item is not None
+        same_rows = np.array_equal(positions, self._source_positions)
+        previous_included = self._included_spots
+        self._source_positions = positions
         preserve_view = (not reset_view and self._diagram == diagram and self._kind == kind)
         self._frame = frame.copy()
         self._included_spots = included_spots
@@ -1274,9 +1428,26 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                 self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
                                        for i, name in enumerate(samples)}
         self.setBackground(theme.plot_background)
+        self._render_key = render_key
+        if same_render:
+            if same_rows:
+                self._included_spots = previous_included
+                self.set_included_spots(included_spots)
+            else:
+                hovered = self._points[self._hover_index][0] if self._hover_index is not None else None
+                self._set_hover(None)
+                self._populate_data()
+                self._default_range = self._initial_range(*self._concordia_coordinates)
+                self._update_sample_legend()
+                if hovered is not None:
+                    self._set_hover(next((i for i, p in enumerate(self._points) if p[0] == hovered), None))
+            if reset_view:
+                self.restore_default_view()
+            return
+        self._row_draw_cache.clear()
         self._draw(preserve_view=preserve_view)
 
-    def set_included_spots(self, names: set[str]) -> None:
+    def set_included_spots(self, names: set[str] | None) -> None:
         """Update spot visibility while retaining the plotted geometry and view."""
         previous = self._included_spots
         if previous == names:
@@ -1285,13 +1456,14 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._scatter is None:
             return
         hovered = self._points[self._hover_index][0] if self._hover_index is not None else None
-        if hovered is not None and hovered not in names:
+        if hovered is not None and names is not None and hovered not in names:
             self._set_hover(None)
         self._update_visible_points()
-        changed = previous ^ names if previous is not None else None
+        changed = previous ^ names if previous is not None and names is not None else None
         for name, ellipse, _color in self._ellipses:
             if changed is None or name in changed:
-                ellipse.setVisible(name in names)
+                ellipse.setVisible(names is None or name in names)
+        self._ellipse_batch.rebuild()
         self._update_selection_style(positions_changed=True)
         old_rect = self._legend.sceneBoundingRect() if self._legend is not None else None
         self._update_sample_legend()
@@ -1300,7 +1472,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if old_rect != new_rect:
             self._schedule_labels()
         self._default_range = self._initial_range(*self._concordia_coordinates)
-        if hovered is not None and hovered in names:
+        if hovered is not None and (names is None or hovered in names):
             self._hover_index = next(i for i, point in enumerate(self._points) if point[0] == hovered)
             self._position_hover()
 
@@ -1311,7 +1483,10 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             if included is None or point[0] in included
         ]
         self._points = [self._all_points[index] for index in indices]
-        self._point_rows = [self._all_point_rows[index] for index in indices]
+        if isinstance(self._all_point_rows, _ConcordiaRows):
+            self._point_rows = _ConcordiaRows(self._all_point_rows.frame, self._all_point_rows.positions[indices])
+        else:
+            self._point_rows = []
         self._point_xy = np.asarray(
             [(x, y) for _name, x, y, _color in self._points], dtype=float
         ).reshape(-1, 2)
@@ -1359,8 +1534,9 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         low, high = (float(finite.min()), float(finite.max())) if finite.size else (0., 1.)
         cmap = self.depth_color_map(self._depth_colormap)
         normalized = (times - low) / max(high - low, np.finfo(float).eps)
-        brushes = [cmap.mapToQColor(float(np.clip(value, 0, 1))) if np.isfinite(value)
-                   else pg.mkColor(theme.muted) for value in normalized]
+        brushes = cmap.mapToQColor(np.clip(np.nan_to_num(normalized), 0, 1))
+        for index in np.flatnonzero(~np.isfinite(normalized)):
+            brushes[index] = pg.mkColor(theme.muted)
         if self._colorbar is None:
             self._colorbar = pg.ColorBarItem(width=10, interactive=False, orientation="horizontal",
                                              colorMapMenu=False)
@@ -1448,6 +1624,35 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         offsets = eigenvectors @ np.diag(2.0 * np.sqrt(eigenvalues)) @ circle
         return x + offsets[0], y + offsets[1]
 
+    @staticmethod
+    def ellipse_coordinates_batch(x, y, x_2e, y_2e, rho, *, points=48) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return stacked two-SE ellipses and a mask of valid input rows.
+
+        Invalid rows have NaN vertices. The angle grid and covariance
+        eigendecomposition match :meth:`ellipse_coordinates`.
+        """
+        x, y, x_2e, y_2e, rho = np.broadcast_arrays(
+            *[np.asarray(value, dtype=float) for value in (x, y, x_2e, y_2e, rho)])
+        x, y, x_2e, y_2e, rho = [a.reshape(-1) for a in (x, y, x_2e, y_2e, rho)]
+        valid = (np.isfinite(x) & np.isfinite(y) & np.isfinite(x_2e) & np.isfinite(y_2e)
+                 & (x_2e > 0) & (y_2e > 0))
+        count = max(4, int(np.ceil((points - 1) / 4)) * 4)
+        ex = np.full((len(x), count + 1), np.nan)
+        ey = np.full_like(ex, np.nan)
+        sx, sy = x_2e[valid] / 2, y_2e[valid] / 2
+        correlation = np.clip(np.where(np.isnan(rho[valid]), 0., rho[valid]), -.999, .999)
+        covariance = np.empty((len(sx), 2, 2))
+        covariance[:, 0, 0], covariance[:, 1, 1] = sx * sx, sy * sy
+        covariance[:, 0, 1] = covariance[:, 1, 0] = correlation * sx * sy
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        axes = np.zeros_like(covariance)
+        axes[:, 0, 0], axes[:, 1, 1] = (2 * np.sqrt(np.maximum(eigenvalues, 0.))).T
+        angle = np.linspace(0., 2. * np.pi, count + 1)
+        circle = np.vstack((np.cos(angle), np.sin(angle)))
+        offsets = eigenvectors @ axes @ circle
+        ex[valid], ey[valid] = x[valid, None] + offsets[:, 0], y[valid, None] + offsets[:, 1]
+        return ex, ey, valid
+
     def _ratio_columns(self) -> tuple[str, str, str | None, str | None]:
         prefix = "" if self._kind == "spot" else "_fractionation_corrected"
         if self._diagram == "wetherill":
@@ -1487,6 +1692,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                     self.scene().removeItem(overlay)
                     overlay.deleteLater()
         self._scatter = None
+        self._ellipse_batch = None
+        self._empty_message = None
         self._age_marker = None
         self._ellipses = []
         self._points = []
@@ -1581,6 +1788,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                 anchor=(0.5, 0.5),
             )
             plot.addItem(message)
+            self._empty_message = message
             message.setPos(0.5, 0.5)
             self._default_range = [[0, 1], [0, 1]]
             plot.setRange(xRange=(0, 1), yRange=(0, 1), padding=0)
@@ -1591,85 +1799,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._schedule_labels()
             return
 
-        x_values = pd.to_numeric(frame[x_column], errors="coerce").to_numpy()
-        y_values = pd.to_numeric(frame[y_column], errors="coerce").to_numpy()
-        if sx_column and sy_column:
-            x_errors = pd.to_numeric(frame[sx_column], errors="coerce").to_numpy()
-            y_errors = pd.to_numeric(frame[sy_column], errors="coerce").to_numpy()
-        else:
-            x_errors = np.full(len(frame), np.nan)
-            y_errors = np.full(len(frame), np.nan)
-        uncertainty_branch = (
-            "with_calibration"
-            if self._include_calibration_uncertainty
-            else "no_calibration"
-        )
-        correlation_stem = (
-            "err_corr" if self._diagram == "wetherill" else "tw_rho"
-        )
-        correlation_column = next(
-            (
-                candidate
-                for candidate in (
-                    f"{correlation_stem}_{uncertainty_branch}",
-                    correlation_stem,
-                )
-                if candidate in frame.columns
-            ),
-            None,
-        )
-        rho_values = (
-            pd.to_numeric(frame[correlation_column], errors="coerce")
-            .to_numpy()
-            if correlation_column is not None
-            else np.zeros(len(frame), dtype=float)
-        )
-        finite = np.isfinite(x_values) & np.isfinite(y_values)
-
-        if self._kind == "depth":
-            brushes = self._depth_brushes(frame, theme)
-        else:
-            brushes = [
-                pg.mkColor(self._sample_colors.get(str(row.get("sample", "")), theme.muted)
-                           if self._colour_mode == "sample" else theme.accent
-                           if self._colour_mode == "single" else
-                           self._spot_colors.get(str(row.get("spot_name", "")),
-                                                 _DIAG_SPOT_COLORS[index % len(_DIAG_SPOT_COLORS)]))
-                for index, row in enumerate(frame.to_dict("records"))
-            ]
-
-        point_indices = np.flatnonzero(finite)
-        self._all_point_rows = frame.loc[finite].to_dict("records")
-        self._all_points = [
-            (str(row.get("spot_name", "")), float(x_values[index]),
-             float(y_values[index]), brushes[index])
-            for row, index in zip(self._all_point_rows, point_indices)
-        ]
-        self._point_errors = np.column_stack((x_errors[finite], y_errors[finite]))
-        self._update_visible_points()
-
-        for (name, x, y, color), (sx, sy), index in zip(
-            self._all_points, self._point_errors, point_indices
-        ):
-            ellipse_x, ellipse_y = self.ellipse_coordinates(x, y, sx, sy, float(rho_values[index]))
-            if ellipse_x.size:
-                ellipse_color = QtGui.QColor(color)
-                ellipse_color.setAlpha(155)
-                ellipse = plot.plot(
-                    ellipse_x, ellipse_y, pen=pg.mkPen(ellipse_color, width=1.0)
-                )
-                ellipse.setVisible(self._included_spots is None or name in self._included_spots)
-                self._ellipses.append((name, ellipse, color))
-        self._scatter = pg.ScatterPlotItem(
-            x=self._point_xy[:, 0], y=self._point_xy[:, 1],
-            symbol="o",
-            size=6 if self._kind == "depth" else 8,
-            pen=pg.mkPen(theme.axis_text, width=0.7),
-            brush=[color for _name, _x, _y, color in self._points],
-        )
-        plot.addItem(self._scatter)
-        self._scatter.sigClicked.connect(self._spot_clicked)
-        self._update_selection_style()
+        self._populate_data()
 
         self._default_range = self._initial_range(concordia_x, concordia_y)
         view = retained_range if retained_range is not None else self._default_range
@@ -1682,6 +1812,118 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._schedule_labels()
         self._apply_zoom_mode()
         self._apply_interaction_mode()
+
+    def _geometry(self):
+        """Cache full-source ratio arrays and vertices for each uncertainty branch."""
+        key = self._diagram, self._kind, self._include_calibration_uncertainty
+        if key in self._geometry_cache:
+            return self._geometry_cache[key]
+        frame = self._source_frame
+        x_column, y_column, sx_column, sy_column = self._ratio_columns()
+
+        def values(column):
+            return (pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+                    if column is not None and column in frame else np.full(len(frame), np.nan))
+
+        x, y = values(x_column), values(y_column)
+        if sx_column and sy_column:
+            sx, sy = values(sx_column), values(sy_column)
+        else:
+            sx, sy = np.full(len(frame), np.nan), np.full(len(frame), np.nan)
+        branch = "with_calibration" if self._include_calibration_uncertainty else "no_calibration"
+        stem = "err_corr" if self._diagram == "wetherill" else "tw_rho"
+        column = next((c for c in (f"{stem}_{branch}", stem) if c in frame), None)
+        rho = values(column) if column is not None else np.zeros(len(frame))
+        ex, ey, valid = self.ellipse_coordinates_batch(x, y, sx, sy, rho)
+        result = x, y, sx, sy, ex, ey, valid, rho
+        self._geometry_cache[key] = result
+        return result
+
+    def _populate_data(self):
+        """Replace visible rows without replacing the scene or recomputing vertices."""
+        frame, theme = self._frame, self._theme
+        x, y, sx, sy, ex, ey, valid, _rho = self._geometry()
+        if self._empty_message is not None:
+            self._empty_message.setVisible(frame.empty)
+        elif frame.empty:
+            self._empty_message = pg.TextItem("No compatible corrected ratios are available for this view.",
+                                              color=theme.muted, anchor=(.5, .5))
+            self._plot_item.addItem(self._empty_message)
+            self._empty_message.setPos(.5, .5)
+        positions = self._source_positions
+        if self._ellipse_batch is None:
+            self._ellipse_batch = _ConcordiaEllipseBatch()
+            self._plot_item.addItem(self._ellipse_batch, ignoreBounds=True)
+        cache_key = self._render_key, positions.tobytes()
+        cached = self._row_draw_cache.get(cache_key)
+        if cached is None:
+            if self._kind == "depth":
+                brushes = self._depth_brushes(frame, theme)
+                # Only ellipse outlines are quantised; points keep full map precision.
+                cmap = self.depth_color_map(self._depth_colormap)
+                palette = cmap.mapToQColor(np.linspace(0, 1, 64))
+                times = (pd.to_numeric(frame["signal_relative_time"], errors="coerce").to_numpy(dtype=float)
+                         if "signal_relative_time" in frame else np.arange(len(frame), dtype=float))
+                finite_times = times[np.isfinite(times)]
+                low, high = ((finite_times.min(), finite_times.max()) if finite_times.size else (0., 1.))
+                normalized = (times - low) / max(high - low, np.finfo(float).eps)
+                levels = np.rint(np.clip(np.nan_to_num(normalized), 0, 1) * 63).astype(int)
+                outlines = [palette[level] if np.isfinite(time) else pg.mkColor(theme.muted)
+                            for level, time in zip(levels, times)]
+            else:
+                samples = frame["sample"].astype(str) if "sample" in frame else [""] * len(frame)
+                names = frame["spot_name"].astype(str) if "spot_name" in frame else [""] * len(frame)
+                brushes = [
+                    pg.mkColor(self._sample_colors.get(sample, theme.muted)
+                               if self._colour_mode == "sample" else theme.accent
+                               if self._colour_mode == "single" else
+                               self._spot_colors.get(name, _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]))
+                    for i, (sample, name) in enumerate(zip(samples, names))
+                ]
+                outlines = [None] * len(frame)
+            names = frame["spot_name"].astype(str).to_numpy() if "spot_name" in frame else [""] * len(frame)
+            finite = np.isfinite(x[positions]) & np.isfinite(y[positions])
+            indices = np.flatnonzero(finite)
+            point_positions = positions[finite]
+            points = [(names[i], float(x[p]), float(y[p]), brushes[i])
+                      for i, p in zip(indices, point_positions)]
+            rows = _ConcordiaRows(self._source_frame, point_positions)
+            ellipses = []
+            pens = {}
+            for i, p in zip(indices, point_positions):
+                if valid[p]:
+                    color = brushes[i]
+                    rgba = color.rgba()
+                    if rgba not in pens:
+                        line = QtGui.QColor(color)
+                        line.setAlpha(155)
+                        pens[rgba] = pg.mkPen(line, width=1.0)
+                    handle = _ConcordiaEllipse(self._ellipse_batch, ex[p], ey[p], pens[rgba], outlines[i])
+                    ellipses.append((names[i], handle, color))
+            errors = np.column_stack((sx[point_positions], sy[point_positions]))
+            cached = points, rows, ellipses, errors
+            # Bound retained subset colours and handles during repeated filtering.
+            if len(self._row_draw_cache) >= 4:
+                self._row_draw_cache.pop(next(iter(self._row_draw_cache)))
+            self._row_draw_cache[cache_key] = cached
+        elif self._kind == "depth":
+            # Update levels and labels as well when a previous subset is restored.
+            self._depth_brushes(frame, theme)
+        self._all_points, self._all_point_rows, self._ellipses, self._point_errors = cached
+        self._update_visible_points()
+        self._ellipse_batch.handles = [handle for _, handle, _ in self._ellipses]
+        self._ellipse_batch.dirty = True
+        for name, handle, _ in self._ellipses:
+            handle.setVisible(self._included_spots is None or name in self._included_spots)
+        if self._scatter is None:
+            self._scatter = pg.ScatterPlotItem(symbol="o", size=6 if self._kind == "depth" else 8,
+                                             pen=pg.mkPen(theme.axis_text, width=.7))
+            self._plot_item.addItem(self._scatter)
+            self._scatter.sigClicked.connect(self._spot_clicked)
+        self._update_selection_style(positions_changed=True)
+        if self._kind == "spot":
+            self._update_selection_style()
+        self._ellipse_batch.rebuild()
 
     def set_zoom_mode(self, mode: str) -> None:
         """Restrict mouse zooming to both axes or one selected axis."""
@@ -1755,23 +1997,20 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     def _visible_age_interval(self, ranges):
         """Invert each monotonic ratio to find the visible age interval."""
         point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
-        lower, upper = 0.001, 4567.3
-        for axis, limits in enumerate(ranges):
-            ends = point(np.array([0.001, 4567.3]))[axis]
-            increasing = ends[1] > ends[0]
-            ages = []
-            for limit in sorted(limits):
-                lo, hi = 0.001, 4567.3
-                for _ in range(48):
-                    mid = (lo + hi) / 2
-                    if (point(mid)[axis] < limit) == increasing:
-                        lo = mid
-                    else:
-                        hi = mid
-                ages.append((lo + hi) / 2)
-            lower = max(lower, min(ages))
-            upper = min(upper, max(ages))
-        return lower, upper
+        limits = np.sort(np.asarray(ranges, dtype=float), axis=1)
+        ends = np.asarray(point(np.array([.001, 4567.3])))
+        increasing = ends[:, 1] > ends[:, 0]
+        lo, hi = np.full((2, 2), .001), np.full((2, 2), 4567.3)
+        # Both limits of both axes are inverted in the same 48 evaluations.
+        for _ in range(48):
+            mid = (lo + hi) / 2
+            px, py = point(mid)
+            values = np.stack((px[0], py[1]))
+            advance = (values < limits) == increasing[:, None]
+            lo = np.where(advance, mid, lo)
+            hi = np.where(advance, hi, mid)
+        ages = (lo + hi) / 2
+        return max(.001, ages.min(axis=1).max()), min(4567.3, ages.max(axis=1).min())
 
     @QtCore.Slot()
     def _update_concordia_labels(self):
@@ -1842,8 +2081,10 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._kind != "spot" or self._colour_mode != "sample":
             return
         samples = sorted({
-            str(row["sample"]) for row in self._point_rows
-            if self._has_value(row.get("sample"))
+            str(value) for value in (
+                self._point_rows.frame["sample"].iloc[self._point_rows.positions]
+                if isinstance(self._point_rows, _ConcordiaRows) and "sample" in self._point_rows.frame else []
+            ) if self._has_value(value)
         })
         if samples == self._legend_samples:
             return
@@ -2618,14 +2859,27 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
 
+    _sample_names_cache = {}
+
     @staticmethod
     def _sample_names(*frames):
+        """Return the first sample per spot in frame order, caching installed frames."""
         samples = {}
+        cache = ResultsTableWidget._sample_names_cache
         for frame in frames:
-            if "spot_name" in frame:
-                for _, row in frame.iterrows():
-                    sample = row.get("sample", "")
-                    samples.setdefault(str(row.spot_name), "" if pd.isna(sample) else str(sample))
+            key = id(frame)
+            cached = cache.get(key)
+            if cached is None or cached[0]() is not frame:
+                mapping = {}
+                if "spot_name" in frame:
+                    names = frame["spot_name"].astype(str)
+                    first = ~names.duplicated()
+                    values = (frame["sample"].where(frame["sample"].notna(), "").astype(str)
+                              if "sample" in frame else pd.Series("", index=frame.index))
+                    mapping = dict(zip(names[first], values[first]))
+                cache[key] = weakref.ref(frame, lambda _ref, key=key: cache.pop(key, None)), mapping
+            for name, sample in cache[key][1].items():
+                samples.setdefault(name, sample)
         return samples
 
     def _glass_spot_names(self):
@@ -3558,6 +3812,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         else:
             self.spot_concordia.show_data(
                 self._spot_frame,
+                source_frame=self._spot_frame,
                 diagram=self.selected_diagram(self.spot_diagram_buttons),
                 kind="spot",
                 include_calibration_uncertainty=self._include_calibration_uncertainty,
@@ -3643,19 +3898,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if self._theme is None:
             return
         spot_name = self.depth_spot_combo.currentText()
-        selected = self._depth_frame
-        if self._depth_sample_choices and "spot_name" in selected.columns:
+        source = self._depth_frame
+        mask = np.ones(len(source), dtype=bool)
+        if self._depth_sample_choices and "spot_name" in source:
             names = {name for name, included in self.include_flags.items() if included}
-            selected = selected[selected["spot_name"].astype(str).isin(names)]
-        elif spot_name and "spot_name" in selected.columns:
-            selected = selected[selected["spot_name"].astype(str).eq(spot_name)]
+            mask = source["spot_name"].astype(str).isin(names).to_numpy()
+        elif spot_name and "spot_name" in source:
+            mask = source["spot_name"].astype(str).eq(spot_name).to_numpy()
         if not self._depth_sample_choices and not self.include_flags.get(spot_name, self._show_glasses
                                       if spot_name in self._glass_spot_names() else True):
-            selected = selected.iloc[0:0]
-        if inclusions_only and selected.equals(self.depth_concordia._frame):
-            return
+            mask = np.zeros(len(source), dtype=bool)
+        positions = np.flatnonzero(mask)
+        selected = source.iloc[positions]
         self.depth_concordia.show_data(
             selected,
+            source_frame=source,
+            row_positions=positions,
             diagram=self.selected_diagram(self.depth_diagram_buttons),
             kind="depth",
             include_calibration_uncertainty=(
