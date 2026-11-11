@@ -205,6 +205,11 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 summary="Review corrected ratios, spot summaries, and final date outputs with the appropriate common-Pb caveats.",
                 hint="For apatite, the final review should emphasize standards behavior and consistency of the Pb-ratio treatment rather than only producing a final age table.",
             ),
+            WorkflowStep(
+                title="Depth-profile review",
+                summary="Review each spot's calibrated sweep-by-sweep ratios, dates and concentrations through the whole ablation.",
+                hint="Every laser spot is a depth profile. Look for zoning, inclusions, cracks and burn-through in the signal interval before trusting a spot mean.",
+            ),
         ),
         stage_sequence=(
             PipelineStage.IMPORT,
@@ -216,6 +221,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             PipelineStage.DOWNHOLE,
             PipelineStage.SESSION,
             PipelineStage.FINALIZE,
+            PipelineStage.DEPTH_PROFILE,
         ),
     ),
     "rutile": WorkflowPreset(
@@ -370,6 +376,11 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
                 summary="Review corrected ratios, concentration outputs, and any thermometry products together.",
                 hint="Review the selected common-Pb method and uncertainty branch before exporting.",
             ),
+            WorkflowStep(
+                title="Depth-profile review",
+                summary="Review each spot's calibrated sweep-by-sweep ratios, dates and concentrations through the whole ablation.",
+                hint="Every laser spot is a depth profile. Look for zoning, inclusions, cracks and burn-through in the signal interval before trusting a spot mean.",
+            ),
         ),
         stage_sequence=(
             PipelineStage.IMPORT,
@@ -381,6 +392,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
             PipelineStage.DOWNHOLE,
             PipelineStage.SESSION,
             PipelineStage.FINALIZE,
+            PipelineStage.DEPTH_PROFILE,
         ),
     ),
 }

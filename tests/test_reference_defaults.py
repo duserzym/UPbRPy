@@ -70,3 +70,11 @@ def test_load_session_groups_underscore_labels_under_the_apatite_preset():
     assert {"NIST612", "NIST610", "S513"} <= samples
     assert not any(name.startswith("NIST612_") for name in samples)
     assert "MADJCU" not in session.secondary_standards
+
+
+def test_every_preset_ends_with_a_depth_profile_review():
+    from UPbRPy.pipeline import PipelineStage
+
+    for preset in WORKFLOW_PRESETS.values():
+        assert preset.stage_sequence[-1] is PipelineStage.DEPTH_PROFILE, preset.key
+        assert len(preset.steps) == len(preset.stage_sequence), preset.key
