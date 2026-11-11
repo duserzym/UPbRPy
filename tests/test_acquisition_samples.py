@@ -137,3 +137,18 @@ def test_reduction_bundle_publishes_corrected_samples_and_provenance(tmp_path, m
     assert results.loc["KD27_4", "sample"] == "SMP2"
     published = pd.read_csv(exported.directory / "UPbRPy_publication_results" / "results.csv")
     assert published.set_index("spot_name").loc["KD27_4", "sample"] == "SMP2"
+
+
+def test_repeated_label_keeps_first_acquisition(tmp_path):
+    """Six blanks all named ``nothing`` in one Rich export: first one wins, names stay unique."""
+    labels = ("SMP1_S_91", "SMP1_S_108", "SMP1_S_120")
+    write_raw_directory(tmp_path, labels=labels)
+    session = open_qtegra(tmp_path)
+    first = session.acquisitions[0]
+    session.acquisitions[2].label = first.label
+    experiment, _, total = experiment_from_session(session)
+    assert sorted(experiment["spot_names"]) == sorted(labels[:2])
+    assert not experiment["spot_names"].duplicated().any()
+    assert len(total[total["spot_name"] == first.label]) == first.n_sweeps
+    assert any("repeated label" in w for w in experiment.attrs["qtegra"]["warnings"])
+    restore_project_selections(experiment, selection_export_frame(experiment).to_dict("records"))

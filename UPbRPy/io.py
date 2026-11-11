@@ -1166,11 +1166,23 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
     samples = []
     sample_overrides = {}
     spot_frames = []
+    # A label the instrument repeated (six blanks all named ``nothing`` in one
+    # Rich export) keeps its first acquisition only, as laicpmsdb does; spot
+    # names must be unique for selections, projects and exports.
+    acquisitions = []
+    seen_labels = set()
+    repeated_labels = []
+    for acquisition in session.acquisitions:
+        if acquisition.label in seen_labels:
+            repeated_labels.append(acquisition.label)
+            continue
+        seen_labels.add(acquisition.label)
+        acquisitions.append(acquisition)
     next_start = min(
-        (a.start for a in session.acquisitions if a.start is not None),
+        (a.start for a in acquisitions if a.start is not None),
         default=pd.Timestamp("1970-01-01"),
     )
-    for acquisition in session.acquisitions:
+    for acquisition in acquisitions:
         if acquisition.sweep_time is None:
             raise ValueError(f"{acquisition.label}: no sweep times.")
         if acquisition.start is not None:
@@ -1224,11 +1236,11 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
         spot_frames.append(this_data)
 
     experiment = pd.DataFrame({
-        "spot_names": [acquisition.label for acquisition in session.acquisitions],
+        "spot_names": [acquisition.label for acquisition in acquisitions],
         "sample": samples,
         "spot_paths": [
             str(acquisition.source_path) if acquisition.source_path is not None else None
-            for acquisition in session.acquisitions
+            for acquisition in acquisitions
         ],
         "spot_starting_times": starts,
     })
@@ -1258,7 +1270,10 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
         "software": session.software,
         "machine": session.machine,
         "acquisition_summary": acquisition_summary(session),
-        "warnings": list(session.warnings),
+        "warnings": list(session.warnings) + [
+            f"{label}: repeated label; only its first acquisition is used."
+            for label in dict.fromkeys(repeated_labels)
+        ],
     }
     return experiment, list(session.channel_names), total_data
 
