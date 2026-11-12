@@ -5991,8 +5991,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Updating reduction stages",
-            lambda: populate_recalculated_cache(self.session, self.workflow_preset, stages,
-                export_settings=self.export_settings),
+            lambda: self._recalculate_cache(stages),
             show_result,
             quiet=quiet,
         )
@@ -6605,6 +6604,12 @@ class MainWindow(QtWidgets.QMainWindow):
         data = get_calibration_slope_data(self.session, self.workflow_preset)
         self._calibration_data_memo = (inputs, data)
         return data
+
+    def _recalculate_cache(self, stages) -> None:
+        """Worker: refresh stage caches, then the export-derived 204Pb values."""
+        populate_recalculated_cache(self.session, self.workflow_preset, stages)
+        if any(stage in {PipelineStage.FINALIZE, PipelineStage.EXPORT} for stage in stages):
+            ensure_results_pb204(self.session, self.workflow_preset, self.export_settings)
 
     def _trace_stage_frame(self, key: str, calculate: Callable[[], pd.DataFrame]) -> pd.DataFrame:
         """Leave pending selection calculations to the shared worker slot."""
