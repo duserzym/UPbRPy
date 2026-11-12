@@ -300,8 +300,16 @@ def test_readout_controls_stay_visible_at_laptop_sizes(app, finalized, theme):
             label = review.concordia_age_label
             rect = QtCore.QRect(label.mapTo(page.viewport(), QtCore.QPoint()), label.size())
             assert page.viewport().rect().contains(rect)
-            assert review._chooser_stack.height() >= 80
+            # In Studio the Spots tree chooses the shown spots (the two lists
+            # were merged by request); a link summarises and focuses it.
+            link = review.spot_summary_button
+            assert link.isVisible() and not review._chooser_stack.isVisible()
+            shown = sum(review.include_flags.values())
+            assert link.text() == f"Showing {shown} of {len(review.include_flags)} spots"
             assert review.spot_concordia.height() >= 250
+        link.click()
+        app.processEvents()
+        assert window.inspector_tabs.tabText(window.inspector_tabs.currentIndex()) == "Browse"
     finally:
         window.has_unsaved_changes = lambda: False
         dispose(shell, app)

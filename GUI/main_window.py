@@ -2514,6 +2514,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_table.showSignalRequested.connect(self.show_spot_signal)
         self.results_table.mouseModeRequested.connect(self._on_review_mouse_mode)
         self.results_table.chooserRequested.connect(self._focus_spot_tree)
+        # The Spots tree is Studio's one spot list; the concordia panel keeps
+        # a link to it instead of a second list.
+        self.results_table.set_external_chooser(True)
         # Ticks in the Spots tree and the concordia list are one state.
         self._pending_tree_checks: dict[str, bool] = {}
         self._tree_check_timer = QtCore.QTimer(self)

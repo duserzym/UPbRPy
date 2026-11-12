@@ -16,7 +16,11 @@ import tempfile
 import urllib.request
 import zipfile
 
+import atexit
+import weakref
+
 from PySide6 import QtCore, QtWidgets
+import shiboken6
 
 from GUI.standards_updates import StandardsCheck, check_standards
 from GUI.updates import (
@@ -209,6 +213,18 @@ class UpdateWorker(QtCore.QThread):
             self.result.emit(("failed", str(exc)))
 
 
+_RUNNING_THREADS: "weakref.WeakSet[QtCore.QThread]" = weakref.WeakSet()
+
+
+@atexit.register
+def _wait_for_running_threads() -> None:
+    """Let checks still running at exit finish; Qt aborts on a live QThread."""
+    for thread in list(_RUNNING_THREADS):
+        if shiboken6.isValid(thread) and thread.isRunning():
+            thread.requestInterruption()
+            thread.wait(5000)
+
+
 class _StandardsWorker(QtCore.QThread):
     result = QtCore.Signal(object)
 
@@ -346,6 +362,7 @@ class Updater(QtCore.QObject):
         self._standards_job = job
         job.result.connect(self._standards_result)
         job.finished.connect(self._standards_finished)
+        _RUNNING_THREADS.add(job)
         job.start()
         self.standardsChanged.emit()
 
@@ -421,6 +438,7 @@ class Updater(QtCore.QObject):
         self._jobs.append(worker)
         worker.result.connect(self._result)
         worker.finished.connect(self._job_finished)
+        _RUNNING_THREADS.add(worker)
         worker.start()
 
     @QtCore.Slot(object)
