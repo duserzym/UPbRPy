@@ -9,8 +9,9 @@ docs:
 docs-serve:
 	"$(MKDOCS)" serve
 
+# Tests run under a memory (3 GB) and time (10 min) watchdog; see scripts/guarded.sh.
 test:
-	UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -q -p no:cacheprovider
+	UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen scripts/guarded.sh -m 3072 -t 600 -- .venv/bin/python -m pytest tests -q -p no:cacheprovider
 
 # scripts/build_desktop.py builds Studio under this folder (hash of the checkout path).
 STUDIO_BUILD_ROOT := $(or $(UPBRPY_BUILD_ROOT),$(HOME)/Library/Caches/UPbRPy/$(shell printf %s "$(CURDIR)" | shasum -a 256 | cut -c1-12))
