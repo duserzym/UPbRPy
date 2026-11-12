@@ -181,6 +181,9 @@ _VIEWS_WITHOUT_SELECTION_WINDOWS = frozenset({
 })
 
 
+_CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
+
+
 # Spots-tree roles: the text a row last showed (to tell a rename from a
 # check toggle) and the check state last applied.
 _TREE_TEXT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 7
@@ -1390,12 +1393,18 @@ class MainWindow(QtWidgets.QMainWindow):
         """Fit compact button rows without reserving horizontal scrollbar space."""
         for scroll, bar in getattr(self, "_toolbar_strips", ()):
             bar.layout().invalidate()
+            if bar is getattr(self, "plot_control_bar", None) and self._plot_control_vertical:
+                bar.setMinimumWidth(bar.layout().minimumSize().width())
+                bar.setFixedHeight(bar.layout().minimumSize().height())
+                scroll.setFixedHeight(bar.height())
+                continue
             height = max(36, bar.sizeHint().height())
             minimum_width = bar.layout().minimumSize().width()
             bar.setMinimumWidth(minimum_width)
             bar.setFixedHeight(height)
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             scroll.setFixedHeight(height + (8 if minimum_width > scroll.width() else 0))
+        self._position_plot_controls()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802 - Qt API
         super().showEvent(event)
@@ -1446,6 +1455,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._position_compact_panels()
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if watched is getattr(self, "plot_control_grip", None) and self._plot_control_grip_event(event):
+            return True
+        if watched is getattr(self, "plots_stack", None) and event.type() in {
+                QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show, QtCore.QEvent.Type.LayoutRequest}:
+            self._position_plot_controls()
         if watched is getattr(self, "sidebar_panel", None) and event.type() == QtCore.QEvent.Type.Resize:
             QtCore.QTimer.singleShot(
                 0, self, lambda: self.adapt_workflow_rail_height(self.height()),
@@ -1524,14 +1538,19 @@ class MainWindow(QtWidgets.QMainWindow):
         short = dict(zip(PLOT_MODE_LABELS, ("Raw", "Base", "Norm", "Cal", "Ratios", "Down", "Drift", "Bias", "Depth", "Final")))
         for key, button in self.plot_mode_buttons.items():
             button.setText(short[key] if narrow else PLOT_MODE_LABELS[key])
-        for widget in self._plot_control_labels:
-            widget.setVisible(not narrow)
+        # Inside the canvas the captions (Drag, Zoom axis, Ratio) give way to
+        # the buttons' tooltips.
+        for widget in self._plot_control_labels[:3]:
+            widget.setVisible(False)
+        self._narrow_controls = narrow
+        for widget in self._plot_control_labels[3:]:
+            widget.setVisible(not narrow and not self._plot_control_vertical)
         controls_layout = self.plot_control_bar.layout()
         controls_layout.setSpacing(1 if narrow else 3)
         inset = 4 if narrow else 6
         controls_layout.setContentsMargins(inset, 4, inset, 4)
         self.ratio_combo.setFixedWidth(153)
-        self.main_panel.layout().setSpacing(6 if narrow or self.window() is not self else 10)
+        self.main_panel.layout().setSpacing(6)
         self.session_overview_plot.setFixedHeight(90 if compact else 115)
         self._sync_rail_button_icons()
         if mode == "compact":
@@ -2254,18 +2273,122 @@ class MainWindow(QtWidgets.QMainWindow):
             if block is not None:
                 block.setVisible(visible)
 
+    def _plot_control_kind(self) -> str:
+        return self._interaction_view_kind() if hasattr(self, "session") else "plots"
+
+    def _position_plot_controls(self, *_args) -> None:
+        """Place the floating drag / zoom / reset controls inside the canvas.
+
+        Each kind of view (traces and diagnostics, concordia) keeps its own
+        place, stored as the nearest canvas corner and an offset from it, so
+        it stays put when the window is resized. Default: top right.
+        """
+        scroll = getattr(self, "plot_control_scroll", None)
+        if scroll is None:
+            return
+        stack, bar = self.plots_stack, self.plot_control_bar
+        size = bar.layout().minimumSize()
+        width = min(size.width() + 2, max(80, stack.width() - 20))
+        scroll.setFixedWidth(width)
+        if self._plot_control_vertical:
+            scroll.setFixedHeight(min(size.height() + 2, max(60, stack.height() - 12)))
+        corner, dx, dy = self._plot_control_anchors.get(self._plot_control_kind(), ("top_right", 10, 6))
+        x = dx if corner.endswith("left") else stack.width() - width - dx
+        y = dy if corner.startswith("top") else stack.height() - scroll.height() - dy
+        self._move_plot_controls(QtCore.QPoint(int(x), int(y)))
+
+    def _move_plot_controls(self, point: QtCore.QPoint) -> None:
+        scroll, stack = self.plot_control_scroll, self.plots_stack
+        x = max(0, min(point.x(), stack.width() - scroll.width()))
+        y = max(0, min(point.y(), stack.height() - scroll.height()))
+        scroll.move(x, y)
+        scroll.raise_()
+        # Labels drawn on the trace move out of the controls' way.
+        if self.plots_stack.currentIndex() == 0:
+            self.trace_plot.set_overlay_rect(QtCore.QRect(
+                scroll.mapTo(self.trace_plot, QtCore.QPoint()), scroll.size()))
+        else:
+            self.trace_plot.set_overlay_rect(None)
+
+    def _plot_control_grip_event(self, event: QtCore.QEvent) -> bool:
+        kind = event.type()
+        if kind == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._plot_control_drag = (event.globalPosition().toPoint(), self.plot_control_scroll.pos())
+            self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            return True
+        if kind == QtCore.QEvent.Type.MouseMove and self._plot_control_drag is not None:
+            start, origin = self._plot_control_drag
+            self._move_plot_controls(origin + event.globalPosition().toPoint() - start)
+            return True
+        if kind == QtCore.QEvent.Type.MouseButtonRelease and self._plot_control_drag is not None:
+            self._plot_control_drag = None
+            self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            self._remember_plot_control_place()
+            return True
+        if kind == QtCore.QEvent.Type.MouseButtonDblClick:
+            self.set_plot_controls_vertical(not self._plot_control_vertical)
+            return True
+        return False
+
+    def _remember_plot_control_place(self) -> None:
+        """Store the place as the nearest corner and the offset from it."""
+        scroll, stack = self.plot_control_scroll, self.plots_stack
+        geometry = scroll.geometry()
+        left = geometry.center().x() < stack.width() / 2
+        top = geometry.center().y() < stack.height() / 2
+        corner = ("top" if top else "bottom") + "_" + ("left" if left else "right")
+        dx = geometry.left() if left else stack.width() - geometry.right() - 1
+        dy = geometry.top() if top else stack.height() - geometry.bottom() - 1
+        self._plot_control_anchors[self._plot_control_kind()] = (corner, int(dx), int(dy))
+        self._save_plot_control_layout()
+
+    def _save_plot_control_layout(self) -> None:
+        self.settings.setValue("plot_controls_v1", json.dumps({
+            "anchors": {kind: list(value) for kind, value in self._plot_control_anchors.items()},
+            "vertical": self._plot_control_vertical,
+        }))
+
+    def set_plot_controls_vertical(self, vertical: bool) -> None:
+        """Lay the floating plot controls out in a row or a column."""
+        self._plot_control_vertical = bool(vertical)
+        layout = self.plot_control_bar.layout()
+        layout.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom if vertical
+                            else QtWidgets.QBoxLayout.Direction.LeftToRight)
+        for divider in self._plot_control_labels[3:]:
+            divider.setVisible(not vertical and not getattr(self, "_narrow_controls", False))
+        self.plot_control_bar.setMaximumHeight(16777215)
+        self.plot_control_bar.setMinimumHeight(0)
+        self._save_plot_control_layout()
+        self._sync_toolbar_strips()
+
+    def reset_plot_controls(self) -> None:
+        """Put the controls back in a row at the top right of every view."""
+        self._plot_control_anchors.clear()
+        self.set_plot_controls_vertical(False)
+
+    def _plot_control_menu(self, position: QtCore.QPoint) -> None:
+        menu = QtWidgets.QMenu(self)
+        row = menu.addAction("Horizontal", lambda: self.set_plot_controls_vertical(False))
+        column = menu.addAction("Vertical", lambda: self.set_plot_controls_vertical(True))
+        for action, checked in ((row, not self._plot_control_vertical), (column, self._plot_control_vertical)):
+            action.setCheckable(True)
+            action.setChecked(checked)
+        menu.addSeparator()
+        menu.addAction("Reset position", self.reset_plot_controls)
+        menu.exec(self.plot_control_grip.mapToGlobal(position))
+
     def _build_main_column(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(6)
 
         plot_card = NeumorphicFrame()
         plot_card.setObjectName("PlotCard")
         self.plot_card = plot_card
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
-        plot_layout.setContentsMargins(12, 12, 12, 12)
-        plot_layout.setSpacing(8)
+        plot_layout.setContentsMargins(10, 8, 10, 10)
+        plot_layout.setSpacing(4)
         mode_bar = SegmentedBar()
         self.stage_segment_bar = mode_bar
         mode_bar.setObjectName("StageSegmentBar")
@@ -2299,6 +2422,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ratio_row_lbl.setObjectName("ControlBarLabel")
 
         self.ratio_combo = StyledComboBox()
+        self.ratio_combo.setToolTip("Isotope ratio shown in the ratio, downhole and session views")
         for ratio_name in ["206Pb/238U", "207Pb/206Pb", "208Pb/232Th"]:
             self.ratio_combo.addItem(ratio_name, ratio_name)
         self.ratio_combo.currentIndexChanged.connect(self.on_ratio_changed)
@@ -2324,7 +2448,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plots_page0.setContentsMargins(0, 0, 0, 0)
         plots_vbox = QtWidgets.QVBoxLayout(plots_page0)
         plots_vbox.setContentsMargins(0, 0, 0, 0)
-        plots_vbox.setSpacing(8)
+        plots_vbox.setSpacing(4)
         self.trace_plot = TracePlotWidget()
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
@@ -2409,6 +2533,28 @@ class MainWindow(QtWidgets.QMainWindow):
         cb_layout = QtWidgets.QHBoxLayout(control_bar)
         cb_layout.setContentsMargins(6, 4, 6, 4)
         cb_layout.setSpacing(3)
+        # Drag this grip to move the controls; right-click to rearrange them.
+        self.plot_control_grip = QtWidgets.QLabel("⠿")
+        self.plot_control_grip.setObjectName("ControlBarLabel")
+        self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        self.plot_control_grip.setToolTip(
+            "Drag to move these controls inside the plot.\n"
+            "Right-click: horizontal or vertical, or reset the position.")
+        self.plot_control_grip.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.plot_control_grip.customContextMenuRequested.connect(self._plot_control_menu)
+        self.plot_control_grip.installEventFilter(self)
+        cb_layout.addWidget(self.plot_control_grip)
+        self._plot_control_drag = None
+        try:
+            saved = json.loads(self.settings.value("plot_controls_v1", "{}", type=str))
+        except (TypeError, ValueError):
+            saved = {}
+        saved = saved if isinstance(saved, dict) else {}
+        self._plot_control_anchors = {
+            kind: tuple(value) for kind, value in saved.get("anchors", {}).items()
+            if isinstance(value, list) and len(value) == 3 and value[0] in _CORNERS
+        }
+        self._plot_control_vertical = bool(saved.get("vertical", False))
 
         drag_lbl = QtWidgets.QLabel("Drag")
         drag_lbl.setObjectName("ControlBarLabel")
@@ -2529,7 +2675,15 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.setFixedHeight(control_bar.sizeHint().height() + 18)
         control_scroll.setWidget(control_bar)
         self._toolbar_strips.append((control_scroll, control_bar))
-        plot_layout.addWidget(control_scroll)
+        # The controls float inside the canvas instead of taking a row.
+        self.plot_control_scroll = control_scroll
+        control_scroll.setParent(self.plots_stack)
+        control_scroll.viewport().setAutoFillBackground(False)
+        control_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.plots_stack.installEventFilter(self)
+        self.plots_stack.currentChanged.connect(self._position_plot_controls)
+        if self._plot_control_vertical:
+            control_bar.layout().setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom)
 
         content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         content_splitter.setChildrenCollapsible(False)
@@ -4639,6 +4793,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.capabilities_badge.setStyleSheet(
             f"color: {theme.accent_strong}; background: {theme.accent_soft}; padding: 3px 10px; border-radius: 10px;"
         )
+        # The floating plot controls need a solid surface over plot content.
+        self.plot_control_bar.setStyleSheet(
+            f"#PlotControlBar {{ background: {theme.surface}; border: 1px solid {theme.input_border}; "
+            "border-radius: 14px; }"
+        )
         self._update_workflow_hint(self.workflow_step_list.currentRow())
         self._sync_toolbar_strips()
         QtCore.QTimer.singleShot(0, self, self._sync_toolbar_strips)
@@ -6035,6 +6194,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 available = enabled and self.session.plot_mode in {
                     "raw_ratios", "downhole_ratios", "session_ratios",
                 }
+                # Only views that plot a ratio show the ratio picker.
+                widget.setVisible(not calibration and self.session.plot_mode in {
+                    "raw_ratios", "downhole_ratios", "session_ratios"})
             elif widget is self.interact_mode_buttons["select"]:
                 available = enabled and hasattr(target, "supports_select_mode") and target.supports_select_mode()
             widget.setEnabled(available)

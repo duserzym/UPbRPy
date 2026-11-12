@@ -5865,6 +5865,13 @@ class TracePlotWidget(RoundedPlotWidget):
         else:
             self._spot_name_label.hide()
 
+    def set_overlay_rect(self, rect: QtCore.QRect | None) -> None:
+        """Keep the spot name and edge labels clear of controls floating over the plot."""
+        if getattr(self, "_overlay_rect", None) != rect:
+            self._overlay_rect = rect
+            self._reposition_spot_label()
+            self._position_signal_labels()
+
     def _reposition_spot_label(self) -> None:
         if not hasattr(self, "_spot_name_label"):
             return
@@ -5873,8 +5880,13 @@ class TracePlotWidget(RoundedPlotWidget):
         lbl.adjustSize()
         margin = 14
         x = self.width() - lbl.width() - margin
-        y = 0 if self.window().width() < 1280 else margin
-        lbl.move(max(0, x), max(0, y))
+        overlay = getattr(self, "_overlay_rect", None)
+        top = 0 if self.window().width() < 1280 else margin
+        if overlay is not None and overlay.intersects(QtCore.QRect(x, top, lbl.width(), lbl.height()).adjusted(-6, -4, 6, 4)):
+            x = overlay.left() - lbl.width() - 8
+            if x < margin:  # no room on the left: go below the controls
+                x, top = self.width() - lbl.width() - margin, overlay.bottom() + 6
+        lbl.move(max(0, x), max(0, top))
 
     def _position_signal_labels(self) -> None:
         """Keep edge pills outside selection boxes and inside the view."""
@@ -5897,6 +5909,13 @@ class TracePlotWidget(RoundedPlotWidget):
                     view.mapViewToScene(QtCore.QPointF(end, mean - spread)),
                 ).normalized().adjusted(-4, -4, 4, 4)
                 obstacles.append(rect)
+            overlay = getattr(self, "_overlay_rect", None)
+            if overlay is not None:
+                # Controls floating over the plot.
+                obstacles.append(QtCore.QRectF(
+                    QtCore.QPointF(self.mapToScene(overlay.topLeft())),
+                    QtCore.QPointF(self.mapToScene(overlay.bottomRight())),
+                ).normalized().adjusted(-4, -4, 4, 4))
             for name in ("signal_start", "signal_end"):
                 line = self._signal_boundaries.get(name)
                 if line is None:
