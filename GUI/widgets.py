@@ -7382,6 +7382,8 @@ class SessionOverviewWidget(RoundedPlotWidget):
         self._hover_spans = _spot_time_spans(frame)
         x_values = x_values[finite_mask]
         y_values = y_values[finite_mask]
+        # show_empty fixes the y range at 0..1, which turns y auto-range off.
+        self.plot_item.enableAutoRange(axis=pg.ViewBox.YAxis)
         curve = self.plot_item.plot(x_values, y_values, pen=pg.mkPen(color, width=1.4))
         curve.setDownsampling(auto=True, method="peak")
         curve.setClipToView(True)

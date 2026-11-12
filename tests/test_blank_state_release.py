@@ -128,3 +128,17 @@ def test_other_session_install_routes_release_controls(shell, app, tmp_path, rou
             reduction.reload_current_directory()
     wait_idle(app, reduction)
     assert_released(reduction)
+
+
+def test_session_overview_scales_to_data_after_blank_state(app, shell):
+    """The blank overview fixes y at 0..1; a loaded session must rescale it."""
+    reduction = shell.active_reduction
+    reduction.load_experiment_directory(str(RICH), background=True, offer_restore=False)
+    wait_idle(app, reduction)
+    for _ in range(20):
+        app.processEvents()
+    overview = reduction.session_overview_plot
+    (curve,) = overview.plot_item.listDataItems()
+    low, high = overview.plot_item.vb.viewRange()[1]
+    y_max = float(curve.yData.max())
+    assert y_max <= high < 10 * y_max, (low, high, y_max)
