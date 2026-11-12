@@ -62,6 +62,8 @@ class RoundedLegendItem(pg.LegendItem):
     """Paint a compact rounded legend without a graphics effect."""
 
     def paint(self, painter, *args):
+        if not self.items:
+            return
         theme = active_theme()
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         fill = theme_color(theme.glass_strong)
@@ -6293,7 +6295,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._spot_name_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self._spot_name_label.hide()
 
-        self.show_preview()
+        self.show_empty("")
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -6337,6 +6339,9 @@ class TracePlotWidget(RoundedPlotWidget):
                 legend.setParentItem(self.plot_item.vb)
             legend._outside_trace = outside
         legend.setColumnCount(max(1, min(6, (self.width()-115)//100)) if outside else 2)
+        # Keep the empty legend's graphics-layout geometry valid on narrow
+        # canvases, without adding entries or data items.
+        legend.setMinimumHeight(1)
 
     def _update_spot_label(self, spot_name: str | None) -> None:
         if not hasattr(self, "_spot_name_label"):
@@ -6514,69 +6519,6 @@ class TracePlotWidget(RoundedPlotWidget):
         _rounded_legend(self.plot_item, offset=(12, 8), labelTextColor=self._theme.axis_text, labelTextSize="10pt", colCount=2)
         self._layout_trace_legend()
 
-    def show_preview(self, region_colors: dict[str, str] | None = None) -> None:
-        self._reset_items()
-        colors = _resolved_region_colors(region_colors)
-        previews = [
-            ("238U", "#69e2ff", 1.0, 0.0),
-            ("206Pb", "#ff8a5b", 0.72, 0.8),
-            ("207Pb", "#ffe56b", 0.52, 1.7),
-            ("29Si", "#7ef7c9", 0.34, 2.4),
-        ]
-        n_spots = 4
-        spot_duration = 80.0
-        gap = 20.0
-        period = spot_duration + gap
-        total = n_spots * period
-        t_global = np.linspace(0.0, total, n_spots * 400)
-        t_local = t_global % period
-        in_spot = (t_local < spot_duration).astype(float)
-        rise = 1.0 / (1.0 + np.exp(-(t_local - 43.0) / 0.8))
-        fall = 1.0 / (1.0 + np.exp((t_local - 70.0) / 2.0))
-        plateau = 1450.0 * rise * fall * in_spot
-
-        preview_stats: np.ndarray | None = None
-        for name, color, scale, phase in previews:
-            baseline = 480.0 + 18.0 * np.sin(t_global / 2.7 + phase) + 10.0 * np.cos(t_global / 6.5 + phase * 0.6)
-            micro_ripple = 14.0 * np.sin(t_global / 1.9 + phase)
-            y_values = (baseline + plateau + micro_ripple) * scale
-            curve = self.plot_item.plot(t_global, y_values, pen=pg.mkPen(color, width=2.2), name=name)
-            curve.setDownsampling(auto=True, method="peak")
-            curve.setClipToView(True)
-            self._hover_series[name] = (t_global, y_values)
-            if name == "238U":
-                preview_stats = y_values
-
-        # Regions pinned to first spot only
-        first_mask = t_global <= spot_duration
-        t_first = t_global[first_mask]
-        preview_frame = pd.DataFrame(
-            {
-                "Time": t_first,
-                "238U": preview_stats[first_mask] if preview_stats is not None else np.zeros_like(t_first),
-            }
-        )
-        self._add_region("preview_baseline", (18.0, 42.0), colors["baseline"], 44, movable=False, frame=preview_frame, stats_channel="238U", plateau_filter_method="none")
-        self._add_region("preview_plateau", (47.0, 62.0), colors["plateau"], 52, movable=False, frame=preview_frame, stats_channel="238U", plateau_filter_method="none")
-        self._add_signal_boundary(
-            "signal_start",
-            43.0,
-            "#00e676",
-            "signal start",
-            movable=False,
-            bounds=(0.0, 47.0),
-        )
-        self._add_signal_boundary(
-            "signal_end",
-            70.0,
-            "#ff8c1a",
-            "signal end",
-            movable=False,
-            bounds=(62.0, 80.0),
-        )
-        self.set_x_window((10.0, 80.0))  # zoom to first spot; user can pan to others
-        self.fit_y_to_visible_data()
-
     def show_spot(
         self,
         spot_data: pd.DataFrame,
@@ -6600,7 +6542,7 @@ class TracePlotWidget(RoundedPlotWidget):
         keeping the reviewed spot isolated from neighboring acquisitions.
         """
         if spot_data.empty:
-            self.show_preview()
+            self.show_empty("")
             self._update_spot_label(None)
             return
         if not channels:
@@ -6724,7 +6666,7 @@ class TracePlotWidget(RoundedPlotWidget):
         line_style: str = "line",
     ) -> None:
         if frame.empty:
-            self.show_preview()
+            self.show_empty("")
             return
         if not series_names:
             self.show_empty("Check one or more channels to display traces.", y_label=y_label)
@@ -6797,12 +6739,14 @@ class TracePlotWidget(RoundedPlotWidget):
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("left", y_label, **label_style)
         self.plot_item.setLabel("bottom", "Acquisition Time", units="s", **label_style)
-        text_item = pg.TextItem(
-            html=f"<div style='color:{self._theme.muted}; font-size:13pt; font-weight:600'>{message}</div>",
-            anchor=(0.5, 0.5),
-        )
-        text_item.setPos(0.5, 0.5)
-        self.plot_item.addItem(text_item)
+        self._update_spot_label(None)
+        if message:
+            text_item = pg.TextItem(
+                html=f"<div style='color:{self._theme.muted}; font-size:13pt; font-weight:600'>{message}</div>",
+                anchor=(0.5, 0.5),
+            )
+            text_item.setPos(0.5, 0.5)
+            self.plot_item.addItem(text_item)
         self.setXRange(0.0, 1.0, padding=0.0)
         self.setYRange(0.0, 1.0, padding=0.0)
 
@@ -7139,7 +7083,7 @@ class TracePlotWidget(RoundedPlotWidget):
         finite_mask = np.isfinite(selected_times) & np.isfinite(y_values)
         inlier_mask = finite_mask.copy()
         if (
-            region_name in {"plateau", "preview_plateau"}
+            region_name == "plateau"
             and overlay["plateau_filter_method"] == "excel_2sigma"
             and finite_mask.sum() >= 3
         ):
@@ -7379,7 +7323,7 @@ class SessionOverviewWidget(RoundedPlotWidget):
         )
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         self._configure_plot()
-        self.show_preview()
+        self.show_empty()
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -7418,44 +7362,22 @@ class SessionOverviewWidget(RoundedPlotWidget):
         self._hover_spans = _spot_time_spans(pd.DataFrame())
         self._configure_plot()
 
-    def show_preview(self) -> None:
+    def show_empty(self) -> None:
+        """Clear session traces and navigation regions, keeping the axes."""
         self._reset_items()
-        previews = [
-            ("238U", "#69e2ff", 1.0, 0.0),
-            ("206Pb", "#ff8a5b", 0.72, 0.8),
-            ("207Pb", "#ffe56b", 0.52, 1.7),
-            ("29Si", "#7ef7c9", 0.34, 2.4),
-        ]
-        n_spots = 4
-        spot_duration = 80.0
-        gap = 20.0
-        period = spot_duration + gap  # 100 s per spot
-        total = n_spots * period
-        t_global = np.linspace(0.0, total, n_spots * 200)
-        t_local = t_global % period
-        in_spot = (t_local < spot_duration).astype(float)
-        rise = 1.0 / (1.0 + np.exp(-(t_local - 43.0) / 0.8))
-        fall = 1.0 / (1.0 + np.exp((t_local - 70.0) / 2.0))
-        plateau = 1450.0 * rise * fall * in_spot
-        for _name, color, scale, phase in previews:
-            baseline = 480.0 + 12.0 * np.sin(t_global / 12.0 + phase)
-            y = (baseline + plateau) * scale
-            curve = self.plot_item.plot(t_global, y, pen=pg.mkPen(color, width=1.0))
-            curve.setDownsampling(auto=True, method="peak")
-            curve.setClipToView(True)
-        self._ensure_window_region((10.0, 80.0))
-        self.setXRange(0.0, total, padding=0.01)
+        self.setXRange(0.0, 1.0, padding=0.0)
+        self.setYRange(0.0, 1.0, padding=0.0)
 
     def show_series(self, frame: pd.DataFrame, channel: str, color: str, current_window: tuple[float, float]) -> None:
         self._reset_items()
         if frame.empty or channel not in frame or "Time" not in frame:
-            self.show_preview()
+            self.show_empty()
             return
         x_values = frame["Time"].to_numpy(dtype=float)
         y_values = frame[channel].to_numpy(dtype=float)
         finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
         if not finite_mask.any():
-            self.show_preview()
+            self.show_empty()
             return
         self._hover_spans = _spot_time_spans(frame)
         x_values = x_values[finite_mask]

@@ -9,7 +9,7 @@ import sys
 from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid
 
-from GUI.main_window import MainWindow
+from GUI.main_window import MainWindow, _dropped_sources
 from GUI.theme import WallpaperWidget, active_theme, theme_color, paint_wallpaper
 
 
@@ -128,6 +128,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings = QtCore.QSettings("UPbRPy", "Studio")
+        self.setAcceptDrops(True)
+        self._companion_choices: dict[str, bool] = {}
         self._reduction_factory = reduction_factory or (
             lambda: MainWindow(theme_mode=theme_mode, app_icon=app_icon)
         )
@@ -259,6 +261,23 @@ class StudioWindow(QtWidgets.QMainWindow):
         reduction = self.reduction_for_new_content()
         reduction.load_experiment_directory(path)
         return reduction
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        if _dropped_sources(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        paths = _dropped_sources(event.mimeData())
+        for path in paths:
+            reduction = (self.reduction_for_new_content() if path.lower().endswith(".zip")
+                         else self.active_reduction or self.add_tab())
+            reduction.open_local_path(path)
+        if paths:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def _activate_tab(self, index: int) -> None:
         # The previous tab is no longer current when Qt emits currentChanged.

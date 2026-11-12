@@ -34,6 +34,15 @@ The [decision record](../qtegra_export_formats.md) explains the choice of
 Rich as the record. Its historical comparisons and intended downstream
 contracts are distinct from the implemented behavior specified here.
 
+Studio's **Import Rich CSV…** action opens a file by default. If per-spot
+files are beside it or in one immediate subfolder, Studio offers to include
+them by opening the enclosing folder. The choice lasts for the current
+Studio window only. **Import folder…** uses folder discovery directly.
+`UPbRPy.qtegra.companion_folder(rich_csv_path) -> Path | None` discovers that
+companion without loading acquisition arrays, using the same ambiguity
+checks as `open_qtegra`. Direct engine calls with a CSV still read that
+file alone.
+
 !!! warning "The signal in Qtegra files is a rate, not a number of ions"
     Qtegra writes every signal as ions **per second**, but the detector
     listens to each isotope for only a few hundredths of a second per sweep.

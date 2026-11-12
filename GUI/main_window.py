@@ -96,6 +96,7 @@ from UPbRPy.autosave import selection_autosave_path
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
 from UPbRPy.project import write_reduction_project
+from UPbRPy.qtegra import companion_folder, detect_format, UnsupportedQtegraFormat
 from UPbRPy.reproducibility import (
     export_reduction_bundle,
     selection_export_frame,
@@ -202,6 +203,14 @@ def _same_view(key: tuple, rendered: tuple | None) -> bool:
     return all(a is b for a, b in zip(key[1], rendered[1]))
 
 
+def _dropped_sources(mime: QtCore.QMimeData) -> list[str]:
+    """Return supported local sources in a URL drop, preserving order."""
+    paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+    return [str(path) for path in paths if path.is_dir() or (
+        path.is_file() and path.suffix.lower() in {".csv", ".upbr", ".zip"}
+    )]
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """One reduction, usable alone or embedded in a Studio tab."""
 
@@ -225,6 +234,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # promptly so those frames and pipeline caches can be reclaimed.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.settings = QtCore.QSettings("UPbRPy", "Studio")
+        self.setAcceptDrops(True)
+        self._companion_choices: dict[str, bool] = {}
         self.session = ReductionSession()
         self.export_settings = ExportSettings()
         self.project_path: Path | None = None
@@ -305,7 +316,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu.addSeparator()
         open_project_action = file_menu.addAction("Open Project…")
-        open_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        open_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+O"))
         open_project_action.triggered.connect(self.choose_project_file)
 
         save_project_action = file_menu.addAction("Save Project")
@@ -323,15 +334,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         file_menu.addSeparator()
-        open_experiment_action = file_menu.addAction(
-            "Open Experiment Folder…"
-        )
+        self.import_rich_action = file_menu.addAction("Import Rich CSV…")
+        self.import_rich_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.import_rich_action.triggered.connect(self.import_rich_csv)
+        open_experiment_action = file_menu.addAction("Import folder…")
         open_experiment_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+O"))
         open_experiment_action.triggered.connect(
             self.choose_experiment_directory
         )
-        open_qtegra_action = file_menu.addAction("Open Qtegra file…")
-        open_qtegra_action.triggered.connect(self.choose_qtegra_file)
+        self.recent_sources_menu = file_menu.addMenu("Open Recent")
+        self.recent_sources_menu.aboutToShow.connect(self._rebuild_recent_sources)
+        self._rebuild_recent_sources()
 
         reload_action = file_menu.addAction("Reload Current Source")
         reload_action.setShortcut(QtGui.QKeySequence("Ctrl+R"))
@@ -603,6 +616,13 @@ class MainWindow(QtWidgets.QMainWindow):
         guide_action.triggered.connect(self.show_pipeline_guide)
         about_action = help_menu.addAction("About UPbRPy Studio")
         about_action.triggered.connect(self.show_about_dialog)
+
+        self._session_actions = [
+            save_project_action, save_project_as_action, reload_action,
+            bundle_action, notebook_action, auto_pick_action, auto_pick_all_action,
+            apply_windows_action, final_action, depth_action, results_bundle_action,
+            *downhole_menu.actions(), *session_menu.actions(),
+        ]
 
     def _build_selection_menu(self, menu: QtWidgets.QMenu) -> None:
         """Keyboard editing of the current spot's selection windows."""
@@ -1260,7 +1280,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_updates_button = CheckUpdatesButton(self.updater, self.version_chip.open_dialog)
         self.statusBar().addPermanentWidget(self.check_updates_button)
 
-        self.statusBar().showMessage("Ready. Load an experiment directory to begin.")
+        self.statusBar().showMessage("Ready. Import a Rich CSV or folder to begin.")
         self._populate_workflow_ui()
         self._sync_fit_controls()
         self.spot_channel_splitter.splitterMoved.connect(
@@ -1461,6 +1481,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if watched is getattr(self, "plots_stack", None) and event.type() in {
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show, QtCore.QEvent.Type.LayoutRequest}:
             self._position_plot_controls()
+            self._position_empty_state()
         if watched in (getattr(self, "trace_plot", None), getattr(self, "plot_control_scroll", None)) and event.type() in {
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Show,
                 QtCore.QEvent.Type.LayoutRequest}:
@@ -2167,8 +2188,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         layout.addWidget(self.export_results_button)
 
-        self.import_button = QtWidgets.QPushButton("Open experiment…")
-        self.import_button.clicked.connect(self.choose_experiment_directory)
+        self.import_button = QtWidgets.QPushButton("Import Rich CSV…")
+        self.import_button.clicked.connect(self.import_rich_csv)
         layout.addWidget(self.import_button)
 
         self.reference_library_button = QtWidgets.QPushButton(
@@ -2707,6 +2728,25 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.plots_stack.installEventFilter(self)
         self.plots_stack.currentChanged.connect(self._position_plot_controls)
+        # A fixed-size child, outside all stack layouts. Moving it never
+        # changes the stack's size hint or schedules another layout pass.
+        self.empty_state_overlay = QtWidgets.QWidget(self.plots_stack)
+        self.empty_state_overlay.setObjectName("EmptySessionOverlay")
+        empty_layout = QtWidgets.QVBoxLayout(self.empty_state_overlay)
+        empty_layout.setContentsMargins(8, 8, 8, 8)
+        empty_layout.setSpacing(6)
+        empty_label = QtWidgets.QLabel("No session loaded")
+        empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_label)
+        self.empty_import_button = QtWidgets.QPushButton("Import Rich CSV…")
+        self.empty_import_button.setProperty("accent", True)
+        self.empty_import_button.clicked.connect(self.import_rich_csv)
+        empty_layout.addWidget(self.empty_import_button)
+        self.empty_folder_button = QtWidgets.QPushButton("Import folder…")
+        self.empty_folder_button.clicked.connect(self.choose_experiment_directory)
+        empty_layout.addWidget(self.empty_folder_button)
+        self.empty_state_overlay.setFixedSize(240, 136)
+        self._position_empty_state()
         if self._plot_control_vertical:
             control_bar.layout().setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom)
 
@@ -3913,16 +3953,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_project_summary(project_summary(self.session))
         self._update_reference_library_labels()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
-        self.trace_plot.show_preview(self.selection_colors)
+        self.trace_plot.show_empty("")
         self.session_overview_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
-        self.session_overview_plot.show_preview()
+        self.session_overview_plot.show_empty()
+        self.plots_stack.setCurrentIndex(0)
+        self._populate_selectors()
+        for model in (self.results_table.results_model, self.results_table.secondary_model,
+                      self.results_table.depth_model):
+            model.set_frame(pd.DataFrame())
+        self.results_table._spot_frame = pd.DataFrame()
+        self.results_table._depth_frame = pd.DataFrame()
+        self.results_table.include_flags.clear()
+        self.results_table.selected_spots.clear()
+        self.results_table.excluded_spots.clear()
+        for model in (self.results_table.results_group_model, self.results_table.secondary_group_model,
+                      self.results_table.spot_choice_group_model, self.results_table.depth_choice_group_model):
+            model.removeRows(0, model.rowCount())
+        self.results_table.spot_choice_list.clear()
+        self.results_table.depth_spot_combo.clear()
+        for panel in self.results_table.fit_panels.values():
+            panel.invalidate()
+            panel._timer.stop()
+            panel.records = []
+            panel.readout.clear()
+        self._sync_qtegra_controls()
+        self.empty_state_overlay.show()
+        self._position_empty_state()
+        self._rendered_view_key = self._view_key()
         self.notes_body.setText(self._compose_notes(None))
-        self.log_view.setPlainText("Ready. Load an experiment directory to begin.\n")
+        self.log_view.setPlainText("Ready. Import a Rich CSV or folder to begin.\n")
         if self._reference_library_notice:
             self.append_log(self._reference_library_notice)
             self._reference_library_notice = None
         self._sync_plot_mode_buttons()
         self._refresh_workflow_status()
+
+    def _position_empty_state(self) -> None:
+        overlay = getattr(self, "empty_state_overlay", None)
+        if overlay is None:
+            return
+        center = self.plots_stack.rect().center()
+        overlay.move(max(0, center.x() - overlay.width() // 2),
+                     max(0, center.y() - overlay.height() // 2))
+        # The controls remain draggable even if moved across the empty state.
+        self.plot_control_scroll.raise_()
+
+    def _sync_session_actions(self) -> None:
+        """Disable session-only controls while blank; undo only that on load.
+
+        Busy workers manage the same controls; a loaded session leaves their
+        enabled state alone except to restore what the blank state disabled.
+        """
+        loaded = self.session.loaded
+        for control in [*self._session_actions, self.save_project_button,
+                        self.export_results_button, self.repick_all_spots_button,
+                        self.results_table, self.fit_card]:
+            blank_disabled = bool(control.property("blankDisabled"))
+            if not loaded and not blank_disabled:
+                control.setProperty("loadedToolTip", control.toolTip())
+                control.setProperty("blankDisabled", True)
+                control.setEnabled(False)
+                control.setToolTip("Load a session first")
+            elif loaded and blank_disabled:
+                control.setProperty("blankDisabled", False)
+                control.setEnabled(self._active_worker is None)
+                control.setToolTip(str(control.property("loadedToolTip") or ""))
+        if not loaded:
+            for action in [*self.selection_edit_actions, self.exclude_spot_action]:
+                action.setEnabled(False)
+                action.setToolTip("Load a session first")
+            # Database actions are synced with their availability reason.
+            self.submit_to_database_action.setEnabled(False)
+            self.prefer_run_action.setEnabled(False)
 
     def _initialize_reference_library(self) -> None:
         saved_path = str(self.settings.value("reference_library_path", "", type=str) or "")
@@ -3973,10 +4075,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def choose_experiment_directory(self) -> None:
         directory = self.select_experiment_directory()
         if directory:
-            if self.isWindow():
-                self.load_experiment_directory(directory)
-            else:
-                self.open_source_requested.emit(directory)
+            self._open_source(directory)
 
     def select_experiment_directory(self) -> str:
         """Return a user-selected experiment directory or an empty string."""
@@ -3999,12 +4098,144 @@ class MainWindow(QtWidgets.QMainWindow):
         )[0]
 
     def choose_qtegra_file(self) -> None:
+        """Compatibility chooser using the original CSV filter and file-only load.
+
+        The primary Import Rich CSV action uses import_rich_csv, including
+        its companion offer. Keep this entry point for existing integrations.
+        """
         path = self.select_qtegra_file()
         if path:
+            self._report_csv_format(path)
+            self._open_source(path)
+
+    def _open_source(self, path: str) -> None:
+        if self.isWindow():
+            self.load_experiment_directory(path)
+        else:
+            self.open_source_requested.emit(path)
+
+    def _report_csv_format(self, path: str) -> str:
+        try:
+            kind = detect_format(path)
+            message = ("Detected a Rich Qtegra CSV" if kind == "rich" else
+                       "Detected a per-spot Qtegra CSV, not a Rich export")
+        except UnsupportedQtegraFormat:
+            kind = "upbr"
+            message = "Detected a Y-only UPbR CSV, not a Rich export (no time information)"
+        except (ValueError, OSError):
+            kind = "unknown"
+            message = "Detected an unknown CSV format, not a Rich export"
+        self.statusBar().showMessage(message)
+        self.append_log(message)
+        return kind
+
+    def import_rich_csv(self) -> None:
+        """Choose a Rich CSV and offer its per-spot companion when available."""
+        path = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import Rich CSV", self.source_dialog_directory(),
+            "Qtegra Rich CSV (*.csv);;All files (*)",
+        )[0]
+        if path:
+            self.import_csv_path(path)
+
+    def import_csv_path(self, path: str) -> None:
+        """Import a dropped or selected CSV through the normal source loader."""
+        source = Path(path).resolve()
+        kind = self._report_csv_format(str(source))
+        if kind == "rich":
+            try:
+                companion = companion_folder(source)
+            except (ValueError, OSError) as exc:
+                self.append_log(f"Companion discovery: {exc}")
+                companion = None
+            if companion is not None:
+                # Share answers across tabs in this shell, without persisting
+                # them to QSettings or a project.
+                owner = self.window()
+                choices = getattr(owner, "_companion_choices", self._companion_choices)
+                key = str(source)
+                if key not in choices:
+                    dialog = QtWidgets.QMessageBox(self)
+                    dialog.setWindowTitle("Include per-spot files")
+                    dialog.setText(f"Include the per-spot files in {companion} (dwell time, cross-calibration)?")
+                    include = dialog.addButton("Include", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+                    rich_only = dialog.addButton("Rich CSV only", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+                    dialog.setDefaultButton(include)
+                    dialog.setEscapeButton(rich_only)
+                    dialog.exec()
+                    choices[key] = dialog.clickedButton() is include
+                if choices[key]:
+                    source = source.parent
+        self._open_source(str(source))
+
+    def open_local_path(self, path: str) -> None:
+        """Open a supported local source, project or bundle from a drop/recent item."""
+        source = Path(path)
+        if source.is_dir():
+            self._open_source(str(source))
+        elif source.suffix.lower() == ".csv":
+            self.import_csv_path(str(source))
+        elif source.suffix.lower() == ".upbr":
             if self.isWindow():
-                self.load_experiment_directory(path)
+                self.load_project_file(str(source))
             else:
-                self.open_source_requested.emit(path)
+                self.open_project_requested.emit(str(source))
+        elif source.suffix.lower() == ".zip":
+            from UPbRPy.session_bundle import unpack_session_bundle
+
+            database = self.database()
+            database.run(lambda: unpack_session_bundle(source, database.cache_root),
+                         self._open_session_bundle_here, title="Open session bundle")
+
+    def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
+        if _dropped_sources(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QtGui.QDropEvent) -> None:
+        paths = _dropped_sources(event.mimeData())
+        for path in paths:
+            self.open_local_path(path)
+        if paths:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _recent_sources(self) -> list[dict[str, str]]:
+        try:
+            records = json.loads(self.settings.value("recent_sources_v1", "[]", type=str))
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(records, list):
+            return []
+        return [record for record in records if isinstance(record, dict)
+                and record.get("kind") in {"csv", "folder", "project"}
+                and isinstance(record.get("path"), str) and record["path"]][:10]
+
+    def _remember_source(self, path: str | Path, kind: str) -> None:
+        path = str(Path(path).resolve())
+        records = [{"kind": kind, "path": path},
+                   *(record for record in self._recent_sources() if record["path"] != path)]
+        self.settings.setValue("recent_sources_v1", json.dumps(records[:10]))
+        self._rebuild_recent_sources()
+
+    def _clear_recent_sources(self) -> None:
+        self.settings.remove("recent_sources_v1")
+        self._rebuild_recent_sources()
+
+    def _rebuild_recent_sources(self) -> None:
+        menu = self.recent_sources_menu
+        menu.clear()
+        for record in self._recent_sources():
+            path = record["path"]
+            action = menu.addAction(path.replace("&", "&&"))
+            action.setData(record)
+            action.setEnabled(Path(path).exists())
+            action.setToolTip(path if action.isEnabled() else f"Missing: {path}")
+            action.triggered.connect(lambda _checked=False, source=path: self.open_local_path(source))
+        menu.addSeparator()
+        menu.addAction("Clear Menu", self._clear_recent_sources)
 
     def choose_experiment_directory_in_new_window(self) -> None:
         """Compatibility entry point: choose a source for a Studio tab."""
@@ -4161,6 +4392,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_action_error("Project save failed", exc)
             return
         self.append_log(f"Saved lightweight project: {written}")
+        self._remember_source(written, "project")
         count = getattr(self, "_last_written_edit_count", 0)
         if count:
             noun = "spot" if count == 1 else "spots"
@@ -4486,9 +4718,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sign_out_action: (available, "Forget this computer's sign-in."),
         }
         for action, (enabled, tip) in states.items():
+            if not available:
+                tip = reason
+            elif not self.session.loaded and action in (
+                self.submit_to_database_action, self.prefer_run_action,
+            ):
+                enabled, tip = False, "Load a session first"
             action.setEnabled(enabled)
-            action.setToolTip(tip if available else reason)
-            action.setStatusTip(tip if available else reason)
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
         self._sync_database_button_visibility()
 
     def register_url_scheme(self) -> None:
@@ -4688,6 +4926,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
+        self.empty_state_overlay.setVisible(not loaded_session.loaded)
         self.results_table.set_selected_spots(set())
         self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)
         self.results_table.include_flags.clear()
@@ -4715,6 +4954,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if project_path is None
             else Path(project_path).resolve(strict=False)
         )
+        self._remember_source(project_path or directory, "project" if project_path else
+                              "csv" if Path(directory).is_file() else "folder")
         self.update_project_window_title()
         self.pending_region_updates.clear()
         self._focused_spot_name = None
@@ -5275,7 +5516,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_workflow_actions()
         if self.session.loaded and self._workflow_step_allows_region_edits():
             self.set_plot_mode("raw", refresh=False)
-        if self.session.loaded and _same_view(self._view_key(), self._rendered_view_key):
+        if _same_view(self._view_key(), self._rendered_view_key):
             self._refresh_step_panels()
             return
         self.refresh_view()
@@ -5288,6 +5529,8 @@ class MainWindow(QtWidgets.QMainWindow):
         reduction-cache entry compare by identity, so a stage recalculated in
         the background (a new result object) forces a redraw.
         """
+        if not self.session.loaded:
+            return (("blank",), (self.session,))
         spot = self.current_spot_name()
         if not spot and self.session.spot_names:
             spot = self.session.spot_names[0]
@@ -6291,8 +6534,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def restore_default_main_view(self) -> None:
         if not self.session.loaded:
-            self.trace_plot.show_preview(self.selection_colors)
-            self.session_overview_plot.show_preview()
+            self.statusBar().showMessage("Load a session first")
             return
         target = self._current_plot_interaction_target()
         if hasattr(target, "restore_default_view"):
@@ -6329,8 +6571,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flush_selection_edits()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
-            self.trace_plot.show_preview(self.selection_colors)
-            self.session_overview_plot.show_preview()
+            if not _same_view(self._view_key(), self._rendered_view_key):
+                self._show_placeholder_state()
             self.notes_body.setText(self._compose_notes(None))
             self._refresh_workflow_status()
             return
@@ -6411,7 +6653,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def on_trace_x_window_changed(self, bounds: tuple[float, float]) -> None:
-        self.session_overview_plot.set_window(bounds)
+        if self.session.loaded:
+            self.session_overview_plot.set_window(bounds)
 
     def on_overview_window_changed(self, bounds: tuple[float, float]) -> None:
         """Navigate the complete session without rebuilding trace items."""
@@ -6700,7 +6943,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _workflow_action_specs(self) -> list[tuple[str, object, bool]]:
         if not self.session.loaded:
-            return [("Import experiment directory", self.choose_experiment_directory, True)]
+            return [("Import Rich CSV…", self.import_rich_csv, True),
+                    ("Import folder…", self.choose_experiment_directory, False)]
 
         stage = self.current_workflow_stage()
         if stage == PipelineStage.IMPORT:
@@ -6763,6 +7007,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_workflow_status(self) -> None:
         self._sync_selection_history_actions()
         self.update_project_window_title()
+        self._sync_session_actions()
         self._sync_workflow_step_locks()
         if not self.session.loaded:
             self.autopick_duration_label.hide()
@@ -7016,7 +7261,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _require_loaded(self) -> bool:
         if self.session.loaded:
             return True
-        self.statusBar().showMessage("Load an experiment directory first.")
+        self.statusBar().showMessage("Load a session first")
         return False
 
     def run_autopick_current_spot(self) -> None:

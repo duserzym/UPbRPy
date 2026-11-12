@@ -718,6 +718,39 @@ def detect_format(path) -> str:
     raise ValueError(f"No Qtegra MainRuns data: {path}")
 
 
+def _companion_spot_paths(path, spot_paths, *, unsupported=None) -> list[Path]:
+    companions = [
+        [file for file, kind in _csv_formats(child, unsupported=unsupported).items()
+         if kind == "spot"]
+        for child in sorted(path.iterdir()) if child.is_dir()
+    ]
+    companions = [files for files in companions if files]
+    if len(companions) > 1 or (spot_paths and companions):
+        raise ValueError(f"Ambiguous per-spot companion folders in {path}")
+    return spot_paths or (companions[0] if companions else [])
+
+
+def companion_folder(rich_csv_path: str | Path) -> Path | None:
+    """Find the per-spot companion beside a Rich CSV without loading data.
+
+    Return its parent directory (the CSV's own directory or one immediate
+    subdirectory), or None. Discovery uses the same rules as open_qtegra;
+    ambiguous exports raise ValueError. To include it, open the Rich CSV's
+    parent directory, which merges the exports.
+    """
+    rich_csv_path = Path(rich_csv_path)
+    if detect_format(rich_csv_path) != "rich":
+        return None
+    parent = rich_csv_path.parent
+    formats = _csv_formats(parent)
+    if sum(kind == "rich" for kind in formats.values()) > 1:
+        raise ValueError(f"More than one Rich CSV in {parent}")
+    spots = _companion_spot_paths(
+        parent, [file for file, kind in formats.items() if kind == "spot"],
+    )
+    return spots[0].parent if spots else None
+
+
 def open_qtegra(path, *, cycle_time_s=None) -> QtegraSession:
     """Open a file or discover a session and its immediate companion folder.
 
@@ -742,16 +775,9 @@ def open_qtegra(path, *, cycle_time_s=None) -> QtegraSession:
         raise ValueError(f"More than one Rich CSV in {path}")
     if rich_files:
         session = read_rich_csv(rich_files[0], cycle_time_s=cycle_time_s)
-        companions = [
-            [file for file, kind in _csv_formats(child, unsupported=unsupported).items()
-             if kind == "spot"]
-            for child in sorted(path.iterdir()) if child.is_dir()
-        ]
-        companions = [files for files in companions if files]
-        if len(companions) > 1 or (spot_paths and companions):
-            raise ValueError(f"Ambiguous per-spot companion folders in {path}")
-        if spot_paths or companions:
-            session = merge(session, _spot_session(spot_paths or companions[0]))
+        spots = _companion_spot_paths(path, spot_paths, unsupported=unsupported)
+        if spots:
+            session = merge(session, _spot_session(spots))
     elif spot_paths:
         session = _spot_session(spot_paths)
     elif unsupported:
