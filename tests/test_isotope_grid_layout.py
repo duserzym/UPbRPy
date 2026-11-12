@@ -7,6 +7,7 @@ out at many widths and fails on the first error, on a bare widget.
 """
 
 import sys
+import traceback
 
 import pytest
 
@@ -28,7 +29,14 @@ def app():
 
 def test_tiles_wrap_inside_the_grid_at_every_width(app, monkeypatch):
     errors = []
-    monkeypatch.setattr(sys, "excepthook", lambda *args: errors.append(args[1]))
+    def record(kind, error, trace):
+        # Only errors raised while laying out the grid (other widgets left by
+        # earlier tests may report their own).
+        text = "".join(traceback.format_tb(trace))
+        if any(name in text for name in ("_arrange", "IsotopeGrid", "_make_chip", "height_for_width")):
+            errors.append(error)
+
+    monkeypatch.setattr(sys, "excepthook", record)
     grid = IsotopeGridWidget()
     grid.set_channels(CHANNELS, set(CHANNELS[:4]), {}, theme_name="light")
     grid.show()
