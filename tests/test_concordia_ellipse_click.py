@@ -144,7 +144,8 @@ def test_spot_card_matches_results_table_and_toggles_exclusion(review, app, fina
     assert shown == ["small"]
     review.set_selected_spots({"small", "far"})
     app.processEvents()
-    assert "2 spots selected" in card.body.text()
+    assert not card.isVisible()  # the readout shows the count and pooled age
+    assert review.concordia_age_label.text().startswith("Selected:")
     review.set_selected_spots(set())
     app.processEvents()
     assert not card.isVisible()

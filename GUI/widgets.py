@@ -254,6 +254,27 @@ class SegmentedBar(QtWidgets.QFrame):
 
 # -- SpotTree --------------------------------------------------------------
 
+SPOT_TREE_COUNT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 9
+
+
+class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
+    """Draw a folder's shown/total count at the right of its name."""
+
+    def paint(self, painter, option, index):
+        count = index.data(SPOT_TREE_COUNT_ROLE)
+        if not count:
+            return super().paint(painter, option, index)
+        width = option.fontMetrics.horizontalAdvance(count) + 8
+        name_option = QtWidgets.QStyleOptionViewItem(option)
+        name_option.rect = option.rect.adjusted(0, 0, -width, 0)
+        super().paint(painter, name_option, index)
+        painter.save()
+        painter.setPen(theme_color(active_theme().muted))
+        painter.drawText(option.rect.adjusted(0, 0, -4, 0),
+                         int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), count)
+        painter.restore()
+
+
 class SpotTree(QtWidgets.QTreeWidget):
     """QTreeWidget with F2-rename and Delete-key support for spot management."""
 
@@ -263,8 +284,57 @@ class SpotTree(QtWidgets.QTreeWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAllColumnsShowFocus(False)
+        # Middle elision keeps the distinguishing end (the spot number) visible.
         self.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        self.setItemDelegate(_SpotTreeDelegate(self))
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._check_press = None
+
+    def check_rect(self, index: QtCore.QModelIndex) -> QtCore.QRect:
+        """The check box of a row in column 0, in viewport coordinates."""
+        option = QtWidgets.QStyleOptionViewItem()
+        self.initViewItemOption(option)
+        option.rect = self.visualRect(index)
+        option.features |= QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        return self.style().subElementRect(
+            QtWidgets.QStyle.SubElement.SE_ItemViewItemCheckIndicator, option, self)
+
+    def _check_index_at(self, pos: QtCore.QPoint) -> QtCore.QModelIndex | None:
+        index = self.indexAt(pos)
+        if not index.isValid() or index.column() != 0:
+            return None
+        if not index.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
+            return None
+        return index if self.check_rect(index).adjusted(-3, -3, 3, 3).contains(pos) else None
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        # The check box shows or hides a spot; it never changes the browsed spot.
+        index = self._check_index_at(event.position().toPoint())
+        if index is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._check_press = QtCore.QPersistentModelIndex(index)
+            event.accept()
+            return
+        self._check_press = None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if self._check_press is not None:
+            index = self._check_index_at(event.position().toPoint())
+            pressed, self._check_press = self._check_press, None
+            if index is not None and QtCore.QModelIndex(pressed) == index:
+                item = self.itemFromIndex(index)
+                state = item.checkState(0)
+                item.setCheckState(0, QtCore.Qt.CheckState.Unchecked if state == QtCore.Qt.CheckState.Checked
+                                   else QtCore.Qt.CheckState.Checked)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if self._check_index_at(event.position().toPoint()) is not None:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def drawBranches(self, painter, rect, index):
         # Draw only the disclosure; Fusion's branch selection fills the indent.
@@ -562,6 +632,63 @@ class ChipButton(QtWidgets.QPushButton):
         event.accept()
 
 
+class TileFlowLayout(QtWidgets.QLayout):
+    """Left-to-right layout of fixed-size tiles that wraps onto new rows."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._items: list[QtWidgets.QLayoutItem] = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(4)
+
+    def addItem(self, item):  # type: ignore[override]
+        self._items.append(item)
+
+    def count(self):  # type: ignore[override]
+        return len(self._items)
+
+    def itemAt(self, index):  # type: ignore[override]
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):  # type: ignore[override]
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # type: ignore[override]
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self):  # type: ignore[override]
+        return True
+
+    def heightForWidth(self, width):  # type: ignore[override]
+        return self._arrange(QtCore.QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect):  # type: ignore[override]
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self):  # type: ignore[override]
+        return self.minimumSize()
+
+    def minimumSize(self):  # type: ignore[override]
+        size = QtCore.QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _arrange(self, rect: QtCore.QRect, *, apply: bool) -> int:
+        x, y, row_height = rect.x(), rect.y(), 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            if x + hint.width() > rect.right() + 1 and row_height > 0:
+                x, y, row_height = rect.x(), y + row_height + spacing, 0
+            if apply:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
+            x += hint.width() + spacing
+            row_height = max(row_height, hint.height())
+        return y + row_height - rect.y()
+
+
 class IsotopeGridWidget(QtWidgets.QWidget):
     """Compact element-grouped channel toggle grid.
 
@@ -674,13 +801,20 @@ class IsotopeGridWidget(QtWidgets.QWidget):
                 continue
 
             self._layout.addWidget(self._make_section_header(section_label))
-
+            # The section's tiles wrap to the panel width; each tile shows its
+            # element, so no separate element column is needed.
+            tiles = QtWidgets.QWidget()
+            flow = TileFlowLayout(tiles)
             for elem in present:
-                self._layout.addWidget(self._make_element_row(elem, element_groups[elem]))
+                ordered = sorted(element_groups[elem],
+                                 key=lambda c: int(_parse_channel(c)[1]) if _parse_channel(c) else 0)
+                for idx, ch in enumerate(ordered):
+                    flow.addWidget(self._make_chip(ch, isotope_index=idx))
                 placed.add(elem)
-
             if has_other:
-                self._layout.addWidget(self._make_other_row(other))
+                for ch in other:
+                    flow.addWidget(self._make_chip(ch))
+            self._layout.addWidget(tiles)
 
         self._layout.addStretch(1)
 
@@ -738,7 +872,7 @@ class IsotopeGridWidget(QtWidgets.QWidget):
         btn.setObjectName("IsotopeChip")
         # A slightly denser tile preserves the periodic-table visual language
         # while exposing substantially more elements in the inspector.
-        btn.setFixedSize(44, 42)
+        btn.setFixedSize(36, 34)
         btn.setToolTip(
             f"{channel}\nClick: use for selection statistics\n"
             "Double-click: show or hide trace\nRight-click: choose color"
@@ -3121,6 +3255,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     selectedSpotsChanged = QtCore.Signal(object)
     showSignalRequested = QtCore.Signal(str)
+    mouseModeRequested = QtCore.Signal(str)
+    chooserRequested = QtCore.Signal()
+    includedSpotsChanged = QtCore.Signal()
     showGlassesChanged = QtCore.Signal(bool)
     appearance_changed = QtCore.Signal()
     excludedSpotsChanged = QtCore.Signal(object)
@@ -3298,7 +3435,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
             card.hide()
             return
         if len(names) > 1:
-            card.show_names(names)
+            # The readout below shows the selected count and pooled age.
+            card.hide()
             return
         name = names[0]
         final = self.results_model.frame
@@ -3971,6 +4109,33 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._update_sample_chips()
         self.refresh_spot_concordia(inclusions_only=True)
         self.refresh_depth_concordia(reset_view=False, inclusions_only=True)
+        self._update_spot_count()
+        self.includedSpotsChanged.emit()
+
+    def set_spot_inclusions(self, changes: dict[str, bool]) -> None:
+        """Show or hide many spots at once; views and fits update once."""
+        self._set_spot_inclusions(dict(changes))
+
+    def spot_shown(self, name: str) -> bool:
+        """Whether a spot is displayed (default: shown, glasses per Glasses)."""
+        if name in self.include_flags:
+            return bool(self.include_flags[name])
+        return self._show_glasses or name not in self._glass_spot_names()
+
+    def _update_spot_count(self) -> None:
+        total = len(self.include_flags)
+        shown = sum(bool(value) for value in self.include_flags.values())
+        text = f"{shown}/{total}" if total else ""
+        if hasattr(self, "spot_count_label"):
+            self.spot_count_label.setText(text)
+        if hasattr(self, "spot_summary_button"):
+            self.spot_summary_button.setText(f"Showing {shown} of {total} spots" if total else "No spots shown")
+
+    def set_external_chooser(self, enabled: bool) -> None:
+        """Hide this page's spot list when another view (Studio's Spots tree) chooses."""
+        self.spot_chooser_section.setVisible(not enabled)
+        self.spot_summary_button.setVisible(enabled)
+        self._update_spot_count()
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
         """Share spot selection, keeping the origin view's scroll position."""
@@ -4143,8 +4308,49 @@ class ResultsTableWidget(QtWidgets.QWidget):
         row.addStretch(1)
         return container, buttons
 
+    def _segmented_row(self, label: str, buttons: list[QtWidgets.QToolButton]) -> QtWidgets.QWidget:
+        """A label column of equal width and a full-width segmented control."""
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        caption = QtWidgets.QLabel(label)
+        caption.setObjectName("ConcordiaOptionLabel")
+        caption.setFixedWidth(caption.fontMetrics().horizontalAdvance("Diagram") + 4)
+        layout.addWidget(caption)
+        for button in buttons:
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            button.setMinimumWidth(0)
+            layout.addWidget(button, 1)
+        return row
+
+    @staticmethod
+    def _hairline() -> QtWidgets.QFrame:
+        line = QtWidgets.QFrame()
+        line.setObjectName("PanelHairline")
+        line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        return line
+
+    def set_mouse_mode_buttons(self, mode: str) -> None:
+        """Show the shared drag mode (pan or zoom) on the concordia panel."""
+        for key, button in self.mouse_mode_buttons.items():
+            blocker = QtCore.QSignalBlocker(button)
+            button.setChecked(key == mode)
+            del blocker
+
+    def _mouse_mode_clicked(self, mode: str) -> None:
+        self.set_interaction_mode(mode)
+        self.set_mouse_mode_buttons(mode)
+        self.mouseModeRequested.emit(mode)
+
     def create_spot_concordia_page(self) -> QtWidgets.QWidget:
-        """Build the selectable multi-spot concordia review page."""
+        """Build the selectable multi-spot concordia review page.
+
+        The options column has three groups: view settings (diagram, colour,
+        mouse), the spots to display (taking the spare height), and the
+        result with the fit controls pinned at the bottom.
+        """
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4155,51 +4361,26 @@ class ResultsTableWidget(QtWidgets.QWidget):
         review_row.setSpacing(8)
         layout.addLayout(review_row, 1)
         controls = QtWidgets.QWidget()
+        controls.setObjectName("ConcordiaOptions")
         controls.setMaximumWidth(230)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.addWidget(QtWidgets.QLabel("Spot means to display"))
-        self.spot_filter = QtWidgets.QLineEdit()
-        self.spot_filter.setMinimumWidth(0)
-        self.spot_filter.setPlaceholderText("Filter spots…")
-        self.spot_filter.textChanged.connect(self.filter_spot_choices)
-        controls_layout.addWidget(self.spot_filter)
-        self.spot_group_toggle = self._group_button("chooser")
-        filter_row = QtWidgets.QHBoxLayout()
-        filter_row.setSpacing(4)
-        filter_row.addWidget(self.spot_group_toggle)
-        self.spot_glasses_toggle = self._create_glass_button()
-        filter_row.addWidget(self.spot_glasses_toggle)
-        filter_row.addStretch(1)
-        controls_layout.addLayout(filter_row)
-        self.spot_choice_list = QtWidgets.QListWidget()
-        self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
-        self.spot_choice_list.itemChanged.connect(self._chooser_include_changed)
-        self.spot_choice_tree, self.spot_choice_group_model = self._create_grouped_view()
-        self.spot_choice_tree.model().setSortRole(QtCore.Qt.ItemDataRole.DisplayRole)
-        self.spot_choice_tree.setHeaderHidden(True)
-        self.spot_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
-        self.spot_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self._chooser_stack = QtWidgets.QStackedWidget()
-        # A wrapping readout makes Qt ask this page for height-for-width.
-        # Let the chooser and canvas shrink instead of inheriting their
-        # preferred heights and scrolling the bottom controls off a laptop.
-        self._chooser_stack.setMinimumHeight(80)
-        self._chooser_stack.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                                           QtWidgets.QSizePolicy.Policy.Ignored)
-        self._chooser_stack.addWidget(self.spot_choice_list)
-        self._chooser_stack.addWidget(self.spot_choice_tree)
-        self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
-        self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
-        controls_layout.addWidget(self._chooser_stack, 6)
-        controls_layout.addLayout(self._create_spot_bulk_buttons())
-        diagram_row, self.spot_diagram_buttons = self.create_diagram_buttons(
-            self.refresh_spot_concordia
-        )
-        controls_layout.addWidget(diagram_row)
-        colour_row = QtWidgets.QHBoxLayout()
-        colour_row.setSpacing(0)
-        colour_row.addWidget(QtWidgets.QLabel("Colour: "))
+        controls_layout.setSpacing(4)
+
+        # 1. View settings.
+        diagram_group = QtWidgets.QButtonGroup(page)
+        self.spot_diagram_buttons = {}
+        for key, label, tip in (("wetherill", "Wetherill", "Wetherill concordia"),
+                                ("tera_wasserburg", "T–W", "Tera–Wasserburg concordia")):
+            button = QtWidgets.QToolButton()
+            button.setText(label)
+            button.setToolTip(tip)
+            button.setCheckable(True)
+            button.setProperty("modeToggle", True)
+            button.setChecked(key == "wetherill")
+            button.clicked.connect(self.refresh_spot_concordia)
+            diagram_group.addButton(button)
+            self.spot_diagram_buttons[key] = button
         colour_group = QtWidgets.QButtonGroup(page)
         self.spot_colour_buttons = {}
         saved_colour = (self._settings.value("review_spot_colour_v1", "sample", type=str)
@@ -4214,24 +4395,117 @@ class ResultsTableWidget(QtWidgets.QWidget):
             button.setChecked(key == saved_colour)
             button.clicked.connect(lambda checked=False, key=key: self.set_spot_colour_mode(key))
             colour_group.addButton(button)
-            colour_row.addWidget(button)
             self.spot_colour_buttons[key] = button
-        colour_row.addStretch(1)
-        controls_layout.addLayout(colour_row)
+        mouse_group = QtWidgets.QButtonGroup(page)
+        self.mouse_mode_buttons = {}
+        for key, label, tip in (("pan", "Pan", "Drag to pan; click an ellipse to select it"),
+                                ("zoom", "Box", "Drag a box to zoom; click an ellipse to select it")):
+            button = QtWidgets.QToolButton()
+            button.setText(label)
+            button.setToolTip(tip)
+            button.setCheckable(True)
+            button.setProperty("modeToggle", True)
+            button.setChecked(key == "pan")
+            button.clicked.connect(lambda checked=False, key=key: self._mouse_mode_clicked(key))
+            mouse_group.addButton(button)
+            self.mouse_mode_buttons[key] = button
+        controls_layout.addWidget(self._segmented_row("Diagram", list(self.spot_diagram_buttons.values())))
+        controls_layout.addWidget(self._segmented_row("Colour", list(self.spot_colour_buttons.values())))
+        controls_layout.addWidget(self._segmented_row("Mouse", list(self.mouse_mode_buttons.values())))
+        controls_layout.addWidget(self._hairline())
+
+        # 2. Spots to display: takes all spare height.
+        self.spot_chooser_section = QtWidgets.QWidget()
+        chooser_layout = QtWidgets.QVBoxLayout(self.spot_chooser_section)
+        chooser_layout.setContentsMargins(0, 0, 0, 0)
+        chooser_layout.setSpacing(4)
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(2)
+        spots_title = QtWidgets.QLabel("Spots")
+        spots_title.setObjectName("SectionTitle")
+        header.addWidget(spots_title)
+        self.spot_count_label = QtWidgets.QLabel("")
+        self.spot_count_label.setObjectName("SecondaryText")
+        self.spot_count_label.setMinimumWidth(0)
+        self.spot_count_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                            QtWidgets.QSizePolicy.Policy.Preferred)
+        header.addWidget(self.spot_count_label, 1)
+        for text, callback, tip in (("All", lambda: self.set_all_spot_choices(True), "Show every spot"),
+                                    ("Clear", self.clear_spot_choices, "Show no spots")):
+            button = QtWidgets.QPushButton(text)
+            button.setToolTip(tip)
+            button.setStyleSheet("padding: 2px 6px;")
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+            button.clicked.connect(callback)
+            header.addWidget(button)
+        actions = self._selection_actions("spot")
+        actions.setText("⋯")
+        actions.setToolTip("Selection actions")
+        actions.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }")
+        header.addWidget(actions)
+        chooser_layout.addLayout(header)
+        self.spot_filter = QtWidgets.QLineEdit()
+        self.spot_filter.setMinimumWidth(0)
+        self.spot_filter.setPlaceholderText("Filter spots…")
+        self.spot_filter.textChanged.connect(self.filter_spot_choices)
+        self.spot_group_toggle = self._group_button("chooser")
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setSpacing(4)
+        filter_row.addWidget(self.spot_group_toggle)
+        self.spot_glasses_toggle = self._create_glass_button()
+        filter_row.addWidget(self.spot_glasses_toggle)
+        filter_row.addStretch(1)
+        chooser_layout.addLayout(filter_row)
+        chooser_layout.addWidget(self.spot_filter)
+        self.spot_choice_list = QtWidgets.QListWidget()
+        self.spot_choice_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        self.spot_choice_list.itemChanged.connect(self._chooser_include_changed)
+        self.spot_choice_tree, self.spot_choice_group_model = self._create_grouped_view()
+        self.spot_choice_tree.model().setSortRole(QtCore.Qt.ItemDataRole.DisplayRole)
+        self.spot_choice_tree.setHeaderHidden(True)
+        self.spot_choice_tree.setIndentation(14)
+        self.spot_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
+        self.spot_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._chooser_stack = QtWidgets.QStackedWidget()
+        # A wrapping readout makes Qt ask this page for height-for-width.
+        # Let the chooser and canvas shrink instead of inheriting their
+        # preferred heights and scrolling the bottom controls off a laptop.
+        self._chooser_stack.setMinimumHeight(80)
+        self._chooser_stack.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                           QtWidgets.QSizePolicy.Policy.Ignored)
+        self._chooser_stack.addWidget(self.spot_choice_list)
+        self._chooser_stack.addWidget(self.spot_choice_tree)
+        self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
+        self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
+        chooser_layout.addWidget(self._chooser_stack, 1)
+        controls_layout.addWidget(self.spot_chooser_section, 6)
+        # In Studio the Spots tree is the chooser; this summary takes its place.
+        self.spot_summary_button = QtWidgets.QToolButton()
+        self.spot_summary_button.setObjectName("SpotSummaryLink")
+        self.spot_summary_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.spot_summary_button.setAutoRaise(True)
+        self.spot_summary_button.setToolTip("Choose the spots to display in the Spots list")
+        self.spot_summary_button.clicked.connect(self.chooserRequested)
+        self.spot_summary_button.hide()
+        controls_layout.addWidget(self.spot_summary_button)
+
+        # The selected spot's card.
+        self.spot_card = SpotInfoCard()
+        self.spot_card.showSignalRequested.connect(self.showSignalRequested)
+        self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
+        controls_layout.addWidget(self.spot_card, 1)
+        controls_layout.addWidget(self._hairline())
+
+        # 3. Result and fit, pinned at the bottom.
         self.concordia_age_label = QtWidgets.QLabel("Shown: No concordia age for this set")
-        self.concordia_age_label.setObjectName("SecondaryText")
+        self.concordia_age_label.setObjectName("ConcordiaResult")
         self.concordia_age_label.setWordWrap(True)
         self.concordia_age_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
                                                        | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard)
         self.concordia_age_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                               QtWidgets.QSizePolicy.Policy.Preferred)
         self.concordia_age_label.setMaximumHeight(self.concordia_age_label.fontMetrics().lineSpacing() * 3 + 6)
-        self.spot_card = SpotInfoCard()
-        self.spot_card.showSignalRequested.connect(self.showSignalRequested)
-        self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
-        controls_layout.addWidget(self.spot_card, 1)
         controls_layout.addWidget(self.concordia_age_label)
-        controls_layout.addWidget(self._selection_actions("spot"))
         controls_layout.addWidget(self._fit_panel("spot"))
         self.spot_concordia = ConcordiaReviewWidget()
         self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
@@ -4652,6 +4926,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.set_selected_spots(retained_selection)
         self.refresh_spot_concordia(reset_view=True)
         self.refresh_depth_concordia()
+        self._update_spot_count()
+        self.includedSpotsChanged.emit()
         if self.tabs.currentWidget() not in (
             self.results_page,
             self.secondary_page,

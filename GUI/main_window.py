@@ -64,6 +64,7 @@ from GUI.state import ReductionSession
 from GUI.export_dialog import ExportResultsDialog
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
+    SPOT_TREE_COUNT_ROLE,
     CALIBRATION_GRID,
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
@@ -178,6 +179,12 @@ _VIEWS_WITHOUT_SELECTION_WINDOWS = frozenset({
     "calibration_slopes", "downhole_ratios", "session_ratios", "standard_bias",
     "final_results", "depth_profile", "normalized_plateau", "raw_ratios",
 })
+
+
+# Spots-tree roles: the text a row last showed (to tell a rename from a
+# check toggle) and the check state last applied.
+_TREE_TEXT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 7
+_TREE_CHECK_ROLE = QtCore.Qt.ItemDataRole.UserRole + 8
 
 
 # Plot modes whose drawing does not depend on the browsed spot.
@@ -656,6 +663,115 @@ class MainWindow(QtWidgets.QMainWindow):
                 return item
             iterator += 1
         return None
+
+    @staticmethod
+    def _is_spot_leaf(item: QtWidgets.QTreeWidgetItem) -> bool:
+        role = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        return item.childCount() == 0 and bool(role) and not str(role).startswith("__")
+
+    def _sync_spot_tree_checks(self) -> None:
+        """Show the shared display ticks and shown/total counts in the tree."""
+        if not hasattr(self, "spot_list"):
+            return
+        checked = QtCore.Qt.CheckState.Checked
+        unchecked = QtCore.Qt.CheckState.Unchecked
+        self.spot_list.blockSignals(True)
+        try:
+            def visit(item) -> tuple[int, int]:
+                if self._is_spot_leaf(item):
+                    name = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole))
+                    shown = self.results_table.spot_shown(name)
+                    item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(0, checked if shown else unchecked)
+                    item.setData(0, _TREE_CHECK_ROLE, shown)
+                    return int(shown), 1
+                shown = total = 0
+                for index in range(item.childCount()):
+                    child_shown, child_total = visit(item.child(index))
+                    shown, total = shown + child_shown, total + child_total
+                if item is not self.spot_list.invisibleRootItem():
+                    item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                    state = (checked if total and shown == total else unchecked if not shown
+                             else QtCore.Qt.CheckState.PartiallyChecked)
+                    item.setCheckState(0, state)
+                    item.setData(0, _TREE_CHECK_ROLE, state.value)
+                    item.setData(0, SPOT_TREE_COUNT_ROLE, f"{shown}/{total}" if total else "")
+                return shown, total
+
+            shown, total = visit(self.spot_list.invisibleRootItem())
+        finally:
+            self.spot_list.blockSignals(False)
+        self.spot_tree_count_label.setText(f"{shown}/{total}" if total else "")
+
+    def _on_spot_tree_check_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
+        """Collect tick changes; a folder tick applies to all its spots at once."""
+        if self._is_populating or column != 0:
+            return
+        if not item.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
+            return
+        state = item.checkState(0)
+        if self._is_spot_leaf(item):
+            shown = state == QtCore.Qt.CheckState.Checked
+            if item.data(0, _TREE_CHECK_ROLE) == shown:
+                return
+            self._pending_tree_checks[str(item.data(0, QtCore.Qt.ItemDataRole.UserRole))] = shown
+        else:
+            if item.data(0, _TREE_CHECK_ROLE) == state.value or state == QtCore.Qt.CheckState.PartiallyChecked:
+                return
+            shown = state == QtCore.Qt.CheckState.Checked
+
+            def collect(node):
+                for index in range(node.childCount()):
+                    child = node.child(index)
+                    if self._is_spot_leaf(child):
+                        self._pending_tree_checks[str(child.data(0, QtCore.Qt.ItemDataRole.UserRole))] = shown
+                    else:
+                        collect(child)
+
+            collect(item)
+        self._tree_check_timer.start(0)
+
+    def _apply_tree_checks(self) -> None:
+        changes, self._pending_tree_checks = self._pending_tree_checks, {}
+        if changes:
+            self.results_table.set_spot_inclusions(changes)
+        self._sync_spot_tree_checks()
+
+    def _filter_spot_tree(self, text: str) -> None:
+        """Hide spots whose names do not contain the text; ticks are unchanged."""
+        needle = text.strip().lower()
+
+        def visit(item) -> bool:
+            if self._is_spot_leaf(item):
+                match = not needle or needle in item.text(0).lower()
+                item.setHidden(not match)
+                return match
+            any_visible = False
+            for index in range(item.childCount()):
+                any_visible |= visit(item.child(index))
+            if item is not self.spot_list.invisibleRootItem() and item.childCount():
+                item.setHidden(not any_visible)
+            return any_visible
+
+        visit(self.spot_list.invisibleRootItem())
+
+    def _focus_spot_tree(self) -> None:
+        for index in range(self.inspector_tabs.count()):
+            if self.inspector_tabs.tabText(index) == "Browse":
+                self.inspector_tabs.setCurrentIndex(index)
+        self.set_workspace_panel_visible("inspector", True)
+        self.spot_list.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        if self.spot_list.currentItem() is not None:
+            self.spot_list.scrollToItem(self.spot_list.currentItem())
+
+    def _on_review_mouse_mode(self, mode: str) -> None:
+        """The concordia panel's Mouse control sets the concordia drag mode."""
+        self._interaction_mode_by_view["concordia"] = mode
+        if self._interaction_view_kind() == "concordia":
+            for key, button in self.interact_mode_buttons.items():
+                button.blockSignals(True)
+                button.setChecked(key == mode)
+                button.blockSignals(False)
 
     def _follow_review_selection(self, names) -> None:
         """Make the one spot selected on the concordia current in the Spots tree."""
@@ -2272,6 +2388,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.results_table.selectedSpotsChanged.connect(self._follow_review_selection)
         self.results_table.showSignalRequested.connect(self.show_spot_signal)
+        self.results_table.mouseModeRequested.connect(self._on_review_mouse_mode)
+        self.results_table.chooserRequested.connect(self._focus_spot_tree)
+        # Ticks in the Spots tree and the concordia list are one state.
+        self._pending_tree_checks: dict[str, bool] = {}
+        self._tree_check_timer = QtCore.QTimer(self)
+        self._tree_check_timer.setSingleShot(True)
+        self._tree_check_timer.timeout.connect(self._apply_tree_checks)
+        self._tree_sync_timer = QtCore.QTimer(self)
+        self._tree_sync_timer.setSingleShot(True)
+        self._tree_sync_timer.timeout.connect(self._sync_spot_tree_checks)
+        self.results_table.includedSpotsChanged.connect(self._tree_sync_timer.start)
         self.plots_stack.addWidget(self.bias_plot)            # index 5
         plot_layout.addWidget(self.plots_stack)
 
@@ -2498,16 +2625,21 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.inspector_tabs, 1)
 
         browse_page = QtWidgets.QWidget()
+        browse_page.setObjectName("BrowsePage")
         browse_layout = QtWidgets.QVBoxLayout(browse_page)
-        browse_layout.setContentsMargins(6, 8, 6, 6)
-        browse_layout.setSpacing(8)
+        # One panel surface with flat sections: no cards inside the card.
+        browse_layout.setContentsMargins(4, 8, 4, 6)
+        browse_layout.setSpacing(6)
 
+        primary_row = QtWidgets.QHBoxLayout()
+        primary_row.setSpacing(8)
         primary_label = QtWidgets.QLabel("Primary channel")
         primary_label.setObjectName("SectionTitle")
         self.primary_channel_combo = StyledComboBox()
         self.primary_channel_combo.currentTextChanged.connect(self.on_primary_channel_changed)
-        browse_layout.addWidget(primary_label)
-        browse_layout.addWidget(self.primary_channel_combo)
+        primary_row.addWidget(primary_label)
+        primary_row.addWidget(self.primary_channel_combo, 1)
+        browse_layout.addLayout(primary_row)
 
         # A user-adjustable vertical splitter makes it possible to favor a
         # long spot list or a large isotope grid without hiding either one.
@@ -2516,33 +2648,70 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.spot_channel_splitter.setObjectName("SpotChannelSplitter")
         self.spot_channel_splitter.setChildrenCollapsible(False)
-        self.spot_channel_splitter.setHandleWidth(7)
+        self.spot_channel_splitter.setHandleWidth(9)
 
-        spots_card = NeumorphicFrame()
-        spots_card.setObjectName("InspectorSubsection")
-        spots_layout = QtWidgets.QVBoxLayout(spots_card)
-        spots_layout.setContentsMargins(10, 10, 10, 10)
-        spots_layout.setSpacing(6)
+        spots_section = QtWidgets.QWidget()
+        spots_section.setObjectName("InspectorSection")
+        spots_layout = QtWidgets.QVBoxLayout(spots_section)
+        spots_layout.setContentsMargins(0, 0, 0, 2)
+        spots_layout.setSpacing(4)
 
-        spots_label = QtWidgets.QLabel("Spots")
-        spots_label.setObjectName("SectionTitle")
-
-        # Keep folder management beside the section heading so it does not
-        # consume a separate row of the high-value browsing area.
+        check_help = (
+            "Ticked spots are shown in the concordia and results plots (the same "
+            "choice as the concordia spot list). Ticks have no effect on other views. "
+            "Clicking a name browses that spot; clicking its box only shows or hides it."
+        )
         spots_toolbar = QtWidgets.QHBoxLayout()
         spots_toolbar.setContentsMargins(0, 0, 0, 0)
-        spots_toolbar.setSpacing(4)
+        spots_toolbar.setSpacing(2)
+        spots_label = QtWidgets.QLabel("Spots")
+        spots_label.setObjectName("SectionTitle")
+        spots_label.setToolTip(check_help)
         spots_toolbar.addWidget(spots_label)
-        spots_toolbar.addStretch(1)
-        _add_folder_btn = QtWidgets.QPushButton("+ Folder")
-        _add_folder_btn.setMinimumWidth(66)
-        _add_folder_btn.setProperty("tertiary", True)
-        _add_folder_btn.setToolTip("Add a new custom folder under Unknowns")
+        self.spot_tree_count_label = QtWidgets.QLabel("")
+        self.spot_tree_count_label.setObjectName("SecondaryText")
+        self.spot_tree_count_label.setToolTip("Spots shown in the concordia and results plots / all spots")
+        self.spot_tree_count_label.setMinimumWidth(0)
+        self.spot_tree_count_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                                 QtWidgets.QSizePolicy.Policy.Preferred)
+        spots_toolbar.addWidget(self.spot_tree_count_label, 1)
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(2)
+        self.spot_tree_filter = QtWidgets.QLineEdit()
+        self.spot_tree_filter.setPlaceholderText("Filter spots…")
+        self.spot_tree_filter.setClearButtonEnabled(True)
+        self.spot_tree_filter.setMinimumWidth(60)
+        self.spot_tree_filter.textChanged.connect(self._filter_spot_tree)
+        filter_row.addWidget(self.spot_tree_filter, 1)
+
+        def compact(text: str, tip: str, row=spots_toolbar) -> QtWidgets.QToolButton:
+            button = QtWidgets.QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setObjectName("CompactHeaderButton")
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(text) + 28)
+            row.addWidget(button)
+            return button
+
+        self.spot_tree_all_button = compact("All", "Show every spot in the concordia and results plots")
+        self.spot_tree_all_button.clicked.connect(lambda: self.results_table.set_all_spot_choices(True))
+        self.spot_tree_none_button = compact("None", "Show no spots in the concordia and results plots")
+        self.spot_tree_none_button.clicked.connect(self.results_table.clear_spot_choices)
+        _add_folder_btn = compact("+ Folder", "Add a new custom folder under Unknowns", filter_row)
         _add_folder_btn.clicked.connect(self._on_spot_add_folder)
-        spots_toolbar.addWidget(_add_folder_btn)
+        self.spot_tree_actions_button = compact("⋯", "Selection actions", filter_row)
+        self.spot_tree_actions_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.spot_tree_actions_button.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }")
+        self.spot_tree_actions_button.setMenu(
+            self.results_table._action_menu(self.spot_tree_actions_button, "spot"))
+        spots_layout.addLayout(spots_toolbar)
+        spots_layout.addLayout(filter_row)
 
         self.spot_list = SpotTree()
         self.spot_list.setHeaderHidden(True)
+        self.spot_list.setIndentation(14)
         self.spot_list.setRootIsDecorated(True)
         self.spot_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.spot_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2551,30 +2720,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.setToolTip(
             "Analyses in this session. Previous / next spot: "
             f"{self._shortcut_text(['Ctrl+Up'])} / {self._shortcut_text(['Ctrl+Down'])} "
-            "(or , / . when no text field has focus)."
+            "(or , / . when no text field has focus).\n" + check_help
         )
         self.spot_list.deleteRequested.connect(self._on_spot_tree_delete)
+        self.spot_list.itemChanged.connect(self._on_spot_tree_check_changed)
         self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
-        spots_layout.addLayout(spots_toolbar)
         spots_layout.addWidget(self.spot_list, 1)
-        spots_card.setMinimumHeight(140)
-        self.spot_channel_splitter.addWidget(spots_card)
+        # At least six rows of spots.
+        spots_section.setMinimumHeight(140)
+        self.spot_channel_splitter.addWidget(spots_section)
 
-        channels_card = NeumorphicFrame()
-        channels_card.setObjectName("InspectorSubsection")
-        channels_card_layout = QtWidgets.QVBoxLayout(channels_card)
-        channels_card_layout.setContentsMargins(10, 10, 10, 10)
-        channels_card_layout.setSpacing(6)
+        channels_section = QtWidgets.QWidget()
+        channels_section.setObjectName("InspectorSection")
+        channels_card_layout = QtWidgets.QVBoxLayout(channels_section)
+        channels_card_layout.setContentsMargins(0, 2, 0, 0)
+        channels_card_layout.setSpacing(2)
 
         channels_heading = QtWidgets.QHBoxLayout()
         channels_heading.setContentsMargins(0, 0, 0, 0)
+        channels_heading.setSpacing(4)
         channels_label = QtWidgets.QLabel("Channels")
         channels_label.setObjectName("SectionTitle")
-        channels_help = ElidedLabel("click: select · double-click: show/hide")
+        channels_help = QtWidgets.QLabel("ⓘ")
         channels_help.setObjectName("InspectorHint")
-        channels_help.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        channels_help.setToolTip(
+            "Click a tile: use it for selection statistics.\n"
+            "Double-click: show or hide its trace.\nRight-click: choose its colour."
+        )
         channels_heading.addWidget(channels_label)
-        channels_heading.addWidget(channels_help, 1)
+        channels_heading.addWidget(channels_help)
+        channels_heading.addStretch(1)
         channels_card_layout.addLayout(channels_heading)
 
         self.channel_list = QtWidgets.QListWidget()
@@ -2594,11 +2769,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.isotope_grid.colorChangeRequested.connect(self._on_isotope_color_change)
         channels_scroll.setWidget(self.isotope_grid)
         channels_card_layout.addWidget(channels_scroll, 1)
-        channels_card.setMinimumHeight(180)
-        self.spot_channel_splitter.addWidget(channels_card)
-        self.spot_channel_splitter.setStretchFactor(0, 2)
-        self.spot_channel_splitter.setStretchFactor(1, 3)
-        self.spot_channel_splitter.setSizes([300, 500])
+        channels_section.setMinimumHeight(180)
+        self.spot_channel_splitter.addWidget(channels_section)
+        self.spot_channel_splitter.setStretchFactor(0, 11)
+        self.spot_channel_splitter.setStretchFactor(1, 9)
+        # About 55 % spots; a size the user dragged is restored from the
+        # saved layout (spot_channel_splitter_state_v1).
+        self.spot_channel_splitter.setSizes([550, 450])
         browse_layout.addWidget(self.spot_channel_splitter, 1)
 
         # The legacy list mirrors grid state for compatibility but does not
@@ -2606,10 +2783,13 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_layout.addWidget(self.channel_list, 0)
         self.channel_list.setVisible(False)  # hidden; isotope_grid is the primary UI
 
-        color_controls = QtWidgets.QGridLayout()
+        color_controls = QtWidgets.QHBoxLayout()
         color_controls.setContentsMargins(0, 0, 0, 0)
-        color_controls.setSpacing(6)
-        self.channel_color_button = QtWidgets.QPushButton("Channel color")
+        color_controls.setSpacing(4)
+        colour_caption = QtWidgets.QLabel("Colour")
+        colour_caption.setObjectName("SecondaryText")
+        color_controls.addWidget(colour_caption)
+        self.channel_color_button = QtWidgets.QPushButton("Channel")
         self.channel_color_button.setToolTip("Change the selected channel trace color")
         self.channel_color_button.clicked.connect(self.choose_channel_color)
         self.baseline_color_button = QtWidgets.QPushButton("Baseline")
@@ -2623,13 +2803,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.baseline_color_button,
             self.plateau_color_button,
         ):
+            button.setStyleSheet("padding: 3px 4px; font-size: 11px;")
             button.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Fixed,
             )
-        color_controls.addWidget(self.channel_color_button, 0, 0, 1, 2)
-        color_controls.addWidget(self.baseline_color_button, 1, 0)
-        color_controls.addWidget(self.plateau_color_button, 1, 1)
+            color_controls.addWidget(button, 1)
         browse_layout.addLayout(color_controls)
         self.inspector_tabs.addTab(browse_page, "Browse")
 
@@ -5090,7 +5269,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 for i in range(root.childCount()):
                     root.child(i).setExpanded(True)
 
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.spot_list)
+        while iterator.value() is not None:
+            item = iterator.value()
+            item.setData(0, _TREE_TEXT_ROLE, item.text(0))
+            iterator += 1
         self.spot_list.blockSignals(False)
+        self._sync_spot_tree_checks()
+        self._filter_spot_tree(self.spot_tree_filter.text())
 
         if self.session.selected_spot:
             self._select_spot_in_tree(self.session.selected_spot)
@@ -5285,6 +5471,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Handle in-tree rename edits."""
         if self._is_populating or column != 0:
             return
+        if item.text(0) == item.data(0, _TREE_TEXT_ROLE):
+            return  # a check toggle, not a rename
+        item.setData(0, _TREE_TEXT_ROLE, item.text(0))
         role_data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         new_text = item.text(0).strip()
         if role_data in self.session.experiment.attrs.get("sample_overrides", {}):
@@ -5871,6 +6060,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self._interaction_mode_by_view[self._interaction_view_kind()]
         if mode == "select" and not supports_select:
             mode = "zoom"
+        if self._interaction_view_kind() == "concordia":
+            self.results_table.set_mouse_mode_buttons(mode)
         if hasattr(target, "set_interaction_mode"):
             target.set_interaction_mode(mode)
         for key, button in self.interact_mode_buttons.items():
@@ -5890,6 +6081,8 @@ class MainWindow(QtWidgets.QMainWindow):
             target.set_interaction_mode(mode)
         current_mode = target.interaction_mode() if hasattr(target, "interaction_mode") else mode
         self._interaction_mode_by_view[self._interaction_view_kind()] = current_mode
+        if self._interaction_view_kind() == "concordia":
+            self.results_table.set_mouse_mode_buttons(current_mode)
         for key, button in self.interact_mode_buttons.items():
             button.blockSignals(True)
             button.setChecked(key == current_mode)
