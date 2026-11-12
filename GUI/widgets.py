@@ -944,6 +944,8 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         super().__init__(parent)
         self.include_flags = include_flags
         self.excluded_spots = set()
+        self.column_marks: dict[str, int] = {}   # column name -> 1 quiet, 2 strong
+        self.flash_columns: set[str] = set()
         self._replace_frame(frame)
 
     def _replace_frame(self, frame: pd.DataFrame | None) -> None:
@@ -1013,6 +1015,14 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
             if role == QtCore.Qt.ItemDataRole.ToolTipRole:
                 return "Excluded from calculations"
         offset = int(self.include_flags is not None)
+        if role == QtCore.Qt.ItemDataRole.BackgroundRole and self.column_marks and index.column() >= offset:
+            mark = self.column_marks.get(self.frame.columns[index.column() - offset], 0)
+            if mark:
+                theme = getattr(self, "review_theme", None) or active_theme()
+                color = QtGui.QColor(theme_color(theme.accent))
+                color.setAlpha(34 if mark == 2 else 14)
+                return QtGui.QBrush(color)
+            return None
         if offset and index.column() == 0:
             if role not in (QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole):
                 return None
@@ -1050,6 +1060,29 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         orientation: QtCore.Qt.Orientation,
         role: int = int(QtCore.Qt.ItemDataRole.DisplayRole),
     ) -> object:
+        offset = int(self.include_flags is not None)
+        if (orientation == QtCore.Qt.Orientation.Horizontal and role != int(QtCore.Qt.ItemDataRole.DisplayRole)
+                and section >= offset and section - offset < len(self.frame.columns)):
+            name = self.frame.columns[section - offset]
+            mark = self.column_marks.get(name, 0)
+            if role == int(QtCore.Qt.ItemDataRole.BackgroundRole) and (mark or name in self.flash_columns):
+                theme = getattr(self, "review_theme", None) or active_theme()
+                color = theme.accent if name in self.flash_columns else (
+                    theme.accent_soft if mark == 2 else theme.row_hover)
+                return QtGui.QBrush(theme_color(color))
+            if role == int(QtCore.Qt.ItemDataRole.FontRole) and mark:
+                font = QtGui.QFont()
+                font.setBold(True)
+                return font
+            if role == int(QtCore.Qt.ItemDataRole.ToolTipRole):
+                if name == "preferred_date":
+                    return ("Preferred date (Ma). The method varies by row, as in the exports: see "
+                            "preferred_date_method (206Pb/238U below the transition age, 207Pb/206Pb "
+                            "above, or the chosen common-Pb correction).")
+                source = RESULTS_ADDED_COLUMNS.get(name)
+                if source is not None:
+                    return f"{name}: spot-mean column {source} (shown here only; exports are unchanged)"
+                return name
         if role != int(QtCore.Qt.ItemDataRole.DisplayRole):
             return None
         if orientation == QtCore.Qt.Orientation.Horizontal:
@@ -3250,6 +3283,342 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.show()
 
 
+
+# ── Final results table: key columns ──────────────────────────────────────
+# Spot-mean columns shown in the Studio table next to the final results
+# (display only; exports are built from the finalized results). Display
+# name -> spot-mean column. There is no 204Pb concentration column: the
+# table shows the 204Pb mean count rate and the 204Pb common-Pb fraction.
+RESULTS_DATE_COLUMNS = {
+    "206Pb/238U_age": "206Pb/238U_age", "206Pb/238U_age_2e": "206Pb/238U_age_2e",
+    "207Pb/235U_age": "207Pb/235U_age", "207Pb/235U_age_2e": "207Pb/235U_age_2e",
+    "207Pb/206Pb_age": "207Pb/206Pb_age", "207Pb/206Pb_age_2e": "207Pb/206Pb_age_2e",
+    "207Pb_corrected_age": "207Pb_corrected_age", "207Pb_corrected_age_2e": "207Pb_corrected_age_2e",
+    "208Pb_corrected_age": "208Pb_corrected_age", "208Pb_corrected_age_2e": "208Pb_corrected_age_2e",
+    "disc%": "disc%",
+}
+RESULTS_CONCENTRATION_COLUMNS = {
+    "U (µg/g)": "U", "Th/U": "Th/U",
+    "204Pb mean (cps)": "qc_204Pb_mean",
+    "204Pb common fraction (f206)": "204Pb_common_fraction_206",
+    "207Pb common fraction (f206)": "207Pb_common_fraction_206",
+}
+RESULTS_ADDED_COLUMNS = {**RESULTS_DATE_COLUMNS, **RESULTS_CONCENTRATION_COLUMNS}
+
+# Jump-to chips in order: label, columns (the first present one is the
+# target), and how strongly the columns are marked (2 strong, 1 quiet, 0 none).
+RESULTS_KEY_GROUPS = (
+    ("Preferred age", ("preferred_date", "preferred_date_2e", "preferred_date_method"), 2),
+    ("206/238 date", ("206Pb/238U_age", "206Pb/238U_age_2e"), 1),
+    ("207/235 date", ("207Pb/235U_age", "207Pb/235U_age_2e"), 1),
+    ("207/206 date", ("207Pb/206Pb_age", "207Pb/206Pb_age_2e"), 1),
+    ("207-corrected age", ("207Pb_corrected_age", "207Pb_corrected_age_2e"), 1),
+    ("208-corrected age", ("208Pb_corrected_age", "208Pb_corrected_age_2e"), 1),
+    ("Discordance", ("disc%",), 1),
+    ("U (µg/g)", ("U (µg/g)",), 1),
+    ("Th/U", ("Th/U",), 1),
+    ("204Pb", ("204Pb mean (cps)", "204Pb common fraction (f206)", "207Pb common fraction (f206)"), 1),
+    ("Ratios", ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th", "207Pb/235U", "238U/206Pb"), 0),
+    ("Flags", ("automatic_flags", "preferred_date_pass"), 0),
+)
+RESULTS_FROZEN_COLUMNS = ("sample", "spot_name")
+
+
+def results_column_group(name: str) -> str:
+    """The band label of a final-results column."""
+    if name in RESULTS_FROZEN_COLUMNS:
+        return "Spot"
+    if name.startswith("preferred_date") or name in RESULTS_DATE_COLUMNS and not name.startswith(("207Pb_c", "208Pb_c")) and name != "disc%":
+        return "Ages"
+    if name.startswith(("207Pb_corrected", "208Pb_corrected")):
+        return "Corrected ages"
+    if name in RESULTS_CONCENTRATION_COLUMNS:
+        return "Concentrations"
+    if name in {"disc%", "automatic_flags"}:
+        return "QC"
+    if "/" in name or name.startswith(("err_corr", "tw_rho")):
+        return "Ratios"
+    return ""
+
+
+def results_key_columns(frame: pd.DataFrame) -> set[str]:
+    """Columns kept by "Key columns only"."""
+    keep = set(RESULTS_FROZEN_COLUMNS)
+    for _label, columns, _strength in RESULTS_KEY_GROUPS:
+        keep.update(column for column in columns if column in frame)
+    keep.update(column for column in frame.columns if results_column_group(column) == "Ratios"
+                and not column.endswith("_no_calibration"))
+    return keep & set(frame.columns)
+
+
+def results_display_frame(final_frame: pd.DataFrame, spot_frame: pd.DataFrame) -> pd.DataFrame:
+    """Final results with key spot-mean columns placed beside them.
+
+    The final-results columns keep their order and values. Dates and the
+    discordance follow the preferred-date columns; concentrations and
+    common-Pb quantities follow the flags. Neither input is modified.
+    """
+    if "spot_name" not in final_frame or "spot_name" not in spot_frame or final_frame.empty:
+        return final_frame
+    source = spot_frame.drop_duplicates("spot_name").set_index(spot_frame.drop_duplicates("spot_name")["spot_name"].astype(str))
+    names = final_frame["spot_name"].astype(str)
+
+    def added(mapping):
+        return {display: source[column].reindex(names).to_numpy() for display, column in mapping.items()
+                if column in source and display not in final_frame}
+
+    dates, concentrations = added(RESULTS_DATE_COLUMNS), added(RESULTS_CONCENTRATION_COLUMNS)
+    if not dates and not concentrations:
+        return final_frame
+    columns = list(final_frame.columns)
+    after_dates = max((columns.index(c) for c in ("preferred_date", "preferred_date_2e", "preferred_date_method",
+                                                    "preferred_date_pass") if c in columns), default=len(columns) - 1)
+    after_flags = columns.index("automatic_flags") if "automatic_flags" in columns else len(columns) - 1
+    parts, start = [], 0
+    for cut, extra in sorted(((after_dates, dates), (after_flags, concentrations)), key=lambda item: item[0]):
+        parts.append(final_frame.iloc[:, start:cut + 1])
+        parts.append(pd.DataFrame(extra, index=final_frame.index))
+        start = cut + 1
+    parts.append(final_frame.iloc[:, start:])
+    return pd.concat(parts, axis=1)
+
+
+class FrozenColumnsView(QtWidgets.QTableView):
+    """Keeps a table's first columns (Include, sample, spot) visible while it scrolls.
+
+    It shares the table's model and selection and sits over its left edge.
+    """
+
+    def __init__(self, table: QtWidgets.QTableView, frozen_names) -> None:
+        super().__init__(table)
+        self._table = table
+        self._frozen_names = tuple(frozen_names)
+        self.setObjectName("FrozenColumns")
+        self.setModel(table.model())
+        self.setSelectionModel(table.selectionModel())
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.verticalHeader().setVisible(False)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(table.verticalScrollMode())
+        self.setSelectionBehavior(table.selectionBehavior())
+        self.setSelectionMode(table.selectionMode())
+        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setAlternatingRowColors(True)
+        self.setWordWrap(False)
+        self.setSortingEnabled(True)
+        self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        theme = active_theme()
+        self.setStyleSheet(
+            f"QTableView#FrozenColumns {{ border: none; border-right: 1px solid {theme.input_border}; "
+            f"background: {theme.surface}; }}")
+        self.viewport().setAutoFillBackground(True)
+        # One-way: the table owns the scroll position; wheel events over the
+        # frozen columns are passed to it.
+        table.verticalScrollBar().valueChanged.connect(self._follow_table_scroll)
+        table.verticalScrollBar().rangeChanged.connect(lambda *_args: self._follow_table_scroll())
+        table.horizontalHeader().sectionResized.connect(self._refresh)
+        table.horizontalHeader().sortIndicatorChanged.connect(
+            lambda column, order: self.horizontalHeader().setSortIndicator(column, order))
+        model = table.model()
+        for signal in (model.modelReset, model.layoutChanged, model.columnsInserted, model.columnsRemoved):
+            signal.connect(self._refresh)
+        self.viewport().installEventFilter(self)
+        self._refresh()
+
+    def _follow_table_scroll(self, *_args) -> None:
+        bar = self.verticalScrollBar()
+        bar.setRange(self._table.verticalScrollBar().minimum(), self._table.verticalScrollBar().maximum())
+        bar.setValue(self._table.verticalScrollBar().value())
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        QtWidgets.QApplication.sendEvent(self._table.viewport(), event)
+
+    def frozen_columns(self) -> list[int]:
+        model = self._table.model()
+        names = [model.headerData(column, QtCore.Qt.Orientation.Horizontal) for column in range(model.columnCount())]
+        count = 0
+        for index, name in enumerate(names):
+            if index == 0 and name in {"Include", "Shown"} or name in self._frozen_names:
+                count = index + 1
+            else:
+                break
+        return list(range(count))
+
+    def frozen_width(self) -> int:
+        return sum(self._table.columnWidth(column) for column in self.frozen_columns()
+                   if not self._table.isColumnHidden(column))
+
+    def _refresh(self, *_args) -> None:
+        frozen = set(self.frozen_columns())
+        for column in range(self.model().columnCount()):
+            self.setColumnHidden(column, column not in frozen or self._table.isColumnHidden(column))
+            if column in frozen:
+                self.setColumnWidth(column, self._table.columnWidth(column))
+        self.setVisible(bool(frozen))
+        self.update_geometry()
+
+    def update_geometry(self) -> None:
+        table = self._table
+        frame = table.frameWidth()
+        left = table.verticalHeader().width() if table.verticalHeader().isVisible() else 0
+        self.setGeometry(frame + left, frame, self.frozen_width() + 1,
+                         table.viewport().height() + table.horizontalHeader().height())
+        self._follow_table_scroll()
+
+
+class ColumnGroupBand(QtWidgets.QWidget):
+    """A thin band naming the column groups above a table's header."""
+
+    def __init__(self, table: QtWidgets.QTableView, frozen: FrozenColumnsView | None = None) -> None:
+        super().__init__()
+        self._table = table
+        self._frozen = frozen
+        self.setObjectName("ColumnGroupBand")
+        self.setFixedHeight(self.fontMetrics().height() + 4)
+        header = table.horizontalHeader()
+        header.sectionResized.connect(self.update)
+        header.geometriesChanged.connect(self.update)
+        table.horizontalScrollBar().valueChanged.connect(self.update)
+        table.model().modelReset.connect(self.update)
+
+    def runs(self) -> list[tuple[str, int, int]]:
+        """(group, first column, last column) for visible runs of one group."""
+        model, out = self._table.model(), []
+        for column in range(model.columnCount()):
+            if self._table.isColumnHidden(column):
+                continue
+            name = str(model.headerData(column, QtCore.Qt.Orientation.Horizontal))
+            group = "Spot" if name in {"Include", "Shown"} else results_column_group(name)
+            if out and out[-1][0] == group:
+                out[-1] = (group, out[-1][1], column)
+            else:
+                out.append((group, column, column))
+        return out
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QtGui.QPainter(self)
+        theme = active_theme()
+        header = self._table.horizontalHeader()
+        vertical = self._table.verticalHeader()
+        offset = self._table.frameWidth() + (vertical.width() if vertical.isVisible() else 0)
+        frozen = self._frozen.frozen_width() if self._frozen is not None and self._frozen.isVisible() else 0
+        font = QtGui.QFont(self.font())
+        font.setPointSizeF(max(8.0, font.pointSizeF() - 1.5))
+        font.setWeight(QtGui.QFont.Weight.DemiBold)
+        painter.setFont(font)
+        for group, first, last in self.runs():
+            if not group:
+                continue
+            frozen_run = self._frozen is not None and first in self._frozen.frozen_columns()
+            left = header.sectionPosition(first) if frozen_run else header.sectionViewportPosition(first)
+            right = (header.sectionPosition(last) + header.sectionSize(last) if frozen_run
+                     else header.sectionViewportPosition(last) + header.sectionSize(last))
+            if not frozen_run:
+                left = max(left, frozen)
+            if right <= left:
+                continue
+            rect = QtCore.QRect(offset + left + 2, 1, right - left - 4, self.height() - 2)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(theme_color(theme.row_hover))
+            painter.drawRoundedRect(rect, 4, 4)
+            painter.setPen(theme_color(theme.muted))
+            painter.drawText(rect.adjusted(6, 0, -4, 0),
+                             int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                             painter.fontMetrics().elidedText(group, QtCore.Qt.TextElideMode.ElideRight,
+                                                              max(0, rect.width() - 10)))
+        painter.end()
+
+
+class ResultsJumpBar(QtWidgets.QWidget):
+    """Chips that scroll the final-results table to its key column groups.
+
+    Chips whose columns are absent are not shown; chips that do not fit go to
+    a More menu. "Key columns only" hides every other column.
+    """
+
+    jumpRequested = QtCore.Signal(str)
+    keyOnlyToggled = QtCore.Signal(bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("ResultsJumpBar")
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        caption = QtWidgets.QLabel("Jump to")
+        caption.setObjectName("SecondaryText")
+        layout.addWidget(caption)
+        self.chips: dict[str, QtWidgets.QToolButton] = {}
+        for label, _columns, _strength in RESULTS_KEY_GROUPS:
+            chip = QtWidgets.QToolButton()
+            chip.setText(label)
+            chip.setProperty("modeToggle", True)
+            chip.setToolTip(f"Scroll to the {label} columns")
+            chip.clicked.connect(lambda _checked=False, label=label: self.jumpRequested.emit(label))
+            layout.addWidget(chip)
+            self.chips[label] = chip
+        self.more = QtWidgets.QToolButton()
+        self.more.setText("More")
+        self.more.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more.setMenu(QtWidgets.QMenu(self.more))
+        layout.addWidget(self.more)
+        layout.addStretch(1)
+        self.key_only = QtWidgets.QToolButton()
+        self.key_only.setText("Key columns only")
+        self.key_only.setCheckable(True)
+        self.key_only.setProperty("modeToggle", True)
+        self.key_only.setToolTip("Show only the marked key columns; exports always contain every column")
+        self.key_only.toggled.connect(self.keyOnlyToggled)
+        layout.addWidget(self.key_only)
+        self._available: list[str] = []
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        # Chips that do not fit go to More, so only the fixed parts count.
+        return QtCore.QSize(self.more.sizeHint().width() + self.key_only.sizeHint().width() + 70,
+                            super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 - Qt API
+        return self.minimumSizeHint()
+
+    def set_available(self, labels) -> None:
+        wanted = set(labels)
+        self._available = [label for label, _c, _s in RESULTS_KEY_GROUPS if label in wanted]
+        self._arrange()
+
+    def visible_chips(self) -> list[str]:
+        return [label for label, chip in self.chips.items() if chip.isVisibleTo(self)]
+
+    def overflow(self) -> list[str]:
+        return [action.text() for action in self.more.menu().actions()]
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._arrange()
+
+    def _arrange(self) -> None:
+        layout = self.layout()
+        fixed = sum(layout.itemAt(i).widget().sizeHint().width() + layout.spacing()
+                    for i in (0,) if layout.itemAt(i).widget() is not None)
+        fixed += self.key_only.sizeHint().width() + self.more.sizeHint().width() + 3 * layout.spacing()
+        room = self.width() - fixed
+        menu = self.more.menu()
+        menu.clear()
+        used = 0
+        for label, chip in self.chips.items():
+            if label not in self._available:
+                chip.hide()
+                continue
+            width = chip.sizeHint().width() + layout.spacing()
+            if used + width <= room and not menu.actions():
+                chip.show()
+                used += width
+            else:
+                chip.hide()
+                menu.addAction(label, lambda label=label: self.jumpRequested.emit(label))
+        self.more.setVisible(bool(menu.actions()))
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
@@ -3312,6 +3681,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.secondary_tree, self.secondary_group_model = self._create_grouped_view()
         (self.results_page, self.results_group_toggle, self.results_filter,
          self._results_stack) = self._create_group_page(self.results_table, self.results_tree, "final")
+        self._build_results_navigation()
         (self.secondary_page, self.secondary_group_toggle, self.secondary_filter,
          self._secondary_stack) = self._create_group_page(self.secondary_table, self.secondary_tree, "secondary")
         self.tabs.addTab(self.results_page, "Final results")
@@ -3351,6 +3721,99 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
+
+    def _build_results_navigation(self) -> None:
+        """Jump-to chips, a group band and frozen spot columns for the results table."""
+        table = self.results_table
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.results_frozen = FrozenColumnsView(table, RESULTS_FROZEN_COLUMNS)
+        self.results_band = ColumnGroupBand(table, self.results_frozen)
+        container = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(container)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        stack = self._results_stack
+        stack.removeWidget(table)
+        box.addWidget(self.results_band)
+        box.addWidget(table, 1)
+        table.show()  # removeWidget hid it
+        stack.insertWidget(0, container)
+        stack.setCurrentIndex(int(self.results_group_toggle.isChecked()))
+        self.results_jump_bar = ResultsJumpBar()
+        self.results_jump_bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                            QtWidgets.QSizePolicy.Policy.Fixed)
+        self.results_page.layout().insertWidget(1, self.results_jump_bar)
+        self.results_jump_bar.jumpRequested.connect(self.jump_to_column_group)
+        self.results_jump_bar.keyOnlyToggled.connect(self.set_key_columns_only)
+        saved = (self._settings.value("review_key_columns_only_v1", False, type=bool)
+                 if self._settings is not None else False)
+        blocker = QtCore.QSignalBlocker(self.results_jump_bar.key_only)
+        self.results_jump_bar.key_only.setChecked(bool(saved))
+        del blocker
+        self._flash_timer = QtCore.QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(900)
+        self._flash_timer.timeout.connect(self._clear_column_flash)
+
+    def key_columns_only(self) -> bool:
+        return self.results_jump_bar.key_only.isChecked()
+
+    def set_key_columns_only(self, enabled: bool) -> None:
+        """Show only the key columns (remembered per user); exports keep all."""
+        if self.results_jump_bar.key_only.isChecked() != bool(enabled):
+            self.results_jump_bar.key_only.setChecked(bool(enabled))  # re-enters via the signal
+            return
+        if self._settings is not None:
+            self._settings.setValue("review_key_columns_only_v1", bool(enabled))
+        self._apply_column_visibility()
+
+    def _apply_column_visibility(self) -> None:
+        frame = self.results_model.frame
+        keep = results_key_columns(frame) if self.key_columns_only() else set(frame.columns)
+        for position, name in enumerate(frame.columns):
+            self.results_table.setColumnHidden(position + 1, name not in keep)
+        self.results_frozen._refresh()
+        self.results_band.update()
+
+    def _style_key_columns(self) -> None:
+        frame = self.results_model.frame
+        marks = {}
+        for _label, columns, strength in RESULTS_KEY_GROUPS:
+            for column in columns:
+                if column in frame and strength:
+                    marks[column] = max(strength, marks.get(column, 0))
+        # The strongest mark is for the preferred date and its uncertainty.
+        marks.pop("preferred_date_method", None)
+        self.results_model.column_marks = marks
+        self.results_jump_bar.set_available(
+            label for label, columns, _s in RESULTS_KEY_GROUPS if any(c in frame for c in columns))
+        self._apply_column_visibility()
+
+    def jump_to_column_group(self, label: str) -> bool:
+        """Scroll the final-results table to a key column group and flash it."""
+        columns = next((columns for name, columns, _s in RESULTS_KEY_GROUPS if name == label), ())
+        frame = self.results_model.frame
+        present = [column for column in columns if column in frame]
+        if not present:
+            return False
+        self.tabs.setCurrentWidget(self.results_page)
+        if self.results_group_toggle.isChecked():
+            self.results_group_toggle.setChecked(False)
+        column = frame.columns.get_loc(present[0]) + 1
+        self.results_table.setColumnHidden(column, False)
+        header = self.results_table.horizontalHeader()
+        self.results_table.horizontalScrollBar().setValue(
+            max(0, header.sectionPosition(column) - self.results_frozen.frozen_width()))
+        self.results_model.flash_columns = set(present)
+        self.results_model.headerDataChanged.emit(QtCore.Qt.Orientation.Horizontal, 0,
+                                                  self.results_model.columnCount() - 1)
+        self._flash_timer.start()
+        return True
+
+    def _clear_column_flash(self) -> None:
+        self.results_model.flash_columns = set()
+        self.results_model.headerDataChanged.emit(QtCore.Qt.Orientation.Horizontal, 0,
+                                                  max(0, self.results_model.columnCount() - 1))
 
     def _fit_panel(self, kind):
         panel = ReviewFitPanel(self, kind)
@@ -4875,9 +5338,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
                     lambda value: f"{value:+.2f}" if np.isfinite(value) else "")
         retained_selection = set(self.selected_spots)
         self._syncing_selection = True
-        self.results_model.set_frame(final_frame)
-        sort_column = next((final_frame.columns.get_loc(name) + 1
-                            for name in ("sample", "spot_name") if name in final_frame), -1)
+        display = results_display_frame(final_frame, parallel_frame)
+        self.results_model.set_frame(display)
+        self._style_key_columns()
+        sort_column = next((display.columns.get_loc(name) + 1
+                            for name in ("sample", "spot_name") if name in display), -1)
         self.results_table.sortByColumn(sort_column, QtCore.Qt.SortOrder.AscendingOrder)
         # Data replacement can change column widths. Review checkboxes cannot.
         self.results_table.resizeColumnsToContents()
