@@ -38,6 +38,7 @@ from GUI.services import (
     ensure_finalized_results,
     ensure_normalized_plateau,
     ensure_raw_ratios,
+    ensure_results_pb204,
     ensure_session_corrected,
     ensure_shared_pipeline,
     ensure_spot_means,
@@ -5990,7 +5991,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Updating reduction stages",
-            lambda: populate_recalculated_cache(self.session, self.workflow_preset, stages),
+            lambda: populate_recalculated_cache(self.session, self.workflow_preset, stages,
+                export_settings=self.export_settings),
             show_result,
             quiet=quiet,
         )
@@ -6505,7 +6507,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         .astype(str)
                         .drop_duplicates()
                     )
-                self.results_table.show_results(finalized, review_flags=self._review_flags)
+                cache = self.session.reduction_cache
+                pb204 = (cache.get("results_pb204")
+                         if cache.get("results_pb204_source") is finalized else None)
+                self.results_table.show_results(
+                    finalized, review_flags=self._review_flags, pb204_frame=pb204)
             return
 
         if self.session.plot_mode == "depth_profile":
@@ -7237,6 +7243,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session,
                 self.workflow_preset,
             )
+            ensure_results_pb204(self.session, self.workflow_preset, self.export_settings)
             return spot_means, final
 
         def show_result(result: object) -> None:

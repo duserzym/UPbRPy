@@ -111,7 +111,8 @@ def test_every_chip_scrolls_to_an_existing_column(review, app, preset):
 
 def test_missing_columns_hide_their_chips(review, app):
     review.show_results(finalized(drop=("207Pb_corrected_age", "207Pb_corrected_age_2e", "208Pb_corrected_age",
-                                        "208Pb_corrected_age_2e", "U", "qc_204Pb_mean",
+                                        "208Pb_corrected_age_2e", "U", "204Pb", "204Pb_status",
+                                        "206Pb/204Pb", "206Pb/204Pb_1s", "qc_204Pb_mean",
                                         "204Pb_common_fraction_206", "207Pb_common_fraction_206")))
     app.processEvents()
     bar = review.results_jump_bar

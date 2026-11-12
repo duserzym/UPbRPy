@@ -23,6 +23,7 @@ from GUI.workflows import (
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.constants import standard_archive_legacy
+from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
 from UPbRPy.qtegra import QtegraSession, open_qtegra
 from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
@@ -362,6 +363,8 @@ _REDUCTION_CACHE_STAGES = {
     "spot_mean_results": PipelineStage.SPOT_MEANS,
     "depth_profile_results": PipelineStage.DEPTH_PROFILE,
     "finalized_results": PipelineStage.FINALIZE,
+    "results_pb204_source": PipelineStage.FINALIZE,
+    "results_pb204": PipelineStage.FINALIZE,
 }
 
 
@@ -828,6 +831,7 @@ def populate_recalculated_cache(
     session: ReductionSession,
     preset: WorkflowPreset,
     completed_stages: Iterable[PipelineStage],
+    *, export_settings: ExportSettings | None = None,
 ) -> None:
     """Populate GUI compatibility keys from recalculated shared-core stages."""
     completed = set(completed_stages)
@@ -853,6 +857,7 @@ def populate_recalculated_cache(
             ensure_depth_profile(session, preset)
         elif stage in {PipelineStage.FINALIZE, PipelineStage.EXPORT}:
             ensure_finalized_results(session, preset)
+            ensure_results_pb204(session, preset, export_settings or ExportSettings())
 
 
 def restore_session_from_project(project_file: str | Path) -> RestoredProject:
@@ -989,7 +994,8 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
     completed = completed_project_stages(
         pipeline_values.get("completed_stages", ())
     )
-    populate_recalculated_cache(session, preset, completed)
+    populate_recalculated_cache(session, preset, completed,
+        export_settings=ExportSettings.from_dict(workspace.get("export_settings", {})))
     resume_stage = PipelineStage(
         pipeline_values.get("resume_stage", PipelineStage.IMPORT.value)
     )
@@ -1546,6 +1552,44 @@ def ensure_finalized_results(
     ensure_spot_means(session, preset)
     session.reduction_cache[cache_key] = result
     return result
+
+
+def ensure_results_pb204(
+    session: ReductionSession,
+    preset: WorkflowPreset,
+    settings: ExportSettings,
+) -> pd.DataFrame:
+    """Cache export-derived mass-204 display values once per finalized object.
+
+    Call from the finalization worker. Review clicks only read this cache;
+    export choices and review exclusions do not change these quantities.
+    """
+    pipeline = ensure_shared_pipeline(session, preset)
+    finalized = pipeline.run_finalize()
+    cache = session.reduction_cache
+    if cache.get("results_pb204_source") is finalized and "results_pb204" in cache:
+        return cache["results_pb204"]
+    try:
+        table = build_export_table(pipeline, settings)
+    except Exception as exc:  # the results must still show without these columns
+        names = finalized.selected_results["spot_name"] if "spot_name" in finalized.selected_results else []
+        frame = pd.DataFrame({"spot_name": list(names), "204Pb": np.nan, "206Pb/204Pb": np.nan,
+                              "206Pb/204Pb_1s": np.nan, "204Pb_status": f"unavailable: {exc}"})
+        cache["results_pb204_source"] = finalized
+        cache["results_pb204"] = frame
+        return frame
+    frame = table.rows[["spot_name", "204Pb", "206Pb/204Pb", "206Pb/204Pb_1s"]].copy()
+    context = table.context["total_pb"]
+    correction = context["hg_correction"]
+    omitted = frame.spot_name.isin(context["omitted_204_spots"])
+    frame["204Pb_status"] = "reported"
+    frame.loc[omitted, "204Pb_status"] = "not detected"
+    if correction != "per-spot baseline 204Hg/202Hg":
+        frame["204Pb_status"] = correction
+    frame.loc[frame["204Pb_status"].ne("reported"), "204Pb"] = np.nan
+    cache["results_pb204_source"] = finalized
+    cache["results_pb204"] = frame
+    return frame
 
 
 def reference_material_summary(session: ReductionSession, preset: WorkflowPreset) -> str:

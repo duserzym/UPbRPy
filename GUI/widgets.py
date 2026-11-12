@@ -3287,8 +3287,8 @@ class SpotInfoCard(QtWidgets.QFrame):
 # ── Final results table: key columns ──────────────────────────────────────
 # Spot-mean columns shown in the Studio table next to the final results
 # (display only; exports are built from the finalized results). Display
-# name -> spot-mean column. There is no 204Pb concentration column: the
-# table shows the 204Pb mean count rate and the 204Pb common-Pb fraction.
+# name -> source column. Mass-204 concentrations and ratios come from the
+# cached export display frame, prepared by the finalization worker.
 RESULTS_DATE_COLUMNS = {
     "206Pb/238U_age": "206Pb/238U_age", "206Pb/238U_age_2e": "206Pb/238U_age_2e",
     "207Pb/235U_age": "207Pb/235U_age", "207Pb/235U_age_2e": "207Pb/235U_age_2e",
@@ -3299,6 +3299,8 @@ RESULTS_DATE_COLUMNS = {
 }
 RESULTS_CONCENTRATION_COLUMNS = {
     "U (µg/g)": "U", "Th/U": "Th/U",
+    "204Pb (µg/g)": "204Pb", "204Pb status": "204Pb_status",
+    "206Pb/204Pb": "206Pb/204Pb", "206Pb/204Pb ±1s": "206Pb/204Pb_1s",
     "204Pb mean (cps)": "qc_204Pb_mean",
     "204Pb common fraction (f206)": "204Pb_common_fraction_206",
     "207Pb common fraction (f206)": "207Pb_common_fraction_206",
@@ -3317,7 +3319,8 @@ RESULTS_KEY_GROUPS = (
     ("Discordance", ("disc%",), 1),
     ("U (µg/g)", ("U (µg/g)",), 1),
     ("Th/U", ("Th/U",), 1),
-    ("204Pb", ("204Pb mean (cps)", "204Pb common fraction (f206)", "207Pb common fraction (f206)"), 1),
+    ("204Pb", ("204Pb (µg/g)", "204Pb status", "206Pb/204Pb", "206Pb/204Pb ±1s",
+               "204Pb mean (cps)", "204Pb common fraction (f206)", "207Pb common fraction (f206)"), 1),
     ("Ratios", ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th", "207Pb/235U", "238U/206Pb"), 0),
     ("Flags", ("automatic_flags", "preferred_date_pass"), 0),
 )
@@ -3351,17 +3354,28 @@ def results_key_columns(frame: pd.DataFrame) -> set[str]:
     return keep & set(frame.columns)
 
 
-def results_display_frame(final_frame: pd.DataFrame, spot_frame: pd.DataFrame) -> pd.DataFrame:
+def results_display_frame(
+    final_frame: pd.DataFrame, spot_frame: pd.DataFrame,
+    pb204_frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Final results with key spot-mean columns placed beside them.
 
-    The final-results columns keep their order and values. Dates and the
+    The final-results columns keep their order and values, except mass-204
+    display quantities supplied by the export frame. Dates and the
     discordance follow the preferred-date columns; concentrations and
-    common-Pb quantities follow the flags. Neither input is modified.
+    common-Pb quantities follow the flags. Inputs are never modified.
     """
     if "spot_name" not in final_frame or "spot_name" not in spot_frame or final_frame.empty:
         return final_frame
     source = spot_frame.drop_duplicates("spot_name").set_index(spot_frame.drop_duplicates("spot_name")["spot_name"].astype(str))
     names = final_frame["spot_name"].astype(str)
+    if pb204_frame is not None:
+        exported = pb204_frame.drop_duplicates("spot_name").set_index("spot_name")
+        exported.index = exported.index.astype(str)
+        source = source.drop(columns=exported.columns, errors="ignore").join(exported, how="outer")
+        # The export values take precedence over any legacy final ratio.
+        final_frame = final_frame.drop(columns=[display for display, column in
+            RESULTS_CONCENTRATION_COLUMNS.items() if column in exported], errors="ignore")
 
     def added(mapping):
         return {display: source[column].reindex(names).to_numpy() for display, column in mapping.items()
@@ -5301,9 +5315,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return view, model
 
     def show_results(
-        self, finalized: object, *, review_flags: dict[str, str] | None = None
+        self, finalized: object, *, review_flags: dict[str, str] | None = None,
+        pb204_frame: pd.DataFrame | None = None,
     ) -> None:
-        """Display calculated results with optional project review annotations."""
+        """Display results with cached export quantities and review annotations."""
         final_frame = getattr(finalized, "selected_results", pd.DataFrame())
         parallel_frame = getattr(finalized, "parallel_results", pd.DataFrame())
         if review_flags:
@@ -5338,7 +5353,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                     lambda value: f"{value:+.2f}" if np.isfinite(value) else "")
         retained_selection = set(self.selected_spots)
         self._syncing_selection = True
-        display = results_display_frame(final_frame, parallel_frame)
+        display = results_display_frame(final_frame, parallel_frame, pb204_frame)
         self.results_model.set_frame(display)
         self._style_key_columns()
         sort_column = next((display.columns.get_loc(name) + 1
