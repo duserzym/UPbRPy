@@ -172,6 +172,20 @@ WORKFLOW_STAGE_LABELS = {
 }
 
 
+# Plot modes that draw no editable selection windows.
+_VIEWS_WITHOUT_SELECTION_WINDOWS = frozenset({
+    "calibration_slopes", "downhole_ratios", "session_ratios", "standard_bias",
+    "final_results", "depth_profile", "normalized_plateau", "raw_ratios",
+})
+
+
+def _same_view(key: tuple, rendered: tuple | None) -> bool:
+    """Compare two MainWindow._view_key results (values, then identities)."""
+    if rendered is None or key[0] != rendered[0] or len(key[1]) != len(rendered[1]):
+        return False
+    return all(a is b for a, b in zip(key[1], rendered[1]))
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """One reduction, usable alone or embedded in a Studio tab."""
 
@@ -233,6 +247,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected_stats_channel: str | None = None
         self._focused_spot_name: str | None = None
         self._last_plot_mode: str | None = None
+        # What the plot area last drew (see _view_key). A workflow-card
+        # switch redraws only when it changes.
+        self._rendered_view_key: tuple | None = None
         self.reference_library_path = default_reference_material_library_path()
         self.default_reference_library_path = default_reference_material_library_path()
         self._reference_library_notice: str | None = None
@@ -4814,6 +4831,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_view()
 
     def on_workflow_step_changed(self, row: int) -> None:
+        """Show another workflow card without recalculating or redrawing data.
+
+        A card change alters only two plot inputs: Import and Selections
+        switch to raw traces, and they make the selection windows editable.
+        The plot is rebuilt only when one of these changes; otherwise only
+        the step panels are updated. Rebuilding the results view on every
+        card change took up to 1.3 s with 283 analyses.
+        """
         if self._is_populating:
             return
         self.flush_selection_edits()
@@ -4821,7 +4846,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_workflow_actions()
         if self.session.loaded and self._workflow_step_allows_region_edits():
             self.set_plot_mode("raw", refresh=False)
+        if self.session.loaded and _same_view(self._view_key(), self._rendered_view_key):
+            self._refresh_step_panels()
+            return
         self.refresh_view()
+
+    def _view_key(self) -> tuple:
+        """Identify the plot inputs a workflow-card change can alter.
+
+        Plot mode, region editability (for views that draw selection
+        windows) and spot compare by value. The session data and every
+        reduction-cache entry compare by identity, so a stage recalculated in
+        the background (a new result object) forces a redraw.
+        """
+        spot = self.current_spot_name()
+        if not spot and self.session.spot_names:
+            spot = self.session.spot_names[0]
+        mode = self.session.plot_mode
+        editable = (self._workflow_step_allows_region_edits()
+                    if mode not in _VIEWS_WITHOUT_SELECTION_WINDOWS else None)
+        return (
+            (mode, editable, spot),
+            (self.session, self.session.total_data,
+             *self.session.reduction_cache.keys(), *self.session.reduction_cache.values()),
+        )
+
+    def _refresh_step_panels(self) -> None:
+        """Update the notes and status that depend on the current step only."""
+        self.notes_body.setText(self._compose_notes(self.session.selected_spot))
+        self._refresh_workflow_status()
 
     # ── Spot tree helpers ──────────────────────────────────────────────────
 
@@ -5868,6 +5921,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if should_focus_spot:
             self._focused_spot_name = selected_spot
         self._last_plot_mode = self.session.plot_mode
+        self._rendered_view_key = self._view_key()
 
         self._apply_project_summary(project_summary(self.session))
         self.notes_body.setText(self._compose_notes(selected_spot))
