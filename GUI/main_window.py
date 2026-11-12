@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
@@ -11,6 +12,8 @@ import numpy as np
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 import shiboken6
+
+from UPbRPy.standards import canonicalize_reference_material_samples
 
 from GUI.icon import (
     build_app_icon,
@@ -4003,6 +4006,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Busy workers manage the same controls; a loaded session leaves their
         enabled state alone except to restore what the blank state disabled.
+        Keep the blank mark and tooltip until the loading worker finishes.
         """
         loaded = self.session.loaded
         for control in [*self._session_actions, self.save_project_button,
@@ -4014,9 +4018,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 control.setProperty("blankDisabled", True)
                 control.setEnabled(False)
                 control.setToolTip("Load a session first")
-            elif loaded and blank_disabled:
+            elif loaded and blank_disabled and self._active_worker is None:
                 control.setProperty("blankDisabled", False)
-                control.setEnabled(self._active_worker is None)
+                control.setEnabled(True)
                 control.setToolTip(str(control.property("loadedToolTip") or ""))
         if not loaded:
             for action in [*self.selection_edit_actions, self.exclude_spot_action]:
@@ -5568,43 +5572,41 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _is_reference_material(self, sample_name: str) -> bool:
-        """Return True if *sample_name* fuzzy-matches any known RM name."""
-        rm_names: set[str] = set()
-        for primary in (
+        """Recognize library aliases or exact normalized configured standards."""
+        archive = current_standard_archive()
+        # The library's Plesovice alias also accepts the Czech spelling
+        # Plešovice. Keep the original candidate for libraries with accents.
+        unaccented = "".join(
+            character for character in unicodedata.normalize("NFKD", sample_name)
+            if not unicodedata.combining(character)
+        )
+        candidates = list(dict.fromkeys((sample_name, unaccented)))
+        canonical = canonicalize_reference_material_samples(
+            pd.DataFrame({"sample": candidates}), archive,
+        )
+        if canonical["sample"].isin(archive.index).any():
+            return True
+
+        rm_names = (
             self.session.primary_68_standard,
             self.session.primary_76_standard,
             self.session.primary_82_standard,
+            *self.session.secondary_standards,
+            *self.session.concentration_standards,
             self.workflow_preset.primary_standard,
-        ):
-            if primary:
-                rm_names.add(primary)
-        rm_names.update(
-            self.session.secondary_standards
-            or self.workflow_preset.secondary_standards
+            self.workflow_preset.pb_ratio_standard,
+            self.workflow_preset.th_ratio_standard,
+            *self.workflow_preset.secondary_standards,
+            *self.workflow_preset.concentration_standards,
         )
-        rm_names.update(
-            self.session.concentration_standards
-            or self.workflow_preset.concentration_standards
-        )
-        try:
-            archive = current_standard_archive()
-            rm_names.update(str(s) for s in archive.index.tolist() if s)
-        except Exception:
-            pass
 
         def _norm(s: str) -> str:
-            return re.sub(r'[^a-z0-9]', '', s.lower())
+            return "".join(character for character in s.casefold() if character.isalnum())
 
         norm_sample = _norm(sample_name)
-        for rm in rm_names:
-            if not rm:
-                continue
-            norm_rm = _norm(rm)
-            if norm_rm and (norm_rm == norm_sample
-                            or norm_rm in norm_sample
-                            or norm_sample in norm_rm):
-                return True
-        return False
+        return bool(norm_sample) and any(
+            norm_sample == _norm(rm) for rm in rm_names if rm
+        )
 
     def _populate_spot_tree(self) -> None:
         self.spot_list.blockSignals(True)
@@ -5620,6 +5622,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Categorise each spot into RM or unknown folders
         rm_folders: dict[str, list[str]] = {}    # {folder_label: [spot_names]}
         unk_folders: dict[str, list[str]] = {}   # {folder_label: [spot_names]}
+        reference_samples: dict[str, bool] = {}
 
         for spot_name in spot_names:
             manual = self._spot_folder_overrides.get(spot_name)
@@ -5631,7 +5634,9 @@ class MainWindow(QtWidgets.QMainWindow):
             sample = sample_map.get(spot_name)
             group_name = sample if sample else spot_base_name(spot_name)
 
-            if self._is_reference_material(group_name):
+            if group_name not in reference_samples:
+                reference_samples[group_name] = self._is_reference_material(group_name)
+            if reference_samples[group_name]:
                 rm_folders.setdefault(group_name, []).append(spot_name)
             else:
                 unk_folders.setdefault(group_name, []).append(spot_name)
