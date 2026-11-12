@@ -2508,9 +2508,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_slopes_plot = CalibrationSlopesWidget()
         self.calibration_channel_combo = StyledComboBox()
         self.calibration_channel_combo.setToolTip(
-            "All elements shows every calibration as a small plot on its own scale; "
-            "choose one element (or double-click its plot) to inspect it alone, or "
-            "All elements, one plot to overlay them."
+            "All elements overlays every calibration on one plot; Separate plots "
+            "gives each element its own scale; or choose one element "
+            "(double-click a separate plot) to inspect it alone."
         )
         self.calibration_channel_combo.setFixedWidth(153)
         self.calibration_channel_combo.hide()
@@ -6709,20 +6709,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 previous_valid = combo.currentIndex() >= 0 and (
                     previous is None or previous in channels
                 )
-                # Every calibrated element by default; a chosen view stays.
+                # Every calibrated element on one plot by default; a chosen
+                # view stays.
                 previous_valid = combo.currentIndex() >= 0 and (
                     previous in (None, CALIBRATION_GRID) or previous in channels
                 )
-                selected = previous if previous_valid else CALIBRATION_GRID
+                selected = previous if previous_valid else None
                 with QtCore.QSignalBlocker(combo):
                     combo.clear()
+                    if channels:
+                        combo.addItem("All elements", None)
+                        combo.addItem("Separate plots", CALIBRATION_GRID)
                     for channel in channels:
                         combo.addItem(channel, channel)
                     if channels:
-                        combo.insertItem(0, "All elements", CALIBRATION_GRID)
-                        combo.addItem("All elements, one plot", None)
                         combo.setCurrentIndex(
-                            combo.findData(selected) if selected is not None else combo.count() - 1
+                            combo.findData(selected) if selected is not None else 0
                         )
                 combo.setEnabled(bool(channels))
                 self.calibration_slopes_plot.show_data(data, theme, channel=selected)

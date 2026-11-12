@@ -1,4 +1,4 @@
-"""The concentration-calibration view shows every calibrated element by default."""
+"""The concentration-calibration view overlays every calibrated element by default."""
 
 from pathlib import Path
 
@@ -58,7 +58,7 @@ def test_widget_draws_one_small_plot_per_element(app):
     assert all(item.vb.state["mouseMode"] == item.vb.PanMode for item in widget._grid_items.values())
 
 
-def test_studio_opens_the_calibration_step_on_all_elements(app, monkeypatch):
+def test_studio_opens_the_calibration_step_on_one_overlay_plot(app, monkeypatch):
     monkeypatch.setattr(main_window.Updater, "start_scheduler", lambda self: None)
     data = fake_data()
     monkeypatch.setattr(main_window, "get_calibration_slope_data", lambda *args: data)
@@ -70,8 +70,13 @@ def test_studio_opens_the_calibration_step_on_all_elements(app, monkeypatch):
         window.set_plot_mode("calibration_slopes", refresh=True)
         app.processEvents()
         combo = window.calibration_channel_combo
+        # Yiming asked (2026-11-12) for one overlay plot by default.
+        assert combo.currentIndex() == 0
         assert combo.currentText() == "All elements"
-        assert combo.itemText(combo.count() - 1) == "All elements, one plot"
+        assert combo.currentData() is None
+        assert window.calibration_slopes_plot.grid_channels() == []
+        combo.setCurrentIndex(combo.findData(CALIBRATION_GRID))
+        assert combo.currentText() == "Separate plots"
         assert window.calibration_slopes_plot.grid_channels() == CHANNELS
         # Double-clicking a small plot focuses that element; the choice stays.
         window.calibration_slopes_plot.channelRequested.emit("89Y")
