@@ -1460,6 +1460,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if watched is getattr(self, "plots_stack", None) and event.type() in {
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show, QtCore.QEvent.Type.LayoutRequest}:
             self._position_plot_controls()
+        if watched in (getattr(self, "trace_plot", None), getattr(self, "plot_control_scroll", None)) and event.type() in {
+                QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Show,
+                QtCore.QEvent.Type.LayoutRequest}:
+            timer = getattr(self, "_plot_control_overlay_timer", None)
+            if timer is not None and not timer.isActive():
+                timer.start()
         if watched is getattr(self, "sidebar_panel", None) and event.type() == QtCore.QEvent.Type.Resize:
             QtCore.QTimer.singleShot(
                 0, self, lambda: self.adapt_workflow_rail_height(self.height()),
@@ -2303,10 +2309,19 @@ class MainWindow(QtWidgets.QMainWindow):
         y = max(0, min(point.y(), stack.height() - scroll.height()))
         scroll.move(x, y)
         scroll.raise_()
+        self._sync_plot_control_overlay()
+
+    def _sync_plot_control_overlay(self) -> None:
+        """Read settled geometry without changing the controls or plot layout."""
+        scroll = self.plot_control_scroll
         # Labels drawn on the trace move out of the controls' way.
         if self.plots_stack.currentIndex() == 0:
+            # Both widgets descend from the stack. QWidget.mapTo requires an
+            # ancestor target, so mapping the scroll directly to its sibling
+            # trace plot gives incorrect coordinates on some Qt versions.
             self.trace_plot.set_overlay_rect(QtCore.QRect(
-                scroll.mapTo(self.trace_plot, QtCore.QPoint()), scroll.size()))
+                scroll.pos() - self.trace_plot.mapTo(self.plots_stack, QtCore.QPoint()),
+                scroll.size()))
         else:
             self.trace_plot.set_overlay_rect(None)
 
@@ -2681,6 +2696,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # The controls float inside the canvas instead of taking a row.
         self.plot_control_scroll = control_scroll
         control_scroll.setParent(self.plots_stack)
+        self._plot_control_overlay_timer = QtCore.QTimer(self)
+        self._plot_control_overlay_timer.setSingleShot(True)
+        self._plot_control_overlay_timer.setInterval(0)
+        self._plot_control_overlay_timer.timeout.connect(self._sync_plot_control_overlay)
+        control_scroll.installEventFilter(self)
+        self.trace_plot.installEventFilter(self)
         control_scroll.viewport().setAutoFillBackground(False)
         control_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.plots_stack.installEventFilter(self)

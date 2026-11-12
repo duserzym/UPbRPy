@@ -6251,6 +6251,10 @@ class TracePlotWidget(RoundedPlotWidget):
         self._interaction_mode = "zoom"
         self._suspend_x_window_signal = False
         self._snap_guard = False
+        self._overlay_label_timer = QtCore.QTimer(self)
+        self._overlay_label_timer.setSingleShot(True)
+        self._overlay_label_timer.setInterval(0)
+        self._overlay_label_timer.timeout.connect(self._layout_overlay_labels)
         self._measurement_refresh_timer = QtCore.QTimer(self)
         self._measurement_refresh_timer.setSingleShot(True)
         self._measurement_refresh_timer.setInterval(35)
@@ -6286,6 +6290,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self.plot_item.showAxis("bottom")
         self._reposition_spot_label()
         self._layout_trace_legend()
+        self._position_signal_labels()
 
     def _layout_trace_legend(self) -> None:
         """Reserve a row outside the data view for narrow-window legends."""
@@ -6327,6 +6332,7 @@ class TracePlotWidget(RoundedPlotWidget):
             self._spot_name_label.adjustSize()
             self._reposition_spot_label()
             self._spot_name_label.show()
+            self._position_signal_labels()
         else:
             self._spot_name_label.hide()
 
@@ -6334,7 +6340,6 @@ class TracePlotWidget(RoundedPlotWidget):
         """Keep the spot name and edge labels clear of controls floating over the plot."""
         if getattr(self, "_overlay_rect", None) != rect:
             self._overlay_rect = rect
-            self._reposition_spot_label()
             self._position_signal_labels()
 
     def _reposition_spot_label(self) -> None:
@@ -6354,6 +6359,15 @@ class TracePlotWidget(RoundedPlotWidget):
         lbl.move(max(0, x), max(0, top))
 
     def _position_signal_labels(self) -> None:
+        """Coalesce label updates after view, content and overlay changes."""
+        if not getattr(self, "_positioning_signal_labels", False) and not self._overlay_label_timer.isActive():
+            self._overlay_label_timer.start()
+
+    def _layout_overlay_labels(self) -> None:
+        self._reposition_spot_label()
+        self._layout_signal_labels()
+
+    def _layout_signal_labels(self) -> None:
         """Keep edge pills outside selection boxes and inside the view."""
         if getattr(self, "_positioning_signal_labels", False):
             return
@@ -6375,12 +6389,11 @@ class TracePlotWidget(RoundedPlotWidget):
                 ).normalized().adjusted(-4, -4, 4, 4)
                 obstacles.append(rect)
             overlay = getattr(self, "_overlay_rect", None)
+            hard_obstacles = []
             if overlay is not None:
                 # Controls floating over the plot.
-                obstacles.append(QtCore.QRectF(
-                    QtCore.QPointF(self.mapToScene(overlay.topLeft())),
-                    QtCore.QPointF(self.mapToScene(overlay.bottomRight())),
-                ).normalized().adjusted(-4, -4, 4, 4))
+                hard_obstacles.append(self.mapToScene(overlay).boundingRect().adjusted(-4, -4, 4, 4))
+                obstacles.extend(hard_obstacles)
             for name in ("signal_start", "signal_end"):
                 line = self._signal_boundaries.get(name)
                 if line is None:
@@ -6407,18 +6420,25 @@ class TracePlotWidget(RoundedPlotWidget):
                     left_candidates.extend((obstacle.left() - width - 5, obstacle.right() + 5))
                 left_candidates = sorted(set(left_candidates), key=lambda x: abs(x - left))
                 placement = next((
-                    (x, y) for x in left_candidates for y in sorted(candidates)
-                    if area.left() <= x <= area.right() - width
+                    (candidate_x, y) for blocked in (obstacles, hard_obstacles)
+                    for candidate_x in left_candidates for y in sorted(candidates)
+                    if area.left() <= candidate_x <= area.right() - width
                     and area.top() <= y <= area.bottom() - height
-                    and not any(QtCore.QRectF(x, y, width, height).intersects(rect)
-                                for rect in obstacles)
-                ), (left, area.top()))
+                    and not any(QtCore.QRectF(candidate_x, y, width, height).intersects(rect)
+                                for rect in blocked)
+                ), None)
+                if placement is None:
+                    # No visible lane remains when controls fill the view.
+                    label.hide()
+                    continue
                 left, top = placement
                 anchor = ((x - left) / width, 0.5)
                 label.anchors = [anchor, anchor]
                 position = 1 - (top + height / 2 - view.sceneBoundingRect().top()) / max(1, view.height())
                 label.setPosition(position)
-                obstacles.append(QtCore.QRectF(left, top, width, height).adjusted(-5, -5, 5, 5))
+                occupied = QtCore.QRectF(left, top, width, height).adjusted(-5, -5, 5, 5)
+                obstacles.append(occupied)
+                hard_obstacles.append(occupied)
         finally:
             self._positioning_signal_labels = False
 
@@ -6428,6 +6448,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._configure_plot()
         if hasattr(self, "_spot_name_label"):
             self._spot_name_label.setStyleSheet(f"color: {theme.muted}; background: transparent; padding: 2px 6px; font-size: 11px;")
+        self._position_signal_labels()
 
     def _configure_plot(self) -> None:
         self.setBackground(self._theme.plot_background)
