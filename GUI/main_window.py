@@ -64,6 +64,7 @@ from GUI.state import ReductionSession
 from GUI.export_dialog import ExportResultsDialog
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
+    CALIBRATION_GRID,
     CalibrationSlopesWidget,
     DownholeFractionationWidget,
     DetectorCalibrationPanel,
@@ -2186,13 +2187,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calibration_slopes_plot = CalibrationSlopesWidget()
         self.calibration_channel_combo = StyledComboBox()
         self.calibration_channel_combo.setToolTip(
-            "Inspect the measured glass spots and fit for one element on its own ppm and cps axes."
+            "All elements shows every calibration as a small plot on its own scale; "
+            "choose one element (or double-click its plot) to inspect it alone, or "
+            "All elements, one plot to overlay them."
         )
         self.calibration_channel_combo.setFixedWidth(153)
         self.calibration_channel_combo.hide()
         self.calibration_channel_combo.currentIndexChanged.connect(
             lambda _index: self.calibration_slopes_plot.set_channel(
                 self.calibration_channel_combo.currentData()
+            )
+        )
+        self.calibration_slopes_plot.channelRequested.connect(
+            lambda channel: self.calibration_channel_combo.setCurrentIndex(
+                self.calibration_channel_combo.findData(channel)
             )
         )
         self.downhole_frac_plot = DownholeFractionationWidget()
@@ -5981,7 +5989,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ratio_name = self.current_ratio_name()
 
         if self.session.plot_mode == "calibration_slopes":
-            data = get_calibration_slope_data(self.session, self.workflow_preset)
+            data = self._calibration_slope_data()
             if theme:
                 combo = self.calibration_channel_combo
                 channels = data["channels"] if data is not None else []
@@ -5989,15 +5997,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 previous_valid = combo.currentIndex() >= 0 and (
                     previous is None or previous in channels
                 )
-                selected = previous if previous_valid else (
-                    "238U" if "238U" in channels else next(iter(channels), None)
+                # Every calibrated element by default; a chosen view stays.
+                previous_valid = combo.currentIndex() >= 0 and (
+                    previous in (None, CALIBRATION_GRID) or previous in channels
                 )
+                selected = previous if previous_valid else CALIBRATION_GRID
                 with QtCore.QSignalBlocker(combo):
                     combo.clear()
                     for channel in channels:
                         combo.addItem(channel, channel)
                     if channels:
-                        combo.addItem("All elements", None)
+                        combo.insertItem(0, "All elements", CALIBRATION_GRID)
+                        combo.addItem("All elements, one plot", None)
                         combo.setCurrentIndex(
                             combo.findData(selected) if selected is not None else combo.count() - 1
                         )
@@ -6114,6 +6125,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 selected_spot
             ),
         )
+
+    def _calibration_slope_data(self) -> dict | None:
+        """Calibration plot data, rebuilt only when its cached inputs change."""
+        cache = self.session.reduction_cache
+        inputs = (self.session, cache.get("concentration_results"), cache.get("normalized_plateau_data"))
+        held = getattr(self, "_calibration_data_memo", None)
+        if held is not None and all(a is b for a, b in zip(held[0], inputs)):
+            return held[1]
+        data = get_calibration_slope_data(self.session, self.workflow_preset)
+        self._calibration_data_memo = (inputs, data)
+        return data
 
     def _trace_stage_frame(self, key: str, calculate: Callable[[], pd.DataFrame]) -> pd.DataFrame:
         """Leave pending selection calculations to the shared worker slot."""

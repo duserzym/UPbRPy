@@ -4883,15 +4883,40 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
 
 
+class _CompactAxis(pg.AxisItem):
+    """Tick labels such as 500k and 1.2M for narrow small-multiple axes."""
+
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        for value in values:
+            magnitude = abs(value * scale)
+            for factor, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
+                if magnitude >= factor:
+                    labels.append(f"{value * scale / factor:.3g}{suffix}")
+                    break
+            else:
+                labels.append(f"{value * scale:.3g}")
+        return labels
+
+
+CALIBRATION_GRID = "*all elements grid*"
+
+
 class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
     """Measured glass points and origin-anchored fits (cps vs. known ppm).
 
     Data is supplied via :meth:`show_data`.  Accepts the dict returned by
-    ``services.get_calibration_slope_data``.
+    ``services.get_calibration_slope_data``. The channel is one element, None
+    (every element on one plot) or :data:`CALIBRATION_GRID` (every element as
+    a grid of small plots, each on its own ppm and cps scale; double-clicking
+    one emits :attr:`channelRequested`).
     """
+
+    channelRequested = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
+        self._grid_items: dict[str, pg.PlotItem] = {}
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._channel: str | None = None
@@ -4906,6 +4931,9 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
+        if getattr(self, "_grid_items", None) and self._grid_columns(len(self._grid_items)) != self._drawn_columns:
+            self._draw()
+            return
         plot = getattr(self, "_plot_item", None)
         if plot is not None and plot.legend is not None:
             columns = self._legend_column_count(len(self._scatter_for_line))
@@ -4921,7 +4949,12 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
     def show_data(
         self, data: dict | None, theme: ThemeSpec, *, channel: str | None = None,
     ) -> None:
-        """Display the requested channel or all calibrated channels."""
+        """Display one channel, all channels on one plot (None), or the grid.
+
+        The same data object, channel and theme are not drawn again.
+        """
+        if data is self._data and channel == self._channel and theme == self._theme:
+            return
         self._theme = theme
         self._data = data
         self._channel = channel
@@ -4934,14 +4967,96 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             self._channel = channel
             self._draw()
 
+    def channel(self) -> str | None:
+        return self._channel
+
+    def grid_channels(self) -> list[str]:
+        """Channels drawn as small plots (empty when one channel is shown)."""
+        return list(self._grid_items)
+
     def restore_default_view(self) -> None:
+        for item in self._grid_items.values():
+            item.enableAutoRange()
         if self._plot_item is not None:
             self._plot_item.enableAutoRange()
+
+    def _grid_columns(self, count: int) -> int:
+        if count <= 1:
+            return 1
+        # The fewest columns whose panels are at most 1.6 times as wide as
+        # tall; more columns make panels narrower and rows fewer.
+        width, height = max(self.width(), 300), max(self.height(), 200)
+        for columns in range(1, count + 1):
+            rows = -(-count // columns)
+            if (width / columns) / (height / rows) <= 1.6:
+                return columns
+        return count
+
+    def _draw_grid(self, channels: list[str], all_channels: list[str], theme: ThemeSpec) -> None:
+        data = self._data
+        columns = self._grid_columns(len(channels))
+        self._drawn_columns = columns
+        tick_font = QtGui.QFont()
+        tick_font.setPointSizeF(7.5)
+        self.ci.layout.setSpacing(2)
+        for index, channel in enumerate(channels):
+            ch_data = data["channel_data"][channel]
+            ppm = np.asarray(ch_data["ppm"], dtype=float)
+            cps = np.asarray(ch_data["cps"], dtype=float)
+            slope = float(ch_data["slope"])
+            color = _DIAG_SPOT_COLORS[all_channels.index(channel) % len(_DIAG_SPOT_COLORS)]
+            item = self.addPlot(
+                row=index // columns, col=index % columns, viewBox=AxisZoomViewBox(),
+                axisItems={"left": _CompactAxis("left"), "bottom": _CompactAxis("bottom")},
+            )
+            for axis_name in ("left", "bottom"):
+                axis = item.getAxis(axis_name)
+                axis.setPen(theme.axis_line)
+                axis.setTextPen(theme.axis_text)
+                axis.setStyle(tickFont=tick_font, tickTextOffset=2, maxTickLevel=0)
+            item.getAxis("left").setWidth(38)
+            item.getAxis("bottom").setHeight(18)
+            item.showGrid(x=True, y=True, alpha=theme.grid_alpha)
+            item.setContentsMargins(2, 2, 2, 2)
+            item.setTitle(f"{channel}", color=theme.axis_text, size="8pt")
+            labels = ch_data.get("labels", [channel] * len(ppm))
+            spot_names = ch_data.get("spot_names", labels)
+            scatter = pg.ScatterPlotItem(
+                x=ppm, y=cps, size=6,
+                pen=pg.mkPen(theme.axis_text, width=0.6), brush=pg.mkBrush(color),
+                hoverable=True, hoverSize=9,
+                data=list(zip(spot_names, labels, [channel] * len(ppm))),
+                tip=lambda x, y, spot: (
+                    f"{spot[0]} · {spot[1]} · {spot[2]}\n"
+                    f"Reference: {x:,.4g} ppm\nMeasured: {y:,.5g} cps"
+                ),
+            )
+            item.addItem(scatter)
+            if np.isfinite(slope) and slope > 0 and ppm.size:
+                xmax = float(np.nanmax(ppm)) * 1.05
+                item.plot([0.0, xmax], [0.0, xmax / slope],
+                          pen=pg.mkPen(color, width=1.6, style=QtCore.Qt.PenStyle.DashLine))
+            item.setToolTip(f"{channel}: double-click to show this element on its own")
+            self._grid_items[channel] = item
+        self._apply_zoom_mode()
+        self._apply_interaction_mode()
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._grid_items:
+            scene_point = self.mapToScene(event.position().toPoint())
+            for channel, item in self._grid_items.items():
+                if item.sceneBoundingRect().contains(scene_point):
+                    self.channelRequested.emit(channel)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
 
     def _draw(self) -> None:
         self.clear()
         self._scatter_for_line = {}
         self._plot_item = None
+        self._grid_items = {}
+        self._drawn_columns = 0
         theme = self._theme
         data = self._data
         if theme is None:
@@ -4958,6 +5073,9 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
 
         all_channels = data["channels"]
         channels = [self._channel] if self._channel in all_channels else all_channels
+        if self._channel == CALIBRATION_GRID and len(channels) > 1:
+            self._draw_grid(channels, all_channels, theme)
+            return
         p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
         self._plot_item = p
         _make_diag_axis(p, theme)
@@ -5053,18 +5171,20 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
     def interaction_mode(self) -> str:
         return self._interaction_mode
 
+    def _plot_items(self) -> list[pg.PlotItem]:
+        items = list(self._grid_items.values())
+        if self._plot_item is not None:
+            items.append(self._plot_item)
+        return items
+
     def _apply_zoom_mode(self) -> None:
-        if self._plot_item is None:
-            return
-        self._plot_item.vb.set_zoom_axes(self._zoom_mode)
+        for item in self._plot_items():
+            item.vb.set_zoom_axes(self._zoom_mode)
 
     def _apply_interaction_mode(self) -> None:
-        if self._plot_item is None:
-            return
-        if self._interaction_mode == "pan":
-            self._plot_item.vb.setMouseMode(pg.ViewBox.PanMode)
-        else:
-            self._plot_item.vb.setMouseMode(pg.ViewBox.RectMode)
+        mode = pg.ViewBox.PanMode if self._interaction_mode == "pan" else pg.ViewBox.RectMode
+        for item in self._plot_items():
+            item.vb.setMouseMode(mode)
 
 
 def _spot_time_spans(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, list[str]]:
