@@ -180,6 +180,10 @@ _VIEWS_WITHOUT_SELECTION_WINDOWS = frozenset({
 })
 
 
+# Plot modes whose drawing does not depend on the browsed spot.
+_VIEWS_WITHOUT_SPOT = frozenset({"final_results"})
+
+
 def _same_view(key: tuple, rendered: tuple | None) -> bool:
     """Compare two MainWindow._view_key results (values, then identities)."""
     if rendered is None or key[0] != rendered[0] or len(key[1]) != len(rendered[1]):
@@ -251,6 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # What the plot area last drew (see _view_key). A workflow-card
         # switch redraws only when it changes.
         self._rendered_view_key: tuple | None = None
+        self._syncing_spot_selection = False
         self.reference_library_path = default_reference_material_library_path()
         self.default_reference_library_path = default_reference_material_library_path()
         self._reference_library_notice: str | None = None
@@ -641,6 +646,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self.repick_tabs_action = add(
             "Re-pick All Open Tabs", ["Ctrl+Alt+Shift+R"], self.repick_all_tabs_requested.emit,
             "Re-pick every spot in every open tab, each with its own auto-pick settings.")
+
+    def _spot_tree_item(self, spot_name: str) -> QtWidgets.QTreeWidgetItem | None:
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.spot_list)
+        while iterator.value() is not None:
+            item = iterator.value()
+            if item.childCount() == 0 and (
+                    item.data(0, QtCore.Qt.ItemDataRole.UserRole) or item.text(0)) == spot_name:
+                return item
+            iterator += 1
+        return None
+
+    def _follow_review_selection(self, names) -> None:
+        """Make the one spot selected on the concordia current in the Spots tree."""
+        if self._syncing_spot_selection or len(names) != 1:
+            return
+        item = self._spot_tree_item(next(iter(names)))
+        if item is None or item is self.spot_list.currentItem():
+            return
+        self._syncing_spot_selection = True
+        try:
+            self.spot_list.setCurrentItem(item)
+            self.spot_list.scrollToItem(item)
+        finally:
+            self._syncing_spot_selection = False
+
+    def show_spot_signal(self, spot_name: str) -> None:
+        """Show one spot's time-resolved signal and windows in the Browse view."""
+        item = self._spot_tree_item(spot_name)
+        if item is None:
+            return
+        self.spot_list.setCurrentItem(item)
+        self.spot_list.scrollToItem(item)
+        for index in range(self.inspector_tabs.count()):
+            if self.inspector_tabs.tabText(index) == "Browse":
+                self.inspector_tabs.setCurrentIndex(index)
+        self.set_plot_mode("raw", refresh=True)
 
     def go_to_adjacent_spot(self, step: int) -> None:
         """Select the previous or next analysis in the spot list."""
@@ -2229,6 +2270,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_table.selectedSpotsChanged.connect(
             self.bias_plot.set_selected_spots
         )
+        self.results_table.selectedSpotsChanged.connect(self._follow_review_selection)
+        self.results_table.showSignalRequested.connect(self.show_spot_signal)
         self.plots_stack.addWidget(self.bias_plot)            # index 5
         plot_layout.addWidget(self.plots_stack)
 
@@ -4295,6 +4338,14 @@ class MainWindow(QtWidgets.QMainWindow):
         for panel in self.results_table.fit_panels.values():
             panel.invalidate()
             panel.records = []
+        experiment = loaded_session.experiment
+        if {"spot_names", "spot_starting_times"}.issubset(getattr(experiment, "columns", ())):
+            ordered = experiment.sort_values("spot_starting_times")
+            self.results_table.set_spot_acquisition({
+                str(name): (number, f"{float(start):.0f} s into the session")
+                for number, (name, start) in enumerate(
+                    zip(ordered["spot_names"], ordered["spot_starting_times"]), start=1)
+            })
         # A new session starts with the mineral's default; a project's saved
         # fit settings are applied afterwards by restore_review_state.
         self.results_table.apply_fit_default(self.workflow_preset.live_fit_by_default)
@@ -4880,8 +4931,10 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self.session.plot_mode
         editable = (self._workflow_step_allows_region_edits()
                     if mode not in _VIEWS_WITHOUT_SELECTION_WINDOWS else None)
+        if mode in _VIEWS_WITHOUT_SPOT:
+            spot = None
         return (
-            (mode, editable, spot),
+            (mode, editable, spot, tuple(sorted(self._review_flags.items()))),
             (self.session, self.session.total_data,
              *self.session.reduction_cache.keys(), *self.session.reduction_cache.values()),
         )
@@ -5300,6 +5353,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.flush_selection_edits()
         self.session.selected_spot = spot_name or None
+        if (spot_name and not self._syncing_spot_selection
+                and spot_name in self.results_table.include_flags
+                and self.results_table.selected_spots != {spot_name}):
+            # A spot chosen in the tree is also highlighted on the concordia.
+            self._syncing_spot_selection = True
+            try:
+                self.results_table.set_selected_spots({spot_name})
+            finally:
+                self._syncing_spot_selection = False
         self._sync_plateau_filter_control()
         self.refresh_view()
 
@@ -5920,7 +5982,12 @@ class MainWindow(QtWidgets.QMainWindow):
         editable_regions = self._workflow_step_allows_region_edits()
 
         try:
-            self._render_current_plot(selected_spot, spot_data, visible_channels, regions, editable_regions)
+            if (self.session.plot_mode in _VIEWS_WITHOUT_SPOT
+                    and _same_view(self._view_key(), self._rendered_view_key)):
+                # Browsing another spot does not rebuild the results tables.
+                self.plots_stack.setCurrentIndex(_PLOT_STACK_IDX.get(self.session.plot_mode, 0))
+            else:
+                self._render_current_plot(selected_spot, spot_data, visible_channels, regions, editable_regions)
         except Exception as exc:
             self.append_log(f"Plot mode {self.session.plot_mode} failed: {exc}")
             self.session.plot_mode = "raw"

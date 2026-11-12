@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import html
 import re
 import sys
 import weakref
@@ -1305,6 +1306,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._click_timer = QtCore.QElapsedTimer()
         self._click_selection = set()
         self._click_scene_pos = None
+        # Ellipse hit-testing: bounding boxes and areas per drawn ellipse set,
+        # the last click's candidates for cycling, and one highlight item.
+        self._hit_cache = None
+        self._last_hit = None
+        self._highlight = None
         self._label_timer = QtCore.QTimer(self)
         self._label_timer.setSingleShot(True)
         self._label_timer.timeout.connect(self._update_concordia_labels)
@@ -1340,6 +1346,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if selected != self.selected_spots:
             self.selected_spots = selected
             self._update_selection_style()
+            self._update_highlight()
             self.selectionChanged.emit(set(selected))
 
     def select_rectangle(self, rect: QtCore.QRectF, *, extend: bool = False) -> None:
@@ -1348,16 +1355,102 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self.select_spots({name for name, x, y, _color in self._points
                            if rect.contains(QtCore.QPointF(x, y))}, extend=extend)
 
+    def _ellipse_hit_data(self):
+        """Bounding boxes, areas and polygons of the drawn ellipses (cached)."""
+        ellipses = self._ellipses
+        if self._hit_cache is not None and self._hit_cache[0] is ellipses:
+            return self._hit_cache[1]
+        names, boxes, areas, polygons = [], [], [], []
+        for name, handle, _color in ellipses:
+            x = np.asarray(handle.x, dtype=float)
+            y = np.asarray(handle.y, dtype=float)
+            finite = np.isfinite(x) & np.isfinite(y)
+            if finite.sum() < 3:
+                continue
+            x, y = x[finite], y[finite]
+            names.append(name)
+            boxes.append((x.min(), x.max(), y.min(), y.max()))
+            areas.append(0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
+            polygons.append((x, y))
+        data = (names, np.array(boxes, dtype=float).reshape(-1, 4), np.array(areas, dtype=float), polygons)
+        self._hit_cache = (ellipses, data)
+        return data
+
+    def spots_at(self, scene_pos) -> list[str]:
+        """Spots under a scene position, smallest ellipse first.
+
+        A drawn centre within 10 px whose ellipse does not contain the point
+        (tiny or missing) is put first; hidden spots are ignored.
+        """
+        if self._plot_item is None:
+            return []
+        vb = self._plot_item.vb
+        if not vb.sceneBoundingRect().contains(scene_pos):
+            return []
+        pos = vb.mapSceneToView(scene_pos)
+        px, py = pos.x(), pos.y()
+        visible = {point[0] for point in self._points}
+        names, boxes, areas, polygons = self._ellipse_hit_data()
+        hits = []
+        if len(names):
+            inside = np.flatnonzero((boxes[:, 0] <= px) & (px <= boxes[:, 1])
+                                    & (boxes[:, 2] <= py) & (py <= boxes[:, 3]))
+            point = QtCore.QPointF(px, py)
+            for index in inside:
+                if names[index] not in visible:
+                    continue
+                x, y = polygons[index]
+                polygon = QtGui.QPolygonF([QtCore.QPointF(a, b) for a, b in zip(x, y)])
+                if polygon.containsPoint(point, QtCore.Qt.FillRule.OddEvenFill):
+                    hits.append((areas[index], names[index]))
+        ordered = [name for _area, name in sorted(hits)]
+        index = self.nearest_point(scene_pos, radius=10)
+        if index is not None and self._points[index][0] not in ordered:
+            # A centre without a containing ellipse (tiny or missing) still hits.
+            ordered.insert(0, self._points[index][0])
+        return ordered
+
     def _select_at(self, scene_pos, modifiers):
         self._click_selection = set(self.selected_spots)
         self._click_scene_pos = QtCore.QPointF(scene_pos)
         self._click_timer.start()
-        index = self.nearest_point(scene_pos, radius=10)
-        names = {self._points[index][0]} if index is not None else set()
+        candidates = self.spots_at(scene_pos)
         control = bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier)
         shift = bool(modifiers & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        choice = 0
+        last = self._last_hit
+        if (candidates and last is not None and not (control or shift) and last[1] == candidates
+                and (QtCore.QPointF(scene_pos) - last[0]).manhattanLength() <= 4):
+            # Repeated clicks on overlapping ellipses step through them.
+            choice = (last[2] + 1) % len(candidates)
+        self._last_hit = (QtCore.QPointF(scene_pos), candidates, choice) if candidates else None
+        names = {candidates[choice]} if candidates else set()
         if names or not (control or shift):
             self.select_spots(names, extend=shift, toggle=control)
+
+    def _update_highlight(self) -> None:
+        """Draw the selected spots' ellipses thicker, on top of the others."""
+        if self._plot_item is None:
+            return
+        if self._highlight is None or self._highlight.scene() is None:
+            self._highlight = QtWidgets.QGraphicsPathItem()
+            self._highlight.setZValue(30)
+            self._highlight.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            self._plot_item.addItem(self._highlight, ignoreBounds=True)
+        path = QtGui.QPainterPath()
+        if self.selected_spots:
+            names, _boxes, _areas, polygons = self._ellipse_hit_data()
+            visible = {point[0] for point in self._points}
+            for name, (x, y) in zip(names, polygons):
+                if name in self.selected_spots and name in visible:
+                    path.addPolygon(QtGui.QPolygonF([QtCore.QPointF(a, b) for a, b in zip(x, y)]))
+                    path.closeSubpath()
+        theme = self._theme
+        pen = pg.mkPen(theme.accent if theme is not None else "#2468d4", width=3.0)
+        pen.setCosmetic(True)
+        self._highlight.setPen(pen)
+        self._highlight.setBrush(QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush))
+        self._highlight.setPath(path)
 
     def _scatter_brush(self, color):
         # ScatterPlotItem keys its symbol atlas by brush object identity.
@@ -1564,6 +1657,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if hovered is not None and names is not None and hovered not in names:
             self._set_hover(None)
         self._update_visible_points()
+        self._update_highlight()
         changed = previous ^ names if previous is not None and names is not None else None
         for name, ellipse, _color in self._ellipses:
             if changed is None or name in changed:
@@ -2016,6 +2110,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._depth_brushes(frame, theme)
         self._all_points, self._all_point_rows, self._ellipses, self._point_errors = cached
         self._update_visible_points()
+        self._update_highlight()
         self._ellipse_batch.handles = [handle for _, handle, _ in self._ellipses]
         self._ellipse_batch.dirty = True
         for name, handle, _ in self._ellipses:
@@ -2884,10 +2979,148 @@ class _SampleChipArea(QtWidgets.QScrollArea):
         self.flow.invalidate()
 
 
+def _spot_number(row: dict, column: str) -> float:
+    try:
+        value = float(row.get(column, np.nan))
+    except (TypeError, ValueError):
+        return np.nan
+    return value
+
+
+class SpotInfoCard(QtWidgets.QFrame):
+    """Metadata, dates and ratios of the spot selected on the concordia.
+
+    :meth:`show_spot` takes the spot's final-results row and its spot-mean
+    row; values are shown as stored there, rounded to their uncertainty.
+    """
+
+    showSignalRequested = QtCore.Signal(str)
+    excludeToggled = QtCore.Signal(str, bool)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("SpotInfoCard")
+        self._name = ""
+        self._excluded = False
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
+        self.body = QtWidgets.QLabel()
+        self.body.setObjectName("SpotInfoBody")
+        self.body.setWordWrap(True)
+        self.body.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.body.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.body.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidget(self.body)
+        self.scroll.setMinimumHeight(24)
+        layout.addWidget(self.scroll, 1)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(4)
+        self.show_signal_button = QtWidgets.QToolButton()
+        self.show_signal_button.setText("Show signal")
+        self.show_signal_button.setToolTip("Show this spot's time-resolved signal and windows")
+        self.show_signal_button.clicked.connect(lambda: self.showSignalRequested.emit(self._name))
+        self.exclude_button = QtWidgets.QToolButton()
+        self.exclude_button.setToolTip("Exclude this spot from fits and pooled ages, or include it again (E)")
+        self.exclude_button.clicked.connect(lambda: self.excludeToggled.emit(self._name, not self._excluded))
+        for button in (self.show_signal_button, self.exclude_button):
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Ignored)
+        self.hide()
+
+    def spot_name(self) -> str:
+        return self._name
+
+    def show_names(self, names: list[str]) -> None:
+        """Several spots: their count and names, without per-spot values."""
+        self._name = ""
+        shown = ", ".join(names[:12]) + (f", … ({len(names) - 12} more)" if len(names) > 12 else "")
+        self.body.setText(f"<b>{len(names)} spots selected</b><br>{shown}")
+        self.show_signal_button.setEnabled(False)
+        self.exclude_button.setEnabled(False)
+        self.exclude_button.setText("Exclude")
+        self.show()
+
+    def show_spot(self, name: str, final_row: dict, spot_row: dict, *, excluded: bool,
+                  acquisition: tuple[int, str] | None = None, transition_ma: float = 1000.0,
+                  calibration: bool = True) -> None:
+        """Show one spot. ``final_row`` and ``spot_row`` may be empty dicts."""
+        self._name, self._excluded = name, bool(excluded)
+        row = {**spot_row, **final_row}
+        branch = "with_calibration" if calibration else "no_calibration"
+
+        def value(column, error_columns):
+            number = _spot_number(row, column)
+            if not np.isfinite(number):
+                return ""
+            error = next((e for e in (_spot_number(row, c) for c in error_columns) if np.isfinite(e)), np.nan)
+            return format_value_with_uncertainty(number, error)
+
+        def line(label, text, unit=""):
+            return f"<tr><td style='padding-right:8px'>{label}</td><td>{text}{unit}</td></tr>" if text else ""
+
+        sample = html.escape(str(row.get("sample", "")))
+        header = f"<b>{html.escape(name)}</b><br>{sample}"
+        if acquisition is not None:
+            header += f" · #{acquisition[0]}" + (f" · {html.escape(acquisition[1])}" if acquisition[1] else "")
+        preferred = value("preferred_date", ["preferred_date_2e"])
+        method = html.escape(str(row.get("preferred_date_method", "")))
+        rows = [line("<b>Preferred</b>", f"<b>{preferred}</b>", " Ma (2σ)" if preferred else "")]
+        if method:
+            rows.append(line("Method", method + "*"))
+        for label, base in (("206Pb/238U date", "206Pb/238U_age"), ("207Pb/235U date", "207Pb/235U_age"),
+                            ("207Pb/206Pb date", "207Pb/206Pb_age"), ("207Pb-corr. date", "207Pb_corrected_age"),
+                            ("208Pb-corr. date", "208Pb_corrected_age")):
+            rows.append(line(label, value(base, [f"{base}_2e_{branch}", f"{base}_2e"]), " Ma"))
+        disc = _spot_number(row, "disc%")
+        if np.isfinite(disc):
+            rows.append(line("Discordance", f"{disc:.1f}", " %"))
+        for label, base in (("207Pb/235U", "207Pb/235U"), ("206Pb/238U", "206Pb/238U"),
+                            ("238U/206Pb", "238U/206Pb"), ("207Pb/206Pb", "207Pb/206Pb")):
+            rows.append(line(label, value(base, [f"{base}_2e_{branch}", f"{base}_2e"])))
+        for label, column in (("ρ 7/35–6/38", f"err_corr_{branch}"), ("ρ T–W", f"tw_rho_{branch}")):
+            number = _spot_number(row, column)
+            if not np.isfinite(number):
+                number = _spot_number(row, column.rsplit("_", 2)[0])
+            if np.isfinite(number):
+                rows.append(line(label, f"{number:.3f}"))
+        uranium = _spot_number(row, "U")
+        if np.isfinite(uranium):
+            rows.append(line("U", value("U", ["U_95CI"]) or f"{uranium:.4g}", " µg/g"))
+        th_u = _spot_number(row, "Th/U")
+        if np.isfinite(th_u):
+            rows.append(line("Th/U", f"{th_u:.3g}"))
+        for label, column in (("f206 (207Pb)", "207Pb_common_fraction_206"), ("f206 (204Pb)", "204Pb_common_fraction_206")):
+            number = _spot_number(row, column)
+            if np.isfinite(number):
+                rows.append(line(label, f"{number:.3g}"))
+        for label, column in (("Grain", "grain_id"), ("Mount", "mount")):
+            if str(row.get(column, "")).strip() not in {"", "nan", "None"}:
+                rows.append(line(label, html.escape(str(row[column]))))
+        flags = str(row.get("automatic_flags", "") or "").strip()
+        rows.append(line("Flags", html.escape(flags) if flags and flags != "nan" else "none"))
+        rows.append(line("State", "excluded from fits" if excluded else "included"))
+        footnote = (f"<br><span style='font-size:9pt'>* The method varies by spot: "
+                    f"206Pb/238U below {transition_ma:g} Ma, 207Pb/206Pb above, unless a "
+                    f"common-Pb correction is chosen.</span>") if method else ""
+        self.body.setText(f"{header}<table cellspacing='0' cellpadding='1'>{''.join(rows)}</table>{footnote}")
+        self.show_signal_button.setEnabled(True)
+        self.exclude_button.setEnabled(True)
+        self.exclude_button.setText("Include" if excluded else "Exclude")
+        self.show()
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
     selectedSpotsChanged = QtCore.Signal(object)
+    showSignalRequested = QtCore.Signal(str)
     showGlassesChanged = QtCore.Signal(bool)
     appearance_changed = QtCore.Signal()
     excludedSpotsChanged = QtCore.Signal(object)
@@ -2918,6 +3151,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._readout_timer = QtCore.QTimer(self)
         self._readout_timer.setSingleShot(True)
         self._readout_timer.timeout.connect(self._update_age_readout)
+        self._readout_timer.timeout.connect(self._update_spot_card)
+        self._spot_acquisition: dict[str, tuple[int, str]] = {}
+        self._age_transition_ma = 1000.0
         self.concordia_readout = None
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -3046,7 +3282,39 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._readout_timer.start(0)
         self._schedule_fits()
         self.excludedSpotsChanged.emit(set(self.excluded_spots))
+        self._update_spot_card()
         self.appearance_changed.emit()
+
+    def set_spot_acquisition(self, info: dict[str, tuple[int, str]]) -> None:
+        """Sequence number and start time per spot, shown on the spot card."""
+        self._spot_acquisition = dict(info)
+
+    def _update_spot_card(self) -> None:
+        card = getattr(self, "spot_card", None)
+        if card is None:
+            return
+        names = [name for name in self._in_spot_order(self.selected_spots)]
+        if not names:
+            card.hide()
+            return
+        if len(names) > 1:
+            card.show_names(names)
+            return
+        name = names[0]
+        final = self.results_model.frame
+        final_row = (final.loc[final["spot_name"].astype(str).eq(name)].iloc[0].to_dict()
+                     if "spot_name" in final and final["spot_name"].astype(str).eq(name).any() else {})
+        spots = self._spot_frame
+        spot_row = (spots.loc[spots["spot_name"].astype(str).eq(name)].iloc[0].to_dict()
+                    if "spot_name" in spots and spots["spot_name"].astype(str).eq(name).any() else {})
+        card.show_spot(name, final_row, spot_row, excluded=name in self.excluded_spots,
+                       acquisition=self._spot_acquisition.get(name),
+                       transition_ma=self._age_transition_ma,
+                       calibration=self._include_calibration_uncertainty)
+
+    def _in_spot_order(self, names) -> list[str]:
+        order = {name: index for index, name in enumerate(self._spot_acquisition)}
+        return sorted(map(str, names), key=lambda name: (order.get(name, len(order)), name))
 
     def _update_exclusion_styles(self):
         for model in (self.results_model, self.depth_model):
@@ -3923,7 +4191,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._chooser_stack.addWidget(self.spot_choice_tree)
         self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
         self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
-        controls_layout.addWidget(self._chooser_stack, 1)
+        controls_layout.addWidget(self._chooser_stack, 6)
         controls_layout.addLayout(self._create_spot_bulk_buttons())
         diagram_row, self.spot_diagram_buttons = self.create_diagram_buttons(
             self.refresh_spot_concordia
@@ -3958,6 +4226,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.concordia_age_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
                                               QtWidgets.QSizePolicy.Policy.Preferred)
         self.concordia_age_label.setMaximumHeight(self.concordia_age_label.fontMetrics().lineSpacing() * 3 + 6)
+        self.spot_card = SpotInfoCard()
+        self.spot_card.showSignalRequested.connect(self.showSignalRequested)
+        self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
+        controls_layout.addWidget(self.spot_card, 1)
         controls_layout.addWidget(self.concordia_age_label)
         controls_layout.addWidget(self._selection_actions("spot"))
         controls_layout.addWidget(self._fit_panel("spot"))
@@ -4338,6 +4610,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.secondary_model.set_frame(secondary)
         self._spot_frame = parallel_frame.copy()
         decision = getattr(finalized, "decision", None)
+        self._age_transition_ma = float(getattr(decision, "age_transition_ma", 1000.0) or 1000.0)
         method = getattr(decision, "common_pb_method", "none")
         uncertainty = getattr(
             decision,
