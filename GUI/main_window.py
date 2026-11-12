@@ -2262,6 +2262,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.interact_mode_buttons[imode] = ibtn
             cb_layout.addWidget(ibtn)
         self.interact_mode_buttons["zoom"].setChecked(True)
+        # Drag mode per kind of view for this window: concordia views open in
+        # Pan, trace and diagnostic plots in Box; a choice made in one kind of
+        # view is kept for it.
+        self._interaction_mode_by_view = {"concordia": "pan", "plots": "zoom"}
         self.interact_mode_buttons["pan"].setToolTip("Drag to pan in x and y")
         self.interact_mode_buttons["select"].setEnabled(False)
         self.interact_mode_buttons["select"].hide()
@@ -4291,6 +4295,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for panel in self.results_table.fit_panels.values():
             panel.invalidate()
             panel.records = []
+        # A new session starts with the mineral's default; a project's saved
+        # fit settings are applied afterwards by restore_review_state.
+        self.results_table.apply_fit_default(self.workflow_preset.live_fit_by_default)
         if project_path is None:
             self._review_flags.clear()
         self._sync_qtegra_controls()
@@ -5799,10 +5806,15 @@ class MainWindow(QtWidgets.QMainWindow):
         visibility_changed = self.interact_mode_buttons["select"].isHidden() == supports_select
         self.interact_mode_buttons["select"].setEnabled(supports_select)
         self.interact_mode_buttons["select"].setVisible(supports_select)
-        if self._selected_interaction_mode() == "select" and not supports_select:
-            self.set_interaction_mode("zoom")
+        mode = self._interaction_mode_by_view[self._interaction_view_kind()]
+        if mode == "select" and not supports_select:
+            mode = "zoom"
         if hasattr(target, "set_interaction_mode"):
-            target.set_interaction_mode(self._selected_interaction_mode())
+            target.set_interaction_mode(mode)
+        for key, button in self.interact_mode_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == mode)
+            button.blockSignals(False)
         if hasattr(target, "set_zoom_mode"):
             target.set_zoom_mode(self._selected_zoom_mode())
         if visibility_changed:
@@ -5815,10 +5827,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(target, "set_interaction_mode"):
             target.set_interaction_mode(mode)
         current_mode = target.interaction_mode() if hasattr(target, "interaction_mode") else mode
+        self._interaction_mode_by_view[self._interaction_view_kind()] = current_mode
         for key, button in self.interact_mode_buttons.items():
             button.blockSignals(True)
             button.setChecked(key == current_mode)
             button.blockSignals(False)
+
+    def _interaction_view_kind(self) -> str:
+        """Concordia (final review, depth profiles) or other plots."""
+        return "concordia" if self.session.plot_mode in {"final_results", "depth_profile"} else "plots"
 
     def set_zoom_mode(self, mode: str) -> None:
         target = self._current_plot_interaction_target()

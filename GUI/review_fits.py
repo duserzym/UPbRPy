@@ -257,6 +257,21 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self._fit_view_pending = self._was_enabled
         self.invalidate()
 
+    def set_enabled_default(self, enabled: bool) -> None:
+        """Start a new session with live fits on or off, keeping other options.
+
+        The per-user preference is not changed.
+        """
+        self._restoring = True
+        try:
+            self.fit_button.setChecked(bool(enabled))
+        finally:
+            self._restoring = False
+        self.readout.setVisible(self.fit_button.isChecked())
+        self._was_enabled = self.fit_button.isChecked()
+        self._fit_view_pending = self._was_enabled
+        self.invalidate()
+
     def _anchor_enabled(self):
         enabled = self.anchor_combo.currentData() in {"common_pb", "age"}
         self.anchor_value.setEnabled(enabled)

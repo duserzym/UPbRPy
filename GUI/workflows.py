@@ -39,6 +39,9 @@ class WorkflowPreset:
     session_polynomial_degree: int = 2
     default_ratio: str = "206Pb/238U"
     plateau_filter_method: str = "none"
+    # Whether the live discordia / isochron Fit in the final review starts on
+    # for a new session. Saved projects keep the state they stored.
+    live_fit_by_default: bool = False
 
 
 COMMON_RATIO_STEP = WorkflowStep(
@@ -162,6 +165,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         th_ratio_standard="NIST610",
         secondary_standards=("MADJCU",),
         common_pb_calibration="tera_wasserburg",
+        live_fit_by_default=True,
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(
@@ -248,6 +252,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         th_ratio_standard="NIST610",
         secondary_standards=("R632",),
         common_pb_calibration="tera_wasserburg",
+        live_fit_by_default=True,
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(
@@ -333,6 +338,7 @@ WORKFLOW_PRESETS: dict[str, WorkflowPreset] = {
         th_ratio_standard="NIST610",
         secondary_standards=("BLR",),
         common_pb_calibration="tera_wasserburg",
+        live_fit_by_default=True,
         default_ratio="206Pb/238U",
         steps=(
             WorkflowStep(

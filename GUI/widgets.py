@@ -2996,6 +2996,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
         """Return the last fit records of both pages for saving or export."""
         return [dict(record) for panel in self.fit_panels.values() for record in panel.records]
 
+    def apply_fit_default(self, enabled: bool) -> None:
+        """Set whether live fits start on for a new session (both pages)."""
+        for panel in self.fit_panels.values():
+            panel.set_enabled_default(enabled)
+
     def restore_review_state(self, workspace: dict, spot_names) -> None:
         """Restore calculation decisions and fits, ignoring unknown spot keys."""
         self.excluded_spots.clear()
