@@ -4614,6 +4614,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         """Hide this page's spot list when another view (Studio's Spots tree) chooses."""
         self.spot_chooser_section.setVisible(not enabled)
         self.spot_summary_button.setVisible(enabled)
+        self.spot_options_filler.setVisible(enabled)
         self._update_spot_count()
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
@@ -4764,12 +4765,6 @@ class ResultsTableWidget(QtWidgets.QWidget):
         callback,
     ) -> tuple[QtWidgets.QWidget, dict[str, QtWidgets.QToolButton]]:
         """Create an exclusive Wetherill/Tera--Wasserburg toggle row."""
-        container = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        group = QtWidgets.QButtonGroup(container)
-        group.setExclusive(True)
         buttons: dict[str, QtWidgets.QToolButton] = {}
         for key, label in (
             ("wetherill", "Wetherill"),
@@ -4781,26 +4776,30 @@ class ResultsTableWidget(QtWidgets.QWidget):
             button.setProperty("modeToggle", True)
             button.setChecked(key == "wetherill")
             button.clicked.connect(callback)
-            group.addButton(button)
-            row.addWidget(button)
             buttons[key] = button
-        row.addStretch(1)
+        container = self._segmented_buttons(list(buttons.values()))
+        group = QtWidgets.QButtonGroup(container)
+        group.setExclusive(True)
+        for button in buttons.values():
+            group.addButton(button)
         return container, buttons
 
-    def _segmented_row(self, label: str, buttons: list[QtWidgets.QToolButton]) -> QtWidgets.QWidget:
-        """A label column of equal width and a full-width segmented control."""
-        row = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(row)
+    def _segmented_buttons(self, buttons: list[QtWidgets.QToolButton]) -> QtWidgets.QWidget:
+        """A full-width control with equally sized segments."""
+        row = QtWidgets.QWidget(self)
+        layout = QtWidgets.QGridLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        caption = QtWidgets.QLabel(label)
-        caption.setObjectName("ConcordiaOptionLabel")
-        caption.setFixedWidth(caption.fontMetrics().horizontalAdvance("Diagram") + 4)
-        layout.addWidget(caption)
-        for button in buttons:
+        for column, button in enumerate(buttons):
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-            button.setMinimumWidth(0)
-            layout.addWidget(button, 1)
+            layout.addWidget(button, 0, column)
+            button.ensurePolished()
+        # Native hints include extra button chrome. Keep the text and the
+        # mode-toggle's 6 px padding on each side within the 230 px panel.
+        minimum = max(button.fontMetrics().horizontalAdvance(button.text()) for button in buttons) + 12
+        for column, button in enumerate(buttons):
+            button.setMinimumWidth(minimum)
+            layout.setColumnStretch(column, 1)
         return row
 
     @staticmethod
@@ -4842,6 +4841,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         controls = QtWidgets.QWidget()
         controls.setObjectName("ConcordiaOptions")
         controls.setMaximumWidth(230)
+        controls.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum,
+                               QtWidgets.QSizePolicy.Policy.Preferred)
         controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
@@ -4888,9 +4889,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
             button.clicked.connect(lambda checked=False, key=key: self._mouse_mode_clicked(key))
             mouse_group.addButton(button)
             self.mouse_mode_buttons[key] = button
-        controls_layout.addWidget(self._segmented_row("Diagram", list(self.spot_diagram_buttons.values())))
-        controls_layout.addWidget(self._segmented_row("Colour", list(self.spot_colour_buttons.values())))
-        controls_layout.addWidget(self._segmented_row("Mouse", list(self.mouse_mode_buttons.values())))
+        view_options = QtWidgets.QWidget()
+        view_options.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                   QtWidgets.QSizePolicy.Policy.Fixed)
+        options_grid = QtWidgets.QGridLayout(view_options)
+        options_grid.setContentsMargins(0, 0, 0, 0)
+        options_grid.setHorizontalSpacing(8)
+        options_grid.setVerticalSpacing(4)
+        options_grid.setColumnStretch(1, 1)
+        for row, (label, buttons) in enumerate((("Diagram", self.spot_diagram_buttons),
+                                               ("Colour", self.spot_colour_buttons),
+                                               ("Mouse", self.mouse_mode_buttons))):
+            caption = QtWidgets.QLabel(label)
+            caption.setObjectName("ConcordiaOptionLabel")
+            options_grid.addWidget(caption, row, 0)
+            options_grid.addWidget(self._segmented_buttons(list(buttons.values())), row, 1)
+        controls_layout.addWidget(view_options)
         controls_layout.addWidget(self._hairline())
 
         # 2. Spots to display: takes all spare height.
@@ -4973,6 +4987,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_card.showSignalRequested.connect(self.showSignalRequested)
         self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
         controls_layout.addWidget(self.spot_card, 1)
+        # Replace the chooser's stretch when Studio uses its external Spots tree.
+        self.spot_options_filler = QtWidgets.QWidget()
+        self.spot_options_filler.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                              QtWidgets.QSizePolicy.Policy.Expanding)
+        self.spot_options_filler.hide()
+        controls_layout.addWidget(self.spot_options_filler, 1)
         controls_layout.addWidget(self._hairline())
 
         # 3. Result and fit, pinned at the bottom.
