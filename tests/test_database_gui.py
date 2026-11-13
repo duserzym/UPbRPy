@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 from types import SimpleNamespace
 
@@ -400,3 +401,299 @@ def test_submitted_returns_to_upblab_only_for_opener(
     assert window.session.origin["run_id"] == "run-1" and not scratch.exists()
     assert all(kind != "warning" for kind, _title, _text in dialogs)
     assert any("Could not open" in line for line in logs) == (via == "upblab" and outcome is not True)
+
+
+@pytest.fixture
+def local_link_project(controller, tmp_path, monkeypatch, mock_client):
+    """A local reduction and a byte-identical server export; no transport."""
+    from datetime import datetime
+    from UPbRPy.session_bundle import unpack_session_bundle
+    from synthetic_bundles import zip_directory
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 13, tzinfo=tz)
+
+    # A normal save updates saved_utc. Hold the clock fixed so the entire
+    # saved documents can be compared with only origin removed.
+    monkeypatch.setattr("UPbRPy.project.datetime", FixedDateTime)
+    fake, calls = mock_client
+    server_bundle = write_session_bundle(tmp_path / "server", server="https://lab.example.org")
+    server_project = server_bundle / "Synthetic_20Mar25.upbr"
+    server_document = json.loads(server_project.read_text())
+    server_document["origin"]["archive_version"] = "1"
+    server_project.write_text(json.dumps(server_document))
+    raw = tmp_path / "local" / "raw"
+    shutil.copytree(server_bundle / "raw", raw)
+    project = raw.parent / "Synthetic_20Mar25.upbr"
+    document = json.loads((server_bundle / project.name).read_text())
+    document.pop("origin")
+    project.write_text(json.dumps(document))
+    window = controller.create_window(show=False).active_reduction
+    window.load_project_file(project, background=False)
+    assert window.session.loaded and window.session.origin is None
+    window.session.experiment.loc[0, "baseline_start_times"] = 0.25
+    window.show_spot_signal("AFB_3")
+    window.save_project()
+    directories = []
+    fetched_origins = []
+
+    def fetch(server, session_id, destination):
+        assert server == "https://lab.example.org" and session_id == SESSION_ID
+        assert destination != controller.database.cache_root
+        directories.append(Path(destination))
+        bundle = unpack_session_bundle(zip_directory(server_bundle), destination, server=server)
+        fetched_origins.append(json.loads(bundle.project_file.read_text())["origin"])
+        return bundle
+
+    fake.fetch_session_bundle = fetch
+    fake.list_sessions = lambda server: calls.append(("list", server)) or [
+        {"id": "wrong", "session_key": "Unrelated"},
+        {"id": SESSION_ID, "session_key": "Synthetic_20Mar25"},
+    ]
+    monkeypatch.setattr(controller.database, "choose_server", lambda: "https://lab.example.org")
+
+    def run(function, success, **kwargs):
+        try:
+            result = function()
+        except Exception as exc:
+            kwargs.get("on_failure", lambda message: controller.database.show_error(kwargs["title"], message))(exc)
+        else:
+            success(result)
+
+    monkeypatch.setattr(controller.database, "run", run)
+
+    def pick(dialog):
+        assert dialog.table.currentRow() == 1
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(gui_database.SessionPickerDialog, "exec", pick)
+    return SimpleNamespace(window=window, server_bundle=server_bundle, project=project,
+                           directories=directories, fetched_origins=fetched_origins,
+                           fake=fake, calls=calls)
+
+
+def test_link_local_project_preserves_decisions_and_submits(
+    controller, dialogs, monkeypatch, local_link_project,
+):
+    case = local_link_project
+    window = case.window
+    before = json.loads(case.project.read_text())
+    pipeline = window.session.pipeline
+    directory = window.session.directory
+    assert not window.has_unsaved_changes()
+    assert window.link_database_session_action.isEnabled()
+    assert not window.submit_to_database_action.isEnabled()
+    assert "File > Database > Link to Database Session…" in window.submit_to_database_action.toolTip()
+    assert "File > Database > Link to Database Session…" in gui_database.ORIGIN_REQUIRED
+    dirty_at_save = []
+    save_project = window.save_project
+
+    def save():
+        dirty_at_save.append(window.has_unsaved_changes())
+        save_project()
+
+    monkeypatch.setattr(window, "save_project", save)
+    window.link_database_session_action.trigger()
+    origin = window.session.origin
+    assert origin == case.fetched_origins[0]
+    assert origin["export_sha256"] and origin["exported_at"]
+    assert pipeline.origin == origin and window.session.pipeline is pipeline
+    assert window.session.directory == directory
+    assert dirty_at_save == [True]
+    assert not window.has_unsaved_changes()
+    assert window.submit_to_database_action.isEnabled()
+    assert not window.link_database_session_action.isEnabled()
+    assert case.directories and all(not path.exists() for path in case.directories)
+    assert not controller.database.cache_root.exists()
+    assert "Linked to database session Synthetic_20Mar25" in window.log_view.toPlainText()
+    saved = json.loads(case.project.read_text())
+    assert saved.pop("origin") == origin
+    assert saved == before
+    assert not window.has_unsaved_changes()
+
+    def submit(server, session_id, folder, **kwargs):
+        import csv
+
+        assert server == origin["server"] and session_id == SESSION_ID
+        manifest = json.loads((folder / "reduction_manifest.json").read_text())
+        # The real importer uses this same hash membership check; filenames
+        # and local paths do not affect matching to session raw assets.
+        stored = {sha256(path) for path in (case.server_bundle / "raw").glob("*.csv")}
+        assert manifest["input_files"]
+        assert all(item["sha256"] in stored for item in manifest["input_files"])
+        assert manifest["metadata"]["origin"] == origin
+        with (folder / "spot_mean_results.csv").open() as stream:
+            assert {row["spot_names"] for row in csv.DictReader(stream)} == set(window.session.spot_names)
+        case.calls.append(("submit", session_id))
+        return SimpleNamespace(run_id="linked-run", counts={}, quarantine_items=[])
+
+    case.fake.submit_reduction = submit
+
+    def export(pipeline, folder, **kwargs):
+        fake_export(pipeline, folder, **kwargs)
+        (folder / "spot_mean_results.csv").write_text("spot_names\n" + "\n".join(window.session.spot_names) + "\n")
+
+    monkeypatch.setattr("UPbRPy.reproducibility.export_reduction_bundle", export)
+    monkeypatch.setattr(window, "run_background", lambda label, calculation, success: success(calculation()))
+    window.submit_to_database_action.trigger()
+    assert ("submit", SESSION_ID) in case.calls
+    assert window.session.origin["run_id"] == "linked-run"
+    assert not window.has_unsaved_changes()
+    assert all(kind != "warning" for kind, _title, _text in dialogs)
+
+
+@pytest.mark.parametrize("mismatch", ["hash", "label", "missing", "manifest", "count"])
+def test_link_refuses_differences_without_changing_project(
+    controller, dialogs, local_link_project, mismatch,
+):
+    case = local_link_project
+    window = case.window
+    raw_file = case.server_bundle / "raw" / "Synthetic_1.csv"
+    manifest = case.server_bundle / "session_manifest.toml"
+    old_hash = sha256(raw_file)
+    if mismatch == "hash":
+        raw_file.write_text(raw_file.read_text() + "\n")
+        manifest.write_text(manifest.read_text().replace(old_hash, sha256(raw_file)))
+    elif mismatch == "label":
+        raw_file.write_text(raw_file.read_text().replace("NIST612_1", "Other_1"))
+        manifest.write_text(manifest.read_text().replace("NIST612_1", "Other_1").replace(old_hash, sha256(raw_file)))
+    elif mismatch == "missing":
+        raw_file.unlink()
+    elif mismatch == "count":
+        manifest.write_text(manifest.read_text() + '\n[[acquisition]]\nlabel = "NIST612_1"\n')
+    else:
+        manifest.write_text(manifest.read_text().replace(old_hash, "0" * 64))
+    before = case.project.read_bytes()
+    fingerprint = window.scientific_project_fingerprint()
+    pipeline_origin = window.session.pipeline.origin
+    controller.database.link_session(window)
+    assert window.session.origin is None and window.session.pipeline.origin == pipeline_origin
+    assert case.project.read_bytes() == before
+    assert window.scientific_project_fingerprint() == fingerprint
+    assert not window.has_unsaved_changes()
+    assert not window.submit_to_database_action.isEnabled()
+    assert window.link_database_session_action.isEnabled()
+    assert case.directories and all(not path.exists() for path in case.directories)
+    message = "\n".join(text for kind, _title, text in dialogs if kind == "warning")
+    if mismatch == "label":
+        assert "labels" in message and "NIST612_1" in message and "Other_1" in message
+    elif mismatch == "count":
+        assert "acquisition counts: 4 local, 5 database" in message
+    else:
+        assert "Synthetic_1.csv" in message
+        assert ("SHA-256" in message if mismatch != "missing" else "missing" in message.lower())
+
+
+def test_link_uses_existing_authorization_and_guards_blank_or_linked_projects(
+    controller, dialogs, monkeypatch, local_link_project,
+):
+    case = local_link_project
+    authorized = []
+    case.fake.is_signed_in = lambda server: bool(authorized)
+
+    def sign_in(server, then):
+        authorized.append(server)
+        then()
+
+    controller.database.sign_in = sign_in
+    controller.database.link_session(case.window)
+    assert authorized == ["https://lab.example.org"]
+    assert case.window.session.origin
+    listed = list(case.calls)
+    controller.database.link_session(case.window)
+    blank = controller.create_window(show=False).active_reduction
+    assert not blank.link_database_session_action.isEnabled()
+    controller.database.link_session(blank)
+    assert listed == case.calls
+
+
+def test_link_action_disabled_without_database_extra(controller, monkeypatch):
+    monkeypatch.setattr(gui_database, "database_availability", lambda: (False, "Needs [database] extra."))
+    window = controller.create_window(show=False).active_reduction
+    assert not window.link_database_session_action.isEnabled()
+    assert "[database] extra" in window.link_database_session_action.toolTip()
+
+
+def test_link_reports_label_only_fallback_and_server_hash_rejection(
+    controller, dialogs, local_link_project,
+):
+    from synthetic_bundles import manifest_toml
+
+    case = local_link_project
+    acquisitions = case.window.session.qtegra.acquisitions
+    raw = case.server_bundle / "raw"
+    for path in raw.iterdir():
+        path.unlink()
+    rich = raw / "combined.csv"
+    labels = [acq.label for acq in acquisitions]
+    lines = [",,,," + ",".join(f"Sample {i + 1}" for i in range(len(labels))) + ",",
+             ",,,," + ",".join(labels) + ","]
+    for channel_index, channel in enumerate(acquisitions[0].channel_names):
+        for sweep in range(acquisitions[0].n_sweeps):
+            for kind in ("Y", "Time"):
+                values = [acq.y[sweep, channel_index] if kind == "Y" else acq.sweep_time[sweep]
+                          for acq in acquisitions]
+                lines.append(f"MainRuns,{sweep},{channel},{kind}," + ",".join(map(str, values)) + ",")
+    rich.write_text("\n".join(lines) + "\n")
+    (case.server_bundle / "session_manifest.toml").write_text(manifest_toml(
+        session_id=SESSION_ID, session_key=case.server_bundle.name,
+        raw_paths=[rich] * len(labels), labels=labels,
+    ))
+    controller.database.link_session(case.window)
+    assert case.window.session.origin
+    message = "\n".join(text for _kind, _title, text in dialogs)
+    assert "labels and counts only" in message
+    assert "different export layouts" in message
+    assert "Submission will be rejected because no input hash belongs" in message
+    assert all(not path.exists() for path in case.directories)
+
+
+def test_link_cleans_temporary_directory_when_fetch_fails(
+    controller, dialogs, local_link_project,
+):
+    case = local_link_project
+
+    def failed_fetch(server, session_id, destination):
+        case.directories.append(destination)
+        (destination / "partial-download").write_bytes(b"partial")
+        raise ValueError("Export could not be downloaded.")
+
+    case.fake.fetch_session_bundle = failed_fetch
+    controller.database.link_session(case.window)
+    assert not case.window.session.origin
+    assert all(not path.exists() for path in case.directories)
+    assert any("Export could not be downloaded" in message for _kind, _title, message in dialogs)
+
+
+def test_link_accepts_renamed_identical_inputs(controller, dialogs, local_link_project):
+    case = local_link_project
+    for path in (case.server_bundle / "raw").iterdir():
+        name = "renamed_" + path.name
+        manifest = case.server_bundle / "session_manifest.toml"
+        manifest.write_text(manifest.read_text().replace(path.name, name))
+        path.rename(path.with_name(name))
+    controller.database.link_session(case.window)
+    assert case.window.session.origin
+    assert "Verified SHA-256 for 4 raw file(s)" in dialogs[-1][2]
+
+
+def test_link_unnamed_reduction_stays_modified_until_save_as(controller, dialogs, local_link_project):
+    case = local_link_project
+    case.window.project_path = None
+    case.fake.list_sessions = lambda server: [
+        {"id": "wrong", "session_key": "Unrelated"},
+        {"id": SESSION_ID, "session_key": "Synthetic_1"},
+    ]
+    before = case.project.read_bytes()
+    controller.database.link_session(case.window)
+    assert case.window.session.origin
+    assert case.window.has_unsaved_changes()
+    assert case.project.read_bytes() == before
+    assert "Save the project to keep this link" in dialogs[-1][2]
+    target = case.project.with_name("linked.upbr")
+    case.window.save_project(target)
+    assert json.loads(target.read_text())["origin"] == case.window.session.origin
+    assert not case.window.has_unsaved_changes()

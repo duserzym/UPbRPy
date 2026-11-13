@@ -11,6 +11,7 @@ never tokens: tokens live in the OS keychain.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 import functools
 from pathlib import Path
@@ -409,6 +410,81 @@ class DatabaseLinks(QtCore.QObject):
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and dialog.session_id:
             self.open_session(server, dialog.session_id)
 
+    def link_session(self, window) -> None:
+        """Verify a local project's inputs against a temporary session export."""
+        title = "Link to database session"
+        if not window.session.loaded or window.session.origin or not self.require_available(title):
+            return
+        server = self.choose_server()
+        if not server:
+            return
+        db = client()
+        session = window.session
+
+        def pick(sessions) -> None:
+            if window.session is not session or session.origin:
+                return
+            self.remember_server(server)
+            if not sessions:
+                self.show_error(title, f"No sessions on {server} are visible to you.")
+                return
+            dialog = SessionPickerDialog(sessions, server, window)
+            keys = _session_key_candidates(window)
+            for key in keys:
+                row = next((i for i, item in enumerate(sessions)
+                            if item.get("session_key") == key), None)
+                if row is not None:
+                    dialog.table.selectRow(row)
+                    break
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dialog.session_id:
+                return
+            session_id = dialog.session_id
+
+            def verify():
+                # fetch_session_bundle normally uses a persistent project cache.
+                # This export is evidence only and must never become a project.
+                with tempfile.TemporaryDirectory(prefix="upbrpy-link-") as scratch:
+                    bundle = db.fetch_session_bundle(server, session_id, Path(scratch))
+                    if bundle.session_id != session_id:
+                        raise ValueError("Cannot link: the export belongs to a different session.")
+                    return _verified_session_origin(session, bundle)
+
+            def linked(result) -> None:
+                if window.session is not session or session.origin:
+                    return
+                origin, verification = result
+                session.origin = dict(origin)
+                if session.pipeline is not None:
+                    session.pipeline.origin = dict(origin)
+                # Use Studio's normal save path, including pending user edits.
+                # An unnamed project stays modified until Save As is chosen.
+                window.update_project_window_title()
+                if window.project_path is not None:
+                    window.save_project()
+                label = origin.get("session_key") or origin["session_id"]
+                message = f"Linked to database session {label} on {origin['server']}. {verification}"
+                window.append_log(message)
+                window.statusBar().showMessage(message)
+                QtWidgets.QMessageBox.information(
+                    window, title, message + (
+                        "\n\nSave the project to keep this link."
+                        if window.has_unsaved_changes() else "\n\nThe project has been saved."
+                    )
+                )
+
+            def fetch() -> None:
+                self.run(verify, linked, title=title, on_failure=lambda message:
+                         self._retry_after_sign_in(server, fetch, title, message))
+
+            fetch()
+
+        def listing() -> None:
+            self.run(lambda: db.list_sessions(server), pick, title=title,
+                     on_failure=lambda message:
+                     self._retry_after_sign_in(server, listing, title, message))
+
+        self._authorize(server, "", listing, title)
+
     # ----------------------------------------------------- submit, prefer
     def submit(self, window) -> None:
         """Export the reduction bundle, post it to the origin server, record the run."""
@@ -561,10 +637,140 @@ class DatabaseLinks(QtCore.QObject):
 
 
 ORIGIN_REQUIRED = (
-    "This reduction did not come from a database session. Open it with "
-    "File > Database > Open from Database… (or a upbr:// link) to submit it."
+    "This reduction did not come from a database session. Use "
+    "File > Database > Link to Database Session… to link it before submitting."
 )
 RUN_REQUIRED = "Submit this reduction to the database first; then mark that run as preferred."
+
+
+def _session_key_candidates(window) -> list[str]:
+    """Session key, project stem and raw stems, in matching priority order."""
+    from UPbRPy.session_manifest import find_session_manifest, read_session_manifest
+
+    source = Path(window.session.directory)
+    manifest = find_session_manifest(source.parent if source.is_file() else source)
+    keys = []
+    if manifest is not None:
+        keys.append(read_session_manifest(manifest).session_key)
+    if window.project_path is not None:
+        keys.append(Path(window.project_path).stem)
+    keys.append(source.stem)
+    if window.session.qtegra is not None:
+        keys.extend(item.path.stem for item in window.session.qtegra.sources)
+    return list(dict.fromkeys(key for key in keys if key))
+
+
+def _verified_session_origin(session, bundle: SessionBundle) -> tuple[dict[str, str], str]:
+    """Compare raw bytes and acquisition labels without changing the project.
+
+    Different export layouts may only support label/count verification. Known
+    file pairs must always have equal hashes, including manifest hashes.
+    """
+    import tomllib
+
+    from GUI.services import raw_input_files
+    from UPbRPy.pipeline import sha256_file
+    from UPbRPy.project import project_origin, read_reduction_project
+    from UPbRPy.qtegra import open_qtegra
+    from UPbRPy.session_manifest import SESSION_MANIFEST_FILENAME
+
+    local = session.qtegra or open_qtegra(session.directory)
+    remote = open_qtegra(bundle.raw_directory)
+    local_files = raw_input_files(local)
+    remote_files = raw_input_files(remote)
+    local_hashes = {p: sha256_file(p) for p in local_files}
+    remote_hashes = {p: sha256_file(p) for p in remote_files}
+    manifest_hashes = dict(remote_hashes)
+    differences = []
+
+    def compare_labels(actual, expected, where):
+        actual, expected = Counter(actual), Counter(expected)
+        missing, extra = expected - actual, actual - expected
+        if missing:
+            differences.append(f"Missing {where} labels: " + ", ".join(
+                f"{label} ({count})" for label, count in sorted(missing.items())))
+        if extra:
+            differences.append(f"Extra {where} labels: " + ", ".join(
+                f"{label} ({count})" for label, count in sorted(extra.items())))
+        if actual.total() != expected.total():
+            differences.append(f"{where.capitalize()} acquisition counts: "
+                               f"{actual.total()} local, {expected.total()} database.")
+
+    with (bundle.path / SESSION_MANIFEST_FILENAME).open("rb") as stream:
+        manifest = tomllib.load(stream)
+    rows = manifest.get("acquisition", [])
+    labels = [row["label"] for row in rows] if rows else remote.labels
+    compare_labels(local.labels, labels, "project")
+    compare_labels(session.spot_names, labels, "loaded project")
+    compare_labels(remote.labels, labels, "bundle raw")
+    for row in rows:
+        for filename_key, hash_key in (("filename", "sha256"), ("spot_filename", "spot_sha256")):
+            name, expected = row.get(filename_key), row.get(hash_key)
+            if not name:
+                continue
+            path = bundle.raw_directory / name
+            if not path.is_file():
+                differences.append(f"Missing database file: {name}")
+            elif expected:
+                if path not in manifest_hashes:
+                    manifest_hashes[path] = sha256_file(path)
+                if manifest_hashes[path] != expected.lower():
+                    differences.append(f"SHA-256 difference for {name}: database file differs from manifest.")
+    for item in local.sources:
+        if item.sha256 and local_hashes[item.path] != item.sha256:
+            differences.append(f"SHA-256 difference for {item.path.name}: local file changed since loading.")
+
+    # Names are preserved by the server export. Renamed local files can also
+    # be paired by identical bytes, or by their format and acquisition labels.
+    remaining = set(remote_files)
+    unpaired = []
+
+    @functools.cache
+    def file_identity(path):
+        single = open_qtegra(path)
+        return single.format, Counter(single.labels)
+
+    for path in local_files:
+        matches = [p for p in remaining if p.name == path.name]
+        if len(matches) != 1:
+            matches = [p for p in remaining if remote_hashes[p] == local_hashes[path]]
+        if len(matches) != 1:
+            identity = file_identity(path)
+            matches = [p for p in remaining if file_identity(p) == identity]
+        if len(matches) == 1:
+            other = matches[0]
+            remaining.remove(other)
+            if local_hashes[path] != remote_hashes[other]:
+                differences.append(f"SHA-256 difference for {path.name} (database: {other.name}).")
+        else:
+            unpaired.append(path)
+
+    fallback = bool(unpaired or remaining)
+    if fallback and local.format == remote.format:
+        if unpaired:
+            differences.append("Extra local files: " + ", ".join(sorted(p.name for p in unpaired)))
+        if remaining:
+            differences.append("Missing local files: " + ", ".join(sorted(p.name for p in remaining)))
+    if differences:
+        raise ValueError("Cannot link: raw data differs from the database session.\n\n"
+                         + "\n".join(dict.fromkeys(differences)))
+    if bundle.project_file is None:
+        raise ValueError("Cannot link: the session bundle has no .upbr origin.")
+    origin = project_origin(read_reduction_project(bundle.project_file))
+    if not origin or origin["session_id"] != bundle.session_id:
+        raise ValueError("Cannot link: the bundle's project origin does not identify its session.")
+    if fallback:
+        result = ("Verified acquisition labels and counts only; raw files could not be compared "
+                  "one to one (different export layouts).")
+        unmatched = [p.name for p in local_files if local_hashes[p] not in remote_hashes.values()]
+        if unmatched:
+            result += (" The server will quarantine unmatched input hashes for: "
+                       + ", ".join(unmatched) + ".")
+            if len(unmatched) == len(local_files):
+                result += " Submission will be rejected because no input hash belongs to this session."
+    else:
+        result = f"Verified SHA-256 for {len(local_files)} raw file(s) and {len(labels)} acquisition labels."
+    return origin, result
 
 
 def quarantine_line(item: object) -> str:
@@ -579,6 +785,7 @@ def format_quarantine(items: list) -> str:
 
 def record_run_id(window, run_id: str) -> None:
     """Store ``origin.run_id`` in the session, its pipeline and the saved .upbr."""
+    was_modified = window.has_unsaved_changes()
     origin = dict(window.session.origin or {})
     origin["run_id"] = str(run_id)
     window.session.origin = origin
@@ -593,6 +800,8 @@ def record_run_id(window, run_id: str) -> None:
             if int(document.get("format_version", 1)) < 2:
                 document["format_version"] = 2
             write_project_document(document, window.project_path)
+            if not was_modified:
+                window._saved_project_fingerprint = window.scientific_project_fingerprint()
         except (OSError, ValueError) as exc:
             window.append_log(f"Could not record run {run_id} in {window.project_path}: {exc}")
     window.update_project_window_title()

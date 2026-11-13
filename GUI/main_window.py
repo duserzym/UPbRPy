@@ -377,6 +377,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_from_database_action.triggered.connect(
             lambda _checked=False: self.database().open_from_database()
         )
+        self.link_database_session_action = database_menu.addAction(
+            "Link to Database Session…"
+        )
+        self.link_database_session_action.triggered.connect(
+            lambda _checked=False: self.database().link_session(self)
+        )
         self.submit_to_database_action = database_menu.addAction(
             "Submit to Database"
         )
@@ -1073,6 +1079,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.session.loaded:
             return ""
         payload = {
+            "origin": self.session.origin,
             "workflow_key": self.workflow_preset.key,
             "primary_channel": self.session.primary_channel,
             "import_settings": self.session.import_settings,
@@ -4706,6 +4713,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 available,
                 "Fetch a session from a laicpmsdb server and open it.",
             ),
+            self.link_database_session_action: (
+                available and self.session.loaded and not origin,
+                "Verify the raw data and link this project to a database session."
+                if not origin else "This project is already linked to a database session.",
+            ),
             self.submit_to_database_action: (
                 available and bool(origin) and self.session.loaded,
                 "Post this reduction to its session on "
@@ -4725,7 +4737,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not available:
                 tip = reason
             elif not self.session.loaded and action in (
-                self.submit_to_database_action, self.prefer_run_action,
+                self.link_database_session_action, self.submit_to_database_action, self.prefer_run_action,
             ):
                 enabled, tip = False, "Load a session first"
             action.setEnabled(enabled)
