@@ -565,7 +565,7 @@ Install the build dependencies into the same environment used for the
 scientific stack and run:
 
 ```bash
-python -m pip install -e ".[gui,build]"
+python -m pip install -e ".[gui,build,database]"
 python scripts/build_desktop.py --archive
 ```
 

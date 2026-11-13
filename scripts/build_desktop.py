@@ -81,8 +81,15 @@ def application_executable(application: Path) -> Path:
 
 
 def require_build_dependencies() -> None:
-    """Raise a focused error when the selected interpreter cannot build."""
-    required = ("PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter")
+    """Raise a focused error when the selected interpreter cannot build.
+
+    requests and keyring (the [database] extra) are required too: the spec
+    bundles database mode only when both are importable, and a build without
+    them opens no upbr:// links and cannot submit to laicpmsdb.
+    """
+    required = (
+        "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring",
+    )
     missing = [
         name
         for name in required
@@ -92,7 +99,7 @@ def require_build_dependencies() -> None:
         extras = ", ".join(missing)
         raise RuntimeError(
             f"Missing desktop build dependencies: {extras}. "
-            'Install them with `python -m pip install -e ".[gui,build]"` '
+            'Install them with `python -m pip install -e ".[gui,build,database]"` '
             "and rerun this script with the same Python interpreter."
         )
 
