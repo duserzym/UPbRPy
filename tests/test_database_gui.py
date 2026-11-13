@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import GUI.database as gui_database  # noqa: E402
 from UPbRPy.integration import laicpmsdb as db  # noqa: E402
@@ -240,3 +241,162 @@ def test_unknown_import_keys_are_nested_under_selection_options():
         "sep": "_",
         "selection_options": {"sigma_threshold": 3, "plateau_width_mode": "signal"},
     }
+
+
+@pytest.fixture
+def mock_client(controller, monkeypatch):
+    """Execute database workers locally, with no transport or token store."""
+    calls = []
+    fake = SimpleNamespace(
+        DatabaseError=ValueError,
+        normalize_server=lambda server: server.rstrip("/"),
+        is_signed_in=lambda server: True,
+        exchange_code=lambda server, code: calls.append(("exchange", code)),
+        get_run=lambda server, run: calls.append(("run", run)) or {"session_id": SESSION_ID},
+        fetch_session_bundle=lambda *args: pytest.fail("Unexpected bundle fetch"),
+    )
+    monkeypatch.setattr(gui_database, "client", lambda: fake)
+    monkeypatch.setattr(gui_database, "database_availability", lambda: (True, ""))
+    monkeypatch.setattr(controller.database, "run", lambda function, success, **kwargs: success(function()))
+    controller.database.sign_in = lambda *args: pytest.fail("Unexpected sign-in")
+    return fake, calls
+
+
+def loaded_bundle(controller, tmp_path):
+    bundle = write_session_bundle(tmp_path / "source", server="https://lab.example.org")
+    shell = controller.create_window(show=False)
+    window = shell.active_reduction
+    window.load_project_file(bundle / "Synthetic_20Mar25.upbr", background=False)
+    return shell, window
+
+
+@pytest.mark.parametrize("route", ["session", "run", "run-session", "run-cached"])
+def test_open_link_activates_existing_tab_without_fetch(
+    controller, dialogs, tmp_path, monkeypatch, mock_client, route,
+):
+    _fake, calls = mock_client
+    shell, window = loaded_bundle(controller, tmp_path)
+    window.spot_tree_filter.setText("NIST")
+    if route == "run":
+        window.session.origin["run_id"] = "run-1"
+    if route == "run-cached":
+        monkeypatch.setattr(gui_database, "find_project_for_run", lambda *args: window.project_path)
+    shell.add_tab()
+    other = controller.create_window(show=False)
+    shown = []
+    monkeypatch.setattr(controller, "_show_window", shown.append)
+    kind, identifier = ("session", SESSION_ID) if route == "session" else ("run", "run-1")
+    controller.open_target(
+        f"upbr://{kind}/{identifier}?server=https://lab.example.org"
+        "&code=c&acquisition=acq-2&via=upblab"
+    )
+    assert shell.active_reduction is window and controller.active_window() is shell
+    assert shown == [shell] and shell.tabs.count() == 2 and other.tabs.count() == 1
+    assert window.current_spot_name() == "AFB_3"
+    assert not window.spot_tree_filter.text() and not window.spot_list.currentItem().isHidden()
+    assert window.session.selected_spot == "AFB_3" and window.session.plot_mode == "raw"
+    assert window.trace_plot._spot_name_label.text() == "AFB_3"
+    assert window.session.origin["opened_via"] == "upblab"
+    assert not dialogs
+    assert calls == ([("exchange", "c"), ("run", "run-1")] if route == "run-session" else [])
+
+
+@pytest.mark.parametrize("route", ["session", "run", "cached-run", "raw"])
+def test_new_opener_selects_analysis_after_background_load(
+    controller, dialogs, tmp_path, monkeypatch, mock_client, route,
+):
+    from UPbRPy.session_bundle import BUNDLE_RECORD_FILENAME, SessionBundle
+
+    fake, calls = mock_client
+    bundle = write_session_bundle(tmp_path / "source", server="https://lab.example.org", upbr=route != "raw")
+    project = bundle / "Synthetic_20Mar25.upbr" if route != "raw" else None
+    if route == "raw":
+        (bundle / BUNDLE_RECORD_FILENAME).write_text(json.dumps({
+            "server": "https://lab.example.org", "session_id": SESSION_ID, "session_key": bundle.name,
+        }))
+    monkeypatch.setattr(fake, "fetch_session_bundle", lambda *args: calls.append(("fetch", SESSION_ID)) or SessionBundle(
+        path=bundle, session_key=bundle.name, session_id=SESSION_ID,
+        export_sha256="", zip_sha256="", project_file=project,
+    ))
+    if route == "cached-run":
+        monkeypatch.setattr(gui_database, "find_project_for_run", lambda *args: project)
+    kind, identifier = ("session", SESSION_ID) if route in {"session", "raw"} else ("run", "run-1")
+    controller.open_target(
+        f"upbr://{kind}/{identifier}?server=https://lab.example.org"
+        "&code=c&acquisition=acq-2&via=upblab"
+    )
+    window = controller.active_window().active_reduction
+    assert wait_for(lambda: window.session.loaded and window._active_worker is None
+                    and window.session.origin.get("opened_via") == "upblab"), dialogs
+    assert window.current_spot_name() == "AFB_3" and window.session.plot_mode == "raw"
+    assert window.trace_plot._spot_name_label.text() == "AFB_3"
+    assert not dialogs
+    assert calls[0] == ("exchange", "c")
+    if route != "cached-run":
+        assert ("fetch", SESSION_ID) in calls
+    # The opener flag is saved through the existing origin mechanism.
+    if project is None:
+        project = bundle / "saved.upbr"
+        window.save_project(project)
+    else:
+        assert "opened_via" not in json.loads(project.read_text())["origin"]
+        window.save_project()
+    assert json.loads(project.read_text())["origin"]["opened_via"] == "upblab"
+
+
+def test_unknown_acquisition_only_reports_status(controller, dialogs, tmp_path, mock_client):
+    _shell, window = loaded_bundle(controller, tmp_path)
+    controller.open_target(f"upbr://session/{SESSION_ID}?server=https://lab.example.org&acquisition=missing")
+    assert "not in this project" in window.statusBar().currentMessage()
+    assert not dialogs
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_old_run_without_server_keeps_cache_behavior(
+    controller, dialogs, tmp_path, monkeypatch, mock_client, cached,
+):
+    if cached:
+        bundle = write_session_bundle(tmp_path / "source")
+        monkeypatch.setattr(gui_database, "find_project_for_run", lambda *args: bundle / "Synthetic_20Mar25.upbr")
+    controller.open_target("upbr://run/run-1")
+    if cached:
+        window = controller.active_window().active_reduction
+        assert wait_for(lambda: window.session.loaded and window._active_worker is None)
+        assert not dialogs
+    else:
+        assert len(dialogs) == 1 and "link names no server" in dialogs[0][2]
+    assert not mock_client[1]
+
+
+@pytest.mark.parametrize("via, outcome", [("", True), ("elsewhere", True), ("upblab", True), ("upblab", False), ("upblab", RuntimeError("no handler"))])
+def test_submitted_returns_to_upblab_only_for_opener(
+    controller, dialogs, tmp_path, monkeypatch, mock_client, via, outcome,
+):
+    _shell, window = loaded_bundle(controller, tmp_path)
+    if via:
+        window.session.origin["opened_via"] = via
+    urls = []
+    logs = []
+    monkeypatch.setattr(window, "append_log", logs.append)
+
+    def open_url(url):
+        urls.append(url.toString())
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", open_url)
+    scratch = tmp_path / "submission"
+    scratch.mkdir()
+    result = SimpleNamespace(run_id="run-1", counts={}, quarantine_items=[])
+    fake, calls = mock_client
+    fake.submit_reduction = lambda server, session, folder, **kwargs: calls.append(("submit", session)) or result
+    monkeypatch.setattr("UPbRPy.reproducibility.export_reduction_bundle", fake_export)
+    monkeypatch.setattr(gui_database.tempfile, "mkdtemp", lambda **kwargs: str(scratch))
+    monkeypatch.setattr(window, "run_background", lambda label, calculation, success: success(calculation()))
+    controller.database.submit(window)
+    assert calls == [("submit", SESSION_ID)]
+    assert urls == (["laicpmsdb://run/run-1"] if via == "upblab" else [])
+    assert window.session.origin["run_id"] == "run-1" and not scratch.exists()
+    assert all(kind != "warning" for kind, _title, _text in dialogs)
+    assert any("Could not open" in line for line in logs) == (via == "upblab" and outcome is not True)

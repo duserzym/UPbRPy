@@ -49,28 +49,33 @@ class DatabaseLinks(QtCore.QObject):
     """Run database flows in the background and hand bundles to windows.
 
     ``open_bundle(bundle)`` opens a fetched :class:`SessionBundle`;
-    ``open_project(path)`` opens a cached ``.upbr``; ``parent()`` returns the
-    widget dialogs attach to; ``sign_in(server, then)`` asks the user to sign
+    ``open_project(path)`` opens a cached ``.upbr``. Both return the reduction
+    widget. ``activate_project(**identity)`` returns an existing reduction,
+    selecting its tab and raising its shell, or None. ``parent_widget()``
+    returns the widget dialogs attach to; ``sign_in(server, then)`` asks the user to sign
     in and calls ``then()`` once a token is stored (set by the GUI layer).
     """
 
     def __init__(
         self,
         *,
-        open_bundle: Callable[[SessionBundle], None],
-        open_project: Callable[[str], None],
+        open_bundle: Callable[[SessionBundle], Any],
+        open_project: Callable[[str], Any],
         parent_widget: Callable[[], QtWidgets.QWidget | None],
         settings: QtCore.QSettings | None = None,
+        activate_project: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
         self.open_bundle = open_bundle
         self.open_project = open_project
+        self.activate_project = activate_project
         self.parent_widget = parent_widget
         self.settings = settings or QtCore.QSettings("UPbRPy", "Studio")
         self.pending_sign_in: tuple[str, Callable[[], None] | None] | None = None
         self.sign_in: Callable[[str, Callable[[], None]], None] | None = None
         self.cache_root: Path | None = None
         self._signals: set[QtCore.QObject] = set()
+        self._open_contexts: dict[QtCore.QObject, list[Callable[[], None]]] = {}
         self.sign_in = self.prompt_sign_in
 
     # ----------------------------------------------------------- plumbing
@@ -117,9 +122,64 @@ class DatabaseLinks(QtCore.QObject):
         if target.kind == "auth_callback":
             self.complete_sign_in(target.code, target.server or None)
         elif target.kind == "session":
-            self.open_session(target.server, target.identifier, code=target.code)
+            self.open_session(target.server, target.identifier, code=target.code,
+                              acquisition=target.acquisition, via=target.via)
         elif target.kind == "run":
-            self.open_run(target.server, target.identifier)
+            self.open_run(target.server, target.identifier, code=target.code,
+                          acquisition=target.acquisition, via=target.via)
+
+    def _activate(self, **identity) -> Any:
+        return self.activate_project(**identity) if self.activate_project else None
+
+    def _opened(self, window, *, acquisition: str = "", via: str = "") -> None:
+        """Apply opener context after the asynchronous project load finishes."""
+        if window is None:
+            return
+
+        def apply() -> None:
+            if not window.session.loaded:
+                return
+            if via == "upblab" and window.session.origin:
+                window.session.origin["opened_via"] = "upblab"
+                if window.session.pipeline is not None:
+                    window.session.pipeline.origin = dict(window.session.origin)
+            if not acquisition:
+                return
+            from UPbRPy.session_manifest import find_session_manifest, read_session_manifest
+
+            try:
+                source = Path(window.session.directory)
+                manifest_path = find_session_manifest(source.parent if source.is_file() else source)
+                if manifest_path is None and window.project_path is not None:
+                    manifest_path = find_session_manifest(Path(window.project_path).parent)
+                manifest = read_session_manifest(manifest_path) if manifest_path else None
+                label = next((row.label for row in manifest.acquisitions
+                              if row.acquisition_id == acquisition), "") if manifest else ""
+                if label in window.session.spot_names:
+                    window.spot_tree_filter.clear()
+                    window.show_spot_signal(label)
+                    return
+                message = f"Acquisition {acquisition} is not in this project."
+            except (OSError, ValueError) as exc:
+                message = f"Could not locate acquisition {acquisition}: {exc}"
+            window.append_log(message)
+            window.statusBar().showMessage(message)
+
+        worker = window._active_worker
+        if worker is not None:
+            signals = worker.signals
+            if signals not in self._open_contexts:
+                self._open_contexts[signals] = []
+                signals.finished.connect(self._finish_open, QtCore.Qt.ConnectionType.QueuedConnection)
+            self._open_contexts[signals].append(apply)
+        else:
+            apply()
+
+    @QtCore.Slot()
+    def _finish_open(self) -> None:
+        # Keep the signals alive until their queued GUI-thread callback runs.
+        for apply in self._open_contexts.pop(self.sender(), []):
+            apply()
 
     def _authorize(self, server: str, code: str, then: Callable[[], None], title: str) -> None:
         """Exchange ``code`` if given, else use the stored token, else sign in."""
@@ -143,8 +203,15 @@ class DatabaseLinks(QtCore.QObject):
             return
         self.sign_in(server, then)
 
-    def open_session(self, server: str, session_id: str, *, code: str = "") -> None:
+    def open_session(
+        self, server: str, session_id: str, *, code: str = "",
+        acquisition: str = "", via: str = "",
+    ) -> None:
         """Fetch a session bundle (exchanging a link's code first) and open it."""
+        existing = self._activate(server=server, session_id=session_id)
+        if existing is not None:
+            self._opened(existing, acquisition=acquisition, via=via)
+            return
         title = "Open from database"
         if not self.require_available(title):
             return
@@ -159,7 +226,7 @@ class DatabaseLinks(QtCore.QObject):
         def fetch() -> None:
             self.run(
                 lambda: db.fetch_session_bundle(server, session_id, self.cache_root),
-                self.open_bundle,
+                lambda bundle: self._opened(self.open_bundle(bundle), acquisition=acquisition, via=via),
                 title=title,
                 on_failure=lambda message: self._retry_after_sign_in(
                     server, fetch, title, message
@@ -174,11 +241,46 @@ class DatabaseLinks(QtCore.QObject):
         else:
             self.show_error(title, message)
 
-    def open_run(self, server: str, run_id: str) -> None:
+    def open_run(
+        self, server: str, run_id: str, *, code: str = "",
+        acquisition: str = "", via: str = "",
+    ) -> None:
         """Open the cached project of a run, else re-fetch its session."""
+        existing = self._activate(server=server, run_id=run_id)
+        if existing is not None:
+            self._opened(existing, acquisition=acquisition, via=via)
+            return
         project = find_project_for_run(run_id, self.cache_root)
         if project is not None:
-            self.open_project(str(project))
+            from UPbRPy.project import read_reduction_project
+
+            try:
+                origin = read_reduction_project(project).get("origin") or {}
+            except (OSError, ValueError):
+                # Let the normal project loader report a malformed cached file.
+                origin = {}
+            existing = self._activate(server=server or origin.get("server", ""),
+                                      session_id=origin.get("session_id", ""), project_file=str(project))
+            if existing is not None:
+                self._opened(existing, acquisition=acquisition, via=via)
+                return
+
+            def open_cached() -> None:
+                self._opened(self.open_project(str(project)), acquisition=acquisition, via=via)
+
+            if code:
+                title = "Open reduction run"
+                if not self.require_available(title):
+                    return
+                db = client()
+                try:
+                    server = db.normalize_server(server or origin.get("server", ""))
+                except db.DatabaseError as exc:
+                    self.show_error(title, exc)
+                    return
+                self._authorize(server, code, open_cached, title)
+            else:
+                open_cached()
             return
         title = "Open reduction run"
         if not server:
@@ -190,16 +292,21 @@ class DatabaseLinks(QtCore.QObject):
         if not self.require_available(title):
             return
         db = client()
-        server = db.normalize_server(server)
+        try:
+            server = db.normalize_server(server)
+        except db.DatabaseError as exc:
+            self.show_error(title, exc)
+            return
 
         def lookup() -> None:
             self.run(
                 lambda: db.get_run(server, run_id),
-                lambda run: self.open_session(server, str(run["session_id"])),
+                lambda run: self.open_session(server, str(run["session_id"]),
+                                              acquisition=acquisition, via=via),
                 title=title,
             )
 
-        self._authorize(server, "", lookup, title)
+        self._authorize(server, code, lookup, title)
 
     def complete_sign_in(self, code: str, server: str | None = None) -> None:
         """Finish a browser (ORCID) sign-in from ``upbr://auth/callback``."""
@@ -404,6 +511,14 @@ class DatabaseLinks(QtCore.QObject):
             for item in held:
                 window.append_log(f"Quarantine: {quarantine_line(item)}")
         box.exec()
+        if origin.get("opened_via") == "upblab":
+            try:
+                opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"laicpmsdb://run/{result.run_id}"))
+            except Exception as exc:
+                window.append_log(f"Could not open the submitted run in UPb Lab: {exc}")
+            else:
+                if not opened:
+                    window.append_log("Could not open the submitted run in UPb Lab.")
 
     def prefer(self, window) -> None:
         """Mark the window's last submitted run as the session's preferred run."""

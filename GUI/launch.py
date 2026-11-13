@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -51,6 +52,8 @@ class LaunchTarget:
     server: str = ""
     code: str = ""
     original: str = ""
+    acquisition: str = ""
+    via: str = ""
 
     @property
     def is_url(self) -> bool:
@@ -97,12 +100,17 @@ def parse_upbr_url(value: str) -> LaunchTarget:
             raise LaunchError(f"Expected upbr://{route}/<id>, got {value!r}.")
         if route == "session" and not server:
             raise LaunchError("A upbr://session link needs ?server=<database URL>.")
+        acquisition = query.get("acquisition", "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}", acquisition):
+            acquisition = ""
         return LaunchTarget(
             kind=route,
             identifier=segments[1],
             server=server,
             code=query.get("code", ""),
             original=value,
+            acquisition=acquisition,
+            via="upblab" if query.get("via") == "upblab" else "",
         )
     if route == "auth" and segments[1:] == ["callback"]:
         if query.get("error"):

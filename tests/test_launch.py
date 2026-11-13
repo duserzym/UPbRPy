@@ -67,6 +67,41 @@ def test_run_and_auth_links():
     assert parse_upbr_url("UPBR://Session/abc?server=x").kind == "session"
 
 
+@pytest.mark.parametrize("route", ["session", "run"])
+@pytest.mark.parametrize("acquisition", ["a", "acq-1._~", "A" * 128])
+def test_opener_context(route, acquisition):
+    target = parse_upbr_url(
+        f"upbr://{route}/id?server=https://lab.example.org&code=c"
+        f"&acquisition={acquisition}&via=upblab"
+    )
+    assert (target.acquisition, target.via, target.code) == (acquisition, "upblab", "c")
+
+
+@pytest.mark.parametrize("acquisition", ["", "-bad", "a%2Fb", "a%20b", "%C3%A9", "a" * 129])
+def test_invalid_acquisition_is_ignored(acquisition):
+    target = parse_upbr_url(f"upbr://run/id?acquisition={acquisition}&via=elsewhere")
+    assert target.acquisition == target.via == ""
+
+
+def test_old_links_have_empty_context():
+    for link in ("upbr://run/id", "upbr://session/id?server=https://lab.example.org"):
+        target = parse_upbr_url(link)
+        assert target.acquisition == target.via == ""
+
+
+def test_single_instance_forwards_opener_context(app, monkeypatch):
+    instance = SingleInstance()
+    received = []
+    instance.received.connect(lambda link: received.append(parse_upbr_url(link)))
+    monkeypatch.setattr(instance, "send", lambda link: instance.received.emit(link) or True)
+    monkeypatch.setattr("GUI.main.SingleInstance", lambda: instance)
+    from GUI.main import main
+
+    assert main(["--open", "upbr://run/id?server=https://lab.example.org&code=c&acquisition=acq-1&via=upblab"]) == 0
+    assert len(received) == 1
+    assert (received[0].code, received[0].acquisition, received[0].via) == ("c", "acq-1", "upblab")
+
+
 @pytest.mark.parametrize(
     "value, message",
     [

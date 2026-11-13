@@ -131,6 +131,7 @@ class StudioWindowController(QtCore.QObject):
                 open_bundle=self.open_session_bundle,
                 open_project=self.open_project_in_window,
                 parent_widget=self.active_window,
+                activate_project=self.activate_open_project,
             )
         return self._database
 
@@ -151,9 +152,43 @@ class StudioWindowController(QtCore.QObject):
         return reduction
 
     def open_project_in_window(self, project_file: str) -> MainWindow:
+        existing = self.activate_open_project(project_file=project_file)
+        if existing is not None:
+            return existing
         window = self.window_for_new_content()
         window.load_project_file(project_file)
         return window
+
+    def activate_open_project(
+        self,
+        *,
+        server: str = "",
+        session_id: str = "",
+        run_id: str = "",
+        project_file: str = "",
+    ) -> MainWindow | None:
+        """Select and raise an open project by path or database origin."""
+        path = Path(project_file).resolve() if project_file else None
+        for shell in self.windows.values():
+            for index in range(shell.tabs.count()):
+                reduction = shell.tabs.widget(index)
+                origin = reduction.session.origin or {}
+                same_path = (path is not None and reduction.project_path is not None
+                             and Path(reduction.project_path).resolve() == path)
+                same_server = (not server
+                               or str(origin.get("server", "")).rstrip("/") == server.rstrip("/"))
+                same_origin = same_server and (
+                    (session_id and origin.get("session_id") == session_id)
+                    or (run_id and origin.get("run_id") == run_id)
+                )
+                if same_path or same_origin:
+                    shell.select_tab(index)
+                    if shell.isMinimized():
+                        shell.showNormal()
+                    self._show_window(shell)
+                    self._remember_active(shell)
+                    return reduction
+        return None
 
     def open_directory_in_window(self, directory: str) -> MainWindow:
         window = self.window_for_new_content()
