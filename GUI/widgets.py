@@ -3635,6 +3635,40 @@ class ResultsJumpBar(QtWidgets.QWidget):
         self.more.setVisible(bool(menu.actions()))
 
 
+class _DeferredReviewModel(QtGui.QStandardItemModel):
+    """Populate for explicit Python reads; Qt's layout queries stay cheap."""
+
+    def rowCount(self, parent=None):
+        # Qt supplies a QModelIndex, including for root layout queries. Keep
+        # no-argument Python inspection of the source model working as before.
+        if parent is None:
+            self.parent().ensure_populated()
+            parent = QtCore.QModelIndex()
+        return super().rowCount(parent)
+
+    def item(self, row, column=0):
+        self.parent().ensure_populated()
+        return super().item(row, column)
+
+
+class _DeferredReviewTree(QtWidgets.QTreeView):
+    """Populate on display or an explicit sort, leaving hidden trees empty."""
+
+    populate = None
+
+    def ensure_populated(self):
+        if self.populate is not None:
+            self.populate()
+
+    def showEvent(self, event):
+        self.ensure_populated()
+        super().showEvent(event)
+
+    def sortByColumn(self, column, order):
+        self.ensure_populated()
+        super().sortByColumn(column, order)
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
@@ -3670,6 +3704,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._depth_sample_choices = False
         self._blank_empty_readout = False
         self._syncing_selection = False
+        self._pending_group_views = set()
         self._readout_timer = QtCore.QTimer(self)
         self._readout_timer.setSingleShot(True)
         self._readout_timer.timeout.connect(self._update_age_readout)
@@ -3737,6 +3772,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
         self.tabs.currentChanged.connect(self._results_tab_changed)
         self._hovered_choice_name = ""
+        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
+            view.populate = lambda view=view: self._ensure_grouped_view(view)
 
     def _build_results_navigation(self) -> None:
         """Jump-to chips, a group band and frozen spot columns for the results table."""
@@ -3933,14 +3970,14 @@ class ResultsTableWidget(QtWidgets.QWidget):
         order = {name: index for index, name in enumerate(self._spot_acquisition)}
         return sorted(map(str, names), key=lambda name: (order.get(name, len(order)), name))
 
-    def _update_exclusion_styles(self):
-        for model in (self.results_model, self.depth_model):
+    def _update_exclusion_styles(self, *, group_models=None, flat=True):
+        for model in (self.results_model, self.depth_model) if flat else ():
             model.excluded_spots = self.excluded_spots
             if model.rowCount():
                 model.dataChanged.emit(model.index(0, 0), model.index(model.rowCount()-1, model.columnCount()-1),
                     [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole])
         blocker = QtCore.QSignalBlocker(self.spot_choice_list)
-        for i in range(self.spot_choice_list.count()):
+        for i in range(self.spot_choice_list.count() if flat else 0):
             item = self.spot_choice_list.item(i)
             excluded = item.text() in self.excluded_spots
             font = item.font()
@@ -3949,53 +3986,44 @@ class ResultsTableWidget(QtWidgets.QWidget):
             item.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
             item.setToolTip(item.text() + (" · Excluded from calculations" if excluded else ""))
         del blocker
+        updating = getattr(self, "_updating_groups", False)
         self._updating_groups = True
         try:
-            for model in (self.results_group_model, self.secondary_group_model,
-                          self.spot_choice_group_model, self.depth_choice_group_model):
-                for row in range(model.rowCount()):
-                    parent = model.item(row)
-                    names = parent.data(_SPOT_NAMES_ROLE) or []
-                    excluded = bool(names) and all(n in self.excluded_spots for n in names)
-                    font = parent.font()
-                    font.setItalic(excluded)
-                    parent.setFont(font)
-                    parent.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
-                    for child_row in range(parent.rowCount()):
-                        names = parent.child(child_row).data(_SPOT_NAMES_ROLE) or []
+            models = (self.results_group_model, self.secondary_group_model,
+                      self.spot_choice_group_model, self.depth_choice_group_model)
+            for model in models if group_models is None else group_models:
+                blocker = QtCore.QSignalBlocker(model)
+                try:
+                    for row in range(model.rowCount(QtCore.QModelIndex())):
+                        parent = model.item(row)
+                        names = parent.data(_SPOT_NAMES_ROLE) or []
                         excluded = bool(names) and all(n in self.excluded_spots for n in names)
-                        for column in range(parent.columnCount()):
-                            child = parent.child(child_row, column)
-                            if child is None:
-                                continue
-                            font = child.font()
-                            font.setItalic(excluded)
-                            child.setFont(font)
-                            child.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
-                            child.setToolTip(" · ".join(names) + (" · Excluded from calculations" if excluded else ""))
+                        font = parent.font()
+                        font.setItalic(excluded)
+                        parent.setFont(font)
+                        parent.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
+                        for child_row in range(parent.rowCount()):
+                            names = parent.child(child_row).data(_SPOT_NAMES_ROLE) or []
+                            excluded = bool(names) and all(n in self.excluded_spots for n in names)
+                            for column in range(parent.columnCount()):
+                                child = parent.child(child_row, column)
+                                if child is None:
+                                    continue
+                                font = child.font()
+                                font.setItalic(excluded)
+                                child.setFont(font)
+                                child.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
+                                child.setToolTip(" · ".join(names) + (" · Excluded from calculations" if excluded else ""))
+                finally:
+                    del blocker
+                self._notify_group_data_changed(model, [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole])
         finally:
-            self._updating_groups = False
+            self._updating_groups = updating
 
     def _build_depth_choices(self):
-        self._updating_groups = True
-        try:
-            model = self.depth_choice_group_model
-            model.clear()
-            model.setHorizontalHeaderLabels(["Acquisitions shown"])
-            samples = self._sample_names(self._depth_frame)
-            for sample in dict.fromkeys(samples.values()):
-                names = [name for name, value in samples.items() if value == sample]
-                parent = self._group_row({}, [], names, sample)[0]
-                model.appendRow(parent)
-                for name in names:
-                    child = self._group_row({}, [], [name], sample)[0]
-                    child.setText(name)
-                    parent.appendRow(child)
-        finally:
-            self._updating_groups = False
-        self.depth_choice_tree.expandAll()
-        self._update_group_inclusion()
-        self._update_exclusion_styles()
+        self._defer_grouped_view(self.depth_choice_tree)
+        if self.depth_choice_tree.isVisible():
+            self._ensure_grouped_view(self.depth_choice_tree)
 
     def show_only_selected(self) -> None:
         """Show exactly the selected spots on both concordia pages."""
@@ -4262,10 +4290,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 self.spot_choice_list, self.spot_choice_tree, self.depth_choice_tree)
 
     def _create_grouped_view(self):
-        view = QtWidgets.QTreeView()
+        view = _DeferredReviewTree()
         view.setObjectName("ReviewGroupedTree")
         view.setStyleSheet("QTreeView#ReviewGroupedTree::item { border-radius: 0px; }")
-        model = QtGui.QStandardItemModel(view)
+        model = _DeferredReviewModel(view)
         proxy = _SpotReviewProxy(view, grouped=True)
         proxy.setSourceModel(model)
         view.setModel(proxy)
@@ -4275,6 +4303,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         view.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         view.header().setStretchLastSection(False)
+        view.header().setResizeContentsPrecision(64)
         view.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         model.itemChanged.connect(lambda item: self._group_include_changed(item))
         return view, model
@@ -4314,6 +4343,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return page, toggle, search, stack
 
     def _switch_group_view(self, stack, checked):
+        if checked:
+            stack.widget(1).ensure_populated()
         stack.setCurrentIndex(int(checked))
         self.set_selected_spots(self.selected_spots)
 
@@ -4422,96 +4453,156 @@ class ResultsTableWidget(QtWidgets.QWidget):
             item.setData(value, QtCore.Qt.ItemDataRole.UserRole)
         return items
 
-    def _build_grouped_views(self):
-        self._updating_groups = True
+    def _defer_grouped_view(self, view):
+        """Discard old rows without disturbing shared review selection."""
+        syncing = self._syncing_selection
+        self._syncing_selection = True
         try:
-            final = self.results_model.frame
-            secondary = self.secondary_model.frame
-            child_columns = [name for name in ("spot_name", "preferred_date", "preferred_date_2e",
-                             "preferred_date_method", "preferred_date_pass", "disc%", "automatic_flags")
-                             if name in self._spot_frame]
-            for model, columns in ((self.results_group_model, list(final.columns)),
-                                   (self.secondary_group_model, child_columns)):
-                model.clear()
-                model.setHorizontalHeaderLabels(["Include", *map(str, columns)])
-            self.spot_choice_group_model.clear()
-            self.spot_choice_group_model.setHorizontalHeaderLabels(["Spots"])
-            self._spot_samples = self._sample_names(final, self._spot_frame)
-            if "spot_name" in final:
-                for sample in sorted({self._spot_samples[str(name)] for name in final.spot_name}):
-                    spots = final.loc[final.spot_name.astype(str).map(self._spot_samples).eq(sample)]
-                    names = list(spots.spot_name.astype(str))
-                    parent = self._group_row({}, list(final.columns), names, sample)
-                    self.results_group_model.appendRow(parent)
-                    for _, row in spots.iterrows():
-                        parent[0].appendRow(self._group_row(row, list(final.columns), [str(row.spot_name)], sample))
-            if "sample" in secondary:
-                for _, row in secondary.sort_values("sample").iterrows():
-                    sample = str(row["sample"])
-                    spots = self._spot_frame
-                    if {"sample", "spot_name"}.issubset(spots.columns):
-                        spots = spots.loc[spots["sample"].astype(str).eq(sample)]
-                    else:
-                        spots = pd.DataFrame()
-                    names = list(spots.spot_name.astype(str)) if "spot_name" in spots else []
-                    parent = self._group_row({}, child_columns, names, sample)
-                    parent[0].setText(self._secondary_summary(row))
-                    self.secondary_group_model.appendRow(parent)
-                    for _, spot in spots.iterrows():
-                        # Summary values remain the engine's; children show only spot fields.
-                        values = {column: spot.get(column, "") for column in child_columns}
-                        parent[0].appendRow(self._group_row(values, child_columns, [str(spot.spot_name)], sample))
-            for sample in sorted(set(self._spot_samples.values())):
-                names = [name for name in self.include_flags if self._spot_samples.get(name) == sample]
-                parent = self._group_row({}, [], names, sample)[0]
-                self.spot_choice_group_model.appendRow(parent)
-                for name in names:
-                    child = self._group_row({}, [], [name], sample)[0]
-                    child.setText(name)
-                    child.setToolTip(name)
-                    parent.appendRow(child)
+            self._pending_group_views.add(view)
+            view.model().sourceModel().clear()
         finally:
-            self._updating_groups = False
-        self._update_group_inclusion()
-        for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
-            model = view.model()
+            self._syncing_selection = syncing
+
+    def _build_grouped_views(self):
+        """Invalidate trees; only fill the ones currently on screen."""
+        views = (self.results_tree, self.secondary_tree, self.spot_choice_tree)
+        for view in views:
+            self._defer_grouped_view(view)
+        for view in views:
+            if view.isVisible():
+                self._ensure_grouped_view(view, style=False)
+
+    def _ensure_grouped_view(self, view, *, style=True):
+        """Fill one deferred tree using the latest inclusion and exclusion state."""
+        if view not in self._pending_group_views:
+            return
+        self._pending_group_views.remove(view)
+        syncing = self._syncing_selection
+        updating = getattr(self, "_updating_groups", False)
+        updates_enabled = view.updatesEnabled()
+        self._syncing_selection = self._updating_groups = True
+        view.setUpdatesEnabled(False)
+        model = view.model().sourceModel()
+        try:
+            self._fill_grouped_view(view, model)
+            self._update_group_inclusion(models=(model,))
+            if style:
+                self._update_exclusion_styles(group_models=(model,), flat=False)
             columns = [model.headerData(column, QtCore.Qt.Orientation.Horizontal)
                        for column in range(model.columnCount())]
             view.sortByColumn(columns.index("spot_name") if "spot_name" in columns else 0,
                               QtCore.Qt.SortOrder.AscendingOrder)
-            view.expandAll()
-        for view in (self.results_tree, self.secondary_tree):
             for row in range(view.model().rowCount()):
-                view.setFirstColumnSpanned(row, QtCore.QModelIndex(), True)
+                if view in (self.results_tree, self.secondary_tree):
+                    view.setFirstColumnSpanned(row, QtCore.QModelIndex(), True)
+            view.expandAll()
+        finally:
+            self._syncing_selection = syncing
+            self._updating_groups = updating
+            view.setUpdatesEnabled(updates_enabled)
+        if not syncing:
+            self.set_selected_spots(self.selected_spots)
 
-    def _update_group_inclusion(self):
+    def _fill_grouped_view(self, view, model):
+        """Attach each sample only after its child rows have been filled."""
+        final = self.results_model.frame
+        if view is self.results_tree:
+            columns = list(final.columns)
+            model.setHorizontalHeaderLabels(["Include", *map(str, columns)])
+            if "spot_name" in final:
+                samples = final.spot_name.astype(str).map(self._spot_samples)
+                for sample in sorted(set(samples)):
+                    spots = final.loc[samples.eq(sample)]
+                    names = list(spots.spot_name.astype(str))
+                    parent = self._group_row({}, columns, names, sample)
+                    for row in spots.to_dict("records"):
+                        parent[0].appendRow(self._group_row(row, columns, [str(row["spot_name"])], sample))
+                    model.appendRow(parent)
+        elif view is self.secondary_tree:
+            columns = [name for name in ("spot_name", "preferred_date", "preferred_date_2e",
+                       "preferred_date_method", "preferred_date_pass", "disc%", "automatic_flags")
+                       if name in self._spot_frame]
+            model.setHorizontalHeaderLabels(["Include", *columns])
+            secondary = self.secondary_model.frame
+            if "sample" in secondary:
+                for row in secondary.sort_values("sample").to_dict("records"):
+                    sample = str(row["sample"])
+                    spots = self._spot_frame
+                    spots = (spots.loc[spots["sample"].astype(str).eq(sample)]
+                             if {"sample", "spot_name"}.issubset(spots.columns) else pd.DataFrame())
+                    names = list(spots.spot_name.astype(str)) if "spot_name" in spots else []
+                    parent = self._group_row({}, columns, names, sample)
+                    parent[0].setText(self._secondary_summary(row))
+                    for spot in spots.to_dict("records"):
+                        parent[0].appendRow(self._group_row(spot, columns, [str(spot["spot_name"])], sample))
+                    model.appendRow(parent)
+        else:
+            depth = view is self.depth_choice_tree
+            model.setHorizontalHeaderLabels(["Acquisitions shown" if depth else "Spots"])
+            samples = self._sample_names(self._depth_frame) if depth else self._spot_samples
+            sample_order = dict.fromkeys(samples.values()) if depth else sorted(set(samples.values()))
+            for sample in sample_order:
+                names = [name for name in (samples if depth else self.include_flags)
+                         if samples.get(name) == sample]
+                parent = self._group_row({}, [], names, sample)[0]
+                for name in names:
+                    child = self._group_row({}, [], [name], sample)[0]
+                    child.setText(name)
+                    parent.appendRow(child)
+                model.appendRow(parent)
+
+    @staticmethod
+    def _notify_group_data_changed(model, roles):
+        """Notify each sibling range once after a batch of item edits."""
+        root = QtCore.QModelIndex()
+        rows = model.rowCount(root)
+        if not rows:
+            return
+        last_column = model.columnCount() - 1
+        model.dataChanged.emit(model.index(0, 0), model.index(rows - 1, last_column), roles)
+        for row in range(rows):
+            parent = model.index(row, 0)
+            children = model.rowCount(parent)
+            if children:
+                model.dataChanged.emit(model.index(0, 0, parent),
+                                       model.index(children - 1, last_column, parent), roles)
+
+    def _update_group_inclusion(self, *, models=None):
+        updating = getattr(self, "_updating_groups", False)
         self._updating_groups = True
         try:
-            for model in (self.results_group_model, self.secondary_group_model, self.spot_choice_group_model, self.depth_choice_group_model):
-                for row in range(model.rowCount()):
-                    parent = model.item(row)
-                    names = parent.data(_SPOT_NAMES_ROLE) or []
-                    count = sum(self.include_flags.get(name, True) for name in names)
-                    state = (QtCore.Qt.CheckState.PartiallyChecked if 0 < count < len(names)
-                             else QtCore.Qt.CheckState.Checked if count else QtCore.Qt.CheckState.Unchecked)
-                    parent.setCheckState(state)
-                    sample = parent.data(_SAMPLE_ROLE) or "(no sample)"
-                    if model is self.results_group_model:
-                        summary = self._sample_summary(names)
-                        parent.setText(f"{sample} · {len(names)} spots ({count} included)" + (f" · {summary}" if summary else ""))
-                    elif model in (self.spot_choice_group_model, self.depth_choice_group_model):
-                        parent.setText(f"{sample} · {count}/{len(names)}")
-                    tooltip = (f"{sample} ({count} included / {len(names)})"
-                               if model in (self.spot_choice_group_model, self.depth_choice_group_model) else parent.text())
-                    excluded_count = len(set(names) & self.excluded_spots)
-                    parent.setToolTip(tooltip + (f" · {excluded_count} excluded from calculations" if excluded_count else ""))
-                    for child_row in range(parent.rowCount()):
-                        child = parent.child(child_row)
-                        included = self.include_flags.get(child.data(_SPOT_NAMES_ROLE)[0], True)
-                        child.setCheckState(QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked)
-                        child.setData(included, QtCore.Qt.ItemDataRole.UserRole)
+            group_models = (self.results_group_model, self.secondary_group_model,
+                            self.spot_choice_group_model, self.depth_choice_group_model)
+            for model in group_models if models is None else models:
+                blocker = QtCore.QSignalBlocker(model)
+                try:
+                    for row in range(model.rowCount(QtCore.QModelIndex())):
+                        parent = model.item(row)
+                        names = parent.data(_SPOT_NAMES_ROLE) or []
+                        count = sum(self.include_flags.get(name, True) for name in names)
+                        state = (QtCore.Qt.CheckState.PartiallyChecked if 0 < count < len(names)
+                                 else QtCore.Qt.CheckState.Checked if count else QtCore.Qt.CheckState.Unchecked)
+                        parent.setCheckState(state)
+                        sample = parent.data(_SAMPLE_ROLE) or "(no sample)"
+                        if model is self.results_group_model:
+                            summary = self._sample_summary(names)
+                            parent.setText(f"{sample} · {len(names)} spots ({count} included)" + (f" · {summary}" if summary else ""))
+                        elif model in (self.spot_choice_group_model, self.depth_choice_group_model):
+                            parent.setText(f"{sample} · {count}/{len(names)}")
+                        tooltip = (f"{sample} ({count} included / {len(names)})"
+                                   if model in (self.spot_choice_group_model, self.depth_choice_group_model) else parent.text())
+                        excluded_count = len(set(names) & self.excluded_spots)
+                        parent.setToolTip(tooltip + (f" · {excluded_count} excluded from calculations" if excluded_count else ""))
+                        for child_row in range(parent.rowCount()):
+                            child = parent.child(child_row)
+                            included = self.include_flags.get(child.data(_SPOT_NAMES_ROLE)[0], True)
+                            child.setCheckState(QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked)
+                            child.setData(included, QtCore.Qt.ItemDataRole.UserRole)
+                finally:
+                    del blocker
+                self._notify_group_data_changed(model, [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole, QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole])
         finally:
-            self._updating_groups = False
+            self._updating_groups = updating
 
     def _scroll_hovered_spot(self, name):
         chooser = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
@@ -5330,6 +5421,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         view.setWordWrap(False)
         view.verticalHeader().setVisible(False)
         view.horizontalHeader().setStretchLastSection(False)
+        # A fixed sample bounds sizing work even for wide saved reductions.
+        # Qt also measures the header, so long labels retain their full width.
+        view.horizontalHeader().setResizeContentsPrecision(64)
         if include_flags is None:
             view.horizontalHeader().setSectionResizeMode(
                 QtWidgets.QHeaderView.ResizeMode.ResizeToContents
@@ -5401,7 +5495,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         spot_names = list(dict.fromkeys(name for frame in (final_frame, self._spot_frame)
                                       if "spot_name" in frame
                                       for name in frame["spot_name"].dropna().astype(str)))
-        self._spot_samples = self._sample_names(final_frame, self._spot_frame)
+        self._spot_samples = self._sample_names(self.results_model.frame, self._spot_frame)
         glass_spots = self._glass_spot_names()
         retained_flags = {name: self.include_flags.get(
             name, self._show_glasses if name in glass_spots else True) for name in dict.fromkeys([*spot_names, *self._sample_names(self._depth_frame)])}
