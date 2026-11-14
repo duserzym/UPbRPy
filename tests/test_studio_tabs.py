@@ -537,6 +537,21 @@ def test_new_content_uses_most_recent_shell(controller, app):
     assert reduction.session.loaded and not second.active_reduction.session.loaded
 
 
+def test_cmd_w_on_the_last_tab_keeps_the_window_open(controller, app):
+    # Cmd+W (Ctrl+W in Qt terms) closes a tab, never the window or the app.
+    shell = controller.create_window()
+    shell.activateWindow()
+    process(app)
+    closed = []
+    app.lastWindowClosed.connect(lambda: closed.append(True))
+    first = shell.active_reduction
+    QtTest.QTest.keyClick(first, QtCore.Qt.Key.Key_W, QtCore.Qt.KeyboardModifier.ControlModifier)
+    process(app)
+    assert shell.isVisible() and shell.tabs.count() == 1
+    assert shell.active_reduction is not first and not shell.active_reduction.session.loaded
+    assert len(controller.windows) == 1 and closed == []
+
+
 def test_new_close_and_new_window_shortcuts(controller, app):
     shell = controller.create_window()
     shell.activateWindow()
