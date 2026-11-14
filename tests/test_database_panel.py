@@ -96,6 +96,8 @@ def test_submit_step_in_all_presets_and_selection_runs_nothing(window, monkeypat
         flush.reset_mock()
         window.database_panel.select_step()
         assert window.current_workflow_step_title() == "Submit to database"
+        # Short list label so the rail does not elide it at 1280 px.
+        assert window.workflow_step_list.item(window.workflow_step_list.count() - 1).text().endswith("  Submit")
         assert window.current_workflow_stage() == PipelineStage.FINALIZE
         assert window._workflow_action_specs() == []
         window.run_current_workflow_action()

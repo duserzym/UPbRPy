@@ -5357,7 +5357,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         PipelineStage.FINALIZE.value, state="ready", accent=theme.accent,
                         muted=theme.muted, success=theme.success,
                     ),
-                    f"{len(self.workflow_preset.steps) + 1}  Submit to database"
+                    f"{len(self.workflow_preset.steps) + 1}  Submit"  # page title: Submit to database
                 )
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, SUBMIT_STEP)
                 item.setToolTip("Link a database session, check results and submit a reduction.")
