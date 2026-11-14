@@ -58,6 +58,8 @@ def pytest_collection_finish(session):
 # Install before collection, including GUI modules with import-time defaults.
 _autosave_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-autosave-")
 os.environ["UPBRPY_AUTOSAVE_DIR"] = _autosave_folder.name
+_results_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-results-")
+os.environ["UPBRPY_RESULTS_CACHE_DIR"] = _results_folder.name
 # Windows start a background standards check that runs `git fetch` in the
 # shared checkout (~/UPbRPy/upb-standards). Tests must not reach the network or
 # write refs into the user's checkout, and a check still running when its

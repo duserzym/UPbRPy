@@ -33,8 +33,27 @@ is validated even in a version-1 document.
 
 Required below describes the project validator and subsequent path use.
 Writers emit all listed core keys except origin. Unknown project keys are
-not rejected. Raw sweeps and computed tables are not embedded: reopening
-re-imports dependencies and recalculates the saved completed stages.
+not rejected. Raw sweeps and computed tables are not embedded. Reopening uses
+validated local results when available, otherwise re-imports dependencies and
+recalculates the saved completed stages.
+
+### Local results cache
+
+Studio keeps disposable results in `~/Library/Caches/UPbRPy/results/` on macOS,
+`${XDG_CACHE_HOME:-~/.cache}/UPbRPy/results/` on Linux, and
+`%LOCALAPPDATA%\UPbRPy\results` on Windows. It verifies input contents,
+reference files, settings and engine code before reuse. Display choices are
+restored from the current project. Explicit Save prepares results after a short
+idle delay; selection autosave does not. The `.upbr` format is unchanged.
+
+Delete the contents of that directory to clear it. Set
+`UPBRPY_RESULTS_CACHE=0` to disable caching, or `UPBRPY_RESULTS_CACHE_DIR` to
+choose a different local cache directory. `UPBRPY_RESULTS_CACHE_MAX_MB` sets the
+size limit (default 2048 MB); oldest-used entries are removed first. Keep this
+private cache outside shared/synced folders: it contains Python pickles.
+**File → Reopen and Recalculate** bypasses existing results and refreshes the
+entry for the current project.
+
 
 | Key | Required/optional | Type / unit | Example | Meaning / without it |
 | --- | --- | --- | --- | --- |
