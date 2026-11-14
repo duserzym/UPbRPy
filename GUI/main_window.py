@@ -1492,9 +1492,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Show, QtCore.QEvent.Type.LayoutRequest}:
             self._position_plot_controls()
             self._position_empty_state()
-        if watched in (getattr(self, "trace_plot", None), getattr(self, "plot_control_scroll", None)) and event.type() in {
+        if watched in getattr(self, "_plot_control_geometry_widgets", ()) and event.type() in {
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Show,
-                QtCore.QEvent.Type.LayoutRequest}:
+                QtCore.QEvent.Type.LayoutRequest} and not (
+                    watched is self.plot_control_scroll and event.type() == QtCore.QEvent.Type.LayoutRequest):
             timer = getattr(self, "_plot_control_overlay_timer", None)
             if timer is not None and not timer.isActive():
                 timer.start()
@@ -2314,31 +2315,84 @@ class MainWindow(QtWidgets.QMainWindow):
     def _plot_control_kind(self) -> str:
         return self._interaction_view_kind() if hasattr(self, "session") else "plots"
 
+    def _plot_control_area(self) -> QtCore.QRect:
+        """Return the active data area in stack coordinates, empty on table tabs."""
+        plot = self.plots_stack.currentWidget()
+        if self.plots_stack.currentIndex() == 0:
+            plot = self.trace_plot
+        elif plot is self.results_table:
+            plot = self.results_table.active_concordia()
+            if plot is None:
+                return QtCore.QRect()
+        rect = plot.rect()
+        item = getattr(plot, "plot_item", None) or getattr(plot, "_plot_item", None)
+        if item is None:
+            # Separate calibration plots share the controls; use the first canvas.
+            item = next(iter(getattr(plot, "_grid_items", {}).values()), None)
+        if item is not None:
+            rect = rect.intersected(plot.mapFromScene(item.vb.sceneBoundingRect()).boundingRect())
+        else:
+            rect.adjust(0, 28, 0, 0)  # Reserve a title row before a plot is drawn.
+        rect.translate(plot.mapTo(self.plots_stack, QtCore.QPoint()))
+        return rect.intersected(self.plots_stack.rect())
+
     def _position_plot_controls(self, *_args) -> None:
         """Place the floating drag / zoom / reset controls inside the canvas.
 
         Each kind of view (traces and diagnostics, concordia) keeps its own
-        place, stored as the nearest canvas corner and an offset from it, so
-        it stays put when the window is resized. Default: top right.
+        place, stored as the nearest stack corner and an offset from it, so
+        it stays put when the window is resized. Default: data area's top right.
         """
         scroll = getattr(self, "plot_control_scroll", None)
         if scroll is None:
             return
-        stack, bar = self.plots_stack, self.plot_control_bar
-        size = bar.layout().minimumSize()
-        width = min(size.width() + 2, max(80, stack.width() - 20))
-        scroll.setFixedWidth(width)
-        if self._plot_control_vertical:
-            scroll.setFixedHeight(min(size.height() + 2, max(60, stack.height() - 12)))
-        corner, dx, dy = self._plot_control_anchors.get(self._plot_control_kind(), ("top_right", 10, 6))
-        x = dx if corner.endswith("left") else stack.width() - width - dx
-        y = dy if corner.startswith("top") else stack.height() - scroll.height() - dy
+        area = self._plot_control_area()
+        scroll.setVisible(not area.isEmpty())
+        if area.isEmpty():
+            self._sync_plot_control_overlay()
+            return
+        bar = self.plot_control_bar
+        layout = bar.layout()
+        # Try the user's row preference first, then use a column if it cannot fit.
+        layout.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom if self._plot_control_vertical
+                            else QtWidgets.QBoxLayout.Direction.LeftToRight)
+        for divider in self._plot_control_labels[3:]:
+            divider.setVisible(not self._plot_control_vertical and not getattr(self, "_narrow_controls", False))
+        layout.invalidate()
+        vertical = self._plot_control_vertical or layout.totalMinimumSize().width() + 2 > area.width()
+        layout.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom if vertical
+                            else QtWidgets.QBoxLayout.Direction.LeftToRight)
+        for divider in self._plot_control_labels[3:]:
+            divider.setVisible(not vertical and not getattr(self, "_narrow_controls", False))
+        layout.invalidate()
+        size = layout.totalMinimumSize()  # Include the frame's stylesheet border.
+        bar.setMinimumWidth(size.width())
+        bar.setFixedHeight(size.height() if vertical else max(36, size.height()))
+        scroll.setFixedSize(min(size.width() + 2, area.width()),
+                            min(bar.height() + 2, area.height()))
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if size.width() + 2 <= area.width() else QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if bar.height() + 2 <= area.height() else QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        anchor = self._plot_control_anchors.get(self._plot_control_kind())
+        if anchor is None:
+            x = area.right() + 1 - scroll.width() - 9
+            y = area.top()
+        else:
+            # plot_controls_v1 offsets are measured from the stack edges.
+            corner, dx, dy = anchor
+            stack = self.plots_stack
+            x = dx if corner.endswith("left") else stack.width() - scroll.width() - dx
+            y = dy if corner.startswith("top") else stack.height() - scroll.height() - dy
         self._move_plot_controls(QtCore.QPoint(int(x), int(y)))
 
     def _move_plot_controls(self, point: QtCore.QPoint) -> None:
-        scroll, stack = self.plot_control_scroll, self.plots_stack
-        x = max(0, min(point.x(), stack.width() - scroll.width()))
-        y = max(0, min(point.y(), stack.height() - scroll.height()))
+        scroll = self.plot_control_scroll
+        area = self._plot_control_area()
+        if area.isEmpty():
+            return
+        x = max(area.left(), min(point.x(), area.right() + 1 - scroll.width()))
+        y = max(area.top(), min(point.y(), area.bottom() + 1 - scroll.height()))
         scroll.move(x, y)
         scroll.raise_()
         self._sync_plot_control_overlay()
@@ -2378,7 +2432,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def _remember_plot_control_place(self) -> None:
-        """Store the place as the nearest corner and the offset from it."""
+        """Store the place as the nearest stack corner and the offset from it."""
         scroll, stack = self.plot_control_scroll, self.plots_stack
         geometry = scroll.geometry()
         left = geometry.center().x() < stack.width() / 2
@@ -2731,13 +2785,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_control_overlay_timer = QtCore.QTimer(self)
         self._plot_control_overlay_timer.setSingleShot(True)
         self._plot_control_overlay_timer.setInterval(0)
-        self._plot_control_overlay_timer.timeout.connect(self._sync_plot_control_overlay)
-        control_scroll.installEventFilter(self)
-        self.trace_plot.installEventFilter(self)
+        self._plot_control_overlay_timer.timeout.connect(self._position_plot_controls)
+        self._plot_control_geometry_widgets = (
+            control_scroll, self.trace_plot, self.calibration_slopes_plot,
+            self.downhole_frac_plot, self.session_frac_plot, self.bias_plot,
+            self.results_table.spot_concordia, self.results_table.depth_concordia,
+        )
+        for plot_widget in self._plot_control_geometry_widgets:
+            plot_widget.installEventFilter(self)
         control_scroll.viewport().setAutoFillBackground(False)
         control_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.plots_stack.installEventFilter(self)
         self.plots_stack.currentChanged.connect(self._position_plot_controls)
+        self.results_table.tabs.currentChanged.connect(self._position_plot_controls)
+        self.plots_stack.currentChanged.connect(self._position_empty_state)
         # A fixed-size child, outside all stack layouts. Moving it never
         # changes the stack's size hint or schedules another layout pass.
         self.empty_state_overlay = QtWidgets.QWidget(self.plots_stack)
@@ -3987,7 +4048,6 @@ class MainWindow(QtWidgets.QMainWindow):
             panel.records = []
             panel.readout.clear()
         self._sync_qtegra_controls()
-        self.empty_state_overlay.show()
         self._position_empty_state()
         self._rendered_view_key = self._view_key()
         self.notes_body.setText(self._compose_notes(None))
@@ -3998,10 +4058,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_plot_mode_buttons()
         self._refresh_workflow_status()
 
-    def _position_empty_state(self) -> None:
+    def _position_empty_state(self, *_args) -> None:
         overlay = getattr(self, "empty_state_overlay", None)
         if overlay is None:
             return
+        overlay.setVisible(not self.session.loaded and self.plots_stack.currentIndex() == 0)
         center = self.plots_stack.rect().center()
         overlay.move(max(0, center.x() - overlay.width() // 2),
                      max(0, center.y() - overlay.height() // 2))
@@ -4942,7 +5003,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
-        self.empty_state_overlay.setVisible(not loaded_session.loaded)
+        self._position_empty_state()
         self.results_table.set_selected_spots(set())
         self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)
         self.results_table.include_flags.clear()
