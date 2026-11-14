@@ -47,8 +47,9 @@ in the reference library, and Studio opens projects as tabs
 - Python: `.venv/bin/python` (3.14, a symlink to a cached venv outside the
   repository; it has numpy, pandas, scipy, PySide6, pyqtgraph and pytest).
   Do not pip-install anything; if something is missing, say so.
-- Run the tests with
-  `UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -q -p no:cacheprovider`.
+- Run QUICK after every change with `make test-quick`.
+  Run FULL before a Studio build/install or changes to reduction numerics,
+  the .upbr format, database submit/link/preferred, conftest or pyproject with `make test`.
   Baseline before this work: 250 passed, 4 skipped.
 - Your sandbox cannot show windows. GUI behaviour you cannot test offscreen,
   say so in your final message; the supervisor runs those checks.

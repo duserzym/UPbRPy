@@ -1,7 +1,7 @@
 MKDOCS ?= $(HOME)/Library/Caches/UPbRPy/docs-venv/bin/mkdocs
 SITE_DIR ?= $(HOME)/Library/Caches/UPbRPy/docs-site
 
-.PHONY: docs docs-serve test
+.PHONY: docs docs-serve test test-quick test-serial
 
 docs:
 	"$(MKDOCS)" build --strict --site-dir "$(SITE_DIR)"
@@ -9,8 +9,15 @@ docs:
 docs-serve:
 	"$(MKDOCS)" serve
 
-# Tests run under a memory (3 GB) and time (10 min) watchdog; see scripts/guarded.sh.
+test-quick:
+	.venv/bin/python scripts/run_tests.py quick
+
+# Parallel FULL: 12 GB and 15 min for the whole process tree.
 test:
+	scripts/guarded.sh -m 12288 -t 900 -- .venv/bin/python scripts/run_tests.py full
+
+# Previous single-process command, with its original watchdog limits.
+test-serial:
 	UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen scripts/guarded.sh -m 3072 -t 600 -- .venv/bin/python -m pytest tests -q -p no:cacheprovider
 
 # scripts/build_desktop.py builds Studio under this folder (hash of the checkout path).
