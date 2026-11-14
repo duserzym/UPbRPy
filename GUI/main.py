@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import sys
 from pathlib import Path
+
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 
 if __package__ in {None, ""}:
@@ -269,6 +274,7 @@ def export_window(window: QtWidgets.QMainWindow, output_path: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="UPbRPy PySide6 + pyqtgraph GUI")
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
     parser.add_argument(

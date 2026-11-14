@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
@@ -839,12 +839,15 @@ def populate_recalculated_cache(
     preset: WorkflowPreset,
     completed_stages: Iterable[PipelineStage],
     *, export_settings: ExportSettings | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     """Populate GUI compatibility keys from recalculated shared-core stages."""
     completed = set(completed_stages)
     for stage in PipelineStage:
         if stage not in completed:
             continue
+        if progress is not None and stage not in {PipelineStage.IMPORT, PipelineStage.SELECTION}:
+            progress(stage.value.replace("_", " ").capitalize())
         if stage == PipelineStage.BASELINE:
             ensure_baseline_subtracted(session)
         elif stage == PipelineStage.NORMALIZATION:
@@ -867,8 +870,12 @@ def populate_recalculated_cache(
             ensure_results_pb204(session, preset, export_settings or ExportSettings())
 
 
-def restore_session_from_project(project_file: str | Path) -> RestoredProject:
-    """Re-import raw data and recalculate a saved lightweight GUI project."""
+def restore_session_from_project(
+    project_file: str | Path, *, progress: Callable[[str], None] | None = None,
+) -> RestoredProject:
+    """Re-import and recalculate a project, reporting stage names if requested."""
+    if progress is not None:
+        progress("Reading data")
     project_path = Path(project_file).expanduser().resolve(strict=False)
     document = read_reduction_project(project_path)
     paths = dict(document["paths"])
@@ -1003,7 +1010,8 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         pipeline_values.get("completed_stages", ())
     )
     populate_recalculated_cache(session, preset, completed,
-        export_settings=ExportSettings.from_dict(workspace.get("export_settings", {})))
+        export_settings=ExportSettings.from_dict(workspace.get("export_settings", {})),
+        progress=progress)
     resume_stage = PipelineStage(
         pipeline_values.get("resume_stage", PipelineStage.IMPORT.value)
     )

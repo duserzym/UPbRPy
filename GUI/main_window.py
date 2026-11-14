@@ -91,6 +91,8 @@ from GUI.widgets import (
     make_list_item,
 )
 from GUI.workers import FunctionWorker
+from GUI.busy_indicator import BusyIndicator
+from GUI.restore_process import RestoreTask
 from GUI.updater import Updater
 from GUI.update_widgets import CheckUpdatesButton, VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
@@ -228,6 +230,7 @@ class MainWindow(QtWidgets.QMainWindow):
     open_project_requested = QtCore.Signal(str)
     open_source_requested = QtCore.Signal(str)
     title_changed = QtCore.Signal(str)
+    restore_progress = QtCore.Signal(str)
 
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None, updater=None) -> None:
         super().__init__()
@@ -286,6 +289,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reference_library_notice: str | None = None
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._active_worker: FunctionWorker | None = None
+        self._restore_task: RestoreTask | None = None
         self._busy_label = ""
         # Database-mode flows; the window controller shares one instance
         # between reductions; a standalone reduction creates one on first use.
@@ -302,6 +306,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_menu()
         self._build_ui()
+        self.restore_progress.connect(
+            self.busy_progress.set_progress, QtCore.Qt.ConnectionType.QueuedConnection)
+        QtWidgets.QApplication.instance().aboutToQuit.connect(self._cancel_restore)
         self._initialize_reference_library()
         self._connect_system_theme_updates()
         self.apply_theme_mode(self.theme_mode, persist=False)
@@ -1174,7 +1181,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Prevent accidental loss of an imported or edited reduction."""
         self.flush_selection_edits()
-        if self._active_worker is not None:
+        restoring = self._restore_task is not None
+        if self._active_worker is not None and not restoring:
             QtWidgets.QMessageBox.information(
                 self,
                 "Reduction still running",
@@ -1185,6 +1193,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self.has_unsaved_changes():
             self.persist_layout_state()
+            self._cancel_restore()
             event.accept()
             return
         dialog = QtWidgets.QMessageBox(self)
@@ -1206,15 +1215,22 @@ class MainWindow(QtWidgets.QMainWindow):
         choice = dialog.exec()
         if choice == QtWidgets.QMessageBox.StandardButton.Discard:
             self.persist_layout_state()
+            self._cancel_restore()
             event.accept()
             return
         if choice == QtWidgets.QMessageBox.StandardButton.Save:
             self.save_project()
             if not self.has_unsaved_changes():
                 self.persist_layout_state()
+                self._cancel_restore()
                 event.accept()
                 return
         event.ignore()
+
+    @QtCore.Slot()
+    def _cancel_restore(self) -> None:
+        if self._restore_task is not None:
+            self._restore_task.cancel()
 
     def paintEvent(self, event):
         if self.isWindow():
@@ -1270,10 +1286,7 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.addWidget(self.workspace_splitter, 1)
 
         self.setCentralWidget(central)
-        self.busy_progress = QtWidgets.QProgressBar()
-        self.busy_progress.setRange(0, 0)
-        self.busy_progress.setFixedWidth(150)
-        self.busy_progress.setVisible(False)
+        self.busy_progress = BusyIndicator()
         self.statusBar().addPermanentWidget(self.busy_progress)
         self.project_summary_label = ElidedLabel("No experiment loaded")
         self.project_summary_label.setObjectName("SecondaryText")
@@ -4407,9 +4420,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         project_file = str(project_file)
         if background:
+            if self._active_worker is not None:
+                self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
+                return
+            task = RestoreTask()
+            self._restore_task = task
             self.run_background(
                 "Opening project and recalculating saved stages",
-                lambda: restore_session_from_project(project_file),
+                lambda: task.restore(project_file, self.restore_progress.emit),
                 self.install_restored_project,
             )
             return
@@ -4548,6 +4566,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def install_restored_project(self, result: object) -> None:
         """Install a recalculated project and restore its compact UI context."""
+        self._installing_project = True
+        try:
+            self._install_restored_project(result)
+        finally:
+            self._installing_project = False
+        # Selectors, stage changes and session installation all request a
+        # redraw. Paint once after the complete saved workspace is applied.
+        self._rebuild_workflow_actions()
+        self.refresh_view()
+        restored = result
+        self.results_table.restore_review_state(restored.workspace, restored.session.spot_names)
+        self._saved_project_fingerprint = self.scientific_project_fingerprint()
+        self.update_project_window_title()
+
+    def _install_restored_project(self, result: object) -> None:
         restored = result
         if not isinstance(restored, RestoredProject):
             raise TypeError("Project loader returned an unexpected result.")
@@ -4693,9 +4726,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_project_window_title()
         self._update_reference_library_labels()
         self.refresh_view()
-        self.results_table.restore_review_state(workspace, restored.session.spot_names)
-        self._saved_project_fingerprint = self.scientific_project_fingerprint()
-        self.update_project_window_title()
         stage_count = len(
             [
                 stage
@@ -4722,6 +4752,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_project_window_title(self) -> None:
         """Show the active project name without exposing a long path."""
+        if getattr(self, "_installing_project", False):
+            return
         label = self._project_name()
         if self.has_unsaved_changes():
             label = f"• {label}"
@@ -5037,7 +5069,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_region_updates.clear()
         self._focused_spot_name = None
         self.channel_colors = self._resolve_channel_colors(self.session.channels)
-        self._populate_selectors()
+        if not getattr(self, "_installing_project", False):
+            self._populate_selectors()
         self._sync_fit_controls()
         self._sync_selection_parameter_controls()
         self._sync_plateau_filter_control()
@@ -5054,7 +5087,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.append_log(f"Detected reference materials: {materials}")
         self._saved_project_fingerprint = (
             self.scientific_project_fingerprint()
-            if project_path is not None
+            if project_path is not None and not getattr(self, "_installing_project", False)
             else None
         )
         self.statusBar().showMessage(f"Loaded {len(self.session.spot_names)} spots from {Path(directory).name}")
@@ -6646,6 +6679,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_plot_mode("raw", refresh=True)
 
     def refresh_view(self) -> None:
+        if getattr(self, "_installing_project", False):
+            return
         self.flush_selection_edits()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
@@ -6958,6 +6993,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_summary_label.setToolTip(f"{text}\n{summary['engine']}")
 
     def _rebuild_workflow_actions(self) -> None:
+        if getattr(self, "_installing_project", False):
+            return
         self._sync_database_button_visibility()
         while self.step_buttons_layout.count():
             widget = self.step_buttons_layout.takeAt(0).widget()
@@ -7085,6 +7122,8 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _refresh_workflow_status(self) -> None:
+        if getattr(self, "_installing_project", False):
+            return
         self._sync_selection_history_actions()
         self.update_project_window_title()
         self._sync_session_actions()
@@ -7265,7 +7304,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._quiet_worker = quiet
         self._active_worker = worker
         self._busy_label = label
-        self.busy_progress.setVisible(True)
+        self.busy_progress.start("Opening project" if self._restore_task is not None else label)
         if not quiet:
             self.step_actions_block.setEnabled(False)
             self.step_back_action.setEnabled(False)
@@ -7288,6 +7327,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def report_success(result: object) -> None:
             nonlocal succeeded
+            if not shiboken6.isValid(self):
+                return
+            if self._restore_task is not None and self._restore_task.cancelled:
+                return
             try:
                 on_success(result)
                 succeeded = True
@@ -7295,6 +7338,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._handle_action_error(f"{label} display failed", exc)
 
         def report_failure(message: str, details: str) -> None:
+            if not shiboken6.isValid(self):
+                return
+            if self._restore_task is not None and self._restore_task.cancelled:
+                return
             if not quiet:
                 QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
             self.append_log(f"{label} failed: {message}")
@@ -7302,9 +7349,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def finish() -> None:
             self._active_worker = None
+            self._restore_task = None
             self._quiet_worker = False
             self._busy_label = ""
-            self.busy_progress.setVisible(False)
+            if not shiboken6.isValid(self):
+                return
+            self.busy_progress.stop()
             self.step_actions_block.setEnabled(True)
             self.workflow_step_list.setEnabled(True)
             self.fit_card.setEnabled(True)
