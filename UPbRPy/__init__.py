@@ -74,7 +74,16 @@ def __getattr__(name: str):
         module = import_module(f".{name}", __name__)
         globals()[name] = module
         return module
-    load_public_api()
+    try:
+        load_public_api()
+    except ImportError as error:
+        # The frozen Studio app leaves out the notebook facade (UPbRPy.UPbRPy).
+        # Attribute probes, such as PySide's import hook while pickling a
+        # restored project in the restore child, must then see a missing
+        # attribute, not a ModuleNotFoundError.
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from error
     try:
         return globals()[name]
     except KeyError as error:
