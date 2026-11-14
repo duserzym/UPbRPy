@@ -333,6 +333,45 @@ def test_frozen_fingerprint_uses_each_bound_loader(tmp_path, monkeypatch):
     assert {"GUI.unloaded", "UPbRPy.unloaded"}.issubset(calls)
 
 
+def test_frozen_fingerprint_hashes_stored_pyz_bytes_and_is_stable(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    real_import = cache.importlib.import_module
+    stored = {"UPbRPy": b"u", "UPbRPy.unloaded": b"u2", "GUI": b"g", "GUI.unloaded": b"g2"}
+
+    class Archive:
+        toc = dict.fromkeys(stored)
+
+        def extract(self, name, raw=False):
+            assert raw
+            return stored[name]
+
+    class Loader:
+        _pyz_archive = Archive()
+
+        def get_code(self, name):
+            raise AssertionError("frozen modules are hashed from the PYZ, not re-marshalled")
+
+    def package(name):
+        if name not in {"UPbRPy", "GUI"}:
+            return real_import(name)
+        return SimpleNamespace(__file__=str(tmp_path / name / "__init__.py"),
+                               __spec__=SimpleNamespace(loader=Loader()))
+    fallback = []
+
+    class Fallback:  # modules loaded in this test process but absent from the fake PYZ
+        def get_code(self, name):
+            assert name not in stored
+            fallback.append(name)
+            return compile("value = 1", name, "exec")
+    monkeypatch.setattr(cache.importlib, "import_module", package)
+    monkeypatch.setattr(cache.importlib.machinery.PathFinder, "find_spec",
+                        lambda name, paths: SimpleNamespace(loader=Fallback()))
+    first = cache.engine_fingerprint()
+    assert first == cache.engine_fingerprint()
+    stored["GUI.unloaded"] = b"changed"
+    assert cache.engine_fingerprint() != first
+
+
 def test_warm_child_priority_and_no_parent_archive(fixture_project, cache_root, monkeypatch):
     import time
     warmer = restore_process.ResultsCacheWarmer()

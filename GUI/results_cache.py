@@ -106,8 +106,16 @@ def engine_fingerprint() -> str:
             source = root.joinpath(*relative).with_suffix(".py") if relative else root / "__init__.py"
             if not source.is_file():
                 source = root.joinpath(*relative, "__init__.py")
+            archive = getattr(loader, "_pyz_archive", None)
             if source.is_file():
                 code = source.read_bytes()
+            elif archive is not None and hasattr(archive, "extract") and name in (toc or ()):
+                # Frozen app: hash the module's bytes as stored in the PYZ.
+                # Re-marshalling a loaded code object is not stable: marshal
+                # marks objects by reference count, which grows as the
+                # restore imports more modules, so the key changed between
+                # lookup and store and no entry was ever written.
+                code = archive.extract(name, raw=True)
             else:
                 # PathFinder consults PyInstaller's path hook without executing
                 # a parent package (which could import Qt).
