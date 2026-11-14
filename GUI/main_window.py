@@ -93,7 +93,7 @@ from GUI.widgets import (
 )
 from GUI.workers import FunctionWorker
 from GUI.busy_indicator import BusyIndicator
-from GUI.restore_process import RestoreTask
+from GUI.restore_process import results_cache_warmer, RestoreTask
 from GUI.updater import Updater
 from GUI.update_widgets import CheckUpdatesButton, VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
@@ -329,6 +329,9 @@ class MainWindow(QtWidgets.QMainWindow):
         open_project_action = file_menu.addAction("Open Project…")
         open_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+O"))
         open_project_action.triggered.connect(self.choose_project_file)
+        self.recalculate_project_action = file_menu.addAction("Reopen and Recalculate")
+        self.recalculate_project_action.setEnabled(False)
+        self.recalculate_project_action.triggered.connect(self.reopen_and_recalculate)
 
         save_project_action = file_menu.addAction("Save Project")
         save_project_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
@@ -1236,6 +1239,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _cancel_restore(self) -> None:
+        results_cache_warmer.cancel()
         if self._restore_task is not None:
             self._restore_task.cancel()
 
@@ -4397,6 +4401,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if secondary_values != self.session.secondary_standards:
             self.on_secondary_standards_changed()
 
+    def reopen_and_recalculate(self) -> None:
+        """Reopen the saved project from raw data, bypassing saved results."""
+        if self.project_path is None:
+            return
+        if self.has_unsaved_changes():
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                "Reopen and Recalculate",
+                f"Discard unsaved changes to “{self._project_name()}” and recalculate "
+                "the saved project from raw data?",
+                QtWidgets.QMessageBox.StandardButton.Discard
+                | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QtWidgets.QMessageBox.StandardButton.Discard:
+                return
+        self.load_project_file(self.project_path, use_cache=False)
+
     def choose_project_file(self) -> None:
         """Choose a lightweight project to open in a Studio tab."""
         project_file = self.select_project_file()
@@ -4426,8 +4448,10 @@ class MainWindow(QtWidgets.QMainWindow):
         project_file: str | Path,
         *,
         background: bool = True,
+        use_cache: bool = True,
     ) -> None:
-        """Recalculate a saved project in this window."""
+        """Restore a saved project, optionally forcing recalculation."""
+        results_cache_warmer.cancel()
         if not self.flush_selection_edits():
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
@@ -4439,8 +4463,8 @@ class MainWindow(QtWidgets.QMainWindow):
             task = RestoreTask()
             self._restore_task = task
             self.run_background(
-                "Opening project and recalculating saved stages",
-                lambda: task.restore(project_file, self.restore_progress.emit),
+                "Opening project",
+                lambda: task.restore(project_file, self.restore_progress.emit, use_cache=use_cache),
                 self.install_restored_project,
             )
             return
@@ -4505,6 +4529,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _write_project(self, target: str | Path, *, sidecar: bool, autosave: bool = False) -> Path:
         """Write the entire project for Save and selection autosave."""
+        results_cache_warmer.cancel()
         self.apply_pending_project_edits()
         pipeline = ensure_shared_pipeline(self.session, self.workflow_preset)
         written = write_reduction_project(
@@ -4526,6 +4551,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_autosave_pending = False
         self._selection_autosave_timer.stop()
         self.update_project_window_title()
+        if not autosave:
+            results_cache_warmer.schedule(written)
         return written
 
     def _autosave_selection_edits(self) -> None:
@@ -4748,11 +4775,11 @@ class MainWindow(QtWidgets.QMainWindow):
             ]
         )
         self.append_log(
-            f"Opened {restored.project_path.name}; recalculated "
-            f"{stage_count} saved reduction stages from raw data."
+            f"Opened {restored.project_path.name}; restored "
+            f"{stage_count} saved reduction stages."
         )
         self.statusBar().showMessage(
-            f"Project opened and recalculated: "
+            f"Project opened: "
             f"{restored.project_path.name}"
         )
 
@@ -4767,6 +4794,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Show the active project name without exposing a long path."""
         if getattr(self, "_installing_project", False):
             return
+        self.recalculate_project_action.setEnabled(self.project_path is not None)
         label = self._project_name()
         if self.has_unsaved_changes():
             label = f"• {label}"
@@ -4990,6 +5018,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ``offer_restore`` asks whether to restore autosaved selection edits for
         this source. Reloads of the open session pass False.
         """
+        results_cache_warmer.cancel()
         if self._active_worker is not None:
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
