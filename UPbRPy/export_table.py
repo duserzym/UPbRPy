@@ -314,7 +314,8 @@ def _total_pb(pipeline, normalized, active_standards, results):
     # each Pb mass is kept as a separate pseudo-element throughout the reducer.
     aliases = {isotope: f"PbMass{chr(65 + i)}" for i, isotope in enumerate(measured)}
     concentrations = calc_concentration(data.rename(columns=aliases),
-        pd.Series({aliases[k]: v for k, v in factors.items()}, dtype=float))
+        pd.Series({aliases[k]: v for k, v in factors.items()}, dtype=float),
+        statistics_cache=getattr(pipeline, "_concentration_statistics_cache", None))
     output = concentrations.rename(columns={v: k for k, v in aliases.items()}).set_index("spot_name", drop=False)
     for isotope in _PB_MASSES:
         if isotope not in output:
@@ -565,7 +566,8 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
         # Calibrant concentrations are intentionally absent from finalization;
         # calculate their table values using the already fitted factors.
         glass_conc = calc_concentration(normalized.loc[normalized["sample"].isin(
-            concentration["active_standards"])], concentration["calibration"])
+            concentration["active_standards"])], concentration["calibration"],
+            statistics_cache=getattr(pipeline, "_concentration_statistics_cache", None))
         all_conc = pd.concat([concentration["final_concentration_df"], glass_conc],
                              ignore_index=True).set_index("spot_name", drop=False)
         for key in all_conc:

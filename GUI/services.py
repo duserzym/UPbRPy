@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -709,8 +709,14 @@ def load_session(
     preset: WorkflowPreset | None = None,
     selection_method: str | None = None,
     import_settings: Mapping[str, object] | None = None,
+    *,
+    restored_selections: Sequence[Mapping[str, object]] | None = None,
 ) -> ReductionSession:
-    """Open a Qtegra file or folder once and import with preset/restored settings."""
+    """Open Qtegra data with preset or restored import settings.
+
+    ``restored_selections`` allows the reader to omit redundant automatic
+    picks when the caller will overlay complete saved selection records.
+    """
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
     # Presets contain nested selection-options dictionaries. A shallow copy
@@ -743,6 +749,7 @@ def load_session(
     experiment, channels, total_data = read_experiment_data(
         qtegra,
         primary_channel=effective_primary,
+        restored_selections=restored_selections,
         **{**read_kwargs, "session_manifest": manifest or False},
     )
     if "plateau_filter_method" not in experiment.columns:
@@ -899,6 +906,7 @@ def restore_session_from_project(project_file: str | Path) -> RestoredProject:
         preset=preset,
         selection_method=config.selection_method,
         import_settings=restored_import_settings,
+        restored_selections=document["selections"],
     )
     if document["selections"]:
         auto_picks = session.experiment.copy()

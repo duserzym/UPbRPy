@@ -379,6 +379,42 @@ def write_project_document(
     return target.resolve(strict=False)
 
 
+def _complete_threshold_selections(experiment, records, method, fallbacks):
+    """Require full coverage, including diagnostics and the saved manual flag."""
+    if not records or method != 'threshold' or fallbacks:
+        return False
+    required = {
+        'spot_names', 'baseline_start_times', 'baseline_end_times',
+        'plateau_start_times', 'plateau_end_times', 'signal_start_times',
+        'signal_end_times', 'selection_error', 'selection_method',
+        'selection_channel', 'selection_detection_index',
+        'selection_signal_end_index', 'selection_unrestricted_signal_end_index',
+        'selection_signal_duration_limit_seconds',
+        'selection_signal_duration_limit_applied', 'selection_washout_start_index',
+        'selection_post_baseline_start_index', 'selection_falling_edge_index',
+        'selection_manual',
+    }
+    if any(
+        not required.issubset(record) or record['selection_error'] is not None
+        for record in records
+    ):
+        return False
+    names = [record['spot_names'] for record in records]
+    return len(names) == len(set(names)) and set(names) == set(experiment['spot_names'])
+
+
+def _restore_selection_inputs_valid(total_data, primary_channel, selection_channels):
+    """Keep full selection when a skipped spot could raise an input error."""
+    channels = [primary_channel, *(str(value).strip() for value in (selection_channels or {}).values())]
+    if any(channel not in total_data for channel in channels):
+        return False
+    times = total_data['Time']
+    return bool(
+        np.isfinite(times).all()
+        and not total_data.groupby('spot_name', sort=False)['Time'].diff().le(0).any()
+    )
+
+
 def restore_project_selections(
     experiment: pd.DataFrame,
     records: Sequence[Mapping[str, object]],

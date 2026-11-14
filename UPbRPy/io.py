@@ -951,6 +951,7 @@ def read_experiment_data(
     *,
     detector_calibration=None,
     cycle_time_s=None,
+    restored_selections=None,
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
 
@@ -1016,6 +1017,11 @@ def read_experiment_data(
         None uses DEFAULT_CYCLE_TIME_S (0.4255 s); otherwise finite and > 0.
         Recorded Time rows win; per-spot input and in-memory sessions ignore
         this keyword. Reconstructed timing emits one UserWarning per import.
+    restored_selections : sequence of mappings or None, keyword-only
+        Complete saved threshold selections that the caller will overlay after
+        import. When every generated field is saved, initialize the selection
+        schema from one spot only. Incomplete records and other detectors keep
+        full automatic selection.
 
     Returns
     -------
@@ -1077,22 +1083,50 @@ def read_experiment_data(
     )
     experiment.attrs["detector_calibration"] = calibration_record
 
-    experiment = auto_select_baseline_peak(
-        experiment,
-        total_data,
-        primary_channel,
-        baseline_sweep_n,
-        peak_sweep_n,
-        threshold,
-        filter_percentile,
-        baseline_offset,
-        plateau_offset,
+    selection_data = total_data
+    if restored_selections:
+        from .project import _complete_threshold_selections, _restore_selection_inputs_valid
+
+        if (
+            _SELECTORS.get('threshold') is threshold_onset
+            and _complete_threshold_selections(
+                experiment, restored_selections, selection_method, selection_fallback_methods,
+            )
+            and _restore_selection_inputs_valid(total_data, primary_channel, selection_channels)
+        ):
+            # One ordinary pick preserves pandas' inferred dtypes and column
+            # order. Every generated value is overwritten by the caller; no
+            # other threshold pick can introduce another output column.
+            selection_data = total_data.loc[
+                total_data['spot_name'] == total_data['spot_name'].iloc[0]
+            ]
+    pick_args = (
+        primary_channel, baseline_sweep_n, peak_sweep_n, threshold,
+        filter_percentile, baseline_offset, plateau_offset,
+    )
+    pick_options = dict(
         selection_channels=selection_channels,
         selection_method=selection_method,
         selection_fallback_methods=selection_fallback_methods,
         selection_options=selection_options,
         signal_duration_limit_seconds=signal_duration_limit_seconds,
     )
+    if selection_data is total_data:
+        experiment = auto_select_baseline_peak(
+            experiment, total_data, *pick_args, **pick_options,
+        )
+    else:
+        picked = auto_select_baseline_peak(
+            experiment.copy(), selection_data, *pick_args, **pick_options,
+        )
+        if picked['selection_error'].notna().any():
+            # A failed first pick creates columns in a different order. Keep
+            # the ordinary path if the raw trace no longer yields a template.
+            experiment = auto_select_baseline_peak(
+                experiment, total_data, *pick_args, **pick_options,
+            )
+        else:
+            experiment = picked
 
     # Keep the parameters that produced the initial selections with the
     # experiment table. Interactive editors can then reproduce the same

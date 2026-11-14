@@ -404,13 +404,19 @@ def calc_concentration_calibration_factor(
     return calibration_factors, plot
 
 
-def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'):
+def calc_concentration(unknown_standard_data, concentration_calibration, sep='_', *,
+                       statistics_cache=None):
     """Calculate filtered spot-mean concentrations and uncertainty intervals.
 
     The existing Student-t filtering calculation is preserved, but spot groups
     and output records are constructed only once. This avoids thousands of
     repeated full-table filters and scalar DataFrame insertions in sessions with
     many analytes.
+
+    ``statistics_cache`` optionally shares unscaled mean/interval pairs across
+    calls. Keys include the spot, NumPy dtype and exact channel bytes, so only
+    identical inputs reuse statistics, independently of calibration factors.
+    Non-NumPy and object dtypes are calculated without caching.
     """
     element_channels = concentration_calibration.index
 
@@ -431,8 +437,22 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
         }
         spot_t_multiplier = t.ppf(0.975, this_spot_data.shape[0] - 1)
         for channel, element in zip(element_channels, elements):
-            unknown_standard_cps_mean = this_spot_data[channel].mean()
-            unknown_standard_cps_std = this_spot_data[channel].std()
+            values = this_spot_data[channel]
+            cache_key = None
+            if (
+                statistics_cache is not None
+                and isinstance(values.dtype, np.dtype)
+                and values.dtype.kind in 'fiub'
+            ):
+                cache_key = (spot_name, values.dtype.str, values.to_numpy().tobytes())
+            if cache_key is not None and cache_key in statistics_cache:
+                filtered_cps_mean, filtered_cps_95CI = statistics_cache[cache_key]
+                calibration_factor = concentration_calibration[channel]
+                record[element] = filtered_cps_mean * calibration_factor
+                record[element + '_95CI'] = filtered_cps_95CI * calibration_factor
+                continue
+            unknown_standard_cps_mean = values.mean()
+            unknown_standard_cps_std = values.std()
             lower_bound = (
                 unknown_standard_cps_mean
                 - spot_t_multiplier * unknown_standard_cps_std
@@ -443,17 +463,16 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
             )
 
             # Retain values within the spot's 95% Student-t interval.
-            this_spot_data_filtered = this_spot_data[
-                (this_spot_data[channel] >= lower_bound)
-                & (this_spot_data[channel] <= upper_bound)
-            ]
-            filtered_cps_mean = this_spot_data_filtered[channel].mean()
-            retained_count = this_spot_data_filtered.shape[0]
+            filtered = values[(values >= lower_bound) & (values <= upper_bound)]
+            filtered_cps_mean = filtered.mean()
+            retained_count = filtered.shape[0]
             filtered_cps_95CI = (
-                this_spot_data_filtered[channel].std()
+                filtered.std()
                 / np.sqrt(retained_count)
                 * t.ppf(0.975, retained_count - 1)
             )
+            if cache_key is not None:
+                statistics_cache[cache_key] = (filtered_cps_mean, filtered_cps_95CI)
             calibration_factor = concentration_calibration[channel]
             record[element] = filtered_cps_mean * calibration_factor
             record[element + '_95CI'] = filtered_cps_95CI * calibration_factor

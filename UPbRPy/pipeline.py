@@ -678,7 +678,13 @@ class ReductionPipeline:
         unknowns = normalized[
             ~normalized["sample"].isin(active_standards)
         ].reset_index(drop=True)
-        concentrations = calc_concentration(unknowns, calibration)
+        # This cache belongs to this normalization result. Export can reuse
+        # unscaled statistics even when it fits different Pb isotope factors.
+        self._concentration_statistics_cache = {}
+        concentrations = calc_concentration(
+            unknowns, calibration,
+            statistics_cache=self._concentration_statistics_cache,
+        )
         result = {
             "calibration": calibration,
             "calibration_plot": plot,

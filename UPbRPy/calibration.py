@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Callable
 
 import numpy as np
@@ -330,6 +331,40 @@ class CalibrationModel:
         return float(np.nanmin(self.x)), float(np.nanmax(self.x))
 
 
+def _predict_function(values, *, function, parameters):
+    return function(values, *parameters)
+
+
+def _predict_constant(values, *, value):
+    return np.full_like(np.asarray(values, dtype=float), value, dtype=float)
+
+
+def _predict_polynomial(values, *, parameters):
+    return np.polyval(parameters, values)
+
+
+def _predict_exponential(values, *, parameters, origin):
+    return _exponential(np.asarray(values, dtype=float) - origin, *parameters)
+
+
+def _predict_log_model(values, *, fitted):
+    return np.exp(fitted(values))
+
+
+def _bound_predictor(expression, *, log_space=False, **parameters):
+    """Bind a picklable predictor while retaining its diagnostic name.
+
+    Existing result snapshots identify these callables by their former lambda
+    name. The partial itself is pickled through the module-level function.
+    """
+    predictor = partial(expression, **parameters)
+    predictor.__module__ = __name__
+    predictor.__name__ = "<lambda>"
+    owner = "fit_multiplicative_calibration_model" if log_space else "fit_calibration_model"
+    predictor.__qualname__ = f"{owner}.<locals>.<lambda>"
+    return predictor
+
+
 def _prepare_xy(x, y, weights=None):
     """Validate, filter, and sort paired one-dimensional calibration observations."""
     x = np.asarray(x, dtype=float)
@@ -458,7 +493,7 @@ def fit_calibration_model(
                     method, x, y, p0=p0, bounds=bounds, sigma=sigma,
                     absolute_sigma=False, maxfev=100000,
                 )
-                predictor = lambda values, f=method, p=parameters: f(values, *p)
+                predictor = _bound_predictor(_predict_function, function=method, parameters=parameters)
                 parameter_count = len(parameters)
         else:
             sigma = None if weights is None else 1 / weights
@@ -466,7 +501,7 @@ def fit_calibration_model(
                 method, x, y, p0=p0, bounds=bounds, sigma=sigma,
                 absolute_sigma=False, maxfev=100000,
             )
-            predictor = lambda values, f=method, p=parameters: f(values, *p)
+            predictor = _bound_predictor(_predict_function, function=method, parameters=parameters)
             parameter_count = len(parameters)
     else:
         method_name = str(method).strip().lower().replace("-", "_").replace(" ", "_")
@@ -485,9 +520,7 @@ def fit_calibration_model(
 
         if method_name == "mean":
             parameters = np.array([np.average(y, weights=weights)], dtype=float)
-            predictor = lambda values, value=parameters[0]: np.full_like(
-                np.asarray(values, dtype=float), value, dtype=float
-            )
+            predictor = _bound_predictor(_predict_constant, value=parameters[0])
             parameter_count = 1
         elif method_name == "interpolate":
             if x.size < 2:
@@ -501,7 +534,7 @@ def fit_calibration_model(
             if fit_degree < 0 or x.size <= fit_degree:
                 raise ValueError("Polynomial degree must be nonnegative and smaller than the observation count.")
             parameters = np.polyfit(x, y, fit_degree, w=weights)
-            predictor = lambda values, p=parameters: np.polyval(p, values)
+            predictor = _bound_predictor(_predict_polynomial, parameters=parameters)
             parameter_count = len(parameters)
             settings["degree"] = fit_degree
         elif method_name == "orthogonal_polynomial":
@@ -540,8 +573,8 @@ def fit_calibration_model(
                 _exponential, shifted_x, y, p0=p0, bounds=bounds, sigma=sigma,
                 absolute_sigma=False, maxfev=100000,
             )
-            predictor = lambda values, p=parameters, origin=x_origin: _exponential(
-                np.asarray(values, dtype=float) - origin, *p
+            predictor = _bound_predictor(
+                _predict_exponential, parameters=parameters, origin=x_origin,
             )
             parameter_count = len(parameters)
             settings["x_origin"] = x_origin
@@ -674,7 +707,7 @@ def fit_multiplicative_calibration_model(
         weights=log_weights,
         **model_kwargs,
     )
-    predictor = lambda values, fitted=log_model: np.exp(fitted(values))
+    predictor = _bound_predictor(_predict_log_model, log_space=True, fitted=log_model)
     fitted_factors = predictor(x_array[valid])
     factor_residuals = factor_array[valid] - fitted_factors
     residual_standard_deviation = float(
