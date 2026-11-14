@@ -171,6 +171,7 @@ def test_bootstrap_agrees_with_analytical_uncertainty():
                                                                       abs=0.3 * fit.lower.sigma_ma)
 
 
+@pytest.mark.slow
 def test_overdispersion_models():
     data = tw_mixtures(60, seed=5, dispersion_ma=60.0, rel=(0.01, 0.006))
     m1 = fit_discordia(*data, space="tera_wasserburg", model=1)

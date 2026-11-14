@@ -80,3 +80,7 @@ UPbRPy = ["standards_v2.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "slow: individual tests taking more than about 20 s; excluded from QUICK unless their file changed",
+  "isolated: wall-clock latency assertions; run this file alone after parallel chunks finish",
+]

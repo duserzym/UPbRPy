@@ -69,6 +69,7 @@ def test_busy_indicator_reduced_motion(app, monkeypatch):
         indicator.close()
 
 
+@pytest.mark.isolated
 def test_background_restore_frame_gaps(app, fixture_project, monkeypatch):
     from GUI import main_window
 

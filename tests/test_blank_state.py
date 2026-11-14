@@ -82,6 +82,7 @@ def assert_blank(window):
             assert action.toolTip() == "Load a session first"
 
 
+@pytest.mark.isolated
 def test_blank_navigation_has_no_data_or_redraw(window, app, monkeypatch, capsys):
     reduction, shell = window
     assert_blank(reduction)

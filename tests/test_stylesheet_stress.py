@@ -109,6 +109,7 @@ def controller(app, monkeypatch):
     apply_theme(app, "light")
 
 
+@pytest.mark.slow
 def test_theme_switches_with_loaded_and_deferred_deleted_tabs(controller, app):
     shell = controller.create_window(show=False)
     shell.resize(1280, 800)
