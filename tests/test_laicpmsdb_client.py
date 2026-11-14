@@ -139,8 +139,10 @@ def test_fetch_errors_are_typed(fake, tokens, tmp_path):
     with pytest.raises(db.PermissionDenied, match="not your session"):
         db.fetch_session_bundle(fake.url, SESSION_ID, tmp_path)
     fake.state.fail_next[r"/v1/sessions"] = (500, "boom")
-    with pytest.raises(db.ServerError, match="HTTP 500"):
+    with pytest.raises(db.ServerError, match="had a problem") as failed:
         db.list_sessions(fake.url)
+    assert failed.value.status == 500 and "boom" in failed.value.details
+    assert "boom" not in str(failed.value) and "HTTP" not in str(failed.value)
     with pytest.raises(db.ConnectionFailed, match="Cannot reach"):
         db.login("http://127.0.0.1:9", "a", "b")
 
@@ -224,3 +226,46 @@ def test_keyring_store_uses_service_upbrpy():
     finally:
         db.set_token_store(previous_store)
         keyring.set_keyring(previous_backend)
+
+
+class _Reply:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload
+        self.text = text if payload is None else json.dumps(payload)
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def test_error_replies_are_short_sentences_with_codes():
+    problems = [
+        {"kind": "spot", "id": "x", "label": "Z1", "code": "spot_outside_grain",
+         "reason": "Spot Z1 lies outside grain a/7.", "related": []},
+        {"kind": "spot", "id": "y", "label": "Z2", "code": "spot_outside_grain",
+         "reason": "Spot Z2 lies outside grain a/7.", "related": []},
+        {"kind": "grain", "id": "z", "label": "a/9", "code": "duplicate_label",
+         "reason": "Grain label a/9 is used twice.", "related": []},
+    ]
+    with pytest.raises(db.RequestRejected) as rejected:
+        db._raise_for(_Reply(422, {"detail": ["spot Z1 is outside grain a/7"] * 3,
+                                   "problems": problems, "code": "validation_failed"}),
+                      "https://lab.example", "sync")
+    text = str(rejected.value)
+    assert "Spot Z1 lies outside grain a/7.; Spot Z2" in text and text.endswith("and 1 more")
+    assert rejected.value.code == "validation_failed" and "https://" not in text
+    with pytest.raises(db.RequestRejected, match="3 items could not be synced"):
+        db._raise_for(_Reply(422, {"detail": ["a", "b", "c"], "message": "3 items could not be synced."}),
+                      "https://lab.example", "sync")
+    with pytest.raises(db.RequestRejected) as conflict:
+        db._raise_for(_Reply(409, {"detail": "This mount changed in another window.",
+                                   "code": "revision_conflict"}), "https://lab.example", "sync")
+    assert conflict.value.code == "revision_conflict"
+    with pytest.raises(db.ServerError) as html:
+        db._raise_for(_Reply(502, text="<html><body>Bad gateway</body></html>"),
+                      "https://lab.example", "list sessions")
+    assert "html" not in str(html.value) and "Bad gateway" in html.value.details
+    duplicated = [{"msg": "field required", "loc": ["body", "name"]}] * 2
+    assert db._detail(_Reply(422, {"detail": duplicated})) == "name: field required"

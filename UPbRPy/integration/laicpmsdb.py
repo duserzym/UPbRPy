@@ -57,10 +57,17 @@ READ_TIMEOUT = 300.0
 class DatabaseError(Exception):
     """A failure the GUI can show; ``str(error)`` is the message."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, status: int | None = None, code: str | None = None,
+        details: str = "",
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.status = status
+        # ``code`` is laicpmsdb's stable error code when it sent one;
+        # ``details`` keeps the raw reply for logs, never for the message.
+        self.code = code
+        self.details = details
 
     def __str__(self) -> str:
         return self.message
@@ -261,50 +268,82 @@ def is_signed_in(server: str) -> bool:
 
 
 # ------------------------------------------------------------- transport
-def _detail(response) -> str:
+_MAX_LISTED = 2
+
+
+def _summary(items: list) -> str:
+    """At most two problems in a sentence, then "and N more"; duplicates once."""
+    texts = []
+    for item in items:
+        if isinstance(item, Mapping):
+            text = str(item.get("reason") or item.get("msg") or "").strip()
+            location = item.get("loc")
+            if item.get("msg") and isinstance(location, (list, tuple)) and location:
+                text = f"{location[-1]}: {text}"
+        else:
+            text = str(item).strip()
+        if text and text not in texts:
+            texts.append(text)
+    if not texts:
+        return ""
+    shown = "; ".join(texts[:_MAX_LISTED])
+    extra = len(texts) - _MAX_LISTED
+    return shown + (f"; and {extra} more" if extra > 0 else "")
+
+
+def _reply(response) -> tuple[str, str | None, str]:
+    """(short human detail, laicpmsdb error code, raw text for logs)."""
+    raw = (response.text or "").strip()[:2000]
     try:
         payload = response.json()
     except ValueError:
-        text = (response.text or "").strip()
-        return text[:300] if text and "<html" not in text[:200].lower() else ""
-    if isinstance(payload, Mapping):
-        detail = payload.get("detail") or payload.get("message") or payload.get("error")
-        if isinstance(detail, list):  # pydantic validation errors
-            return "; ".join(
-                str(item.get("msg", item)) if isinstance(item, Mapping) else str(item)
-                for item in detail
-            )
-        if detail:
-            return str(detail)
-    return ""
+        return "", None, raw
+    if not isinstance(payload, Mapping):
+        return "", None, raw
+    code = payload.get("code") if isinstance(payload.get("code"), str) else None
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip(), code, raw
+    detail = payload.get("detail") or payload.get("error")
+    if isinstance(detail, list):
+        problems = payload.get("problems")
+        return _summary(problems if isinstance(problems, list) and problems else detail), code, raw
+    if isinstance(detail, str):
+        return detail.strip(), code, raw
+    return "", code, raw
+
+
+def _detail(response) -> str:
+    return _reply(response)[0]
+
+
+def _host(server: str) -> str:
+    return urlsplit(server).netloc or server
 
 
 def _raise_for(response, server: str, action: str) -> None:
     status = response.status_code
     if status < 400:
         return
-    detail = _detail(response)
+    detail, code, raw = _reply(response)
+    extra = {"status": status, "code": code, "details": raw}
+    host = _host(server)
     suffix = f": {detail}" if detail else "."
     if status == 401:
         forget_token(server)
         raise AuthenticationRequired(
-            f"Sign in to {server} to {action}" + (f" ({detail})." if detail else "."),
-            status=status,
+            f"Sign in to {host} again to {action}" + (f" ({detail})." if detail else "."), **extra
         )
     if status == 403:
-        raise PermissionDenied(
-            f"Your account may not {action} on {server}{suffix}", status=status
-        )
+        raise PermissionDenied(f"Your account may not {action} on {host}{suffix}", **extra)
     if status == 404:
-        raise NotFound(
-            f"Not found on {server} (or not shared with you){suffix}", status=status
-        )
+        raise NotFound(f"Not found on {host}, or not shared with you{suffix}", **extra)
     if status in (400, 409, 413, 415, 422):
-        raise RequestRejected(
-            f"{server} refused to {action}{suffix}", status=status
-        )
+        raise RequestRejected(f"{host} did not accept the request to {action}{suffix}", **extra)
     raise ServerError(
-        f"{server} failed to {action} (HTTP {status}){suffix}", status=status
+        f"{host} had a problem while trying to {action}. Try again in a minute; "
+        "if it keeps failing, tell the database administrator.",
+        **extra,
     )
 
 
