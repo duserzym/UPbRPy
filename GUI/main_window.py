@@ -65,6 +65,7 @@ from GUI.services import (
     unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
+from GUI.database_panel import DatabasePanel, SUBMIT_STEP, is_submit_step
 from GUI.export_dialog import ExportResultsDialog
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
@@ -1044,6 +1045,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_workflow_step_locks()
         row = self.workflow_step_list.currentRow()
         candidate = row + offset
+        # The strip can reach Submit before the last scientific stage unlocks.
+        if is_submit_step(self) and offset < 0:
+            while candidate >= 0 and not (
+                self.workflow_step_list.item(candidate).flags() & QtCore.Qt.ItemFlag.ItemIsEnabled
+            ):
+                candidate -= 1
         if 0 <= candidate < self.workflow_step_list.count():
             item = self.workflow_step_list.item(candidate)
             if item.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled:
@@ -2316,14 +2323,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return block, tuple(buttons)
 
     def _sync_database_button_visibility(self) -> None:
-        """Offer database controls only at final review of a database session."""
+        """Replace the old panel controls with the database strip and page."""
         if not hasattr(self, "workflow_step_list"):
             return
-        visible = bool(self.session.origin) and self.current_workflow_stage() == PipelineStage.FINALIZE
         for name in ("step_database_block", "results_database_block"):
             block = getattr(self, name, None)
             if block is not None:
-                block.setVisible(visible)
+                block.hide()
+        if hasattr(self, "database_panel"):
+            self.database_panel.refresh()
 
     def _plot_control_kind(self) -> str:
         return self._interaction_view_kind() if hasattr(self, "session") else "plots"
@@ -2503,6 +2511,9 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
         plot_layout.setContentsMargins(10, 8, 10, 10)
         plot_layout.setSpacing(4)
+        # Database state stays above the plot modes, including on the Submit page.
+        self.database_panel = DatabasePanel(self)
+        plot_layout.addWidget(self.database_panel.strip)
         mode_bar = SegmentedBar()
         self.stage_segment_bar = mode_bar
         mode_bar.setObjectName("StageSegmentBar")
@@ -2642,6 +2653,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_table.includedSpotsChanged.connect(self._tree_sync_timer.start)
         self.plots_stack.addWidget(self.bias_plot)            # index 5
         plot_layout.addWidget(self.plots_stack)
+        self._database_plot_widgets = (mode_scroll, self.plots_stack)
+        plot_layout.addWidget(self.database_panel, 1)
 
         # ── Control bar below both plots ───────────────────────────────────
         control_bar = QtWidgets.QFrame()
@@ -4766,12 +4779,14 @@ class MainWindow(QtWidgets.QMainWindow):
             suffix += f" — database {host}"
         self.setWindowTitle(f"UPbRPy Studio{suffix}")
         if hasattr(self, "database_origin_label"):
-            from GUI.database import origin_summary
+            from GUI.database import database_availability, origin_summary
 
             text, tooltip = origin_summary(origin)
             self.database_origin_label.setText(text)
             self.database_origin_label.setToolTip(tooltip)
-            self.database_origin_label.setVisible(bool(text))
+            self.database_origin_label.setVisible(
+                bool(text) and not (self.session.loaded and database_availability()[0])
+            )
         self._update_database_actions()
         self.title_changed.emit(label)
 
@@ -5334,6 +5349,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 item.setSizeHint(QtCore.QSize(0, 45))
                 self.workflow_step_list.addItem(item)
+            from GUI.database import database_availability
+
+            if database_availability()[0]:
+                item = QtWidgets.QListWidgetItem(
+                    build_workflow_stage_icon(
+                        PipelineStage.FINALIZE.value, state="ready", accent=theme.accent,
+                        muted=theme.muted, success=theme.success,
+                    ),
+                    f"{len(self.workflow_preset.steps) + 1}  Submit to database"
+                )
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, SUBMIT_STEP)
+                item.setToolTip("Link a database session, check results and submit a reduction.")
+                item.setSizeHint(QtCore.QSize(0, 45))
+                self.workflow_step_list.addItem(item)
             if self.workflow_step_list.count() > 0:
                 self.workflow_step_list.setCurrentRow(0)
         finally:
@@ -5364,20 +5393,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workflow_step_list.setMaximumHeight(visible_height)
 
     def current_workflow_step_title(self) -> str | None:
+        if is_submit_step(self):
+            return "Submit to database"
         row = self.workflow_step_list.currentRow()
         if row < 0 or row >= len(self.workflow_preset.steps):
             return None
         return self.workflow_preset.steps[row].title
 
     def current_workflow_stage(self) -> PipelineStage | None:
-        """Return the explicit core stage represented by the selected step."""
+        """Return the core stage, using FINALIZE for the GUI-only Submit page.
+
+        Saving on that page resumes at final review; selecting it runs no stage.
+        """
+        if is_submit_step(self):
+            return PipelineStage.FINALIZE
         row = self.workflow_step_list.currentRow()
         if row < 0 or row >= len(self.workflow_preset.stage_sequence):
             return None
         return self.workflow_preset.stage_sequence[row]
 
     def _update_workflow_hint(self, row: int) -> None:
-        if row < 0 or row >= len(self.workflow_preset.steps):
+        if is_submit_step(self):
+            self.step_actions_title.setText(f"{row + 1} · Submit to database")
+            self.workflow_hint_body.setText("Link, check and submit using the database page.")
+        elif row < 0 or row >= len(self.workflow_preset.steps):
             self.step_actions_title.setText("")
             self.workflow_hint_body.setText("")
         else:
@@ -5620,6 +5659,15 @@ class MainWindow(QtWidgets.QMainWindow):
         card change took up to 1.3 s with 283 analyses.
         """
         if self._is_populating:
+            return
+        if is_submit_step(self):
+            if not self.workflow_step_list.currentItem().flags() & QtCore.Qt.ItemFlag.ItemIsEnabled:
+                with QtCore.QSignalBlocker(self.workflow_step_list):
+                    self.workflow_step_list.setCurrentRow(max(0, row - 1))
+                return
+            # Navigation must not flush edits, recalculate a stage or redraw plots.
+            self._update_workflow_hint(row)
+            self._rebuild_workflow_actions()
             return
         self.flush_selection_edits()
         self._update_workflow_hint(row)
@@ -7034,11 +7082,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not has_next:
             tooltip = "This is the last step."
         elif ready:
-            tooltip = f"Go to {next_row + 1} {WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]}"
+            target = ("Submit to database" if next_row == len(self.workflow_preset.stage_sequence)
+                      else WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]])
+            tooltip = f"Go to {next_row + 1} {target}"
         else:
-            label = self._workflow_action_specs()[0][0]
-            target = WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]
-            tooltip = f"Run '{label}' first to unlock {next_row + 1} {target}"
+            if next_row == len(self.workflow_preset.stage_sequence):
+                tooltip = "Load a session with database mode available to submit."
+            else:
+                label = self._workflow_action_specs()[0][0]
+                target = WORKFLOW_STAGE_LABELS[self.workflow_preset.stage_sequence[next_row]]
+                tooltip = f"Run '{label}' first to unlock {next_row + 1} {target}"
         next_keys = self._shortcut_text(["Ctrl+]"])
         back_keys = self._shortcut_text(["Ctrl+["])
         self.step_next_button.setToolTip(f"{tooltip} ({next_keys})")
@@ -7059,6 +7112,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ))
 
     def _workflow_action_specs(self) -> list[tuple[str, object, bool]]:
+        if is_submit_step(self):
+            return []
         if not self.session.loaded:
             return [("Import Rich CSV…", self.import_rich_csv, True),
                     ("Import folder…", self.choose_experiment_directory, False)]
@@ -7189,9 +7244,17 @@ class MainWindow(QtWidgets.QMainWindow):
         unlocked_rows = unlocked_workflow_rows(
             self.workflow_preset.stage_sequence, completed, self.session.loaded,
         )
+        from GUI.database import database_availability
+
+        submit_enabled = self.session.loaded and database_availability()[0]
+        if self.workflow_step_list.count() > len(self.workflow_preset.stage_sequence):
+            unlocked_rows = [*unlocked_rows, submit_enabled]
         for index in range(self.workflow_step_list.count()):
             item = self.workflow_step_list.item(index)
             if index >= len(self.workflow_preset.stage_sequence):
+                flags = QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled
+                item.setFlags(flags if submit_enabled else QtCore.Qt.ItemFlag.NoItemFlags)
+                item.setForeground(accent_color if submit_enabled else muted_color)
                 continue
             stage = self.workflow_preset.stage_sequence[index]
             is_done = stage in completed

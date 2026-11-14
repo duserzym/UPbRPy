@@ -55,19 +55,15 @@ def panel_buttons(window):
 
 
 def test_buttons_only_at_database_final_review(window):
-    set_stage(window, PipelineStage.FINALIZE)
-    assert all(not button.isVisibleTo(window) for button in panel_buttons(window))
-    database_review(window)
-    window.inspector_tabs.setCurrentIndex(2)  # Results
-    assert all(button.isVisibleTo(window) for button in panel_buttons(window))
-    for stage in window.workflow_preset.stage_sequence:
-        if stage != PipelineStage.FINALIZE:
+    # The database status strip and the Submit to database step replaced these
+    # panel buttons (2026-11-13); they stay hidden at every stage.
+    for origin in (None, ORIGIN):
+        window.session.origin = dict(origin) if origin else None
+        window.update_project_window_title()
+        window.inspector_tabs.setCurrentIndex(2)  # Results
+        for stage in window.workflow_preset.stage_sequence:
             set_stage(window, stage)
             assert all(not button.isVisibleTo(window) for button in panel_buttons(window))
-    set_stage(window, PipelineStage.FINALIZE)
-    window.session.origin = None
-    window.update_project_window_title()
-    assert all(not button.isVisibleTo(window) for button in panel_buttons(window))
 
 
 @pytest.mark.parametrize("index", [0, 1], ids=["submit", "prefer"])
@@ -220,9 +216,9 @@ def test_database_review_panels_fit_laptop(window, app, size):
     window.inspector_tabs.setCurrentIndex(2)
     process(app)
     assert shell.size() == QtCore.QSize(*size)
-    assert all(button.isVisibleTo(window) for button in panel_buttons(window))
+    # The replaced panel buttons are hidden; the strip and Submit page have
+    # their own fit test (test_database_panel.py).
+    assert all(not button.isVisibleTo(window) for button in panel_buttons(window))
     assert not clipped_widgets(shell)
     scroll = window.inspector_tabs.currentWidget()
     assert scroll.horizontalScrollBar().maximum() == 0
-    for button in panel_buttons(window):
-        assert button.parentWidget().rect().contains(button.geometry())

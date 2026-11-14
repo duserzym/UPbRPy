@@ -57,6 +57,9 @@ class DatabaseLinks(QtCore.QObject):
     in and calls ``then()`` once a token is stored (set by the GUI layer).
     """
 
+    # Presentation-only events, keyed by session so other tabs ignore them.
+    operation_changed = QtCore.Signal(object, str, str, object)
+
     def __init__(
         self,
         *,
@@ -100,6 +103,27 @@ class DatabaseLinks(QtCore.QObject):
 
     def show_error(self, title: str, message: object) -> None:
         QtWidgets.QMessageBox.warning(self.parent_widget(), title, str(message))
+
+    def _operation_run(self, session, operation, function, on_success, *, title, on_failure):
+        """Observe a worker without changing its callbacks or retry policy."""
+        self.operation_changed.emit(session, operation, "working", None)
+
+        def done(result):
+            self.operation_changed.emit(session, operation, "idle", None)
+            on_success(result)
+
+        def failed(message):
+            self.operation_changed.emit(session, operation, "error", str(message))
+            on_failure(message)
+
+        self.run(function, done, title=title, on_failure=failed)
+
+    def _submit_export(self, session, export):
+        try:
+            return export()
+        except Exception as exc:
+            self.operation_changed.emit(session, "submit", "error", str(exc))
+            raise
 
     def remember_server(self, server: str) -> None:
         servers = [str(s) for s in (self.settings.value(SETTINGS_SERVERS, [], type=list) or [])]
@@ -426,7 +450,9 @@ class DatabaseLinks(QtCore.QObject):
                 return
             self.remember_server(server)
             if not sessions:
-                self.show_error(title, f"No sessions on {server} are visible to you.")
+                message = f"No sessions on {server} are visible to you."
+                self.operation_changed.emit(session, "link", "error", message)
+                self.show_error(title, message)
                 return
             dialog = SessionPickerDialog(sessions, server, window)
             keys = _session_key_candidates(window)
@@ -456,6 +482,7 @@ class DatabaseLinks(QtCore.QObject):
                 session.origin = dict(origin)
                 if session.pipeline is not None:
                     session.pipeline.origin = dict(origin)
+                self.operation_changed.emit(session, "link", "done", verification)
                 # Use Studio's normal save path, including pending user edits.
                 # An unnamed project stays modified until Save As is chosen.
                 window.update_project_window_title()
@@ -473,13 +500,13 @@ class DatabaseLinks(QtCore.QObject):
                 )
 
             def fetch() -> None:
-                self.run(verify, linked, title=title, on_failure=lambda message:
+                self._operation_run(session, "link", verify, linked, title=title, on_failure=lambda message:
                          self._retry_after_sign_in(server, fetch, title, message))
 
             fetch()
 
         def listing() -> None:
-            self.run(lambda: db.list_sessions(server), pick, title=title,
+            self._operation_run(session, "link", lambda: db.list_sessions(server), pick, title=title,
                      on_failure=lambda message:
                      self._retry_after_sign_in(server, listing, title, message))
 
@@ -493,6 +520,7 @@ class DatabaseLinks(QtCore.QObject):
             return
         origin = dict(window.session.origin or {})
         if not window.session.loaded or not origin:
+            self.operation_changed.emit(window.session, "submit", "error", ORIGIN_REQUIRED)
             self.show_error(title, ORIGIN_REQUIRED)
             return
         label = origin.get("session_key") or origin["session_id"]
@@ -516,6 +544,7 @@ class DatabaseLinks(QtCore.QObject):
             window.apply_pending_project_edits()
             pipeline = ensure_shared_pipeline(window.session, window.workflow_preset)
         except Exception as exc:
+            self.operation_changed.emit(window.session, "submit", "error", str(exc))
             self.show_error(title, exc)
             return
         workspace = window.project_workspace_state()
@@ -543,7 +572,8 @@ class DatabaseLinks(QtCore.QObject):
         server, session_id = origin["server"], origin["session_id"]
 
         def upload(_folder=None) -> None:
-            self.run(
+            self._operation_run(
+                session, "submit",
                 lambda: db.submit_reduction(
                     server, session_id, folder, supersedes=origin.get("run_id")
                 ),
@@ -555,14 +585,19 @@ class DatabaseLinks(QtCore.QObject):
             )
 
         def exported(_folder) -> None:
+            self.operation_changed.emit(session, "submit", "idle", None)
             window.append_log(f"Reduction bundle for the database written to {folder}.")
             self._authorize(server, "", upload, title)
 
-        window.run_background("Exporting the reduction bundle for the database", export, exported)
+        if getattr(window, "_active_worker", None) is None:
+            self.operation_changed.emit(session, "submit", "working", None)
+        window.run_background("Exporting the reduction bundle for the database",
+                              lambda: self._submit_export(session, export), exported)
 
     def _submitted(self, window, result, scratch: Path) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
         record_run_id(window, result.run_id)
+        self.operation_changed.emit(window.session, "submit", "done", result)
         counts = ", ".join(f"{k}: {v}" for k, v in result.counts.items()) or "none reported"
         held = result.quarantine_items
         window.append_log(f"Submitted to the database as run {result.run_id} ({counts}).")
@@ -603,6 +638,7 @@ class DatabaseLinks(QtCore.QObject):
             return
         origin = dict(window.session.origin or {})
         if not origin.get("run_id"):
+            self.operation_changed.emit(window.session, "prefer", "error", RUN_REQUIRED)
             self.show_error(title, RUN_REQUIRED)
             return
         server, session_id, run_id = origin["server"], origin["session_id"], origin["run_id"]
@@ -615,9 +651,11 @@ class DatabaseLinks(QtCore.QObject):
         ) != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         db = client()
+        session = window.session
 
         def call() -> None:
-            self.run(
+            self._operation_run(
+                session, "prefer",
                 lambda: db.prefer_run(server, session_id, run_id),
                 lambda _r: self._preferred(window, run_id),
                 title=title,
@@ -627,6 +665,7 @@ class DatabaseLinks(QtCore.QObject):
         self._authorize(server, "", call, title)
 
     def _preferred(self, window, run_id: str) -> None:
+        self.operation_changed.emit(window.session, "prefer", "done", run_id)
         window.append_log(f"Run {run_id} is now the preferred run of its session.")
         origin = window.session.origin
         label = origin.get("session_key") or origin["session_id"]
