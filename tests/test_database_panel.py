@@ -343,7 +343,7 @@ def test_submit_cancel_failure_retry_and_prefer_use_unchanged_flows(window, dial
     panel.submit.primary.click()
     upload.assert_not_called()
     export.assert_not_called()
-    assert "supersede run run-previous" in question.call_args.args[2]
+    assert "supersede the run this reduction submitted earlier (id run-prev" in question.call_args.args[2]
     question.return_value = QtWidgets.QMessageBox.StandardButton.Yes
     panel.submit.primary.click()
     assert panel.submit.status.text() == "failed"

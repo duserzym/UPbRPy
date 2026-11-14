@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from urllib.parse import urlsplit
 
 pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
@@ -141,9 +142,12 @@ def test_confirmation_cancel_then_yes(window, dialogs, monkeypatch, panel, use_k
     label = origin.get("session_key") or origin["session_id"]
     if operation == "submit":
         expected = (f"Submit this reduction to session {label} on {origin['server']} as a new run?"
-                    f"\n\nIt will supersede run {origin['run_id']}.")
+                    "\n\nIt will supersede the run this reduction submitted earlier "
+                    f"(id {origin['run_id'][:8]}).")
     else:
-        expected = f"Make run {origin['run_id']} the preferred run of session {label} on {origin['server']}?"
+        host = urlsplit(origin["server"]).netloc or origin["server"]
+        expected = (f"Make the run this reduction submitted (id {origin['run_id'][:8]}) the preferred run "
+                    f"of session {label} on {host}?")
     assert questions == [expected]
     answer = QtWidgets.QMessageBox.StandardButton.Yes
     button.click()
@@ -170,12 +174,12 @@ def test_submitted_and_preferred_status_name_session(window, dialogs, tmp_path, 
     result = SimpleNamespace(run_id="run-created", counts={"spots": 3}, quarantine_items=[])
     window.database()._submitted(window, result, scratch)
     label = origin.get("session_key") or origin["session_id"]
-    assert window.statusBar().currentMessage() == f"Submitted to {label} as run run-created."
+    assert window.statusBar().currentMessage() == f"Submitted to {label} as a new run."
     assert window.session.origin["run_id"] == "run-created"
     assert not scratch.exists()
-    assert any(kind == "box" and "run-created" in text for kind, title, text in dialogs)
+    assert any(kind == "box" and "id run-crea" in text for kind, title, text in dialogs)
     window.database()._preferred(window, "run-created")
-    assert window.statusBar().currentMessage() == f"Run run-created marked as preferred for session {label}."
+    assert window.statusBar().currentMessage() == f"The submitted run is now preferred for session {label}."
 
 
 def test_submit_shortcut_is_unique_and_routes_to_active_tab(window, app, monkeypatch):

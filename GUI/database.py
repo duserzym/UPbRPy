@@ -311,7 +311,8 @@ class DatabaseLinks(QtCore.QObject):
         if not server:
             self.show_error(
                 title,
-                f"Run {run_id} is not in the local cache and the link names no server.",
+                f"This run ({short_id(run_id)}) is not in the local cache and the link "
+                "names no server.",
             )
             return
         if not self.require_available(title):
@@ -528,7 +529,10 @@ class DatabaseLinks(QtCore.QObject):
             f"Submit this reduction to session {label} on {origin['server']} as a new run?"
         )
         if origin.get("run_id"):
-            question += f"\n\nIt will supersede run {origin['run_id']}."
+            question += (
+                "\n\nIt will supersede the run this reduction submitted earlier "
+                f"({short_id(origin['run_id'])})."
+            )
         if QtWidgets.QMessageBox.question(
             window, title, question,
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
@@ -603,14 +607,14 @@ class DatabaseLinks(QtCore.QObject):
         window.append_log(f"Submitted to the database as run {result.run_id} ({counts}).")
         origin = window.session.origin
         label = origin.get("session_key") or origin["session_id"]
-        window.statusBar().showMessage(f"Submitted to {label} as run {result.run_id}.")
+        window.statusBar().showMessage(f"Submitted to {label} as a new run.")
         box = QtWidgets.QMessageBox(window)
         box.setIcon(
             QtWidgets.QMessageBox.Icon.Warning if held else QtWidgets.QMessageBox.Icon.Information
         )
         box.setWindowTitle("Submitted to database")
         box.setText(
-            f"Run {result.run_id} was created.\n\nCounts: {counts}.\n"
+            f"A new run of {label} was created ({short_id(result.run_id)}).\n\nCounts: {counts}.\n"
             + (
                 f"{len(held)} item(s) were held in quarantine (see details)."
                 if held
@@ -645,7 +649,8 @@ class DatabaseLinks(QtCore.QObject):
         label = origin.get("session_key") or session_id
         if QtWidgets.QMessageBox.question(
             window, title,
-            f"Make run {run_id} the preferred run of session {label} on {server}?",
+            f"Make the run this reduction submitted ({short_id(run_id)}) the preferred run "
+            f"of session {label} on {urlsplit(server).netloc or server}?",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
             QtWidgets.QMessageBox.StandardButton.Cancel,
         ) != QtWidgets.QMessageBox.StandardButton.Yes:
@@ -669,9 +674,11 @@ class DatabaseLinks(QtCore.QObject):
         window.append_log(f"Run {run_id} is now the preferred run of its session.")
         origin = window.session.origin
         label = origin.get("session_key") or origin["session_id"]
-        window.statusBar().showMessage(f"Run {run_id} marked as preferred for session {label}.")
+        window.statusBar().showMessage(f"The submitted run is now preferred for session {label}.")
         QtWidgets.QMessageBox.information(
-            window, "Mark as preferred", f"Run {run_id} is now the session's preferred run."
+            window, "Mark as preferred",
+            f"The run this reduction submitted ({short_id(run_id)}) is now the preferred run "
+            f"of session {label}.",
         )
 
 
@@ -844,6 +851,12 @@ def record_run_id(window, run_id: str) -> None:
         except (OSError, ValueError) as exc:
             window.append_log(f"Could not record run {run_id} in {window.project_path}: {exc}")
     window.update_project_window_title()
+
+
+def short_id(value: object) -> str:
+    """A run or session id as people can read it: "id 1a2b3c4d"."""
+    text = str(value or "")
+    return f"id {text[:8]}" if text else "no id"
 
 
 def origin_summary(origin: dict | None) -> tuple[str, str]:

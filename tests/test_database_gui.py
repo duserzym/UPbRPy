@@ -110,7 +110,8 @@ def test_standalone_window_has_no_origin_and_submit_disabled(controller):
     assert not window.submit_to_database_action.isEnabled()
     if gui_database.database_availability()[0]:
         assert window.open_from_database_action.isEnabled()
-        assert "did not come from a database" in window.submit_to_database_action.toolTip()
+        # An empty window has nothing to submit yet (c6af2a0 put this first).
+        assert window.submit_to_database_action.toolTip() == "Load a session first"
 
 
 def fake_export(pipeline, folder, **kwargs):
@@ -164,7 +165,7 @@ def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monke
             assert window.session.origin["run_id"] == "run-1"
             saved = json.loads(project.read_text())
             assert saved["origin"]["run_id"] == "run-1"
-            assert any(kind == "box" and "Run run-1" in text for kind, _t, text in dialogs)
+            assert any(kind == "box" and "(id run-1)" in text for kind, _t, text in dialogs)
             assert window.prefer_run_action.isEnabled()
 
             window.prefer_run_action.trigger()
