@@ -60,6 +60,8 @@ _autosave_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-autosave-")
 os.environ["UPBRPY_AUTOSAVE_DIR"] = _autosave_folder.name
 _results_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-results-")
 os.environ["UPBRPY_RESULTS_CACHE_DIR"] = _results_folder.name
+_lab_inbox_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-lab-inbox-")
+os.environ["UPBRPY_LAB_INBOX_DIR"] = _lab_inbox_folder.name
 # Windows start a background standards check that runs `git fetch` in the
 # shared checkout (~/UPbRPy/upb-standards). Tests must not reach the network or
 # write refs into the user's checkout, and a check still running when its

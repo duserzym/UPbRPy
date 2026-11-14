@@ -602,6 +602,7 @@ class DatabaseLinks(QtCore.QObject):
         shutil.rmtree(scratch, ignore_errors=True)
         record_run_id(window, result.run_id)
         self.operation_changed.emit(window.session, "submit", "done", result)
+        notify_lab(window, result.run_id)
         counts = ", ".join(f"{k}: {v}" for k, v in result.counts.items()) or "none reported"
         held = result.quarantine_items
         window.append_log(f"Submitted to the database as run {result.run_id} ({counts}).")
@@ -851,6 +852,17 @@ def record_run_id(window, run_id: str) -> None:
         except (OSError, ValueError) as exc:
             window.append_log(f"Could not record run {run_id} in {window.project_path}: {exc}")
     window.update_project_window_title()
+
+
+def notify_lab(window, run_id: str) -> None:
+    """Leave a run-submitted notice for UPb Lab; a failure is only logged."""
+    origin = window.session.origin or {}
+    try:
+        from GUI.lab_inbox import write_run_submitted
+
+        write_run_submitted(origin["session_id"], run_id, origin["server"])
+    except Exception as exc:  # noqa: BLE001 - the submit itself succeeded
+        window.append_log(f"Could not leave a notice for UPb Lab: {exc}")
 
 
 def short_id(value: object) -> str:
