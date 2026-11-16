@@ -1,5 +1,7 @@
 """Spot identity and scales in Studio's diagnostics."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -74,11 +76,13 @@ def test_trace_hover_spot_intervals_leave_gaps_unlabelled():
 def test_reopening_identical_reference_library_preserves_cached_archive(tmp_path, monkeypatch):
     monkeypatch.setattr(services, "_active_standard_archive", pd.DataFrame())
     monkeypatch.setattr(services, "_active_standard_archive_path", "")
-    path = tmp_path / "standards.csv"
-    path.write_text("sample,238U\nGlass1,400\n")
+    import shutil
+    path = tmp_path / "library"
+    shutil.copytree(Path(services.DEFAULT_REFERENCE_LIBRARY_PATH), path)
+    material = path / "zircon/S513.toml"
     archive = services.load_standard_archive_from_path(str(path))
     assert services.load_standard_archive_from_path(str(path)) is archive
-    path.write_text("sample,238U\nGlass1,410\n")
+    material.write_text(material.read_text().replace("value = 924,", "value = 925,"))
     updated = services.load_standard_archive_from_path(str(path))
     assert updated is not archive
-    assert updated.loc["Glass1", "238U"] == 410
+    assert updated.loc["S513", "238U"] == 925

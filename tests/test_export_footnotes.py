@@ -93,8 +93,8 @@ def test_missing_fields_settings_and_citations():
     assert "10.1111/j.1751-908X.2011.00120.x" in notes["standards"].text
     assert "10.1103/PhysRevC.4.1889" in notes["constants"].text
     assert "137.818 ± 0.045" in notes["constants"].text
-    assert "207Pb/206Pb (S513): not recorded" in notes["uncertainty"].text
-    assert "primary_reference_terms.207Pb/206Pb" in notes["uncertainty"].missing_fields
+    assert "207Pb/206Pb (S513): 0.0068 % (relative 1s)" in notes["uncertainty"].text
+    assert "primary_reference_terms.207Pb/206Pb" not in notes["uncertainty"].missing_fields
     assert "not recorded" in notes["corrections"].text  # Default manifest has no detector factors.
     assert "burn-through" in notes["notes"].text.lower()
     assert "High common Pb" not in notes["notes"].text
@@ -273,12 +273,12 @@ def test_compact_journal_prose_preserves_values_sources_and_clock(monkeypatch):
     notes = {n.id: n for n in build_footnotes(table, pipeline)}
     standards = notes['standards'].text
     assert standards.count('Primary standard S513') == 1
-    assert standards.count('Luo et al., 2025') == 1
+    assert standards.count('Luo, T., Qing, L.') == 1
     assert '206Pb/238U 0.090955 (561.18 Ma)' in standards
     assert '207Pb/235U 0.73873 (561.66 Ma)' in standards
-    assert '207Pb/206Pb 0.058932 (563.62 Ma)' in standards
-    assert '208Pb/232Th 0.028154 (561.18 Ma; UPbR26plus archive value, no DOI)' in standards
-    assert 'Concentration reference glasses NIST610 and NIST612 (Jochum et al., 2011' in standards
+    assert '207Pb/206Pb 0.058934 (563.68 Ma)' in standards
+    assert '208Pb/232Th 0.028154 (561.18 Ma)' in standards
+    assert 'Concentration reference glasses NIST610 and NIST612 (Jochum, K.P., Weis, U.' in standards
     assert standards.count('Jochum') == 1
     assert 'acquisition starts: 2026-11-04 15:55 to 16:20 (instrument clock)' in notes['session'].text
     assert notes['session'].text.count('2026-11-04') == 1

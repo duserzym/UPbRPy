@@ -35,7 +35,7 @@ def test_reference_summary_shows_two_accepted_systems(monkeypatch):
                                "7/6 WM ±2s", "7/6 accepted", "7/6 offset %"]
         row = frame.set_index("sample").loc["91500"]
         assert row["6/38 accepted"] == "1062.4"
-        assert row["7/6 accepted"] == "1065.7"
+        assert row["7/6 accepted"] == "1065.4"
         assert "±" in row["6/38 WM ±2s"] and "±" in row["7/6 WM ±2s"]
         assert widget.secondary_table.horizontalHeader().length() < 1000
         assert widget.minimumSizeHint().width() <= 1280

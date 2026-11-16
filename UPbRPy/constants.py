@@ -1,9 +1,5 @@
 """Physical constants and packaged reference-material data."""
 
-from importlib.resources import files
-
-import pandas as pd
-
 # Uranium isotope ratios
 common_U238_U235 = 137.818
 sigma_common_U238_U235 = 0.045 / 2
@@ -22,15 +18,6 @@ lambda_232 = 4.9475e-11
 # is explicitly enabled in an age calculation.
 sigma_232 = 0.042e-11 / 2
 
-# Retain the historical CSV archive as an explicit compatibility option. The
-# primary ``standard_archive`` is constructed from the TOML library in
-# :mod:`UPbRPy.standards`.
-standard_archive_legacy = pd.read_csv(
-    files(__package__) / "standards.csv",
-    index_col=0,
-)
-standard_archive_csv = standard_archive_legacy
-
 __all__ = [
     "common_U238_U235",
     "sigma_common_U238_U235",
@@ -41,6 +28,4 @@ __all__ = [
     "sigma_238",
     "lambda_232",
     "sigma_232",
-    "standard_archive_csv",
-    "standard_archive_legacy",
 ]

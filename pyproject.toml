@@ -64,7 +64,7 @@ include = ["UPbRPy*", "GUI*"]
 
 [tool.setuptools.package-data]
 UPbRPy = [
-  "standards.csv",
+  "reference_materials/LICENSE",
   "reference_materials/*.toml",
   "reference_materials/*/*.toml",
 ]

@@ -4151,10 +4151,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_reference_library_labels(self) -> None:
         current_path = self.reference_library_path or current_standard_archive_path()
-        self.reference_library_label.setText(f"Current library: {current_path}")
+        from GUI.standards_updates import library_revision
+
+        revision = library_revision(current_path)
+        identity = f" (revision {revision})" if revision else ""
+        self.reference_library_label.setText(f"Current library: {current_path}{identity}")
         self.reference_library_default_label.setText(f"Default library: {self.default_reference_library_path}")
         self.reference_library_button.setToolTip(
-            f"Current: {current_path}\n"
+            f"Current: {current_path}{identity}\n"
             f"Default: {self.default_reference_library_path}"
         )
 
@@ -4164,8 +4168,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             "Select reference material library",
             start_directory,
-            "UPbRPy libraries (library.toml *.csv);;"
-            "TOML manifest (library.toml);;Legacy CSV (*.csv)",
+            "TOML manifest (library.toml)",
         )
         if not file_path:
             return

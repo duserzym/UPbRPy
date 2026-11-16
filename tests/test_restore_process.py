@@ -159,8 +159,9 @@ def test_restore_transport_failure_falls_back(fixture_project, monkeypatch, capl
 
 
 def test_restore_parent_custom_archive(fixture_project, tmp_path):
-    library = tmp_path / "references.csv"
-    services.current_standard_archive().to_csv(library)
+    import shutil
+    library = tmp_path / "references"
+    shutil.copytree(services.DEFAULT_REFERENCE_LIBRARY_PATH, library)
     document = json.loads(fixture_project.read_text())
     document["paths"]["reference_library"] = str(library)
     fixture_project.write_text(json.dumps(document))

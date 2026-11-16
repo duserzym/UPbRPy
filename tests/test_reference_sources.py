@@ -97,12 +97,20 @@ EXPECTED = {
         "29Si": 151443.22960004435,
         "91Zr": 487760.24454904505,
         "177Hf": 8259.0,
+        "208Pb": 119.0,
+        "232Th": 89.6,
+        "238U": 924.0,
         "206Pb/204Pb_i": 17.81427985313352,
         "207Pb/204Pb_i": 15.576740129737942,
         "208Pb/204Pb_i": 37.59322277150352,
         "206Pb/238U*": 0.090955,
         "207Pb/235U*": 0.73873,
-        "208Pb/232Th*": 0.028153518284538936,
+        "207Pb/206Pb*": 0.058934,
+        "208Pb/232Th_age": 561.3,
+        "concordia_age": 561.18,
+        "UThHe_age": 420.3,
+        "176Hf/177Hf": 0.281606,
+        "d18O": 11.71,
         "206Pb/238U_age": 561.18,
     },
     "LTSE": {
@@ -125,7 +133,9 @@ def test_new_materials_load_exact_inputs_and_derive_redundant_ratios(standard):
     records = measurements.loc[measurements["standard"].eq(standard)]
     assert records.set_index("quantity")["value"].to_dict() == EXPECTED[standard]
     assert set(records["aliases"]) == ({"SLZC"} if standard == "LTSE" else {""})
-    published = {"206Pb/238U_age", "206Pb/238U*", "207Pb/235U*"} if standard == "LTSE" else set()
+    published = {"206Pb/238U_age", "206Pb/238U*", "207Pb/235U*"} if standard == "LTSE" else {
+        "206Pb/238U_age", "206Pb/238U*", "207Pb/235U*", "207Pb/206Pb*", "176Hf/177Hf",
+    }
     by_quantity = records.set_index("quantity")
     for quantity, status in by_quantity["status"].items():
         assert status == ("recommended" if quantity in published else "provisional"), quantity
@@ -134,8 +144,7 @@ def test_new_materials_load_exact_inputs_and_derive_redundant_ratios(standard):
     documented = UPbRPy.build_standard_archive(measurements, include_derived=False)
     row = archive.loc[standard]
     expected_derived = {
-        "207Pb/206Pb*": row["207Pb/235U*"] / row["206Pb/238U*"] / common_U238_U235,
-        "206Pb/207Pb*": row["206Pb/238U*"] * common_U238_U235 / row["207Pb/235U*"],
+        "206Pb/207Pb*": 1 / row["207Pb/206Pb*"],
         "238U/206Pb*": 1 / row["206Pb/238U*"],
         "204Pb/206Pb_i": 1 / row["206Pb/204Pb_i"],
         "204Pb/207Pb_i": 1 / row["207Pb/204Pb_i"],
@@ -144,6 +153,11 @@ def test_new_materials_load_exact_inputs_and_derive_redundant_ratios(standard):
         "207Pb/206Pb_i": row["207Pb/204Pb_i"] / row["206Pb/204Pb_i"],
         "206Pb/208Pb_i": row["206Pb/204Pb_i"] / row["208Pb/204Pb_i"],
     }
+    if standard == "LTSE":
+        expected_derived["207Pb/206Pb*"] = row["207Pb/235U*"] / row["206Pb/238U*"] / common_U238_U235
+    else:
+        assert row["207Pb/206Pb*"] == documented.loc[standard, "207Pb/206Pb*"] == 0.058934
+        expected_derived["208Pb/232Th*"] = 0.028153518284539
     for quantity, value in expected_derived.items():
         assert quantity not in set(records["quantity"])
         assert np.isnan(documented.loc[standard].get(quantity, np.nan))
@@ -154,14 +168,30 @@ def test_new_material_provenance_separates_published_and_archive_values():
     measurements = UPbRPy.load_standard_measurements()
     sources = measurements.attrs["sources"]
     s513 = measurements.loc[measurements["standard"].eq("S513")].set_index("quantity")
-    for quantity in ("177Hf", "206Pb/238U*", "207Pb/235U*", "206Pb/238U_age"):
+    published = set(EXPECTED["S513"]) - {
+        "29Si", "91Zr", "206Pb/204Pb_i", "207Pb/204Pb_i", "208Pb/204Pb_i",
+    }
+    for quantity in published:
         assert s513.loc[quantity, "source"] == sources["luo2025"]["display"]
-    assert s513.loc["208Pb/232Th*", "source"] == sources["boise_upbr26plus_2026"]["display"]
-    assert s513.loc["206Pb/238U_age", "uncertainty"] == 0.63
-    assert s513.loc["206Pb/238U_age", "uncertainty_type"] == "expanded_95"
+        assert s513.loc[quantity, "source_locator"] == "Abstract, p. 403"
+    assert sources["boise_upbr26plus_2026"]["display"] not in set(s513["source"])
+    assert "208Pb/232Th*" not in s513.index
+    assert s513.loc["concordia_age", "value"] == 561.18
+    assert "Concordance assumption" in s513.loc["concordia_age", "notes"]
+    expected_errors = {
+        "177Hf": (244, "2sd"), "208Pb": (5.20, "2sd"),
+        "232Th": (3.92, "2sd"), "238U": (64.6, "2sd"),
+        "206Pb/238U*": (0.000019, "2sd"), "207Pb/235U*": (0.00023, "2sd"),
+        "207Pb/206Pb*": (0.000008, "2sd"), "206Pb/238U_age": (0.63, "expanded_95"),
+        "208Pb/232Th_age": (3.3, "2sd"), "UThHe_age": (7.6, "2sd"),
+        "176Hf/177Hf": (0.000010, "2sd"), "d18O": (0.11, "2sd"),
+    }
+    for quantity, (uncertainty, convention) in expected_errors.items():
+        assert s513.loc[quantity, "uncertainty"] == uncertainty
+        assert s513.loc[quantity, "uncertainty_type"] == convention
     for quantity in ("206Pb/204Pb_i", "207Pb/204Pb_i", "208Pb/204Pb_i"):
         assert s513.loc[quantity, "source"] == sources["stacey1975"]["display"]
-        assert "rows labelled 206Pb/207Pb and 206Pb/208Pb" in s513.loc[quantity, "notes"]
+        assert "561.18 Ma" in s513.loc[quantity, "notes"]
     for standard in EXPECTED:
         rows = measurements.loc[measurements["standard"].eq(standard)]
         for quantity in ("29Si", "91Zr"):

@@ -41,8 +41,8 @@ def results(archive):
 
 def test_accepted_dates_are_system_specific(archive):
     dates = accepted_dates(archive, ["91500", "S513", "NIST610", "absent"])
-    np.testing.assert_allclose(dates.loc['91500'], [1062.44, 1063.50, 1065.68], atol=.01, rtol=0)
-    np.testing.assert_allclose(dates.loc['S513'], [561.18, 561.66, 563.62], atol=.01, rtol=0)
+    np.testing.assert_allclose(dates.loc['91500'], [1062.44, 1063.50, 1065.40], atol=.01, rtol=0)
+    np.testing.assert_allclose(dates.loc['S513'], [561.18, 561.66, 563.68], atol=.01, rtol=0)
     assert dates.loc['absent'].isna().all()
 
 

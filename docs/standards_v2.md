@@ -1,27 +1,32 @@
 # Reference-material library
 
-`UPbRPy/reference_materials/` is the package's primary, source-traceable
-reference-material library. The historical wide `UPbRPy/standards.csv`
-remains unchanged as a secondary compatibility archive:
+`UPbRPy/reference_materials/` bundles a pinned MIT-licensed snapshot of
+[upb-standards](https://github.com/duserzym/upb-standards), revision
+`47c15a5998db3ccf74a8886c6412ece16e66df20`. The wide CSV library and the
+`standard_archive_legacy` / `standard_archive_csv` exports have been removed.
 
 ```python
-from UPbRPy import (
-    standard_archive,
-    standard_archive_legacy,
-    standard_measurements,
-)
+from UPbRPy import standard_archive, standard_measurements
 ```
 
 Use `standard_archive` with calibration functions. It is the wide DataFrame
-built from the TOML records. Use the normalized `standard_measurements` table
-to inspect source values and metadata. `standard_archive_legacy` (also exposed
-as `standard_archive_csv`) loads the retained CSV. The former
-`standard_archive_v2` name remains only as a compatibility alias for
-`standard_archive`.
+built from TOML records. Use `standard_measurements` to inspect source values
+and metadata. `standard_archive_v2` remains an alias for `standard_archive`.
+`UPSTREAM.toml` records the revision, commit date, license, file list and
+hashes. `LICENSE` contains the upstream MIT text. Refresh using
+`.venv/bin/python scripts/sync_upb_standards.py ~/Github/upb-standards`
+(default: the pinned revision), or `--rev REV` for another commit. The script
+reads Git objects, ignoring working-tree edits. Review library changes in
+upb-standards before refreshing the snapshot.
+
+Studio can select a shared TOML library. **Check standards** uses
+`UPB_STANDARDS_DIR` or `~/UPbRPy/upb-standards`, compares against the recorded
+snapshot revision when available, and does not adopt changed values. The
+library tooltip shows the active revision.
 
 ## File organization
 
-The authoritative files are:
+The snapshot data files are:
 
 - `library.toml`: format version and stable material-file loading order.
 - `sources.toml`: shared publication citations, DOI values, and optional local
@@ -94,6 +99,9 @@ by the present fractionation API. Their notes identify this convention so they
 are not confused with pure radiogenic mineral ratios.
 
 ## Editing rules
+
+Make data edits in upb-standards, then refresh the committed snapshot here.
+For a separately selected local TOML library, the same format rules apply.
 
 1. Add or edit only documented source quantities. Do not add reciprocal or
    age-derived convenience ratios.
@@ -169,12 +177,10 @@ publication.
   `10.1111/j.1751-908X.2005.tb00891.x`, in the imported zircon Hf-isotope
   compilations.
 
-The legacy spreadsheets are migration history, not scientific provenance.
-Their filenames and cell addresses are intentionally absent. Values that
-could not be traced to a publication were removed; values associated with a
-publication but not yet checked number-for-number remain `provisional`.
+Unpublished lab archive values are marked provisional and identified in the
+source registry. Published values retain their source locators, uncertainty
+conventions and audit notes from upb-standards.
 
-The currently omitted legacy-only names are `Zirconia`, `MADJCU`, `MOA`,
-`MOM`, `TR1`, `TC`, `RTFT`, and `RC`. They remain available in the unchanged
-legacy `standards.csv`, but should return to the TOML library only with an
-identifiable publication and a value-level review.
+Legacy-only names `Zirconia`, `MADJCU`, `MOA`, `MOM`, `TR1`, `TC`, `RTFT`,
+and `RC` are not available. They should return only through an upstream
+record with identifiable provenance and a value-level review.

@@ -93,10 +93,12 @@ def test_sys_decomposition_order_notes_and_no_mutation():
     assert rows.loc["B_0", "206Pb_cps"] > 0
     assert rows.loc["B_0", "206Pb/204Pb_1s"] == 2
     ref = table.context["primary_reference_terms"]["206Pb/238U"]
-    assert ref["available"] and ref["quantity"] == "206Pb/238U_age"
-    relative = (.63 / 1.959963984540054) / relative_ratio_date_component(561.18, "206Pb/238U", 1.)
+    assert ref["available"] and ref["quantity"] == "206Pb/238U*"
+    relative = (0.000019 / 2) / 0.090955
     assert ref["relative_ratio_1s"] == pytest.approx(relative)
-    assert not table.context["primary_reference_terms"]["207Pb/206Pb"]["available"]
+    pb_reference = table.context["primary_reference_terms"]["207Pb/206Pb"]
+    assert pb_reference["available"] and pb_reference["quantity"] == "207Pb/206Pb*"
+    assert pb_reference["relative_ratio_1s"] == pytest.approx((0.000008 / 2) / 0.058934)
     physical = systematic_date_components(560., "206Pb/238U", pipeline.config.uncertainty)
     expected = np.sqrt(4.**2 + (2 * physical["decay_1s"])**2 + (2 * relative_ratio_date_component(560., "206Pb/238U", relative))**2)
     assert rows.loc["B_0", "206Pb/238U_age_2e_sys"] == pytest.approx(expected)

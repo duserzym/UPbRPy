@@ -265,11 +265,9 @@ class DependencyRecorder:
     def __enter__(self):
         # Include package resources read during import, before the audit scope.
         from GUI.services import DEFAULT_REFERENCE_LIBRARY_PATH
-        import UPbRPy
         reference = self.request.reference
         self._tree(reference.parent if reference.name == "library.toml" else reference)
         self._tree(DEFAULT_REFERENCE_LIBRARY_PATH)
-        self._record_file(Path(UPbRPy.__file__).parent / "standards.csv")
         folder = self.request.source if self.request.source.is_dir() else self.request.source.parent
         # stat/is_file probes do not emit open events. Track absence as well as
         # presence, so adding a manifest (or bundle raw folder) invalidates.

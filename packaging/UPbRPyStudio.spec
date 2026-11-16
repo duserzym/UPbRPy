@@ -20,10 +20,6 @@ APPLICATION_NAME = "UPbRPy Studio"
 
 data_files = [
     (
-        str(PROJECT_ROOT / "UPbRPy" / "standards.csv"),
-        "UPbRPy",
-    ),
-    (
         str(PROJECT_ROOT / "UPbRPy" / "reference_materials"),
         "UPbRPy/reference_materials",
     ),

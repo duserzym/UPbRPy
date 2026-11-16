@@ -22,7 +22,6 @@ from GUI.workflows import (
 )
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.concentration import resolve_element_concentration
-from UPbRPy.constants import standard_archive_legacy
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
 from UPbRPy.qtegra import QtegraSession, open_qtegra
@@ -52,9 +51,7 @@ from UPbRPy.uncertainty import UncertaintySettings, inverse_standard_deviation_w
 
 
 DEFAULT_REFERENCE_LIBRARY_PATH = str(files("UPbRPy") / "reference_materials")
-_active_standard_archive = standard_archive.combine_first(
-    standard_archive_legacy
-)
+_active_standard_archive = standard_archive
 _active_standard_archive_path = DEFAULT_REFERENCE_LIBRARY_PATH
 
 
@@ -603,20 +600,17 @@ def current_standard_archive_path() -> str:
 
 
 def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
-    """Load the primary TOML library or an explicitly selected legacy CSV."""
+    """Load a TOML library directory or manifest."""
     global _active_standard_archive
     global _active_standard_archive_path
 
     target_path = Path(path).expanduser().resolve() if path else Path(DEFAULT_REFERENCE_LIBRARY_PATH)
+    if target_path.suffix.lower() == ".csv":
+        raise ValueError("Select a TOML library directory or library.toml manifest.")
     if not path:
-        loaded_archive = standard_archive.combine_first(standard_archive_legacy)
-    elif target_path.suffix.lower() == ".csv":
-        loaded_archive = pd.read_csv(target_path, index_col=0)
+        loaded_archive = standard_archive
     else:
-        measurements = load_standard_measurements(target_path)
-        loaded_archive = build_standard_archive(measurements).combine_first(
-            standard_archive_legacy
-        )
+        loaded_archive = build_standard_archive(load_standard_measurements(target_path))
     # Other tabs may have cached reductions using the same archive. Keep
     # that identity when opening or restoring a tab with the same library.
     if (
@@ -694,7 +688,7 @@ def measured_reference_materials(samples: Iterable[str]) -> list[str]:
     from UPbRPy.standards import standard_archive
     from UPbRPy.standards import canonicalize_reference_material_samples
 
-    archive = standard_archive.combine_first(standard_archive_legacy)
+    archive = standard_archive
     names = [str(s) for s in samples]
     canonical = canonicalize_reference_material_samples(pd.DataFrame({"sample": names}), archive)["sample"]
     known = set(archive.index.astype(str))

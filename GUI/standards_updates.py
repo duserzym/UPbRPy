@@ -1,9 +1,11 @@
 """Check the shared standards checkout without adopting or editing values."""
 
 from dataclasses import dataclass
+from importlib.resources import files
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 
 from UPbRPy.standards import reference_library_info
 
@@ -35,10 +37,30 @@ def _git(path: Path, *args: str) -> str:
     ).stdout
 
 
+def library_revision(path: str | None) -> str:
+    """Return the snapshot revision or a shared checkout's HEAD and edit marker."""
+    try:
+        root = Path(path) if path else files("UPbRPy") / "reference_materials"
+        if root.name == "library.toml":
+            root = root.parent
+        metadata = root / "UPSTREAM.toml"
+        if metadata.is_file():
+            with metadata.open("rb") as stream:
+                return tomllib.load(stream)["commit"][:12]
+        if path is None:
+            return ""
+        revision = _git(root, "rev-parse", "HEAD").strip()
+        changed = _git(root, "status", "--porcelain", "--", "*.toml").strip()
+        return revision[:12] + (" (modified)" if changed else "")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
 def check_standards(active_path: str | None, checkout: Path) -> StandardsCheck:
     """Compare the active TOML library and shared checkout with GitHub main."""
     try:
-        digest = reference_library_info(active_path)["sha256"]
+        active_info = reference_library_info(active_path)
+        digest = active_info["sha256"]
     except (OSError, ValueError):
         return StandardsCheck("Warning: the active standards library could not be read.", True)
     if not (checkout / ".git").exists():
@@ -70,13 +92,29 @@ def check_standards(active_path: str | None, checkout: Path) -> StandardsCheck:
         return StandardsCheck("Warning: the shared standards checkout could not be compared.", True, digest)
 
     messages = []
+    snapshot_changed = False
+    if revision := active_info.get("revision"):
+        messages.append(f"Using upb-standards snapshot {revision[:12]}.")
+        if base != "HEAD":
+            messages.append(f"{'GitHub main' if online else 'Last checked revision'}: {base[:12]}.")
+        # Compare the pinned revision itself when its Git object is available.
+        # Documentation-only upstream commits do not require a data warning.
+        try:
+            newer = _git(checkout, "diff", "--name-only", revision, base,
+                         "--", "library.toml", "sources.toml", "*/*.toml").strip()
+        except (OSError, subprocess.SubprocessError):
+            newer = ""
+        snapshot_changed = bool(newer)
+        if snapshot_changed:
+            messages.append("Warning: standards data differs from the bundled snapshot revision.")
+
     if changed:
         target = "GitHub main" if online else (
             "the local Git revision" if base == "HEAD" else "the last checked GitHub revision")
         messages.append(f"Warning: {len(changed)} standards TOML file(s) differ from {target}.")
     if digest != shared_digest:
         messages.append("Warning: Studio's configured library on disk differs from the shared checkout.")
-    if not messages or not online:
+    if (not changed and digest == shared_digest and not snapshot_changed) or not online:
         messages.append(status)
-    return StandardsCheck(" ".join(messages), bool(changed) or digest != shared_digest,
+    return StandardsCheck(" ".join(messages), bool(changed) or digest != shared_digest or snapshot_changed,
                           digest, tuple(sorted(changed)))

@@ -1,14 +1,8 @@
 """Source-traceable reference-material measurements and derived archives.
 
-The historical :mod:`UPbRPy.constants` archive is a convenient wide table, but
-it mixes primary values with reciprocals and other calculated ratios. The
-primary library instead uses readable TOML files grouped by material,
-standard, and measurement type. This module expands and validates those source
-documents, then constructs a backwards-friendly wide view on demand.
-
-The TOML archive is the package's primary reference-material interface. The
-historical CSV remains available as ``standard_archive_legacy`` for comparison
-and migration work.
+The bundled TOML data is a pinned snapshot of duserzym/upb-standards.
+This module validates source documents and constructs a wide calibration
+view, deriving reciprocal and linked ratios only when no direct value exists.
 """
 
 from __future__ import annotations
@@ -426,7 +420,8 @@ def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
     legacy CSV). ``version`` is the
     manifest's optional ``version`` key, else ``format-<n>``, always followed
     by ``+sha256.<first 12 hex digits>`` so two edited copies of the same
-    nominal version stay distinguishable.
+    nominal version stay distinguishable. Snapshots also return ``repository``,
+    ``revision`` (the upstream commit) and ``commit_date`` from UPSTREAM.toml.
     """
     import hashlib
 
@@ -472,7 +467,13 @@ def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
             else f"format-{manifest.get('format_version', '?')}"
         )
     hexdigest = digest.hexdigest()
-    return {"version": f"{label}+sha256.{hexdigest[:12]}", "sha256": hexdigest}
+    info = {"version": f"{label}+sha256.{hexdigest[:12]}", "sha256": hexdigest}
+    if label != "legacy-csv" and (root / "UPSTREAM.toml").is_file():
+        upstream = _read_toml(root / "UPSTREAM.toml")
+        info["repository"] = upstream["repository"]
+        info["revision"] = upstream["commit"]
+        info["commit_date"] = upstream["commit_date"]
+    return info
 
 
 def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:

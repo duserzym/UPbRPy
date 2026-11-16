@@ -72,7 +72,8 @@ def test_packaged_archive_can_be_reloaded_and_is_in_public_api():
     assert UPbRPy.standard_archive is standard_archive
     assert UPbRPy.standard_archive_v2 is standard_archive_v2
     assert UPbRPy.standard_archive_v2 is UPbRPy.standard_archive
-    assert UPbRPy.standard_archive_legacy is UPbRPy.standard_archive_csv
+    assert not hasattr(UPbRPy, "standard_archive_legacy")
+    assert not hasattr(UPbRPy, "standard_archive_csv")
     assert UPbRPy.standard_sources is standard_sources
 
 
@@ -98,7 +99,7 @@ def test_toml_source_registry_is_resolved_and_preserved_as_metadata():
         source.get("kind") == "reduction_workbook"
         for source in standard_sources.values()
     )
-    assert standard_measurements["source_locator"].eq("").all()
+    assert standard_measurements["source_locator"].ne("").any()
 
 
 def test_packaged_toml_contains_publication_provenance_not_excel_locations():
@@ -109,7 +110,7 @@ def test_packaged_toml_contains_publication_provenance_not_excel_locations():
     )
     for legacy_marker in ("Instructions!", ".xlsm", "reduction_workbook"):
         assert legacy_marker not in library_text
-    assert "locator =" not in library_text
+    assert 'locator = "Abstract, p. 403"' in library_text
     # Lab compilations may name their workbook in the shared source registry.
     for source in standard_sources.values():
         if ".xlsm" in str(source):
@@ -169,12 +170,8 @@ def test_documented_ratios_take_precedence_over_age_derived_values():
     assert row["206Pb/238U*"] == 0.17917
     assert row["207Pb/235U*"] == 1.8502
     assert row["208Pb/232Th*"] == 0.05374
-    assert np.isclose(
-        row["207Pb/206Pb*"],
-        row["207Pb/235U*"]
-        / row["206Pb/238U*"]
-        / common_U238_U235,
-    )
+    # The upstream 207Pb/206Pb age takes precedence over the linked U-Pb ratios.
+    assert row["207Pb/206Pb*"] == 0.07491807081490459
 
     # PL reports a direct 207Pb/206Pb value whose published precision is not
     # exactly reproduced from the rounded companion ratios.
@@ -227,18 +224,18 @@ def test_rutile_literature_values_include_uncertainty_semantics():
 
 def test_apatite_id_tims_values_come_from_the_cited_publications():
     expected = {
-        "AFB1": (473.25, 0.09),
-        "BR5": (2040.34, 0.09),
-        "OL2": (868.87, 0.25),
-        "MADUCSB": (467.4, 8.4),
+        "AFB1": (473.25, 0.09, "expanded_95"),
+        "BR5": (2040.34, 0.09, "expanded_95"),
+        "OL2": (868.87, 0.25, "expanded_95"),
+        "MADUCSB": (467.4, 8.4, "2sd"),
     }
-    for standard, (age, uncertainty) in expected.items():
+    for standard, (age, uncertainty, convention) in expected.items():
         row = standard_measurements.query(
             "standard == @standard and quantity == 'concordia_age'"
         ).iloc[0]
         assert row["value"] == age
         assert row["uncertainty"] == uncertainty
-        assert row["uncertainty_type"] == "2sd"
+        assert row["uncertainty_type"] == convention
 
 
 def test_wide_archive_covers_concentration_and_ratio_calibration_interfaces():

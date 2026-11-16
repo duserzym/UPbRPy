@@ -237,7 +237,8 @@ def test_reproducibility_notebook_embeds_reviewed_selection():
     assert notebook["nbformat"] == 4
     assert '"baseline_start_times":1.25' in source
     assert "pipeline.run_depth_profile()" in source
-    assert "standard_archive_legacy" in source
-    assert ".combine_first(standard_archive_legacy)" in source
+    assert "standard_archive_legacy" not in source
+    assert "load_standard_measurements(reference_library_path)" in source
+    assert "archive = standard_archive" in source
     assert "include_concentrations=False" in source
     assert "include_depth_concentrations=False" in source

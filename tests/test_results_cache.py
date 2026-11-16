@@ -113,9 +113,11 @@ def test_same_mtime_raw_change_misses(seeded):
     assert cache.load(cache.prepare(request.project)) is None
 
 
-def test_reference_value_change_misses(fixture_project, cache_root, tmp_path):
-    library = tmp_path / "references.csv"
-    services.current_standard_archive().to_csv(library)
+@pytest.mark.parametrize("reference_file", ["zircon/S513.toml", "UPSTREAM.toml"])
+def test_reference_value_change_misses(fixture_project, cache_root, tmp_path, reference_file):
+    import shutil
+    library = tmp_path / "references"
+    shutil.copytree(services.DEFAULT_REFERENCE_LIBRARY_PATH, library)
     edit_document(fixture_project, lambda d: d["paths"].update(reference_library=str(library)))
     request = cache.prepare(fixture_project)
     try:
@@ -123,9 +125,11 @@ def test_reference_value_change_misses(fixture_project, cache_root, tmp_path):
             restored = services.restore_session_from_project(fixture_project)
         cache.store(request, pickle.dumps(restored, protocol=5), recorder.dependencies(restored))
         assert cache.load(request)
-        text = library.read_text()
-        library.write_text(text.replace("337.1", "337.2", 1) if "337.1" in text else text.replace("0.0", "0.1", 1))
-        assert library.read_text() != text
+        changed = library / reference_file
+        text = changed.read_text()
+        changed.write_text(text.replace("value = 924,", "value = 925,", 1)
+                           if reference_file.endswith("S513.toml") else text + "\n# Changed provenance\n")
+        assert changed.read_text() != text
         assert cache.load(cache.prepare(fixture_project)) is None
     finally:
         services.load_standard_archive_from_path(None)

@@ -7,7 +7,8 @@ icon: material/diamond-stone
 !!! abstract "In short"
     Reference materials (standards) are materials of known composition measured
     alongside the unknowns. UPbRPy keeps their accepted values, uncertainties and
-    literature sources in small plain-text TOML files, one per material. This page
+    literature sources in a pinned snapshot of [upb-standards](https://github.com/duserzym/upb-standards),
+    with small plain-text TOML files, one per material. This page
     describes those files and how values are combined.
 
 Implementation: [standards.py](https://github.com/duserzym/UPbRPy/blob/main/UPbRPy/standards.py).
@@ -23,6 +24,18 @@ directory, its `library.toml`, or a former normalized long-form CSV.
 `build_standard_archive(measurements=None, *, include_derived=True)`
 constructs the wide calibration table. The reference-library format version
 is **2**, independently of this data-model document's version.
+
+
+The bundled snapshot is revision `47c15a5998db3ccf74a8886c6412ece16e66df20`.
+`UPSTREAM.toml` records its repository, commit, commit date, MIT license,
+file list and SHA-256 hashes; `LICENSE` preserves the upstream license text.
+Refresh from committed Git objects with
+`.venv/bin/python scripts/sync_upb_standards.py ~/Github/upb-standards`
+(the default is the pinned revision), or select a new commit with `--rev REV`.
+Python packages and Studio ship the same snapshot. Studio's library tooltip
+shows its revision; **Check standards** uses `UPB_STANDARDS_DIR` or
+`~/UPbRPy/upb-standards` for the shared checkout without adopting values.
+A shared TOML library can still be selected explicitly in Studio.
 
 ## library.toml
 
@@ -127,16 +140,17 @@ measurement loader also rejects unknown resolved source IDs. No source-ID
 naming convention or online DOI lookup is enforced.
 
 `lab_compilation` denotes an unpublished laboratory compilation. The
-`boise_upbr26plus_2026` entry names the UPbR26plus spreadsheet dated
-2026-11-04 and carries `status = "provisional"` and a `no_doi_reason`.
-Its file label records provenance; the workbook is not bundled.
+`boise_upbr26plus_2026` entry identifies an unpublished UPbR26plus archive,
+with provisional status and a `no_doi_reason`; no workbook is bundled.
 
 S513 stores the published Th-corrected CA-ID-TIMS age as
-`206Pb/238U_age = 561.18` Ma (0.63 Ma, `expanded_95`), rather than labelling
-it a concordia age. Its two published U-Pb ratios and Hf concentration cite
-`luo2025`; the archive's 208Pb/232Th ratio has a separate provisional
-compilation record. The initial-Pb notes identify the archive's mislabelled
-ratio rows. LTSE is the SLZC megacryst of Hu et al. (2023) (alias `SLZC`,
+`206Pb/238U_age = 561.18` Ma (0.63 Ma, `expanded_95`). Its three radiogenic
+ratios, including `207Pb/206Pb* = 0.058934`, are recommended, citing
+`luo2025`. Its published U, Th, Pb and Hf concentrations are provisional.
+The provisional `concordia_age = 561.18` is an explicit concordance
+assumption used to derive `208Pb/232Th* = 0.028153518284539`; S513 no longer
+uses a Boise compilation source. Its initial Pb remains provisional
+Stacey–Kramers model Pb. LTSE is the SLZC megacryst of Hu et al. (2023) (alias `SLZC`,
 confirmed 2026-11-05): its reference age is the published
 `206Pb/238U_age = 560.83` Ma (1.29 Ma, `expanded_95`, status `recommended`,
 source `hu2023`). Its 206Pb/238U* (0.0908962) and 207Pb/235U* (0.738832)
