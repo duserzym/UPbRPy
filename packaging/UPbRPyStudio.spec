@@ -88,6 +88,13 @@ analysis = Analysis(
     optimize=1,
 )
 
+# An editable install records the builder's checkout path in
+# direct_url.json; a distributed app must not carry it.
+analysis.datas = [
+    entry for entry in analysis.datas
+    if not (entry[0].endswith("direct_url.json") and ".dist-info" in entry[0])
+]
+
 python_archive = PYZ(analysis.pure)
 
 executable = EXE(
