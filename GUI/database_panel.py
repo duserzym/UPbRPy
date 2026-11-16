@@ -137,7 +137,7 @@ class DatabasePanel(QtWidgets.QWidget):
     def open_run(self) -> None:
         run_id = (self.window.session.origin or {}).get("run_id")
         if run_id:
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"laicpmsdb://run/{run_id}"))
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"upbdb://run/{run_id}"))
 
     @QtCore.Slot(object, str, str, object)
     def operation_changed(self, session, operation, state, result) -> None:

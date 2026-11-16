@@ -37,7 +37,7 @@ def assert_corrected_tree(window):
     corrected = items["KD27_4"]
     assert corrected.text(0) == "KD27_4 · DB"
     assert corrected.parent().text(0) == "SMP2"
-    assert corrected.toolTip(0) == "KD27_4\nSample SMP2 from laicpmsdb (label sample KD27)"
+    assert corrected.toolTip(0) == "KD27_4\nSample SMP2 from UPbDB (label sample KD27)"
     for label in ("AFB_3", "MAD_UCSB_2", "NIST612_1"):
         assert items[label].text(0) == label
         assert items[label].toolTip(0) == label
@@ -78,7 +78,7 @@ def test_marker_grouping_reimport_and_project_reopen(app, tmp_path, monkeypatch)
 
         old_bundle = write_session_bundle(tmp_path / "old")
         window.load_experiment_directory(str(old_bundle), primary_channel="44Ca", background=False)
-        assert all(" · DB" not in item.text(0) and "laicpmsdb" not in item.toolTip(0) for item in spot_items(window).values())
+        assert all(" · DB" not in item.text(0) and "UPbDB" not in item.toolTip(0) for item in spot_items(window).values())
     finally:
         window.has_unsaved_changes = lambda: False
         window.close()

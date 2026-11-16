@@ -61,7 +61,7 @@ def test_run_and_auth_links():
     assert parse_upbr_url("upbr://run/run-7").server == ""
     callback = parse_upbr_url("upbr://auth/callback?code=xyz")
     assert (callback.kind, callback.code) == ("auth_callback", "xyz")
-    # laicpmsdb's app redirect style: parameters after a fragment route.
+    # UPbDB's app redirect style: parameters after a fragment route.
     fragment = parse_upbr_url("upbr://auth/callback#/auth/callback?code=frag")
     assert fragment.code == "frag"
     assert parse_upbr_url("UPBR://Session/abc?server=x").kind == "session"

@@ -1,4 +1,4 @@
-"""Client for a laicpmsdb server: database mode of UPbRPy Studio.
+"""Client for a UPbDB server: database mode of UPbRPy Studio.
 
 Thin, typed and free of Qt. It moves the two bundles of
 ``upblab/docs/WORKFLOW.md`` (sections 3.2 and 3.3) over HTTP and nothing
@@ -64,7 +64,7 @@ class DatabaseError(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
-        # ``code`` is laicpmsdb's stable error code when it sent one;
+        # ``code`` is UPbDB's stable error code when it sent one;
         # ``details`` keeps the raw reply for logs, never for the message.
         self.code = code
         self.details = details
@@ -292,7 +292,7 @@ def _summary(items: list) -> str:
 
 
 def _reply(response) -> tuple[str, str | None, str]:
-    """(short human detail, laicpmsdb error code, raw text for logs)."""
+    """(short human detail, UPbDB error code, raw text for logs)."""
     raw = (response.text or "").strip()[:2000]
     try:
         payload = response.json()

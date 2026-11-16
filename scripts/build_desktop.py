@@ -85,7 +85,7 @@ def require_build_dependencies() -> None:
 
     requests and keyring (the [database] extra) are required too: the spec
     bundles database mode only when both are importable, and a build without
-    them opens no upbr:// links and cannot submit to laicpmsdb.
+    them opens no upbr:// links and cannot submit to upbdb.
     """
     required = (
         "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring",

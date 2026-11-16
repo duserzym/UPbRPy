@@ -1,4 +1,4 @@
-"""Studio's File > Database actions, offscreen, against the fake laicpmsdb."""
+"""Studio's File > Database actions, offscreen, against the fake UPbDB."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ pytest.importorskip("PySide6")
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 import GUI.database as gui_database  # noqa: E402
-from UPbRPy.integration import laicpmsdb as db  # noqa: E402
+from UPbRPy.integration import upbdb as db  # noqa: E402
 
 from synthetic_bundles import sha256, write_session_bundle  # noqa: E402
 
@@ -126,7 +126,7 @@ def fake_export(pipeline, folder, **kwargs):
 
 def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monkeypatch):
     pytest.importorskip("requests")
-    from fake_laicpmsdb import FakeLaicpmsdb, FakeState
+    from fake_upbdb import FakeUpbdb, FakeState
 
     gui_database.database_availability.cache_clear()
     monkeypatch.setattr(gui_database, "database_availability", lambda: (True, ""))
@@ -136,7 +136,7 @@ def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monke
     bundle = write_session_bundle(tmp_path / "server", session_id=SESSION_ID)
     state = FakeState(sessions={SESSION_ID: bundle})
     try:
-        with FakeLaicpmsdb(state) as fake:
+        with FakeUpbdb(state) as fake:
             window = controller.create_window(show=False).active_reduction
             code = state.issue_code()
             controller.open_target(f"upbr://session/{SESSION_ID}?server={fake.url}&code={code}")
@@ -182,7 +182,7 @@ def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monke
 
 def test_link_without_code_or_token_asks_to_sign_in(controller, dialogs, tmp_path, monkeypatch):
     pytest.importorskip("requests")
-    from fake_laicpmsdb import FakeLaicpmsdb, FakeState
+    from fake_upbdb import FakeUpbdb, FakeState
 
     monkeypatch.setattr(gui_database, "database_availability", lambda: (True, ""))
     previous = db.set_token_store(db.MemoryTokenStore())
@@ -190,7 +190,7 @@ def test_link_without_code_or_token_asks_to_sign_in(controller, dialogs, tmp_pat
     controller.database.sign_in = lambda server, then: asked.append(server)
     bundle = write_session_bundle(tmp_path / "server", session_id=SESSION_ID)
     try:
-        with FakeLaicpmsdb(FakeState(sessions={SESSION_ID: bundle})) as fake:
+        with FakeUpbdb(FakeState(sessions={SESSION_ID: bundle})) as fake:
             controller.open_target(f"upbr://session/{SESSION_ID}?server={fake.url}")
             assert asked == [fake.url]
     finally:
@@ -199,14 +199,14 @@ def test_link_without_code_or_token_asks_to_sign_in(controller, dialogs, tmp_pat
 
 def test_orcid_callback_completes_pending_sign_in(controller, dialogs, monkeypatch):
     pytest.importorskip("requests")
-    from fake_laicpmsdb import FakeLaicpmsdb
+    from fake_upbdb import FakeUpbdb
 
     monkeypatch.setattr(gui_database, "database_availability", lambda: (True, ""))
     store = db.MemoryTokenStore()
     previous = db.set_token_store(store)
     resumed = []
     try:
-        with FakeLaicpmsdb() as fake:
+        with FakeUpbdb() as fake:
             # What SignInDialog leaves behind after opening the browser:
             controller.database.pending_sign_in = (fake.url, lambda: resumed.append(True))
             code = fake.state.issue_code()
@@ -398,7 +398,7 @@ def test_submitted_returns_to_upblab_only_for_opener(
     monkeypatch.setattr(window, "run_background", lambda label, calculation, success: success(calculation()))
     controller.database.submit(window)
     assert calls == [("submit", SESSION_ID)]
-    assert urls == (["laicpmsdb://run/run-1"] if via == "upblab" else [])
+    assert urls == (["upbdb://run/run-1"] if via == "upblab" else [])
     assert window.session.origin["run_id"] == "run-1" and not scratch.exists()
     assert all(kind != "warning" for kind, _title, _text in dialogs)
     assert any("Could not open" in line for line in logs) == (via == "upblab" and outcome is not True)

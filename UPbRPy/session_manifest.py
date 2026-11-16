@@ -44,7 +44,7 @@ records every acquisition belongs to (``[[acquisition]]``)::
 
 ``[reference_materials]`` may instead hold ``[[reference_materials.plan]]``
 rows with ``rm_name``, ``role`` and ``planned_bracket_every``, the shape of
-laicpmsdb's ``ReferenceMaterialPlan``. The module is plain Python: no Qt, no
+UPbDB's ``ReferenceMaterialPlan``. The module is plain Python: no Qt, no
 HTTP, no database.
 """
 
@@ -212,6 +212,10 @@ def parse_session_manifest(
     path: str | Path,
 ) -> SessionManifest:
     """Validate a parsed TOML document and return a :class:`SessionManifest`."""
+    if "format" in document and document["format"] != "upbdb-session-bundle":
+        raise SessionManifestError(
+            "Unsupported session bundle format; expected upbdb-session-bundle."
+        )
     session = document.get("session", {})
     if not isinstance(session, Mapping):
         raise SessionManifestError("[session] must be a table.")

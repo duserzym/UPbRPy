@@ -1223,7 +1223,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
     sample_overrides = {}
     spot_frames = []
     # A label the instrument repeated (six blanks all named ``nothing`` in one
-    # Rich export) keeps its first acquisition only, as laicpmsdb does; spot
+    # Rich export) keeps its first acquisition only, as UPbDB does; spot
     # names must be unique for selections, projects and exports.
     acquisitions = []
     seen_labels = set()

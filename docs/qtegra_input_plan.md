@@ -31,7 +31,7 @@ Open questions and fixture limits:
 Goal: UPbRPy and UPbRPy Studio open Rich and per-spot Qtegra exports
 through one acquisition model, with the Rich single CSV as the canonical
 record (`docs/qtegra_export_formats.md`), and offer a within-session detector
-cross-calibration that only the Rich format makes possible. laicpmsdb's
+cross-calibration that only the Rich format makes possible. UPbDB's
 ingest will import the readers from here, so the public names below are a
 contract: do not rename them.
 
@@ -371,4 +371,4 @@ def apply_cross_calibration(session, calibration) -> QtegraSession
 
 README and `docs/lab_workflow_integration.md`: formats accepted, which is
 canonical, what each lacks, how the cross-calibration modes work, the public
-API of `UPbRPy.qtegra` (for laicpmsdb), and how to regenerate the fixture.
+API of `UPbRPy.qtegra` (for UPbDB), and how to regenerate the fixture.

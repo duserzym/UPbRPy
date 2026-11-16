@@ -1,4 +1,4 @@
-"""UPbRPy.integration.laicpmsdb against a fake laicpmsdb (http.server)."""
+"""UPbRPy.integration.upbdb against a fake UPbDB (http.server)."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 
 pytest.importorskip("requests")
 
-from UPbRPy.integration import laicpmsdb as db
+from UPbRPy.integration import upbdb as db
 from UPbRPy.project import read_reduction_project
 from UPbRPy.session_bundle import find_cached_session, read_bundle_record
 
-from fake_laicpmsdb import FakeLaicpmsdb, FakeState
+from fake_upbdb import FakeUpbdb, FakeState
 from synthetic_bundles import sha256, write_session_bundle
 
 
@@ -34,7 +34,7 @@ def fake(tmp_path, tokens):
     source = tmp_path / "server_bundles"
     bundle = write_session_bundle(source, session_id=SESSION_ID)
     state = FakeState(sessions={SESSION_ID: bundle})
-    with FakeLaicpmsdb(state) as server:
+    with FakeUpbdb(state) as server:
         yield server
 
 

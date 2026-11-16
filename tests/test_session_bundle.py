@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from UPbRPy.integration import laicpmsdb as db
+from UPbRPy.integration import upbdb as db
 from UPbRPy.project import read_reduction_project
 from UPbRPy.session_bundle import (
     SessionBundleError,
@@ -16,6 +16,18 @@ from UPbRPy.session_bundle import (
 )
 
 from synthetic_bundles import write_session_bundle, zip_directory
+
+
+@pytest.mark.parametrize("format_name", ["upbdb-session-bundle", "other-session-bundle"])
+def test_session_bundle_format(format_name, tmp_path):
+    source = write_session_bundle(tmp_path / "src")
+    manifest = source / "session_manifest.toml"
+    manifest.write_text(f'format = "{format_name}"\n' + manifest.read_text())
+    if format_name == "upbdb-session-bundle":
+        assert unpack_session_bundle(zip_directory(source), tmp_path / "cache").path.is_dir()
+    else:
+        with pytest.raises(SessionBundleError, match="Unsupported session bundle format"):
+            unpack_session_bundle(zip_directory(source), tmp_path / "cache")
 
 
 def test_local_zip_unpacks_like_a_download(tmp_path):

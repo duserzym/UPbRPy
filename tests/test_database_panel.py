@@ -183,7 +183,7 @@ def test_page_rows_checks_and_existing_handlers(window, monkeypatch):
     opened = Mock()
     monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", opened)
     panel.submit.secondary.click()
-    assert opened.call_args.args[0].toString() == "laicpmsdb://run/run-previous"
+    assert opened.call_args.args[0].toString() == "upbdb://run/run-previous"
 
 
 def test_old_buttons_and_origin_duplicate_stay_hidden(window):

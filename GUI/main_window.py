@@ -4847,7 +4847,7 @@ class MainWindow(QtWidgets.QMainWindow):
         states = {
             self.open_from_database_action: (
                 available,
-                "Fetch a session from a laicpmsdb server and open it.",
+                "Fetch a session from a UPbDB server and open it.",
             ),
             self.link_database_session_action: (
                 available and self.session.loaded and not origin,
@@ -5846,7 +5846,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if override := sample_overrides.get(sn):
                     spot_item.setText(0, f"{sn} · DB")
                     spot_item.setToolTip(
-                        0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from laicpmsdb "
+                        0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from UPbDB "
                         f"(label sample {override['label_sample']})",
                     )
                 if reason := self._review_flags.get(sn):

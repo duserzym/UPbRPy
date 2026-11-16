@@ -52,7 +52,7 @@ hidden_imports = [
 # through entry points, hence its metadata.
 if find_spec("requests") is not None and find_spec("keyring") is not None:
     hidden_imports += [
-        "UPbRPy.integration.laicpmsdb",
+        "UPbRPy.integration.upbdb",
         "requests",
         "keyring",
         *collect_submodules("keyring.backends"),

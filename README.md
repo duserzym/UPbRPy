@@ -499,7 +499,7 @@ branches and per-system reference comparisons; see the
 #### Database mode (optional)
 
 Everything above works without a server and stays unchanged. A lab that runs
-[laicpmsdb](https://github.com/duserzym/laicpmsdb) can also move sessions and
+[UPbDB](https://github.com/duserzym/upbdb) can also move sessions and
 reductions over HTTP; the cross-repository contract is
 `upblab/docs/WORKFLOW.md` v1 and the plan is
 [`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md).
@@ -700,7 +700,7 @@ publication-table settings; the choice is kept in
 <img src="./docs/screenshots/studio_rich_detector_drift_1280x800.png" alt="Studio Rich export with detector drift calibration at 1280 × 800" width="800">
 
 See [`docs/qtegra_export_formats.md`](docs/qtegra_export_formats.md) for the
-export contract and [`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md#6-qtegra-input-layer-for-laicpmsdb)
+export contract and [`docs/lab_workflow_integration.md`](docs/lab_workflow_integration.md#6-qtegra-input-layer-for-upbdb)
 for the ingest API and storage rules.
 
 ### Bug reports and issue discussions

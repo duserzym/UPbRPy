@@ -1,6 +1,6 @@
 """Database mode of UPbRPy Studio: links, sign-in, open, submit, prefer.
 
-All HTTP goes through :mod:`UPbRPy.integration.laicpmsdb` on Qt's worker
+All HTTP goes through :mod:`UPbRPy.integration.upbdb` on Qt's worker
 pool; this module only sequences those calls and shows their results. When
 the ``[database]`` extra is missing, :func:`database_availability` says why
 and every entry point shows that sentence instead of failing.
@@ -34,16 +34,16 @@ SETTINGS_SERVERS = "database/servers"
 @functools.cache
 def database_availability() -> tuple[bool, str]:
     """``(available, reason)`` for the ``[database]`` extra (checked once)."""
-    from UPbRPy.integration import laicpmsdb
+    from UPbRPy.integration import upbdb
 
-    return laicpmsdb.availability()
+    return upbdb.availability()
 
 
 def client():
     """The client module (import is cheap; it never imports requests early)."""
-    from UPbRPy.integration import laicpmsdb
+    from UPbRPy.integration import upbdb
 
-    return laicpmsdb
+    return upbdb
 
 
 class DatabaseLinks(QtCore.QObject):
@@ -391,7 +391,7 @@ class DatabaseLinks(QtCore.QObject):
         value, ok = QtWidgets.QInputDialog.getItem(
             self.parent_widget(),
             "Open from database",
-            "laicpmsdb server address:",
+            "UPbDB server address:",
             servers or ["https://"],
             0,
             True,
@@ -629,7 +629,7 @@ class DatabaseLinks(QtCore.QObject):
         box.exec()
         if origin.get("opened_via") == "upblab":
             try:
-                opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"laicpmsdb://run/{result.run_id}"))
+                opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"upbdb://run/{result.run_id}"))
             except Exception as exc:
                 window.append_log(f"Could not open the submitted run in UPb Lab: {exc}")
             else:

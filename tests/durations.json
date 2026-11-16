@@ -43,7 +43,7 @@
   "tests/test_isochron.py": 2.58,
   "tests/test_isoplot.py": 1.0,
   "tests/test_isotope_grid_layout.py": 1.0,
-  "tests/test_laicpmsdb_client.py": 1.0,
+  "tests/test_upbdb_client.py": 1.0,
   "tests/test_launch.py": 3.54,
   "tests/test_live_concordia.py": 5.84,
   "tests/test_module_api.py": 0.6,

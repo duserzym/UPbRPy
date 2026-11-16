@@ -3,7 +3,7 @@
 UPbRPy is a Python LA-ICP-MS U-Pb and trace-element reduction engine
 (`UPbRPy/`) with an optional PySide6 + pyqtgraph desktop GUI, UPbRPy Studio
 (`GUI/`). It belongs to Yiming Zhang's open-source lab workflow (with
-laicpmsdb, upbstudio, grainatlas and bracketeer, each in its own repository).
+UPbDB, upbstudio, grainatlas and bracketeer, each in its own repository).
 
 ## Current work
 

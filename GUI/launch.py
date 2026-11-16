@@ -75,7 +75,7 @@ class LaunchTarget:
 
 def _query(parts) -> dict[str, str]:
     values = {k: v[-1] for k, v in parse_qs(parts.query).items() if v}
-    # laicpmsdb's browser callbacks put parameters after a fragment route
+    # UPbDB's browser callbacks put parameters after a fragment route
     # (``#/auth/callback?code=…``); accept those too.
     if "?" in parts.fragment:
         fragment_query = parts.fragment.split("?", 1)[1]

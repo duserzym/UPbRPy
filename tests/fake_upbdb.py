@@ -1,11 +1,11 @@
-"""A fake laicpmsdb server for client and GUI tests (no Django, no database).
+"""A fake UPbDB server for client and GUI tests (no Django, no database).
 
 It serves the routes UPbRPy's database mode uses, from session-bundle
 folders on disk, and records every call. Run it by hand for manual checks::
 
-    python tests/fake_laicpmsdb.py --port 8765 --bundle path/to/<session_key>
+    python tests/fake_upbdb.py --port 8765 --bundle path/to/<session_key>
 
-Routes follow ``upblab/docs/WORKFLOW.md`` v1 and laicpmsdb's plan 8.1-8.4.
+Routes follow ``upblab/docs/WORKFLOW.md`` v1 and UPbDB's plan 8.1-8.4.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class FakeState:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FakeLaicpmsdb/1"
+    server_version = "FakeUpbdb/1"
     state: FakeState
 
     def log_message(self, *args):  # keep pytest output clean
@@ -234,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
 
-class FakeLaicpmsdb:
+class FakeUpbdb:
     """Context manager running the fake server on a free localhost port."""
 
     def __init__(self, state: FakeState | None = None, port: int = 0):
@@ -249,7 +249,7 @@ class FakeLaicpmsdb:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
-    def __enter__(self) -> "FakeLaicpmsdb":
+    def __enter__(self) -> "FakeUpbdb":
         self.thread.start()
         return self
 
@@ -270,9 +270,9 @@ def main() -> None:  # pragma: no cover - manual use
     for index, folder in enumerate(args.bundle):
         session_id = args.session_id[index] if index < len(args.session_id) else f"session-{index + 1}"
         state.sessions[session_id] = folder.resolve()
-    with FakeLaicpmsdb(state, port=args.port) as fake:
+    with FakeUpbdb(state, port=args.port) as fake:
         code = state.issue_code()
-        print(f"fake laicpmsdb at {fake.url}; user {state.username!r} / {state.password!r}")
+        print(f"fake UPbDB at {fake.url}; user {state.username!r} / {state.password!r}")
         for session_id in state.sessions:
             print(f"  upbr://session/{session_id}?server={fake.url}&code={code}")
         try:

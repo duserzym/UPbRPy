@@ -2,13 +2,13 @@
 
 **Status:** implemented 2026-11-03 (steps 1 to 5 of section 4: commits
 44f9104, 8fcd4a7, cca3195, 21bf44f), verified end to end on macOS against a
-local laicpmsdb with the full 197-spot `Apatite_20Mar25` session (link with
+local UPbDB with the full 197-spot `Apatite_20Mar25` session (link with
 handoff code, fetch, auto-pick, reduce, submit, prefer; preferred dates equal
-to laicpmsdb's own script reduction of the same bundle). The Windows
+to UPbDB's own script reduction of the same bundle). The Windows
 registration (`--register-url-scheme`) and a frozen-app launch by a real
 `upbr://` click are not yet tried on a machine. Part of the cross-repository
 contract `upblab/docs/WORKFLOW.md` v1 (sections 3.2, 3.3 and 4), which wins
-where the two differ; laicpmsdb's `docs/workflow_api.md` gives the server's
+where the two differ; UPbDB's `docs/workflow_api.md` gives the server's
 exact shapes. `GUI/roadmap.md` keeps the architecture of Studio itself.
 
 ## 1. What changes and what does not
@@ -18,7 +18,7 @@ in `UPbRPy/` stays free of Qt, HTTP and database code. Standalone use is
 unchanged: open a Qtegra export directory or a `.upbr`, reduce, export the
 reduction bundle. **Database mode** adds one optional way in and one way out:
 
-- **In:** open a session from a laicpmsdb server. Studio fetches the
+- **In:** open a session from a UPbDB server. Studio fetches the
   *session bundle* (`raw/` CSVs byte-identical, `session_manifest.toml`, a
   pre-filled `.upbr` with an `origin` block) and opens it exactly as a local
   folder. It arrives through a link, `upbr://session/<id>?server=&code=`,
@@ -37,16 +37,19 @@ moves over HTTP.
 | Piece | Where | Notes |
 | --- | --- | --- |
 | `[database]` extra | `pyproject.toml` | `requests` (or `httpx`) and `keyring`; the GUI imports them lazily and shows the two database actions disabled with a one-line reason when the extra is missing |
-| client | `UPbRPy/integration/laicpmsdb.py` | thin, typed, no Qt: `exchange_code`, `fetch_session_bundle`, `submit_reduction`, `prefer_run`, `whoami`; bearer token per server stored in the OS keychain (`keyring`, service `UPbRPy`), never in files; errors mapped to messages the GUI can show |
+| client | `UPbRPy/integration/upbdb.py` | thin, typed, no Qt: `exchange_code`, `fetch_session_bundle`, `submit_reduction`, `prefer_run`, `whoami`; bearer token per server stored in the OS keychain (`keyring`, service `UPbRPy`), never in files; errors mapped to messages the GUI can show |
 | `origin` in the project | `UPbRPy/project.py` | format version 2, additive: `origin { server, session_id, session_key, export_sha256, exported_at, run_id? }`; version 1 files still load |
-| manifest provenance | `UPbRPy/pipeline.py` `manifest()` | `hash_inputs=True` by default in `export_reduction_bundle`; `reference_library_version` from `library.toml`; `metadata.origin` echoing the project's origin (laicpmsdb plan section 8.3) |
+| manifest provenance | `UPbRPy/pipeline.py` `manifest()` | `hash_inputs=True` by default in `export_reduction_bundle`; `reference_library_version` from `library.toml`; `metadata.origin` echoing the project's origin (UPbDB plan section 8.3) |
 | session manifest | `UPbRPy/io.py` | `read_experiment_data` accepts `session_manifest.toml` beside `raw/` as the source of `sample_aliases`, `sep` and the reference-material plan; the GUI pre-fills from it |
 | URL scheme | `GUI/main.py`, `packaging/UPbRPyStudio.spec`, installer | `--open` accepts a directory, a `.upbr`, a session-bundle zip, or a `upbr://` URL; macOS `CFBundleURLTypes` for `upbr` in the spec and a `QFileOpenEvent` handler; Windows registry entry `HKCU\Software\Classes\upbr` written by the installer (and offered on first run of a portable build); a second launch hands the URL to the running instance (local socket) |
 | database mode UI | `GUI/` | a "Database" group in the File menu: Open from database… (server URL and sign-in: password, or ORCID through the system browser returning to `upbr://auth/callback?code=`), Submit to database, Mark as preferred; the origin shown in the window title and the project panel; a status row with the run id after a submit |
 | cache | `~/UPbRPy/sessions/<session_key>/` | one folder per fetched session; the bundle hash tells Studio whether a re-fetch is needed; the user may move it |
-| tests | `tests/` | a pytest fixture that serves a fake laicpmsdb (`http.server` in a thread) with the export, exchange, import and prefer routes; project format v2 round trip; `--open upbr://` parsing; manifest provenance |
+| tests | `tests/` | a pytest fixture that serves a fake UPbDB (`http.server` in a thread) with the export, exchange, import and prefer routes; project format v2 round trip; `--open upbr://` parsing; manifest provenance |
 
 ## 3. The exchange
+
+When `session_manifest.toml` declares a top-level `format`, it must be
+`"upbdb-session-bundle"`. Manifests without that optional field still load.
 
 ```text
 browser or UPb Studio ── upbr://session/<id>?server=S&code=C ──> Studio
@@ -68,11 +71,11 @@ in. Every request carries `User-Agent: UPbRPy-Studio/<version>`.
 3. `--open` of `.upbr`, zips and `upbr://` URLs; the scheme registration in
    the PyInstaller spec and installer; single-instance hand-off.
 4. The File > Database actions and the sign-in dialog.
-5. End-to-end against a local laicpmsdb with the fixture session
+5. End-to-end against a local UPbDB with the fixture session
    `Apatite_20Mar25`: open through the link, reduce, submit, prefer, and
    compare the preferred ages with the frozen publication tables.
 
-Done when a session page in laicpmsdb launches Studio on a Mac and on
+Done when a session page in UPbDB launches Studio on a Mac and on
 Windows, the reduction appears in the database, and the standalone test
 suite still passes with the `[database]` extra absent.
 
@@ -92,10 +95,10 @@ suite still passes with the `[database]` extra absent.
   defaults in Studio (explicit project settings still win), and only `raw/*.csv`
   are hashed as inputs.
 
-## 6. Qtegra input layer for laicpmsdb
+## 6. Qtegra input layer for UPbDB
 
 The UPbRPy input layer was implemented on 2026-11-04 and updated 2026-11-05.
-The laicpmsdb `POST /v1/sessions/ingest` endpoint and watcher should import
+The UPbDB `POST /v1/sessions/ingest` endpoint and watcher should import
 these readers
 rather than maintain another parser. The Rich single CSV is the canonical
 record; a per-spot folder supplies companion metadata and remains an
@@ -103,11 +106,11 @@ accepted standalone input. Y-only exports are unsupported because they have
 no time information. The export and storage contract is
 [`qtegra_export_formats.md`](qtegra_export_formats.md), especially
 [Where it lands](qtegra_export_formats.md#where-it-lands). The storage changes
-below describe the laicpmsdb integration contract.
+below describe the UPbDB integration contract.
 
 ### Changed 2026-11-05
 
-For laicpmsdb ingest callers:
+For UPbDB ingest callers:
 
 - Removed `read_upbr_csv(path, *, cycle_time_s=None, acquisition_gap_s=0.0)`
   and `Acquisition.start_offset_s`.
@@ -422,7 +425,7 @@ double; per-spot CSVs print 15. For example, Rich
 `449124.38355127671` becomes `449124.383551277` per spot. Keep Rich precision
 and validate companions with the merge tolerance, not bitwise equality.
 
-### What laicpmsdb should store
+### What UPbDB should store
 
 - Accept a Rich file, a per-spot folder, or both at ingest and in the
   watcher. Preserve the Rich CSV as a `RawAsset`, like each per-spot file,

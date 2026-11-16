@@ -764,7 +764,7 @@ def load_session(
     resolved_primary = effective_primary if effective_primary in clean_channels else clean_channels[0]
     selected_spot = str(experiment["spot_names"].iloc[0]) if not experiment.empty else None
     measured_samples = list(experiment["sample"].astype(str).unique()) if "sample" in experiment else []
-    # Reference materials: the session manifest's plan (laicpmsdb) wins, else
+    # Reference materials: the session manifest's plan (UPbDB) wins, else
     # the preset, preferring its preferred primaries that this session measured.
     standards: dict[str, object] = {
         "concentration_standards": workflow_preset.concentration_standards,
