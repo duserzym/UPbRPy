@@ -758,3 +758,34 @@ def test_database_menu_says_who_is_signed_in(controller, dialogs):
         links._set_account_name(server, None)
         links.settings.remove(gui_database.SETTINGS_LAST_SERVER)
         db.set_token_store(previous)
+
+
+def test_server_picker_lists_answering_servers_first(app):
+    dialog = gui_database.ServerPickerDialog(
+        ["http://localhost:8000", "https://lab.example.org"], "http://localhost:8000",
+        "Sign in", "Saved servers", check=lambda server: server.startswith("https://"),
+    )
+    assert wait_for(lambda: not dialog._futures)
+    dialog._collect()
+    first = dialog.list.item(0)
+    assert first.data(QtCore.Qt.ItemDataRole.UserRole) == "https://lab.example.org"
+    assert "answering" in first.text()
+    assert "not answering" in dialog.list.item(1).text()
+    # The answering server is chosen even though the last-used one is dead.
+    assert dialog._chosen_item_server() == "https://lab.example.org"
+    # Forget the dead one; then Continue returns the chosen server.
+    dialog.list.setCurrentRow(1)
+    dialog._forget()
+    assert dialog.forgotten == ["http://localhost:8000"] and dialog.list.count() == 1
+    dialog.list.setCurrentRow(0)
+    dialog._accept()
+    assert dialog.server == "https://lab.example.org"
+
+
+def test_server_picker_takes_a_typed_address(app):
+    dialog = gui_database.ServerPickerDialog([], "", "Sign in", "Saved servers", check=lambda s: True)
+    dialog._accept()
+    assert dialog.server is None and "Choose a server" in dialog.message.text()
+    dialog.address.setText("upb-host.example.ts.net")
+    dialog._accept()
+    assert dialog.server == "https://upb-host.example.ts.net"

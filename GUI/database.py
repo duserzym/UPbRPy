@@ -459,22 +459,25 @@ class DatabaseLinks(QtCore.QObject):
     # ----------------------------------------------------- open from menu
     def choose_server(self, title: str = "Open from database",
                       label: str = "UPbDB server address:") -> str | None:
-        servers = self.known_servers()
-        value, ok = QtWidgets.QInputDialog.getItem(
-            self.parent_widget(),
-            title,
-            label,
-            servers or ["https://"],
-            0,
-            True,
+        """Pick the UPbDB server: saved servers with whether they answer, or a new address."""
+        dialog = ServerPickerDialog(
+            self.known_servers(), self.current_server(), title, label, self.parent_widget()
         )
-        if not ok or not value.strip():
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dialog.server:
             return None
+        if dialog.forgotten:
+            self.forget_servers(dialog.forgotten)
         try:
-            return client().normalize_server(value)
+            return client().normalize_server(dialog.server)
         except client().DatabaseError as exc:
             self.show_error(title, exc)
             return None
+
+    def forget_servers(self, servers: list[str]) -> None:
+        kept = [s for s in self.known_servers() if s not in servers]
+        self.settings.setValue(SETTINGS_SERVERS, kept)
+        if self.current_server() in servers:
+            self.settings.setValue(SETTINGS_LAST_SERVER, kept[0] if kept else "")
 
     def open_from_database(self) -> None:
         """File > Database > Open from Database…: server, sign-in, session."""
@@ -976,12 +979,21 @@ class SignInDialog(QtWidgets.QDialog):
         self.signed_in = False
         self.browser_started = False
         self.state = secrets.token_urlsafe(24)
-        self.setWindowTitle("Sign in to the database")
+        self.setWindowTitle("Sign in to UPbDB")
+        self.setMinimumWidth(440)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+        layout.addWidget(_heading("Sign in to UPbDB"))
+        where = QtWidgets.QLabel(server)
+        where.setObjectName("SecondaryText")
+        where.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(where)
         intro = QtWidgets.QLabel(
-            f"Sign in to <b>{server}</b> on its page in your browser, with ORCID, "
-            "Google, GitHub or a password, whatever the server offers. New here? "
-            "Create your account with ORCID on that page."
+            "Your browser opens UPbDB's sign-in page. Sign in there with ORCID, "
+            "Google, GitHub or a password, then click <b>Sign UPbRPy Studio in</b>; "
+            "the browser hands you back to Studio.<br><br>New here? Create your "
+            "account with ORCID on that page."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -992,7 +1004,9 @@ class SignInDialog(QtWidgets.QDialog):
         self.browser_button = buttons.addButton(
             "Sign in…", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
         )
-        buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        self.browser_button.setProperty("accent", True)
+        cancel = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        cancel.setProperty("tertiary", True)
         buttons.rejected.connect(self.reject)
         self.browser_button.clicked.connect(self.sign_in_with_browser)
         self.browser_button.setDefault(True)
@@ -1009,6 +1023,190 @@ class SignInDialog(QtWidgets.QDialog):
             return
         self.browser_started = True
         self.reject()
+
+
+def _heading(text: str) -> QtWidgets.QLabel:
+    label = QtWidgets.QLabel(text)
+    font = label.font()
+    font.setBold(True)
+    font.setPointSizeF(font.pointSizeF() * 1.35)
+    label.setFont(font)
+    return label
+
+
+def _server_answers(server: str, timeout: float = 3.0) -> bool:
+    """True when ``<server>/v1/health`` answers (any HTTP reply counts as alive)."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(server.rstrip("/") + "/v1/health", timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+class ServerPickerDialog(QtWidgets.QDialog):
+    """Choose a UPbDB server: saved servers with a live "answering" check, or a new address."""
+
+    def __init__(self, servers: list[str], current: str, title: str, prompt: str,
+                 parent=None, *, check=_server_answers) -> None:
+        super().__init__(parent)
+        self.server: str | None = None
+        self.forgotten: list[str] = []
+        self._check = check
+        self._status: dict[str, bool | None] = {s: None for s in servers}
+        self.setWindowTitle(title)
+        self.setMinimumWidth(480)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+        layout.addWidget(_heading("Choose the UPbDB server"))
+        intro = QtWidgets.QLabel(
+            "The lab's database runs on the lab desktop. Its address looks like "
+            "<b>https://upb-host.&lt;tailnet&gt;.ts.net</b> and works while <b>Tailscale</b> is "
+            "connected on this computer. Ask the lab manager if you do not have it."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list = QtWidgets.QListWidget()
+        self.list.setObjectName("ServerList")
+        self.list.setSpacing(2)
+        self.list.setUniformItemSizes(True)
+        self.list.itemSelectionChanged.connect(self._selected)
+        self.list.itemDoubleClicked.connect(lambda _item: self._accept())
+        saved = QtWidgets.QLabel(prompt if servers else "No saved servers yet.")
+        saved.setObjectName("SectionTitle")
+        layout.addWidget(saved)
+        layout.addWidget(self.list)
+        self.list.setVisible(bool(servers))
+        self.forget_button = QtWidgets.QPushButton("Forget")
+        self.forget_button.setProperty("tertiary", True)
+        self.forget_button.setToolTip("Remove the selected server from this list.")
+        self.forget_button.clicked.connect(self._forget)
+        self.forget_button.setVisible(bool(servers))
+        forget_row = QtWidgets.QHBoxLayout()
+        forget_row.addStretch(1)
+        forget_row.addWidget(self.forget_button)
+        layout.addLayout(forget_row)
+
+        other = QtWidgets.QLabel("Another address")
+        other.setObjectName("SectionTitle")
+        layout.addWidget(other)
+        self.address = QtWidgets.QLineEdit()
+        self.address.setPlaceholderText("https://upb-host.<tailnet>.ts.net")
+        self.address.textEdited.connect(lambda _t: self.list.clearSelection())
+        self.address.returnPressed.connect(self._accept)
+        layout.addWidget(self.address)
+
+        self.message = QtWidgets.QLabel()
+        self.message.setObjectName("SecondaryText")
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        buttons = QtWidgets.QDialogButtonBox()
+        self.continue_button = buttons.addButton("Continue", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        self.continue_button.setProperty("accent", True)
+        self.continue_button.setDefault(True)
+        cancel = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        cancel.setProperty("tertiary", True)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._render(prefer=current)
+        if not servers:
+            self.address.setFocus()
+        self._start_checks()
+
+    # -- status checks run in threads; a timer brings results to this thread
+    def _start_checks(self) -> None:
+        import concurrent.futures
+
+        if not self._status:
+            return
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._futures = {s: self._pool.submit(self._check, s) for s in self._status}
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._collect)
+        self._timer.start(150)
+
+    def _collect(self) -> None:
+        changed = False
+        for server, future in list(self._futures.items()):
+            if future.done():
+                self._status[server] = bool(future.result()) if not future.exception() else False
+                del self._futures[server]
+                changed = True
+        if changed:
+            self._render(prefer=self._chosen_item_server())
+        if not self._futures:
+            self._timer.stop()
+            self._pool.shutdown(wait=False)
+
+    def _chosen_item_server(self) -> str | None:
+        item = self.list.currentItem()
+        return item.data(QtCore.Qt.ItemDataRole.UserRole) if item and item.isSelected() else None
+
+    def _render(self, prefer: str | None = None) -> None:
+        from GUI.theme import active_theme, theme_color
+
+        theme = active_theme()
+        order = {True: 0, None: 1, False: 2}
+        servers = sorted(self._status, key=lambda s: order[self._status[s]])
+        self.list.blockSignals(True)
+        self.list.clear()
+        for server in servers:
+            state = self._status[server]
+            mark, note, color = {
+                True: ("●", "answering", theme.accent),
+                None: ("○", "checking…", theme.muted),
+                False: ("○", "not answering (switched off, or Tailscale not connected)", theme.faint),
+            }[state]
+            item = QtWidgets.QListWidgetItem(f"{mark}  {server}\n     {note}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, server)
+            item.setForeground(theme_color(color) if state is not True else self.palette().text().color())
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        rows = {self.list.item(i).data(QtCore.Qt.ItemDataRole.UserRole): i for i in range(self.list.count())}
+        answering = [s for s in servers if self._status[s]]
+        pick = prefer if prefer in rows and self._status.get(prefer) is not False else (answering[0] if answering else None)
+        if pick is not None and not self.address.text().strip():
+            self.list.setCurrentRow(rows[pick])
+        lines = self.list.sizeHintForRow(0) if self.list.count() else 0
+        self.list.setFixedHeight(min(6, max(1, self.list.count())) * (lines + 8) + 16)
+        self._selected()
+
+    def _selected(self) -> None:
+        server = self._chosen_item_server()
+        self.forget_button.setEnabled(server is not None)
+        if server is not None and self._status.get(server) is False:
+            self.message.setText(f"{server} is not answering. Connect Tailscale, or choose another server.")
+        else:
+            self.message.setText("")
+
+    def _forget(self) -> None:
+        server = self._chosen_item_server()
+        if server is None:
+            return
+        self.forgotten.append(server)
+        self._status.pop(server, None)
+        self._render()
+        self.list.setVisible(bool(self._status))
+        self.forget_button.setVisible(bool(self._status))
+
+    def _accept(self) -> None:
+        typed = self.address.text().strip()
+        server = typed or self._chosen_item_server()
+        if not server or server == "https://":
+            self.message.setText("Choose a server above or type its address.")
+            return
+        if not server.startswith(("http://", "https://")):
+            server = "https://" + server
+        self.server = server
+        self.accept()
 
 
 class SessionPickerDialog(QtWidgets.QDialog):
