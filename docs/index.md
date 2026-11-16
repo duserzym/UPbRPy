@@ -81,6 +81,6 @@ the controls. The [data model](data-model/index.md) defines inputs, acquisition
 objects, saved projects and exported quantities. The [Python API](reference/python-api.md)
 uses the same numerical pipeline as Studio.
 
-Use [UPbDB](https://github.com/duserzym/upbdb) to store raw sessions and reduction
+Use UPbDB to store raw sessions and reduction
 runs, and [UPb Lab](https://github.com/duserzym/upblab) to open sessions in Studio
 and review results after submission. Local reduction needs neither service.
