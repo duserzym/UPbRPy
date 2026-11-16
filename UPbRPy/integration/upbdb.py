@@ -8,7 +8,7 @@ Endpoints (all under ``<server>/v1/``, bearer token unless noted)::
 
     POST auth/login        {username, password} -> {token, account}  (no token)
     POST auth/exchange     {code}               -> {token, account}  (no token)
-    GET  auth/orcid/start?next=upbr://auth/callback   (browser, no token)
+    browser: <server>/app/#/connect?app=upbrpy&callback=upbr://auth/callback&state=… (no token)
     POST auth/logout
     GET  accounts/me                            -> account
     GET  sessions?q=                            -> [session]
@@ -442,6 +442,18 @@ def sign_in_url(
     """
     query = urlencode({"next": callback})
     return api_url(server, f"auth/{quote(provider)}/start") + "?" + query
+
+
+def connect_url(server: str, state: str, callback: str = AUTH_CALLBACK_URL) -> str:
+    """UPbDB's own sign-in page for Studio (``#/connect``).
+
+    It offers every sign-in the server has (ORCID, Google, GitHub, a password,
+    ORCID sign-up). After the person confirms, the page sends the browser to
+    ``callback?code=<one-time code>&state=<state>``; Studio checks ``state``
+    and calls :func:`exchange_code`.
+    """
+    query = urlencode({"app": "upbrpy", "callback": callback, "state": state})
+    return server.rstrip("/") + "/app/#/connect?" + query
 
 
 def providers(server: str) -> dict:

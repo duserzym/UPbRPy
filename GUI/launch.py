@@ -8,7 +8,8 @@ the single running instance, and the URL-scheme registration.
 - a session-bundle ``.zip``,
 - ``upbr://session/<id>?server=<base url>&code=<one-time code>``,
 - ``upbr://run/<id>?server=<base url>``,
-- ``upbr://auth/callback?code=<one-time code>`` (end of an ORCID sign-in).
+- ``upbr://auth/callback?code=<one-time code>&state=<state>`` (end of a
+  browser sign-in through UPbDB's ``#/connect`` page).
 
 A second launch with a ``upbr://`` link hands it to the running Studio over
 a local socket (:class:`SingleInstance`) and exits. macOS delivers links as
@@ -54,6 +55,7 @@ class LaunchTarget:
     original: str = ""
     acquisition: str = ""
     via: str = ""
+    state: str = ""
 
     @property
     def is_url(self) -> bool:
@@ -113,12 +115,24 @@ def parse_upbr_url(value: str) -> LaunchTarget:
             via="upblab" if query.get("via") == "upblab" else "",
         )
     if route == "auth" and segments[1:] == ["callback"]:
-        if query.get("error"):
-            raise LaunchError(f"Sign-in failed: {query['error']}.")
+        error = query.get("error")
+        if error == "cancelled":
+            raise LaunchError("Sign-in was cancelled in the browser.")
+        if error == "orcid_required":
+            raise LaunchError(
+                "No UPbDB account uses that sign-in yet. Create your account with ORCID "
+                "on the sign-in page, then link Google or GitHub on your Account page."
+            )
+        if error:
+            raise LaunchError(f"Sign-in failed: {error}.")
         if not query.get("code"):
             raise LaunchError("The sign-in callback carries no code.")
+        state = query.get("state", "")
+        if state and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", state):
+            raise LaunchError("The sign-in callback carries an invalid state.")
         return LaunchTarget(
-            kind="auth_callback", code=query["code"], server=server, original=value
+            kind="auth_callback", code=query["code"], server=server, original=value,
+            state=state,
         )
     raise LaunchError(f"Studio does not know the link {value!r}.")
 

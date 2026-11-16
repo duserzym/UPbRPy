@@ -15,6 +15,7 @@ from collections import Counter
 from collections.abc import Callable
 import functools
 from pathlib import Path
+import secrets
 import shutil
 import tempfile
 from typing import Any
@@ -75,7 +76,8 @@ class DatabaseLinks(QtCore.QObject):
         self.activate_project = activate_project
         self.parent_widget = parent_widget
         self.settings = settings or QtCore.QSettings("UPbRPy", "Studio")
-        self.pending_sign_in: tuple[str, Callable[[], None] | None] | None = None
+        # (server, continuation, state) of a browser sign-in Studio started.
+        self.pending_sign_in: tuple[str, Callable[[], None] | None, str] | None = None
         self.sign_in: Callable[[str, Callable[[], None]], None] | None = None
         self.cache_root: Path | None = None
         self._signals: set[QtCore.QObject] = set()
@@ -145,7 +147,7 @@ class DatabaseLinks(QtCore.QObject):
     def handle(self, target: LaunchTarget) -> None:
         """Act on a ``upbr://`` link."""
         if target.kind == "auth_callback":
-            self.complete_sign_in(target.code, target.server or None)
+            self.complete_sign_in(target.code, target.server or None, target.state)
         elif target.kind == "session":
             self.open_session(target.server, target.identifier, code=target.code,
                               acquisition=target.acquisition, via=target.via)
@@ -334,12 +336,16 @@ class DatabaseLinks(QtCore.QObject):
 
         self._authorize(server, code, lookup, title)
 
-    def complete_sign_in(self, code: str, server: str | None = None) -> None:
-        """Finish a browser (ORCID) sign-in from ``upbr://auth/callback``."""
+    def complete_sign_in(self, code: str, server: str | None = None, state: str = "") -> None:
+        """Finish a browser sign-in from ``upbr://auth/callback``. A sign-in
+        Studio started through UPbDB's page must come back with its state."""
         title = "Sign in"
         if not self.require_available(title):
             return
         pending = self.pending_sign_in
+        if pending and pending[2] and pending[2] != state:
+            self.show_error(title, "This sign-in link is not the one Studio started; sign in again.")
+            return
         target_server = server or (pending[0] if pending else None) or str(
             self.settings.value(SETTINGS_LAST_SERVER, "", type=str) or ""
         )
@@ -360,14 +366,14 @@ class DatabaseLinks(QtCore.QObject):
 
     # ------------------------------------------------------------ sign in
     def prompt_sign_in(self, server: str, then: Callable[[], None] | None = None) -> None:
-        """Ask for a password or start ORCID; call ``then`` once signed in."""
+        """Open UPbDB's sign-in page in the browser; call ``then`` once signed in."""
         dialog = SignInDialog(self, server, self.parent_widget())
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and dialog.signed_in:
             self.remember_server(server)
             if then is not None:
                 then()
         elif dialog.browser_started:
-            self.pending_sign_in = (server, then)
+            self.pending_sign_in = (server, then, dialog.state)
 
     def sign_out(self, server: str | None = None) -> None:
         title = "Sign out"
@@ -890,7 +896,12 @@ def origin_summary(origin: dict | None) -> tuple[str, str]:
 
 # ---------------------------------------------------------------- dialogs
 class SignInDialog(QtWidgets.QDialog):
-    """Password sign-in, or ORCID through the system browser."""
+    """One button: UPbDB's own sign-in page in the system browser.
+
+    The page offers every sign-in the server has (ORCID, Google, GitHub, a
+    password, ORCID sign-up) and returns to ``upbr://auth/callback`` with a
+    one-time code and this dialog's ``state``.
+    """
 
     def __init__(self, links: DatabaseLinks, server: str, parent=None) -> None:
         super().__init__(parent)
@@ -898,65 +909,35 @@ class SignInDialog(QtWidgets.QDialog):
         self.server = server
         self.signed_in = False
         self.browser_started = False
+        self.state = secrets.token_urlsafe(24)
         self.setWindowTitle("Sign in to the database")
         layout = QtWidgets.QVBoxLayout(self)
-        intro = QtWidgets.QLabel(f"Sign in to <b>{server}</b>")
+        intro = QtWidgets.QLabel(
+            f"Sign in to <b>{server}</b> on its page in your browser, with ORCID, "
+            "Google, GitHub or a password, whatever the server offers. New here? "
+            "Create your account with ORCID on that page."
+        )
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        form = QtWidgets.QFormLayout()
-        self.username_edit = QtWidgets.QLineEdit()
-        self.password_edit = QtWidgets.QLineEdit()
-        self.password_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        form.addRow("Username", self.username_edit)
-        form.addRow("Password", self.password_edit)
-        layout.addLayout(form)
         self.message_label = QtWidgets.QLabel()
         self.message_label.setWordWrap(True)
         layout.addWidget(self.message_label)
         buttons = QtWidgets.QDialogButtonBox()
-        self.sign_in_button = buttons.addButton(
-            "Sign in", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
-        )
-        self.orcid_button = buttons.addButton(
-            "Sign in with ORCID…", QtWidgets.QDialogButtonBox.ButtonRole.ActionRole
+        self.browser_button = buttons.addButton(
+            "Sign in…", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole
         )
         buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.rejected.connect(self.reject)
-        self.sign_in_button.clicked.connect(self.sign_in_with_password)
-        self.orcid_button.clicked.connect(self.sign_in_with_orcid)
-        self.orcid_button.setToolTip(
+        self.browser_button.clicked.connect(self.sign_in_with_browser)
+        self.browser_button.setDefault(True)
+        self.browser_button.setToolTip(
             "Opens your browser; Studio finishes the sign-in when the "
             "browser returns to upbr://auth/callback."
         )
         layout.addWidget(buttons)
 
-    def sign_in_with_password(self) -> None:
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text()
-        if not username or not password:
-            self.message_label.setText("Enter your username and password.")
-            return
-        self.setEnabled(False)
-        self.message_label.setText("Signing in…")
-        db = client()
-
-        def done(_token) -> None:
-            self.signed_in = True
-            self.accept()
-
-        def failed(message) -> None:
-            self.setEnabled(True)
-            self.message_label.setText(str(message))
-
-        self.links.run(
-            lambda: db.login(self.server, username, password),
-            done,
-            title="Sign in",
-            on_failure=failed,
-        )
-
-    def sign_in_with_orcid(self) -> None:
-        url = client().sign_in_url(self.server, "orcid")
+    def sign_in_with_browser(self) -> None:
+        url = client().connect_url(self.server, self.state)
         if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(url)):
             self.message_label.setText(f"Could not open the browser. Visit {url}")
             return

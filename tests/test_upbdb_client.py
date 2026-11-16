@@ -269,3 +269,9 @@ def test_error_replies_are_short_sentences_with_codes():
     assert "html" not in str(html.value) and "Bad gateway" in html.value.details
     duplicated = [{"msg": "field required", "loc": ["body", "name"]}] * 2
     assert db._detail(_Reply(422, {"detail": duplicated})) == "name: field required"
+
+
+def test_connect_url_for_studio():
+    url = db.connect_url("https://lab.example.org/", "abcdefghijklmnop_12345")
+    assert url == ("https://lab.example.org/app/#/connect?app=upbrpy&callback=upbr%3A%2F%2Fauth%2Fcallback"
+                   "&state=abcdefghijklmnop_12345")

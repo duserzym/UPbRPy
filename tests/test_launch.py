@@ -110,6 +110,8 @@ def test_single_instance_forwards_opener_context(app, monkeypatch):
         ("upbr://session/a/b?server=x", "upbr://session/<id>"),
         ("upbr://auth/callback", "no code"),
         ("upbr://auth/callback?error=access_denied", "access_denied"),
+        ("upbr://auth/callback?error=cancelled", "cancelled in the browser"),
+        ("upbr://auth/callback?code=x&state=short", "invalid state"),
         ("upbr://mount/1", "does not know"),
         ("upbr://", "nothing"),
     ],
@@ -294,3 +296,8 @@ def test_open_bundle_zip_unpacks_into_cache(controller, tmp_path):
     assert controller.opened == [
         ("project", str(tmp_path / "cache" / "Synthetic_20Mar25" / "Synthetic_20Mar25.upbr"))
     ]
+
+
+def test_auth_callback_keeps_the_state():
+    target = parse_upbr_url("upbr://auth/callback?code=xyz&state=abcdefghijklmnop_12345")
+    assert target.kind == "auth_callback" and target.state == "abcdefghijklmnop_12345"

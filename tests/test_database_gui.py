@@ -208,13 +208,45 @@ def test_orcid_callback_completes_pending_sign_in(controller, dialogs, monkeypat
     try:
         with FakeUpbdb() as fake:
             # What SignInDialog leaves behind after opening the browser:
-            controller.database.pending_sign_in = (fake.url, lambda: resumed.append(True))
+            controller.database.pending_sign_in = (fake.url, lambda: resumed.append(True), "")
             code = fake.state.issue_code()
             controller.open_target(f"upbr://auth/callback?code={code}")
             assert wait_for(lambda: resumed), dialogs
             assert store.get(fake.url) in fake.state.tokens
     finally:
         db.set_token_store(previous)
+
+
+def test_browser_sign_in_needs_its_own_state(controller, dialogs, monkeypatch):
+    pytest.importorskip("requests")
+    from fake_upbdb import FakeUpbdb
+
+    monkeypatch.setattr(gui_database, "database_availability", lambda: (True, ""))
+    store = db.MemoryTokenStore()
+    previous = db.set_token_store(store)
+    resumed = []
+    state = "abcdefghijklmnop_12345"
+    try:
+        with FakeUpbdb() as fake:
+            controller.database.pending_sign_in = (fake.url, lambda: resumed.append(True), state)
+            code = fake.state.issue_code()
+            controller.open_target(f"upbr://auth/callback?code={code}&state=other_state_value_1234")
+            assert not resumed and store.get(fake.url) is None
+            controller.open_target(f"upbr://auth/callback?code={code}&state={state}")
+            assert wait_for(lambda: resumed), dialogs
+            assert store.get(fake.url) in fake.state.tokens
+    finally:
+        db.set_token_store(previous)
+
+
+def test_sign_in_dialog_opens_the_connect_page(app, monkeypatch):
+    opened = []
+    monkeypatch.setattr(gui_database.QtGui.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True)
+    dialog = gui_database.SignInDialog(None, "https://lab.example.org")
+    dialog.browser_button.click()
+    assert dialog.browser_started
+    assert opened and opened[0].startswith("https://lab.example.org/app/#/connect?app=upbrpy&callback=upbr")
+    assert f"state={dialog.state}" in opened[0]
 
 
 def test_session_picker_filters_and_returns_id(app):
