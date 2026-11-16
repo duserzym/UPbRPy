@@ -331,6 +331,23 @@ def parse_arguments(
     return parser.parse_args(argv)
 
 
+def sign_application(application: Path) -> None:
+    """Sign the macOS app with ``APPLE_SIGNING_IDENTITY`` when it is set.
+
+    A stable identity (the lab's certificate) keeps macOS keychain permissions
+    across builds and updates; without it PyInstaller's ad-hoc signature stays.
+    """
+    identity = os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
+    if sys.platform != "darwin" or not identity or identity == "-":
+        return
+    subprocess.run(
+        ["codesign", "--force", "--deep", "--timestamp=none", "--sign", identity, str(application)],
+        check=True,
+    )
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(application)], check=True)
+    print(f"Signed with: {identity}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Build the app and report paths intended for manual testing."""
     arguments = parse_arguments(argv)
@@ -348,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         work_directory,
         clean=arguments.clean,
     )
+    sign_application(application)
     print(f"Application: {application}")
     if arguments.smoke_test:
         screenshot = smoke_test_application(
