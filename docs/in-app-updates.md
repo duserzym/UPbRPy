@@ -1,12 +1,11 @@
 # In-app updates
 
-UPbRPy Studio updates itself the way the lab's other apps (and the owner's
-repohub app) do: a quiet check in the background, a download when allowed, and
-one "Update ready, restart now" action. The version is always visible in a
-corner of the plot canvas, and a click there opens the Updates dialog. Studio
-is a PySide6 application packaged with PyInstaller, not a Tauri app, so it has
-its own small updater instead of `tauri-plugin-updater`; the user-facing
-behaviour is the same.
+Studio checks GitHub Releases for an application update, verifies the downloaded
+archive with SHA-256 and offers a restart to install it. The version chip and
+Help menu open the Updates dialog. See [Updates](get-started/updates.md) for
+user instructions.
+
+![Updates dialog](assets/screenshots/13-updates.png)
 
 ## Mechanism
 
@@ -92,11 +91,11 @@ notarization and Windows code signing remain separate, as before.)
   (no network).
 - `tests/test_updates_gui.py`: the chip and the dialog render offscreen at
   1440 x 900 and 1280 x 800 in light and dark; with `UPBRPY_SCREENSHOTS=1`
-  the test writes `docs/screenshots/studio_updates_*.png`.
+  the test writes `docs/assets/screenshots/studio_updates_*.png`.
 - The button and popup are tested at 1512 x 982, 1280 x 800 and the shell's
   minimum 760 x 620, in light and dark. `scripts/shot_check_updates.py` writes
   `check-updates-idle.png` and `check-updates-available.png` (with popup) to
-  `SHOT_DIR`, or `docs/screenshots` by default. It supports
+  `SHOT_DIR`, or `docs/assets/screenshots` by default. It supports
   `QT_QPA_PLATFORM=offscreen` and uses temporary preferences and no network.
 - `Updater(preview=...)` (or `UPBRPY_UPDATE_PREVIEW`) accepts `idle`, `none`,
   `available`, `downloading`, `ready`, `error`, `unsupported`, and `checking`.

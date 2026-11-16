@@ -65,9 +65,9 @@ def test_updates_fit_canvas_and_laptop(app, prefs, theme, size):
             assert canvas.childAt(chip.geometry().center()) is chip
         canvas.setCurrentIndex(0)
         pump(app)
-        output = Path(__file__).resolve().parents[1] / "docs/screenshots"
+        output = Path(__file__).resolve().parents[1] / "docs/assets/screenshots"
         if os.environ.get("UPBRPY_SCREENSHOTS") == "1":
-            output.mkdir(exist_ok=True)
+            output.mkdir(parents=True, exist_ok=True)
             assert shell.grab().save(str(output / f"studio_updates_chip_{theme}_{size[0]}x{size[1]}.png"))
         chip.click()
         dialog = chip._dialog

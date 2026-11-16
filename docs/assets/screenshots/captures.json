@@ -1,0 +1,23 @@
+{
+  "images": [
+    "00-overview.png",
+    "00-overview-1280x800.png",
+    "01-import-and-auto-pick-windows.png",
+    "02-review-baseline-and-plateau-picks.png",
+    "03-subtract-baseline.png",
+    "04-internal-normalization.png",
+    "05-calibrate-and-calculate-concentrations.png",
+    "06-build-raw-isotope-ratios.png",
+    "07-downhole-correction.png",
+    "08-session-fractionation-correction.png",
+    "09-dates-and-concordia-review.png",
+    "09-spot-concordia.png",
+    "10-depth-profile-export.png",
+    "10-depth-concordia.png",
+    "11-export-results.png",
+    "12-sign-in-to-upbdb.png",
+    "13-updates.png"
+  ],
+  "unavailable": [],
+  "missing_channels": []
+}

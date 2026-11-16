@@ -1,95 +1,86 @@
 ---
-icon: material/home
 hide:
-  - navigation
   - toc
 ---
 
-# UPbRPy documentation
+# UPbRPy Studio
 
-UPbRPy turns laser-ablation ICP-MS measurements of U, Th and Pb isotopes into
-isotope ratios, dates and trace-element concentrations, and records every step so
-a reduction can be repeated. This site explains what UPbRPy reads, what it keeps
-from each file, and what it writes.
+Reduce LA-ICP-MS U-Pb and trace-element measurements in a desktop application
+or use the same engine from Python. Studio reads Qtegra Rich and per-spot
+exports and provides zircon, apatite, rutile and titanite workflows.
+
+[Install Studio](get-started/install.md){ .md-button .md-button--primary }
+[Open a session](get-started/open-session.md){ .md-button }
+
+![Studio showing real acquisition traces and reviewed windows](assets/screenshots/01-import-and-auto-pick-windows.png){ .hero-shot }
+
+## Follow the workflow
+
+The cards follow the zircon preset. Run each action, review its result, then
+continue with Next. Other mineral presets adapt reference choices and selection
+defaults. The screenshots show real measurements with neutral labels; acquisition
+metadata is not displayed. They are interface examples, not reported sample results.
 
 <div class="grid cards" markdown>
 
--   :material-lightbulb-on-outline: **Start here: key ideas**
+- **[Import](manual/import.md)**
 
-    ---
+    Read exports and inspect auto-picks.
 
-    What an acquisition, a sweep, a channel and a count rate are, in plain
-    words, with one picture of how a measurement is laid out.
+- **[Selections](manual/selections.md)**
 
-    [:octicons-arrow-right-24: Key ideas](guide/key-ideas.md)
+    Review baseline, plateau and signal windows.
 
--   :material-counter: **Counts, count rates and dwell time**
+- **[Baseline](manual/baseline.md)**
 
-    ---
+    Subtract the measured gas blank.
 
-    Why the instrument's "counts per second" cannot be used directly as a
-    number of ions, and what that means for uncertainties.
+- **[Internal normalization](manual/normalization.md)**
 
-    [:octicons-arrow-right-24: Counting and dwell time](guide/counting-and-dwell.md)
+    Normalize intensities with the mineral matrix.
 
--   :material-file-export-outline: **Which Qtegra export should I use?**
+- **[Concentrations](manual/concentrations.md)**
 
-    ---
+    Calibrate with measured reference glasses.
 
-    A short decision guide: what each export contains and what you lose
-    without it.
+- **[Raw isotope ratios](manual/ratios.md)**
 
-    [:octicons-arrow-right-24: Choosing an export](guide/choosing-an-export.md)
+    Build ratios from baseline-subtracted signals.
 
--   :material-book-open-variant: **Reference**
+- **[Downhole correction](manual/downhole.md)**
 
-    ---
+    Review fractionation through each ablation.
 
-    The exact file layouts, data structures, reference-material files,
-    project files and export tables, field by field.
+- **[Session fractionation](manual/session.md)**
 
-    [:octicons-arrow-right-24: Data model reference](data-model/index.md)
+    Correct drift through session time.
+
+- **[Dates and concordia review](manual/final-results.md)**
+
+    Inspect spot results, flags and references.
+
+- **[Depth-profile export](manual/depth-profiles.md)**
+
+    Review corrected full-signal sweeps.
+
+- **[Export results](manual/export.md)**
+
+    Prepare tables and reproducibility products.
+
+- **[Database](manual/database.md)**
+
+    Sign in, link a session and submit a run.
 
 </div>
 
-## How data moves through UPbRPy
+## Understand the measurements
 
-```mermaid
-flowchart TD
-    A["Qtegra export<br/>Rich CSV and/or per-spot files"] --> B["Read<br/>one session of acquisitions"]
-    B --> C["Experiment tables<br/>signal per sweep, sample names, timing"]
-    C --> D["Review<br/>choose gas blank and signal windows"]
-    G["Reference materials<br/>TOML library"] --> E
-    D --> E["Reduce<br/>ratios, corrections, uncertainties"]
-    E --> F["Results<br/>spot means, depth profiles, export tables"]
-    D -. saved as .-> H[".upbr project"]
-    F -. saved as .-> I["Reduction bundle"]
-```
+Read [Key ideas](guide/key-ideas.md), [Counting and dwell time](guide/counting-and-dwell.md)
+and [Choosing an export](guide/choosing-an-export.md) for the concepts behind
+the controls. The [data model](data-model/index.md) defines inputs, acquisition
+objects, saved projects and exported quantities. The [Python API](reference/python-api.md)
+uses the same numerical pipeline as Studio.
 
-## What UPbRPy Studio looks like
-
-UPbRPy Studio is the desktop program built on UPbRPy. You review each laser
-spot, choose its gas blank and signal windows, and step through the reduction
-from the list on the left.
-
-=== "Reviewing a spot"
-
-    <figure markdown="span">
-      ![UPbRPy Studio showing one spot's signal with the gas blank and signal windows marked](screenshots/studio_tabs_rich_1280x800.png){ loading=lazy }
-      <figcaption>Step 1, Import: the signal of one spot against time, with the chosen signal window marked by the green and orange lines. Below it, the whole session at a glance; on the right, the spot list and isotope picker.</figcaption>
-    </figure>
-
-=== "Checking results"
-
-    <figure markdown="span">
-      ![UPbRPy Studio concordia diagram of spot means coloured by sample](screenshots/studio_final_spot_concordia_1440x900.png){ loading=lazy }
-      <figcaption>Step 9, Final review: spot means on a concordia diagram, coloured by sample. Selecting spots reports their concordia age and MSWD.</figcaption>
-    </figure>
-
-!!! info "Recent change that affects uncertainties (2026-11-11)"
-    Before this date, UPbRPy calculated the counting uncertainty of each sweep
-    as if the instrument's count rate were the number of ions detected. That
-    made sweep-level uncertainties several times too small. Spot averages were
-    not affected. [Read what changed and why](guide/counting-and-dwell.md).
-
-The source code is on [GitHub](https://github.com/duserzym/UPbRPy).
+Use [UPbDB](https://github.com/duserzym/upbdb) to store raw sessions and reduction
+runs, and [UPb Lab](https://github.com/duserzym/upblab) to open sessions in Studio
+and review results after submission. Local reduction needs neither service.

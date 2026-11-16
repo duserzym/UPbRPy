@@ -1,26 +1,25 @@
-site_name: UPbRPy documentation
-site_description: How UPbRPy reads LA-ICP-MS U-Pb data, what it keeps, and what it writes.
+site_name: UPbRPy Studio manual
+site_description: Installation, reduction workflow, Python API and data model for UPbRPy Studio.
 site_url: https://duserzym.github.io/UPbRPy/
 repo_url: https://github.com/duserzym/UPbRPy
 repo_name: duserzym/UPbRPy
 docs_dir: docs
 theme:
   name: material
+  logo: assets/upbrpy.png
+  favicon: assets/upbrpy.png
   icon:
-    logo: material/atom-variant
     repo: fontawesome/brands/github
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
+    - scheme: default
       primary: indigo
-      accent: deep orange
+      accent: blue
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
+    - scheme: slate
       primary: indigo
-      accent: deep orange
+      accent: blue
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -65,41 +64,56 @@ markdown_extensions:
   - toc:
       permalink: true
 exclude_docs: |
-  **
-  !/index.md
-  !/guide/
-  !/guide/*.md
-  !/images/
-  !/images/*.svg
-  !/screenshots/
-  !/screenshots/studio_tabs_rich_1280x800.png
-  !/screenshots/studio_final_spot_concordia_1440x900.png
-  !/stylesheets/
-  !/stylesheets/*.css
-  !/assets/
-  !/assets/**
-  !/data-model/
-  !/data-model/index.md
-  !/data-model/rich-csv.md
-  !/data-model/per-spot.md
-  !/data-model/acquisition-model.md
-  !/data-model/reference-materials.md
-  !/data-model/project-and-bundle.md
-  !/data-model/export-table.md
-  !/qtegra_export_formats.md
+  /includes/**
+  /notes/**
+  /perf/**
+  /qtegra_input_plan.md
+  /verification_*.md
+  /lab_workflow_integration.md
+  /manuscript_workflow_compatibility.md
+  /standards_v2.md
 nav:
   - Home: index.md
-  - Guide:
+  - Get started:
+      - Install: get-started/install.md
+      - First launch: get-started/first-launch.md
+      - Open a session: get-started/open-session.md
+      - Updates: get-started/updates.md
+  - Manual:
+      - Import and auto-pick windows: manual/import.md
+      - Review baseline and plateau picks: manual/selections.md
+      - Subtract baseline: manual/baseline.md
+      - Internal normalization: manual/normalization.md
+      - Calibrate and calculate concentrations: manual/concentrations.md
+      - Build raw isotope ratios: manual/ratios.md
+      - Downhole correction: manual/downhole.md
+      - Session fractionation correction: manual/session.md
+      - Dates and concordia review: manual/final-results.md
+      - Spot concordia: manual/concordia.md
+      - Depth-profile export: manual/depth-profiles.md
+      - Export results: manual/export.md
+      - Database: manual/database.md
+      - Keyboard shortcuts: manual/keyboard-shortcuts.md
+  - Concepts:
       - Key ideas: guide/key-ideas.md
       - Counting and dwell time: guide/counting-and-dwell.md
       - Choosing an export: guide/choosing-an-export.md
+      - Uncertainty and publication exports: uncertainty_and_publication_exports.md
+      - Regression methods: isochron_regression.md
   - Reference:
-      - Overview: data-model/index.md
+      - Data model: data-model/index.md
       - Rich single CSV: data-model/rich-csv.md
       - Per-spot CSV and folder: data-model/per-spot.md
       - Acquisition model: data-model/acquisition-model.md
       - Reference materials: data-model/reference-materials.md
       - Projects and bundles: data-model/project-and-bundle.md
       - Export table: data-model/export-table.md
-  - Decisions:
-      - Qtegra exports: qtegra_export_formats.md
+      - Publication table contract: export_table_spec.md
+      - Qtegra exports decision: qtegra_export_formats.md
+      - Python API: reference/python-api.md
+  - Development:
+      - Building Studio: development/building.md
+      - Tests: testing.md
+      - In-app updates and releases: in-app-updates.md
+      - Contributing: development/contributing.md
+      - Manual screenshots: development/screenshots.md

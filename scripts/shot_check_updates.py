@@ -1,7 +1,7 @@
 """Capture the status-bar update button and popup without network access.
 
 Run from the worktree with QT_QPA_PLATFORM=offscreen when no display is
-available. SHOT_DIR selects the output folder; defaults to docs/screenshots.
+available. SHOT_DIR selects the output folder; defaults to docs/assets/screenshots.
 """
 
 from pathlib import Path
@@ -23,7 +23,7 @@ from GUI.updater import Updater
 
 
 def main():
-    output = Path(os.environ.get("SHOT_DIR", ROOT / "docs/screenshots"))
+    output = Path(os.environ.get("SHOT_DIR", ROOT / "docs/assets/screenshots"))
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="upbrpy-update-shots-") as settings_dir:
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":

@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "Please cite UPbRPy when using this software."
+title: UPbRPy
+type: software
+authors:
+  - family-names: Zhang
+    given-names: Yiming
+    affiliation: University of Minnesota
+license: MIT
+repository-code: https://github.com/duserzym/UPbRPy
+url: https://duserzym.github.io/UPbRPy/
