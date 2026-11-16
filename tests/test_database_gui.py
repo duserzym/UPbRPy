@@ -730,3 +730,31 @@ def test_link_unnamed_reduction_stays_modified_until_save_as(controller, dialogs
     case.window.save_project(target)
     assert json.loads(target.read_text())["origin"] == case.window.session.origin
     assert not case.window.has_unsaved_changes()
+
+
+def test_database_menu_says_who_is_signed_in(controller, dialogs):
+    window = controller.create_window(show=False).active_reduction
+    links = window.database()
+    store = db.MemoryTokenStore()
+    previous = db.set_token_store(store)
+    server = "https://lab.example.org"
+    try:
+        links.settings.remove(gui_database.SETTINGS_LAST_SERVER)
+        window._refresh_database_status()
+        assert window.database_status_action.text() == "Not signed in to a database"
+        assert not window.database_status_action.isEnabled()
+        assert window.sign_in_action.isVisible() and not window.sign_out_action.isVisible()
+
+        links.remember_server(server)
+        window._refresh_database_status()
+        assert window.database_status_action.text() == "Not signed in · lab.example.org"
+
+        store.set(server, "lcp_test")
+        links._set_account_name(server, "Annie Jay")
+        window._refresh_database_status()
+        assert window.database_status_action.text() == "Signed in as Annie Jay · lab.example.org"
+        assert window.sign_out_action.isVisible() and not window.sign_in_action.isVisible()
+    finally:
+        links._set_account_name(server, None)
+        links.settings.remove(gui_database.SETTINGS_LAST_SERVER)
+        db.set_token_store(previous)

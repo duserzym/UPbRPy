@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 import functools
+import json
 from pathlib import Path
 import secrets
 import shutil
@@ -29,6 +30,7 @@ from UPbRPy.session_bundle import SessionBundle, find_project_for_run
 
 
 SETTINGS_LAST_SERVER = "database/last_server"
+SETTINGS_ACCOUNT_NAMES = "database/account_names"
 SETTINGS_SERVERS = "database/servers"
 
 
@@ -60,6 +62,8 @@ class DatabaseLinks(QtCore.QObject):
 
     # Presentation-only events, keyed by session so other tabs ignore them.
     operation_changed = QtCore.Signal(object, str, str, object)
+    # The signed-in account changed (sign-in confirmed, or signed out).
+    signed_in_changed = QtCore.Signal()
 
     def __init__(
         self,
@@ -136,6 +140,67 @@ class DatabaseLinks(QtCore.QObject):
 
     def known_servers(self) -> list[str]:
         return [str(s) for s in (self.settings.value(SETTINGS_SERVERS, [], type=list) or [])]
+
+    # ------------------------------------------------------- who is signed in
+    def current_server(self) -> str:
+        return str(self.settings.value(SETTINGS_LAST_SERVER, "", type=str) or "")
+
+    def _account_names(self) -> dict:
+        raw = self.settings.value(SETTINGS_ACCOUNT_NAMES, "", type=str) or ""
+        try:
+            names = json.loads(raw) if raw else {}
+        except ValueError:
+            names = {}
+        return names if isinstance(names, dict) else {}
+
+    def _set_account_name(self, server: str, name: str | None) -> None:
+        names = self._account_names()
+        if name:
+            names[server] = name
+        else:
+            names.pop(server, None)
+        self.settings.setValue(SETTINGS_ACCOUNT_NAMES, json.dumps(names))
+
+    def is_signed_in(self, server: str | None = None) -> bool:
+        server = server or self.current_server()
+        return bool(server) and client().is_signed_in(server)
+
+    def status_text(self) -> str:
+        """One line for the Database menu: who is signed in, and where."""
+        server = self.current_server()
+        if not server:
+            return "Not signed in to a database"
+        host = server.split("://", 1)[-1].rstrip("/")
+        if not self.is_signed_in(server):
+            return f"Not signed in · {host}"
+        name = self._account_names().get(server)
+        return f"Signed in as {name} · {host}" if name else f"Signed in · {host}"
+
+    def sign_in_from_menu(self) -> None:
+        """File > Database > Sign In…: choose the server, then UPbDB's sign-in page."""
+        title = "Sign in"
+        if not self.require_available(title):
+            return
+        server = self.choose_server(title, "Sign in to which UPbDB server?")
+        if not server:
+            return
+        self.remember_server(server)
+        self.prompt_sign_in(server, lambda: self.announce_signed_in(server))
+
+    def announce_signed_in(self, server: str) -> None:
+        """Say who Studio is now signed in as (and remember it for the menu)."""
+        db = client()
+
+        def shown(account: dict) -> None:
+            name = str(account.get("display_name") or account.get("username") or "")
+            self._set_account_name(server, name or None)
+            self.signed_in_changed.emit()
+            QtWidgets.QMessageBox.information(
+                self.parent_widget(), "Signed in",
+                f"Studio is signed in to {server}" + (f" as {name}." if name else "."),
+            )
+
+        self.run(lambda: db.whoami(server), shown, title="Sign in")
 
     def require_available(self, title: str) -> bool:
         ok, reason = database_availability()
@@ -379,25 +444,26 @@ class DatabaseLinks(QtCore.QObject):
         title = "Sign out"
         if not self.require_available(title):
             return
-        server = server or str(self.settings.value(SETTINGS_LAST_SERVER, "", type=str) or "")
+        server = server or self.current_server()
         if not server:
             return
         db = client()
-        self.run(
-            lambda: db.sign_out(server),
-            lambda _r: QtWidgets.QMessageBox.information(
-                self.parent_widget(), title, f"Signed out of {server}."
-            ),
-            title=title,
-        )
+
+        def done(_r) -> None:
+            self._set_account_name(server, None)
+            self.signed_in_changed.emit()
+            QtWidgets.QMessageBox.information(self.parent_widget(), title, f"Signed out of {server}.")
+
+        self.run(lambda: db.sign_out(server), done, title=title)
 
     # ----------------------------------------------------- open from menu
-    def choose_server(self) -> str | None:
+    def choose_server(self, title: str = "Open from database",
+                      label: str = "UPbDB server address:") -> str | None:
         servers = self.known_servers()
         value, ok = QtWidgets.QInputDialog.getItem(
             self.parent_widget(),
-            "Open from database",
-            "UPbDB server address:",
+            title,
+            label,
             servers or ["https://"],
             0,
             True,
@@ -407,7 +473,7 @@ class DatabaseLinks(QtCore.QObject):
         try:
             return client().normalize_server(value)
         except client().DatabaseError as exc:
-            self.show_error("Open from database", exc)
+            self.show_error(title, exc)
             return None
 
     def open_from_database(self) -> None:

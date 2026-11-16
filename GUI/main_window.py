@@ -382,6 +382,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         database_menu = file_menu.addMenu("Database")
         database_menu.setToolTipsVisible(True)
+        # Who Studio is signed in as, and where: refreshed each time the menu opens.
+        self.database_status_action = database_menu.addAction("Not signed in to a database")
+        self.database_status_action.setEnabled(False)
+        self.sign_in_action = database_menu.addAction("Sign In…")
+        self.sign_in_action.triggered.connect(
+            lambda _checked=False: self.database().sign_in_from_menu()
+        )
+        database_menu.addSeparator()
+        database_menu.aboutToShow.connect(self._refresh_database_status)
         self.open_from_database_action = database_menu.addAction(
             "Open from Database…"
         )
@@ -4836,6 +4845,17 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.load_experiment_directory(str(bundle.raw_directory))
 
+    def _refresh_database_status(self) -> None:
+        """Show who is signed in, and offer Sign In… or Sign Out accordingly."""
+        try:
+            links = self.database()
+            text, signed_in = links.status_text(), links.is_signed_in()
+        except Exception:  # keyring or settings unavailable: keep the menu usable
+            text, signed_in = "Database sign-in status unknown", False
+        self.database_status_action.setText(text)
+        self.sign_in_action.setVisible(not signed_in)
+        self.sign_out_action.setVisible(signed_in)
+
     def _update_database_actions(self) -> None:
         """Enable the database actions that apply, with the reason otherwise."""
         if not hasattr(self, "submit_to_database_action"):
@@ -4868,6 +4888,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 else RUN_REQUIRED,
             ),
             self.sign_out_action: (available, "Forget this computer's sign-in."),
+            self.sign_in_action: (
+                available,
+                "Sign in on the UPbDB server's page in your browser (ORCID, Google, GitHub or a password).",
+            ),
         }
         for action, (enabled, tip) in states.items():
             if not available:
