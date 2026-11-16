@@ -26,7 +26,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from GUI.launch import LaunchTarget
 from GUI.workers import FunctionWorker
-from UPbRPy.session_bundle import SessionBundle, find_project_for_run
+from UPbRPy.session_bundle import (
+    SessionBundle, find_project_for_run, holds_reduced_work,
+    install_run_project, pick_session_run,
+)
 
 
 SETTINGS_LAST_SERVER = "database/last_server"
@@ -75,7 +78,7 @@ class DatabaseLinks(QtCore.QObject):
         activate_project: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
-        self.open_bundle = open_bundle
+        self._open_bundle = open_bundle
         self.open_project = open_project
         self.activate_project = activate_project
         self.parent_widget = parent_widget
@@ -215,7 +218,7 @@ class DatabaseLinks(QtCore.QObject):
             self.complete_sign_in(target.code, target.server or None, target.state)
         elif target.kind == "session":
             self.open_session(target.server, target.identifier, code=target.code,
-                              acquisition=target.acquisition, via=target.via)
+                              acquisition=target.acquisition, via=target.via, fresh=target.fresh)
         elif target.kind == "run":
             self.open_run(target.server, target.identifier, code=target.code,
                           acquisition=target.acquisition, via=target.via)
@@ -223,7 +226,23 @@ class DatabaseLinks(QtCore.QObject):
     def _activate(self, **identity) -> Any:
         return self.activate_project(**identity) if self.activate_project else None
 
-    def _opened(self, window, *, acquisition: str = "", via: str = "") -> None:
+    @staticmethod
+    def _bundle_messages(bundle) -> tuple[str, ...]:
+        if bundle.superseded is None:
+            return ()
+        detail = " It holds reduced work." if holds_reduced_work(bundle.superseded) else ""
+        return (f"The previous cache folder was moved to {bundle.superseded}.{detail}",)
+
+    def open_bundle(self, bundle: SessionBundle, *, acquisition: str = "", via: str = "",
+                    messages: tuple[str, ...] = ()):
+        """Open a bundle and report any preserved cache folder after loading."""
+        window = self._open_bundle(bundle)
+        self._opened(window, acquisition=acquisition, via=via,
+                     messages=(*messages, *self._bundle_messages(bundle)))
+        return window
+
+    def _opened(self, window, *, acquisition: str = "", via: str = "",
+                messages: tuple[str, ...] = ()) -> None:
         """Apply opener context after the asynchronous project load finishes."""
         if window is None:
             return
@@ -235,6 +254,10 @@ class DatabaseLinks(QtCore.QObject):
                 window.session.origin["opened_via"] = "upblab"
                 if window.session.pipeline is not None:
                     window.session.pipeline.origin = dict(window.session.origin)
+            for message in messages:
+                window.append_log(message)
+            if messages:
+                window.statusBar().showMessage(" ".join(messages))
             if not acquisition:
                 return
             from UPbRPy.session_manifest import find_session_manifest, read_session_manifest
@@ -297,10 +320,13 @@ class DatabaseLinks(QtCore.QObject):
 
     def open_session(
         self, server: str, session_id: str, *, code: str = "",
-        acquisition: str = "", via: str = "",
+        acquisition: str = "", via: str = "", fresh: bool = False,
     ) -> None:
-        """Fetch a session bundle (exchanging a link's code first) and open it."""
-        existing = self._activate(server=server, session_id=session_id)
+        """Open a session's chosen complete run, or its raw data when fresh."""
+        if fresh:
+            existing = self._activate(server=server, session_id=session_id, fresh=True)
+        else:
+            existing = self._activate(server=server, session_id=session_id)
         if existing is not None:
             self._opened(existing, acquisition=acquisition, via=via)
             return
@@ -315,17 +341,49 @@ class DatabaseLinks(QtCore.QObject):
             return
         self.remember_server(server)
 
+        messages = ()
+
+        def opened(bundle) -> None:
+            self.open_bundle(bundle, acquisition=acquisition, via=via, messages=messages)
+
         def fetch() -> None:
             self.run(
                 lambda: db.fetch_session_bundle(server, session_id, self.cache_root),
-                lambda bundle: self._opened(self.open_bundle(bundle), acquisition=acquisition, via=via),
+                opened,
                 title=title,
                 on_failure=lambda message: self._retry_after_sign_in(
                     server, fetch, title, message
                 ),
             )
 
-        self._authorize(server, code, fetch, title)
+        def selected(result) -> None:
+            nonlocal messages
+            run, warning = result
+            if warning:
+                messages = (warning,)
+            if run is None:
+                fetch()
+                return
+            run_id = str(run.get("id") or run["run_id"])
+            reason = "preferred run" if run.get("is_preferred_for_session") else "newest complete run, none preferred"
+            message = (f"Opened run {short_id(run_id)} ({reason}). To start a fresh reduction, use "
+                       "File > Database > New Reduction from Session Data.")
+            self.open_run(server, run_id, acquisition=acquisition, via=via, _messages=(message,))
+
+        def listing():
+            # Keep the failure typed inside the worker: worker signals carry text.
+            try:
+                return pick_session_run(db.list_session_runs(server, session_id)), ""
+            except Exception as exc:
+                return None, f"Could not list session runs; opened the session data instead: {exc}"
+
+        def start() -> None:
+            if fresh:
+                fetch()
+            else:
+                self.run(listing, selected, title=title)
+
+        self._authorize(server, code, start, title)
 
     def _retry_after_sign_in(self, server: str, again: Callable[[], None], title: str, message) -> None:
         if not client().is_signed_in(server) and self.sign_in is not None:
@@ -335,12 +393,12 @@ class DatabaseLinks(QtCore.QObject):
 
     def open_run(
         self, server: str, run_id: str, *, code: str = "",
-        acquisition: str = "", via: str = "",
+        acquisition: str = "", via: str = "", _messages: tuple[str, ...] = (),
     ) -> None:
-        """Open the cached project of a run, else re-fetch its session."""
+        """Activate a run, reopen its cached project, or download its project."""
         existing = self._activate(server=server, run_id=run_id)
         if existing is not None:
-            self._opened(existing, acquisition=acquisition, via=via)
+            self._opened(existing, acquisition=acquisition, via=via, messages=_messages)
             return
         project = find_project_for_run(run_id, self.cache_root)
         if project is not None:
@@ -352,13 +410,14 @@ class DatabaseLinks(QtCore.QObject):
                 # Let the normal project loader report a malformed cached file.
                 origin = {}
             existing = self._activate(server=server or origin.get("server", ""),
-                                      session_id=origin.get("session_id", ""), project_file=str(project))
+                                      project_file=str(project))
             if existing is not None:
-                self._opened(existing, acquisition=acquisition, via=via)
+                self._opened(existing, acquisition=acquisition, via=via, messages=_messages)
                 return
 
             def open_cached() -> None:
-                self._opened(self.open_project(str(project)), acquisition=acquisition, via=via)
+                self._opened(self.open_project(str(project)), acquisition=acquisition, via=via,
+                             messages=_messages)
 
             if code:
                 title = "Open reduction run"
@@ -390,13 +449,51 @@ class DatabaseLinks(QtCore.QObject):
         except db.DatabaseError as exc:
             self.show_error(title, exc)
             return
+        self.remember_server(server)
+
+        def downloaded(result) -> None:
+            bundle, project = result
+            if project is None:
+                messages = (f"Run {short_id(run_id)} has no saved project on the server; "
+                            "opened the session's raw data instead.",)
+                self.open_bundle(bundle, acquisition=acquisition, via=via,
+                                 messages=(*_messages, *messages))
+                return
+            window = self.open_project(str(project.path))
+            messages = (*project.notes, *self._bundle_messages(bundle))
+            self._opened(window, acquisition=acquisition, via=via,
+                         messages=(*_messages, *messages))
+
+        def fetch(run) -> None:
+            session_id = str(run["session_id"])
+            # Older client adapters can still open session data.
+            if not hasattr(db, "fetch_run_project"):
+                self.open_session(server, session_id, acquisition=acquisition, via=via, fresh=True)
+                return
+
+            def download():
+                bundle = db.fetch_session_bundle(server, session_id, self.cache_root)
+                try:
+                    data = db.fetch_run_project(server, run_id)
+                except db.DatabaseError as exc:
+                    if exc.status != 404:
+                        raise
+                    return bundle, None
+                project = install_run_project(
+                    bundle.path, run_id, data, server=server, session_id=session_id,
+                    session_key=bundle.session_key, export_sha256=bundle.export_sha256,
+                )
+                return bundle, project
+
+            self.run(download, downloaded, title=title, on_failure=lambda message:
+                     self._retry_after_sign_in(server, lookup, title, message))
 
         def lookup() -> None:
             self.run(
                 lambda: db.get_run(server, run_id),
-                lambda run: self.open_session(server, str(run["session_id"]),
-                                              acquisition=acquisition, via=via),
+                fetch,
                 title=title,
+                on_failure=lambda message: self._retry_after_sign_in(server, lookup, title, message),
             )
 
         self._authorize(server, code, lookup, title)

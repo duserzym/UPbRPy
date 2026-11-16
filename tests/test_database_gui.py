@@ -789,3 +789,181 @@ def test_server_picker_takes_a_typed_address(app):
     dialog.address.setText("upb-host.example.ts.net")
     dialog._accept()
     assert dialog.server == "https://upb-host.example.ts.net"
+
+
+@pytest.fixture
+def remote_run(controller, tmp_path, monkeypatch, mock_client):
+    from UPbRPy.session_bundle import unpack_session_bundle
+    from synthetic_bundles import zip_directory
+
+    fake, calls = mock_client
+    source = write_session_bundle(tmp_path / "remote", server="https://lab.example.org")
+    bundle = unpack_session_bundle(zip_directory(source), controller.database.cache_root,
+                                   server="https://lab.example.org")
+    document = json.loads(bundle.project_file.read_text())
+    document["origin"].update(run_id="previous-run", export_sha256="earlier-export")
+    document["paths"]["source_directory"] = {"relative": "../../submitter/raw", "absolute": "/submitter/raw"}
+    document["paths"]["reference_library"] = {"absolute": "/submitter/library.json"}
+    fake.DatabaseError = db.DatabaseError
+    fake.fetch_session_bundle = lambda *args: calls.append(("fetch", SESSION_ID)) or bundle
+    fake.fetch_run_project = lambda server, run: calls.append(("project", run)) or json.dumps(document).encode()
+    fake.list_session_runs = lambda *args: []
+    logs = []
+    from GUI.main_window import MainWindow
+    monkeypatch.setattr(MainWindow, "append_log", lambda self, message: logs.append(message))
+    return fake, calls, bundle, logs
+
+
+def wait_for_opened_run(controller, dialogs, run_id=None):
+    def ready():
+        shell = controller.active_window()
+        window = shell.active_reduction if shell else None
+        return (window is not None and window.session.loaded and window._active_worker is None
+                and window.session.origin.get("opened_via") == "upblab"
+                and (run_id is None or window.session.origin.get("run_id") == run_id))
+
+    assert wait_for(ready), dialogs
+    return controller.active_window().active_reduction
+
+
+def test_uncached_run_downloads_saved_project_and_keeps_opener_context(controller, dialogs, remote_run):
+    fake, calls, bundle, logs = remote_run
+    controller.open_target(
+        "upbr://run/full-run-id?server=https://lab.example.org&code=c&acquisition=acq-2&via=upblab"
+    )
+    window = wait_for_opened_run(controller, dialogs, "full-run-id")
+    assert window.project_path == bundle.path / f"{bundle.session_key}.run-full-run-id.upbr"
+    assert window.project_path != bundle.project_file
+    assert window.current_spot_name() == "AFB_3"
+    assert calls == [("exchange", "c"), ("run", "full-run-id"), ("fetch", SESSION_ID), ("project", "full-run-id")]
+    assert any("earlier export" in line for line in logs)
+    assert any("built-in library" in line for line in logs)
+    assert not dialogs
+
+
+def test_run_project_404_opens_bundle_with_explanation(controller, dialogs, remote_run):
+    fake, calls, bundle, logs = remote_run
+
+    def missing(*args):
+        raise db.NotFound("No project", status=404)
+
+    fake.fetch_run_project = missing
+    controller.open_target("upbr://run/run-1?server=https://lab.example.org&via=upblab")
+    window = wait_for_opened_run(controller, dialogs)
+    assert window.project_path == bundle.project_file
+    message = "Run id run-1 has no saved project on the server; opened the session's raw data instead."
+    assert message in logs and message in window.statusBar().currentMessage()
+    assert not dialogs
+
+
+@pytest.mark.parametrize("preferred", [True, False])
+def test_session_opens_preferred_or_newest_run(controller, dialogs, remote_run, preferred):
+    fake, calls, bundle, logs = remote_run
+    fake.list_session_runs = lambda *args: [
+        {"id": "old", "status": "completed", "started_at": "2026-01-01T00:00:00Z",
+         "is_preferred_for_session": preferred},
+        {"id": "new", "status": "complete", "started_at": "2026-02-01T00:00:00Z"},
+        {"id": "pending", "status": "running", "started_at": "2027-01-01T00:00:00Z"},
+    ]
+    controller.open_target(f"upbr://session/{SESSION_ID}?server=https://lab.example.org&via=upblab&acquisition=acq-2")
+    run_id = "old" if preferred else "new"
+    window = wait_for_opened_run(controller, dialogs, run_id)
+    assert window.current_spot_name() == "AFB_3"
+    reason = "preferred run" if preferred else "newest complete run, none preferred"
+    assert any(reason in message and "New Reduction from Session Data" in message for message in logs)
+    assert reason in window.statusBar().currentMessage()
+    assert ("project", run_id) in calls and not dialogs
+
+
+@pytest.mark.parametrize("mode", ["empty", "fresh", "listing-fails"])
+def test_session_raw_opening_choices(controller, dialogs, remote_run, mode):
+    fake, calls, bundle, logs = remote_run
+
+    def listing(*args):
+        if mode == "fresh":
+            pytest.fail("Fresh reduction must not list runs")
+        if mode == "listing-fails":
+            raise db.PermissionDenied("Old server", status=403)
+        return []
+
+    fake.list_session_runs = listing
+    controller.database.open_session("https://lab.example.org", SESSION_ID,
+                                     fresh=mode == "fresh", via="upblab")
+    window = wait_for_opened_run(controller, dialogs)
+    assert window.project_path == bundle.project_file
+    assert calls == [("fetch", SESSION_ID)]
+    if mode == "listing-fails":
+        assert any("Could not list session runs" in line for line in logs)
+    assert not dialogs
+
+
+@pytest.mark.parametrize("route", ["session", "run", "zip"])
+def test_superseded_reduced_work_is_reported(controller, dialogs, remote_run, tmp_path, route):
+    from dataclasses import replace
+
+    fake, calls, bundle, logs = remote_run
+    superseded = tmp_path / "session.superseded-20261116"
+    superseded.mkdir()
+    (superseded / "edited.upbr").write_text(json.dumps({"selections": [{"spot_names": "A"}]}))
+    bundle = replace(bundle, superseded=superseded)
+    fake.fetch_session_bundle = lambda *args: bundle
+    if route == "zip":
+        controller.database.open_bundle(bundle)
+    elif route == "run":
+        controller.database.open_run("https://lab.example.org", "run-1")
+    else:
+        controller.database.open_session("https://lab.example.org", SESSION_ID)
+    window = controller.active_window().active_reduction
+    assert wait_for(lambda: window.session.loaded and window._active_worker is None
+                    and "holds reduced work" in window.statusBar().currentMessage()), dialogs
+    assert str(superseded) in window.statusBar().currentMessage()
+    assert any("holds reduced work" in line and str(superseded) in line for line in logs)
+    assert (superseded / "edited.upbr").is_file() and not dialogs
+
+
+def test_fresh_link_and_menu_open_raw_in_new_tab_and_reuse_it(controller, dialogs, remote_run):
+    fake, calls, bundle, logs = remote_run
+    controller.database.open_run("https://lab.example.org", "run-1", via="upblab")
+    run_window = wait_for_opened_run(controller, dialogs, "run-1")
+    shell = controller.active_window()
+    assert run_window.new_reduction_from_session_action.isEnabled()
+    fake.list_session_runs = lambda *args: pytest.fail("Fresh must bypass run selection")
+    controller.open_target(f"upbr://session/{SESSION_ID}?server=https://lab.example.org&fresh=1&via=upblab")
+    raw_window = wait_for_opened_run(controller, dialogs)
+    assert raw_window is not run_window and shell.tabs.count() == 2
+    assert raw_window.project_path == bundle.project_file
+    shell.select_tab(0)
+    run_window.new_reduction_from_session_action.trigger()
+    assert shell.active_reduction is raw_window and shell.tabs.count() == 2
+    assert not dialogs
+
+
+@pytest.mark.parametrize("query, expected", [("", False), ("&fresh=1", True), ("&fresh=0", False)])
+def test_launch_target_parses_fresh_session(query, expected):
+    from GUI.launch import parse_upbr_url
+
+    target = parse_upbr_url(f"upbr://session/{SESSION_ID}?server=https://lab.example.org{query}")
+    assert target.fresh is expected
+    assert not parse_upbr_url("upbr://run/run-1?fresh=1").fresh
+
+
+def test_run_download_network_work_stays_off_gui_thread(controller, dialogs, remote_run, monkeypatch):
+    import threading
+
+    fake, calls, bundle, logs = remote_run
+    gui_thread = threading.get_ident()
+    threads = []
+    for name in ("get_run", "fetch_session_bundle", "fetch_run_project"):
+        original = getattr(fake, name)
+
+        def record(*args, original=original):
+            threads.append(threading.get_ident())
+            return original(*args)
+
+        setattr(fake, name, record)
+    monkeypatch.setattr(controller.database, "run", gui_database.DatabaseLinks.run.__get__(controller.database))
+    controller.database.open_run("https://lab.example.org", "background-run", via="upblab", acquisition="acq-2")
+    window = wait_for_opened_run(controller, dialogs, "background-run")
+    assert window.current_spot_name() == "AFB_3"
+    assert len(threads) == 3 and all(thread != gui_thread for thread in threads)
+    assert not dialogs

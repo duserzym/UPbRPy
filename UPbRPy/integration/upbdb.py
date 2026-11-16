@@ -13,10 +13,12 @@ Endpoints (all under ``<server>/v1/``, bearer token unless noted)::
     GET  accounts/me                            -> account
     GET  sessions?q=                            -> [session]
     GET  sessions/{id}/export/upbrpy            -> zip (X-Export-SHA256)
+    GET  sessions/{id}/reductions               -> [run]
     POST sessions/{id}/runs/import  multipart "bundle" (zip) [+ "supersedes"]
                                                 -> {run_id, counts, quarantine}
     POST sessions/{id}/runs/{run_id}/prefer     -> {...}
     GET  runs/{run_id}                          -> {id, session_id, ...}
+    GET  runs/{run_id}/project                  -> saved .upbr bytes
 
 Tokens are kept per server in the OS keychain (``keyring``, service
 ``UPbRPy``, user name = the normalized server URL), never in a file. Every
@@ -651,6 +653,30 @@ def get_run(server: str, run_id: str) -> dict:
     return dict(payload)
 
 
+def fetch_run_project(server: str, run_id: str) -> bytes:
+    """Download a run's saved project; a missing file raises NotFound (404)."""
+    response = _request(
+        "GET", server, f"runs/{quote(str(run_id), safe='')}/project",
+        action="download the run project", headers={"Accept": "application/json"},
+    )
+    return response.content
+
+
+def list_session_runs(server: str, session_id: str) -> list[dict]:
+    """Return the runs visible to the account for a session."""
+    action = "list session runs"
+    response = _request(
+        "GET", server, f"sessions/{quote(str(session_id), safe='')}/reductions",
+        action=action,
+    )
+    payload = _json(response, server, action)
+    if isinstance(payload, Mapping) and isinstance(payload.get("items"), list):
+        payload = payload["items"]
+    if not isinstance(payload, list):
+        raise ServerError(f"{normalize_server(server)} sent no run list.")
+    return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+
 __all__ = [
     "KEYRING_SERVICE",
     "AUTH_CALLBACK_URL",
@@ -689,4 +715,6 @@ __all__ = [
     "submit_reduction",
     "prefer_run",
     "get_run",
+    "fetch_run_project",
+    "list_session_runs",
 ]

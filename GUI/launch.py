@@ -56,6 +56,7 @@ class LaunchTarget:
     acquisition: str = ""
     via: str = ""
     state: str = ""
+    fresh: bool = False
 
     @property
     def is_url(self) -> bool:
@@ -113,6 +114,7 @@ def parse_upbr_url(value: str) -> LaunchTarget:
             original=value,
             acquisition=acquisition,
             via="upblab" if query.get("via") == "upblab" else "",
+            fresh=route == "session" and query.get("fresh") == "1",
         )
     if route == "auth" and segments[1:] == ["callback"]:
         error = query.get("error")

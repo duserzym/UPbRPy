@@ -171,6 +171,7 @@ class StudioWindowController(QtCore.QObject):
         session_id: str = "",
         run_id: str = "",
         project_file: str = "",
+        fresh: bool = False,
     ) -> MainWindow | None:
         """Select and raise an open project by path or database origin."""
         path = Path(project_file).resolve() if project_file else None
@@ -178,6 +179,11 @@ class StudioWindowController(QtCore.QObject):
             for index in range(shell.tabs.count()):
                 reduction = shell.tabs.widget(index)
                 origin = reduction.session.origin or {}
+                if fresh and (
+                    reduction.project_path is None
+                    or Path(reduction.project_path).name != f"{origin.get('session_key', '')}.upbr"
+                ):
+                    continue
                 same_path = (path is not None and reduction.project_path is not None
                              and Path(reduction.project_path).resolve() == path)
                 same_server = (not server
@@ -210,10 +216,6 @@ class StudioWindowController(QtCore.QObject):
         window.append_log(
             f"Session bundle {bundle.session_key} ({note}): {bundle.path}"
         )
-        if bundle.superseded is not None:
-            window.append_log(
-                f"The previous cached copy was kept as {bundle.superseded}."
-            )
         return window
 
     def open_target(self, value: str | LaunchTarget) -> None:
@@ -249,7 +251,7 @@ class StudioWindowController(QtCore.QObject):
 
         self.database.run(
             lambda: unpack_session_bundle(path, self.database.cache_root),
-            self.open_session_bundle,
+            self.database.open_bundle,
             title="Open session bundle",
         )
 

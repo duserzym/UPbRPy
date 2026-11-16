@@ -275,3 +275,38 @@ def test_connect_url_for_studio():
     url = db.connect_url("https://lab.example.org/", "abcdefghijklmnop_12345")
     assert url == ("https://lab.example.org/app/#/connect?app=upbrpy&callback=upbr%3A%2F%2Fauth%2Fcallback"
                    "&state=abcdefghijklmnop_12345")
+
+
+def test_run_project_and_session_runs_requests(monkeypatch, tokens):
+    from types import SimpleNamespace
+
+    calls = []
+    project = b'{"format": "UPbRPy reduction project"}'
+    runs = [{"id": "run-1", "status": "completed", "session_id": SESSION_ID}]
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        reply = _Reply(200, runs)
+        reply.content = project
+        return reply
+
+    monkeypatch.setattr(db, "_requests", lambda: SimpleNamespace(request=request))
+    db.store_token("https://lab.example.org", "secret-token")
+    assert db.fetch_run_project("https://lab.example.org", "run-1") == project
+    assert db.list_session_runs("https://lab.example.org", SESSION_ID) == runs
+    assert [(method, url) for method, url, _kwargs in calls] == [
+        ("GET", "https://lab.example.org/v1/runs/run-1/project"),
+        ("GET", f"https://lab.example.org/v1/sessions/{SESSION_ID}/reductions"),
+    ]
+    assert all(kwargs["headers"]["Authorization"] == "Bearer secret-token" for _, _, kwargs in calls)
+
+
+def test_run_project_missing_is_distinguishable(monkeypatch, tokens):
+    from types import SimpleNamespace
+
+    db.store_token("https://lab.example.org", "secret-token")
+    monkeypatch.setattr(db, "_requests", lambda: SimpleNamespace(
+        request=lambda *args, **kwargs: _Reply(404, {"detail": "No saved project"})))
+    with pytest.raises(db.NotFound) as missing:
+        db.fetch_run_project("https://lab.example.org", "run-1")
+    assert missing.value.status == 404

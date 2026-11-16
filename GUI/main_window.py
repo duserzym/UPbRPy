@@ -397,6 +397,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_from_database_action.triggered.connect(
             lambda _checked=False: self.database().open_from_database()
         )
+        self.new_reduction_from_session_action = database_menu.addAction(
+            "New Reduction from Session Data"
+        )
+        self.new_reduction_from_session_action.triggered.connect(
+            lambda _checked=False: self.database().open_session(
+                self.session.origin["server"], self.session.origin["session_id"], fresh=True
+            )
+        )
         self.link_database_session_action = database_menu.addAction(
             "Link to Database Session…"
         )
@@ -4299,7 +4307,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
             database = self.database()
             database.run(lambda: unpack_session_bundle(source, database.cache_root),
-                         self._open_session_bundle_here, title="Open session bundle")
+                         lambda bundle: database.open_bundle(bundle),
+                         title="Open session bundle")
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
         if _dropped_sources(event.mimeData()):
@@ -4835,18 +4844,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.database_links is None:
             from GUI.database import DatabaseLinks
 
+            def open_project(path):
+                self.load_project_file(path)
+                return self
+
             self.database_links = DatabaseLinks(
                 open_bundle=self._open_session_bundle_here,
-                open_project=self.load_project_file,
+                open_project=open_project,
                 parent_widget=lambda: self,
             )
         return self.database_links
 
-    def _open_session_bundle_here(self, bundle) -> None:
+    def _open_session_bundle_here(self, bundle):
         if bundle.project_file is not None:
             self.load_project_file(bundle.project_file)
         else:
             self.load_experiment_directory(str(bundle.raw_directory))
+        return self
 
     def _refresh_database_status(self) -> None:
         """Show who is signed in, and offer Sign In… or Sign Out accordingly."""
@@ -4868,6 +4882,11 @@ class MainWindow(QtWidgets.QMainWindow):
         available, reason = database_availability()
         origin = self.session.origin or {}
         states = {
+            self.new_reduction_from_session_action: (
+                available and bool(origin.get("server") and origin.get("session_id")),
+                "Open the session's raw data for a new reduction in a new tab."
+                if origin else ORIGIN_REQUIRED,
+            ),
             self.open_from_database_action: (
                 available,
                 "Fetch a session from a UPbDB server and open it.",

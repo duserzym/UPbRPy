@@ -79,3 +79,114 @@ def test_client_module_imports_without_the_extra():
     ok, reason = db.availability()
     assert ok == (not db.missing_requirements())
     assert bool(reason) != ok
+
+
+@pytest.mark.parametrize("runs, expected", [
+    ([], None),
+    ([{"id": "pending", "status": "running", "is_preferred_for_session": True}], None),
+    ([{"id": "old", "status": "completed", "started_at": "2026-01-01T00:00:00Z",
+       "is_preferred_for_session": True},
+      {"id": "new", "status": "complete", "started_at": "2026-02-01T00:00:00Z"}], "old"),
+    ([{"id": "old", "status": "completed", "started_at": "2026-01-01T00:00:00Z"},
+      {"id": "new", "status": "complete", "started_at": "2026-02-01T00:00:00Z"},
+      {"id": "pending", "status": "running", "started_at": "2027-01-01T00:00:00Z",
+       "is_preferred_for_session": True}], "new"),
+    ([{"id": "old", "status": "complete", "started_at": "2026-01-01T01:00:00+02:00"},
+      {"id": "new", "status": "complete", "started_at": "2026-01-01T00:00:00Z"}], "new"),
+])
+def test_pick_session_run(runs, expected):
+    from UPbRPy.session_bundle import pick_session_run
+
+    chosen = pick_session_run(runs)
+    assert (chosen["id"] if chosen else None) == expected
+
+
+def test_install_run_project_rebases_dependencies_and_preserves_edits(tmp_path):
+    import json
+    from UPbRPy.project import resolve_project_path
+    from UPbRPy.session_bundle import install_run_project
+
+    source = write_session_bundle(tmp_path / "submitter")
+    document = read_reduction_project(source / f"{source.name}.upbr")
+    document["paths"]["source_directory"] = {"relative": "../../submitter/raw", "absolute": "/old/raw"}
+    document["paths"]["reference_library"] = {"relative": "missing.json", "absolute": "/missing/library.json"}
+    document["origin"].update(run_id="superseded-run", export_sha256="old-export", custom="kept")
+    document["selections"] = [{"spot_names": "A", "plateau_start_times": 12}]
+    folder = tmp_path / "cache"
+    (folder / "raw").mkdir(parents=True)
+    fields = dict(server="https://lab.example.org", session_id="session-id",
+                  session_key="session-key", export_sha256="current-export")
+    result = install_run_project(folder, "full-run-id", json.dumps(document).encode(), **fields)
+    assert result.path == folder / "session-key.run-full-run-id.upbr" and result.created
+    loaded = read_reduction_project(result.path)
+    assert loaded["paths"]["source_directory"] == {"relative": "raw", "absolute": str(folder / "raw")}
+    assert resolve_project_path(result.path, loaded["paths"]["source_directory"], label="raw") == folder / "raw"
+    assert loaded["paths"]["reference_library"] is None
+    assert loaded["selections"] == document["selections"]
+    assert loaded["origin"] == {**document["origin"], **fields, "run_id": "full-run-id"}
+    assert loaded["format_version"] >= 2
+    assert any("earlier export" in note for note in result.notes)
+    assert any("built-in library" in note for note in result.notes)
+    result.path.write_text("local edits")
+    again = install_run_project(folder, "full-run-id", b"invalid", **fields)
+    assert not again.created and again.path.read_text() == "local edits"
+    assert not list(folder.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("dependency", ["relative", "absolute", None])
+def test_install_run_project_keeps_resolvable_reference_library(tmp_path, dependency):
+    import json
+    from UPbRPy.session_bundle import install_run_project
+
+    folder = write_session_bundle(tmp_path)
+    document = read_reduction_project(folder / f"{folder.name}.upbr")
+    document["format_version"] = 1
+    library = folder / "library.json"
+    library.write_text("{}")
+    reference = {dependency: "library.json" if dependency == "relative" else str(library)} if dependency else None
+    document["paths"]["reference_library"] = reference
+    result = install_run_project(folder, "run-1", json.dumps(document).encode(),
+                                 server="https://lab.example.org", session_id="s",
+                                 session_key=folder.name, export_sha256="current")
+    loaded = read_reduction_project(result.path)
+    assert loaded["paths"]["reference_library"] == reference and not result.notes
+    assert loaded["format_version"] == 2
+
+
+@pytest.mark.parametrize("data", [b"not json", b"[]", b"{}", b'{"format_version": null}', b"\xff"])
+def test_install_run_project_rejects_invalid_project(tmp_path, data):
+    from UPbRPy.session_bundle import install_run_project
+
+    with pytest.raises(SessionBundleError, match="Invalid saved UPbRPy reduction project"):
+        install_run_project(tmp_path, "run-1", data, server="https://lab.example.org",
+                            session_id="s", session_key="key", export_sha256="current")
+    assert not list(tmp_path.glob("*.upbr"))
+
+
+def test_find_run_project_prefers_live_cache(tmp_path):
+    import json
+
+    old = tmp_path / "aaa.superseded-20261101"
+    live = tmp_path / "zzz"
+    for folder in (old, live):
+        folder.mkdir()
+        (folder / "run.upbr").write_text(json.dumps({"origin": {"run_id": "run-1"}}))
+    assert find_project_for_run("run-1", tmp_path) == live / "run.upbr"
+    (live / "run.upbr").unlink()
+    assert find_project_for_run("run-1", tmp_path) == old / "run.upbr"
+
+
+@pytest.mark.parametrize("document, expected", [
+    ({"selections": [], "origin": None}, False),
+    ({"selections": [{"spot_names": "A"}]}, True),
+    ({"origin": {"run_id": "run-1"}}, True),
+    ({"origin": {"session_id": "s"}}, False),
+])
+def test_holds_reduced_work(tmp_path, document, expected):
+    import json
+    from UPbRPy.session_bundle import holds_reduced_work
+
+    assert not holds_reduced_work(tmp_path)
+    (tmp_path / "broken.upbr").write_text("invalid json")
+    (tmp_path / "project.upbr").write_text(json.dumps(document))
+    assert holds_reduced_work(tmp_path) is expected

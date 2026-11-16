@@ -67,6 +67,92 @@ class SessionBundle:
         return self.path / RAW_DIRECTORY_NAME
 
 
+@dataclass(frozen=True)
+class RunProject:
+    """A downloaded run project installed beside its session's raw files."""
+
+    path: Path
+    notes: tuple[str, ...]
+    created: bool
+
+
+def pick_session_run(runs: list[dict]) -> dict | None:
+    """Choose a preferred complete run, otherwise the newest complete run."""
+    complete = [run for run in runs if run.get("status") in {"completed", "complete"}]
+    preferred = [run for run in complete if run.get("is_preferred_for_session")]
+
+    def started(run):
+        try:
+            value = datetime.fromisoformat(str(run.get("started_at", "")))
+            return value.replace(tzinfo=value.tzinfo or timezone.utc).timestamp()
+        except (ValueError, OverflowError):
+            return float("-inf")
+
+    return max(preferred or complete, key=started, default=None)
+
+
+def install_run_project(
+    folder: str | Path, run_id: str, data: bytes, *, server: str,
+    session_id: str, session_key: str, export_sha256: str,
+) -> RunProject:
+    """Validate and rebase a run project, preserving an existing local copy."""
+    from .project import (
+        resolve_project_path, validate_reduction_project, write_project_document,
+    )
+
+    folder = Path(folder).expanduser().resolve()
+    # Both identifiers become filename components, never paths supplied by a server.
+    for value in (session_key, run_id):
+        if not value or value in {".", ".."} or any(c in value for c in ("/", "\\", "\x00")):
+            raise SessionBundleError("The run project has an invalid session key or run id.")
+    target = folder / f"{session_key}.run-{run_id}.upbr"
+    if target.exists():
+        return RunProject(target, (), False)
+    try:
+        document = json.loads(data)
+        if not isinstance(document, dict):
+            raise ValueError("The project root must be a JSON object.")
+        document = validate_reduction_project(document)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise SessionBundleError(f"Invalid saved UPbRPy reduction project: {exc}") from exc
+    notes = []
+    paths = dict(document["paths"])
+    paths["source_directory"] = {"relative": "raw", "absolute": str(folder / "raw")}
+    reference = paths.get("reference_library")
+    if reference is not None:
+        try:
+            resolve_project_path(target, reference, label="reference library")
+        except (OSError, ValueError, TypeError, AttributeError):
+            paths["reference_library"] = None
+            notes.append("The run's reference library could not be found; using Studio's built-in library.")
+    document["paths"] = paths
+    origin = dict(document.get("origin") or {})
+    if origin.get("export_sha256") and origin["export_sha256"] != export_sha256:
+        notes.append("This run was reduced from an earlier export of the session and now points at the current raw files.")
+    origin.update(server=server.rstrip("/"), session_id=session_id, session_key=session_key,
+                  run_id=run_id, export_sha256=export_sha256)
+    document["origin"] = origin
+    document["format_version"] = max(2, int(document["format_version"]))
+    try:
+        write_project_document(document, target)
+    except (ValueError, TypeError) as exc:
+        raise SessionBundleError(f"Invalid saved UPbRPy reduction project: {exc}") from exc
+    return RunProject(target, tuple(notes), True)
+
+
+def holds_reduced_work(folder: str | Path) -> bool:
+    """Whether a cached folder contains selections or a project linked to a run."""
+    for project in Path(folder).glob("*.upbr"):
+        try:
+            document = json.loads(project.read_text(encoding="utf-8"))
+            origin = document.get("origin") or {}
+            if document.get("selections") or (isinstance(origin, dict) and origin.get("run_id")):
+                return True
+        except (OSError, ValueError, AttributeError):
+            continue
+    return False
+
+
 def default_cache_root() -> Path:
     """``~/UPbRPy/sessions``, or ``$UPBRPY_SESSION_CACHE`` when set."""
     configured = os.environ.get("UPBRPY_SESSION_CACHE")
@@ -365,7 +451,8 @@ def find_project_for_run(
     root = Path(cache_root).expanduser() if cache_root else default_cache_root()
     if not root.is_dir():
         return None
-    for project in sorted(root.glob("*/*.upbr")):
+    for project in sorted(root.glob("*/*.upbr"),
+                          key=lambda path: (".superseded-" in path.parent.name, path)):
         try:
             origin = json.loads(project.read_text(encoding="utf-8")).get("origin")
         except (OSError, json.JSONDecodeError, AttributeError):
@@ -379,6 +466,10 @@ __all__ = [
     "BUNDLE_RECORD_FILENAME",
     "SessionBundleError",
     "SessionBundle",
+    "RunProject",
+    "pick_session_run",
+    "install_run_project",
+    "holds_reduced_work",
     "default_cache_root",
     "read_bundle_record",
     "unpack_session_bundle",
