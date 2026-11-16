@@ -37,15 +37,17 @@ contract: do not rename them.
 
 ## Accepted formats, as found in the files
 
-Fixture: `tests/fixtures/qtegra/Zircon_04Nov26_slice/` (made by
-`scripts/make_qtegra_fixture.py` from the full 245-acquisition session; first
-12 acquisitions, 9 of the 29 channels: 29Si 91Zr 177Hf 204Hg 206Pb 207Pb
+Fixture: `tests/fixtures/qtegra/Zircon_demo/` (made by
+`scripts/make_qtegra_fixture.py` from the full session; 12 RM acquisitions selected by
+label (NIST612 x3, NIST610 x3, S513 x2,
+91500 x2, PL x2), 9 of the 29 channels: 29Si 91Zr 177Hf 204Hg 206Pb 207Pb
 208Pb 232Th 238U). All files are UTF-8; the Rich CSV starts with a BOM; all
 use CRLF line endings; no cell is quoted; every row ends with one empty cell.
 
-**Rich single CSV** (`Zircon_04Nov26_slice_Rich.csv`). Columns 0 to 3 are keys,
-column 4 + i is acquisition i (1-based "Sample i"), then the trailing empty
-cell. Row 0: `,,,,Sample 1,Sample 2,...`. Row 1: `,,,,<label 1>,<label 2>,...`.
+**Rich single CSV** (`Zircon_demo_Rich.csv`). Columns 0 to 3 are keys,
+column 4 + i is selected acquisition i, then the trailing empty cell.
+Row 0 keeps the source acquisition numbers: `,,,,Sample 1,...,Sample 8,Sample 26,Sample 27,Sample 45,Sample 46,`.
+Row 1: `,,,,<label 1>,<label 2>,...`.
 Then:
 
 - `MainRuns,<sweep>,<channel>,<quantity>,values...` for quantity in
@@ -70,7 +72,7 @@ Then:
   `BrigidMS,TRQuant,<Evaluate|Sample Type|Standard|Dilution Factor|Amount|Final Quantity>,,...`
 - `PMIAnalyteLaser,<Identifier|Laser Scan Position Number|Laser Output Setting [%]>,,,...`
 
-**Per-spot folder** (`zircon_04Nov26/`, one CSV per acquisition, file name
+**Per-spot folder** (`zircon_demo/`, one CSV per acquisition, file name
 suffix = sequence number, but order by time, not by name):
 
 ```

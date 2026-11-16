@@ -14,9 +14,6 @@ UPbRPy is developed with a goal of providing a Python-based reproducible data re
 **7) making publication-ready figures**
 
 
-### interactive time series visualization
-<img src="./examples/example_time_series.png" alt="Interactive time series visualization" width="600">
-
 ### Elemental concentration calibration
 <img src="./examples/example_concentration_calibration.png" alt="Elemental concentration calibration" width="550">
 
@@ -340,7 +337,7 @@ reports when a background stage is done or has failed.
 
 <img src="./docs/screenshots/studio_steps_05_concentrations_1280x800.png" alt="Studio at 1280 × 800 after calibrating concentrations: This step block in the left rail with Next highlighted" width="640">
 
-Screenshots of the steps on the Boise zircon_04Nov26 session (245 spots; a
+Screenshots of the steps on the Boise zircon session of 4 November 2026 (245 spots; a
 time-drift detector calibration at 1280 × 800) are in
 `docs/screenshots/studio_steps_*.png`.
 
@@ -547,14 +544,16 @@ Run the tests as if the extra were absent, in an environment that has it:
 UPBRPY_BLOCK_IMPORTS=requests,keyring QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests -q -p no:cacheprovider
 ```
 
-To regenerate the Qtegra fixture on the laptop, run
-`.venv/bin/python scripts/make_qtegra_fixture.py "/path/to/LAICPMS_data"`
-against the folder containing `Zircon_demo_Rich.csv`
-and `zircon_04Nov26/`. The defaults copy the first 12 acquisitions and 9 of
-29 channels into
-`tests/fixtures/qtegra/Zircon_04Nov26_slice/`; `-n`, `--channels` (or
-`--channels all`), and `--out` override the slice and destination. Cell text,
-BOMs and CRLF line endings are preserved; the full exports stay off git.
+To regenerate the RM-only Qtegra fixture, run
+`.venv/bin/python scripts/make_qtegra_fixture.py /path/to/zircon_session`.
+The source folder holds a Rich CSV and matching per-spot exports, directly
+or in subfolders. The defaults select NIST612 x3, NIST610 x3, S513 x2,
+91500 x2 and PL x2 by label, in acquisition order, with 9 of 29 channels,
+into `tests/fixtures/qtegra/Zircon_demo/`. `--rich`, `--labels`,
+`--channels` (or `--channels all`), `--name` and `--out` override the inputs
+and destination. Non-reference labels require `--allow-non-reference`.
+Cell text, metadata, BOMs and CRLF line endings are preserved; full exports
+stay outside the repository.
 
 #### Building the desktop application
 
@@ -682,7 +681,7 @@ The basis is `on="all"` (default) or `on="primary_standard"`, with
 "primary_standard": "S513"}` selects S513. Corrected saturated Y uses
 **analog × factor only**; the intercept is reported but not applied.
 
-Measured on the full `Zircon_demo` session (Boise iCAP RQ,
+Measured on a full Boise iCAP RQ zircon session of 4 November 2026 (
 245 acquisitions; errors below are one standard error):
 
 | Channel / basis | Session constant | Qtegra factor |

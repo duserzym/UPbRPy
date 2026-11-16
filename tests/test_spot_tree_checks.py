@@ -18,7 +18,7 @@ from GUI.widgets import SPOT_TREE_COUNT_ROLE
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 CHECKED, UNCHECKED = QtCore.Qt.CheckState.Checked, QtCore.Qt.CheckState.Unchecked
 
 

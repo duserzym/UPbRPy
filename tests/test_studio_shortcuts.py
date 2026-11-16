@@ -15,8 +15,8 @@ from GUI.studio_window import StudioWindow
 from GUI.theme import build_application
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
 CTRL = QtCore.Qt.KeyboardModifier.ControlModifier
 SHIFT = QtCore.Qt.KeyboardModifier.ShiftModifier
 ALT = QtCore.Qt.KeyboardModifier.AltModifier

@@ -230,7 +230,7 @@ def test_secondary_summary_accepted_system_and_wide():
 def test_qtegra_pipeline_reuses_cached_stages():
     from UPbRPy.io import read_experiment_data
     from UPbRPy.pipeline import FitSettings
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
     experiment, channels, data = read_experiment_data(fixture)
     data["202Hg"] = 1.
     config = PipelineConfig(primary_68_standard="S513", primary_76_standard="S513",
@@ -358,7 +358,7 @@ def test_complete_note_vocabulary_and_long_term_term():
 
 
 def test_supervisor_corrections_glass_mixed_methods_and_unmeasured_standards(tmp_path):
-    """Audit fixes of 2026-11-06 found on the DemoSession session."""
+    """Audit fixes of 2026-11-06 found on the Boise zircon session."""
     from UPbRPy.export_table import write_export_xlsx
 
     pipeline = synthetic_pipeline()

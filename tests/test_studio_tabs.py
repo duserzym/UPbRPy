@@ -20,9 +20,9 @@ from GUI.main import StudioWindowController
 from GUI.main_window import MainWindow
 from GUI.theme import build_application
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-SPOTS = FIXTURE / "zircon_04Nov26"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+SPOTS = FIXTURE / "zircon_demo"
 
 
 def process(app):

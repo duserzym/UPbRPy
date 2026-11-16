@@ -15,7 +15,7 @@ import pytest
 from scripts.snapshot_restore import compare_snapshots, snapshot_project, snapshot_restored
 
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 @pytest.mark.skipif(

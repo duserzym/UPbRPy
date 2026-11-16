@@ -17,7 +17,7 @@ import UPbRPy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests/fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+FIXTURE = ROOT / "tests/fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 def test_gui_does_not_import_through_the_lazy_package_api():

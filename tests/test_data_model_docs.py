@@ -13,7 +13,7 @@ from test_qtegra_reduced import reduced
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs/data-model"
-RICH = ROOT / "tests/fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = ROOT / "tests/fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 def pipe_table(path, heading):

@@ -11,7 +11,7 @@ from GUI.workflows import get_workflow_preset
 from UPbRPy.pipeline import PipelineStage
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
 PRESET = get_workflow_preset("zircon")
 
 

@@ -20,7 +20,7 @@ from GUI.theme import build_application
 from test_export_table import synthetic_pipeline
 
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 @pytest.fixture(scope="module")

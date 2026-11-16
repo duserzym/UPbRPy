@@ -68,7 +68,7 @@ def assert_controls_fit(window):
 
 def test_all_requested_widths_and_loaded_states(app, shell):
     window = shell.active_reduction
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     for loaded in (False, True):
         if loaded:
             window.load_experiment_directory(str(fixture), background=False)
@@ -110,7 +110,7 @@ def test_all_requested_widths_and_loaded_states(app, shell):
 
 def test_compact_actions_settings_and_remembered_inspector(app, shell):
     window = shell.active_reduction
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     window.load_experiment_directory(str(fixture), background=False)
     shell.resize(760, 620)
     pump(app)
@@ -172,7 +172,7 @@ def test_compact_action_icons_remain_visible_when_disabled(app, shell):
     pump(app)
     assert not window.repick_all_spots_button.isEnabled()
     assert not window.export_results_button.isEnabled()
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
     for loaded in (False, True):
         if loaded:
@@ -220,8 +220,13 @@ def test_spot_names_keep_suffixes_and_full_tooltips(app, shell):
     import pandas as pd
 
     window = shell.active_reduction
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     window.load_experiment_directory(str(fixture), background=False)
+    # Treat the secondary zircon RM as a sample for this tree-layout check.
+    window._spot_folder_overrides = {
+        name: "Demo sample" for name in window.session.spot_names if name.startswith("91500_")
+    }
+    window._populate_spot_tree()
     shell.resize(1024, 768)
     pump(app)
     tree = window.spot_list
@@ -233,7 +238,7 @@ def test_spot_names_keep_suffixes_and_full_tooltips(app, shell):
             assert item.toolTip(0) == item.text(0)
             spot_names.append(item.text(0))
         iterator += 1
-    assert spot_names
+    assert len(spot_names) == 12
     for suffix in ("323", "324"):
         name = f"SAMPLE-A_S__{suffix}"
         shown = tree.fontMetrics().elidedText(name, tree.textElideMode(), 110)
@@ -266,7 +271,7 @@ def test_spot_names_keep_suffixes_and_full_tooltips(app, shell):
 
 def test_signal_pills_stay_by_edges_and_avoid_boxes(app, shell):
     window = shell.active_reduction
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     window.load_experiment_directory(str(fixture), background=False)
     plot = window.trace_plot
     start = plot._signal_boundaries["signal_start"]

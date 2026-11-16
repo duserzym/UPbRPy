@@ -1,4 +1,4 @@
-"""Optional comparison with the private DemoSession UPbR26plus tables.
+"""Optional comparison with the private Boise zircon UPbR26plus tables.
 
 No session data or workbook extract belongs in this repository. Pb failures
 are reported as a measured xfail, with the mass-204 omission diagnostic; this
@@ -11,8 +11,8 @@ import pytest
 
 
 pytestmark = pytest.mark.skipif(
-    not (os.environ.get("UPBRPY_HL_SESSION_DIR") and os.environ.get("UPBRPY_HL_UPBR26_CSV")),
-    reason="Set UPBRPY_HL_SESSION_DIR and UPBRPY_HL_UPBR26_CSV for the private comparison",
+    not (os.environ.get("UPBRPY_COMPARISON_SESSION_DIR") and os.environ.get("UPBRPY_COMPARISON_UPBR26_CSV")),
+    reason="Set UPBRPY_COMPARISON_SESSION_DIR and UPBRPY_COMPARISON_UPBR26_CSV for the private comparison",
 )
 
 
@@ -26,13 +26,13 @@ def comparison():
     from UPbRPy.export_table import build_export_table
 
     preset = get_workflow_preset("zircon")
-    session = load_session(os.environ["UPBRPY_HL_SESSION_DIR"], preset=preset)
+    session = load_session(os.environ["UPBRPY_COMPARISON_SESSION_DIR"], preset=preset)
     autopick_all_selection_regions(session)
     session.primary_68_standard = session.primary_76_standard = session.primary_82_standard = "S513"
     session.secondary_standards = tuple(x for x in ("91500", "Seiland", "PL", "LTSE")
                                         if x in set(session.experiment["sample"]))
     table = build_export_table(ensure_shared_pipeline(session, preset))
-    reference = pd.read_csv(os.environ["UPBRPY_HL_UPBR26_CSV"])
+    reference = pd.read_csv(os.environ["UPBRPY_COMPARISON_UPBR26_CSV"])
     assert set(reference["table"]) <= {"S2", "S3"}
     assert len(reference) == 218
     matched = table.rows.merge(reference, left_on="spot_name", right_on="analysis",

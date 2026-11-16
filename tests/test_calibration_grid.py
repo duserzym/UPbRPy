@@ -14,7 +14,7 @@ from GUI.theme import active_theme, build_application
 from GUI.widgets import CALIBRATION_GRID, CalibrationSlopesWidget
 
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 CHANNELS = ["31P", "49Ti", "89Y", "91Zr", "139La", "232Th", "238U"]
 
 

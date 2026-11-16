@@ -157,7 +157,7 @@ def test_studio_tree_and_concordia_selection_follow_each_other(app, monkeypatch,
     from GUI.main_window import MainWindow
 
     monkeypatch.setattr(main_window.Updater, "start_scheduler", lambda self: None)
-    rich = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    rich = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     window = MainWindow(theme_mode="light")
     try:
         window.resize(1280, 800)

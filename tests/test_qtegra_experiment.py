@@ -18,9 +18,9 @@ from qtegra_helpers import write_y_only_csv
 from synthetic_bundles import write_raw_directory, write_session_bundle
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-FOLDER = FIXTURE / "zircon_04Nov26"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+FOLDER = FIXTURE / "zircon_demo"
 
 
 def frozen_legacy_experiment(directory, sep="_", sample_aliases=None):
@@ -270,7 +270,7 @@ def test_file_source_uses_manifest_in_parent_with_existing_rules(tmp_path, layou
     experiment, _, _ = io.read_experiment_data(directory=source)
     samples = experiment.set_index("spot_names")["sample"]
     assert samples["NIST612_896"] == "Glass"
-    assert samples["SAMPLE-A_S_323"] == "K26"
+    assert samples["91500_738"] == "91500_738"
     assert set(experiment["spot_paths"]) == {str(source)}
     overridden, _, _ = io.read_experiment_data(
         source, sep="_", sample_aliases={"nist612": "Override"},

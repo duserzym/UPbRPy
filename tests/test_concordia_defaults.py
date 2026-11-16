@@ -13,7 +13,7 @@ from GUI.theme import build_application
 from GUI.workflows import WORKFLOW_PRESETS, get_workflow_preset
 
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 @pytest.fixture(scope="module")

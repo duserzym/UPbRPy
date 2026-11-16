@@ -218,9 +218,9 @@ url = "https://doi.org/10.1111/ggr.12495"
 notes = "Hu, P., Luo, T., Crowley, J., Wu, Y., Zhang, C., Xia, X., Long, T., Zhang, S., Bao, Z., Xu, L., Feng, L., Zhang, W. & Hu, Z. (2023), Characterisation of Three Sri Lankan Zircon Megacrysts as Potential Reference Materials for Microbeam U-Pb Geochronology and Hf-O-Zr Isotope Measurements, Geostandards and Geoanalytical Research 47(3), 509-533. The materials are SLZA, SLZB and SLZC; the Boise standard LTSE is SLZC (confirmed by Yiming Zhang, 2026-11-05)."
 
 [sources."boise_upbr26plus_2026"]
-display = "Boise State Isotope Geology Laboratory, UPbR26plus spreadsheet, Analyte & Standards Archive (Zircon_demo-i193-LA-UPbR26plus.xlsm, 2026-11-04)"
+display = "Boise State Isotope Geology Laboratory, UPbR26plus spreadsheet (i193), Analyte & Standards Archive (2026-11-04)"
 kind = "lab_compilation"
 status = "provisional"
-file = "Zircon_demo-i193-LA-UPbR26plus.xlsm"
+file = "Boise-i193-LA-UPbR26plus.xlsm"
 no_doi_reason = "Unpublished laboratory compilation; no DOI."
 notes = "No DOI: an unpublished laboratory compilation; values to be confirmed by the Boise lab."

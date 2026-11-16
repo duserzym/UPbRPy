@@ -48,7 +48,7 @@ def test_updates_fit_canvas_and_laptop(app, prefs, theme, size):
     shell.show()
     dialog = None
     try:
-        fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+        fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
         window.load_experiment_directory(str(fixture), background=False)
         shell.resize(*size)
         window.apply_default_layout()

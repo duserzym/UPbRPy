@@ -1,23 +1,14 @@
-"""Cut a small test fixture from the accepted Qtegra exports of one session.
-
-The Zircon_demo session (Boise iCAP RQ, Qtegra
-2.10.4345.64) provides a Rich single CSV and a folder of per-spot CSV files.
-This script copies the first ``n`` acquisitions of both, restricted to a
-subset of channels so the fixture stays under 1 MB, into
-``tests/fixtures/qtegra/<name>/``:
-
-    Zircon_04Nov26_slice_Rich.csv     Rich single CSV, n sample columns
-    zircon_04Nov26/                   the n matching per-spot CSV files
-
-Cells are copied as text, byte for byte (BOM and CRLF line endings kept), so
-the per-spot values stay equal to the Rich Y values at exported precision.
-Only whole columns (acquisitions and channels) are dropped; no value is
-reformatted. The source files are read only; the full exports never go into git.
+"""Build the RM-only Qtegra demo fixture from read-only instrument exports.
 
 Usage::
 
-    python scripts/make_qtegra_fixture.py \\
-        "/path/to/LAICPMS_data"
+    .venv/bin/python scripts/make_qtegra_fixture.py /path/to/zircon_session
+
+The source folder must contain one Rich CSV (or select it with --rich) and
+matching per-spot CSVs, directly or in subfolders. Select acquisitions by
+label, then retain acquisition order. Cell text, metadata, BOMs and line
+endings are preserved; output file names are neutral. Full exports stay
+outside the repository.
 """
 
 from __future__ import annotations
@@ -27,9 +18,13 @@ import re
 import sys
 from pathlib import Path
 
-RICH_NAME = "Zircon_demo_Rich.csv"
-FOLDER_NAME = "zircon_04Nov26"
-SLICE_PREFIX = "Zircon_04Nov26_slice"
+DEFAULT_NAME = "Zircon_demo"
+KNOWN_REFERENCE_MATERIALS = frozenset({"NIST612", "NIST610", "S513", "91500", "PL", "LTSE", "Seiland"})
+DEFAULT_LABELS = (
+    "NIST612_896", "NIST612_897", "NIST612_898",
+    "NIST610_863", "NIST610_864", "NIST610_865",
+    "S513_628", "S513_629", "91500_738", "91500_739", "PL_836", "PL_837",
+)
 
 #: Channels kept in the fixture: the U, Th and Pb channels with 204Hg, the matrix
 #: channels Si and Zr, and Hf; Si, Zr and Hf saturate the pulse counter in this
@@ -60,32 +55,30 @@ def write_lines(path: Path, bom: str, lines: list[str], newline: str) -> None:
     path.write_bytes((bom + newline.join(lines) + newline).encode("utf-8"))
 
 
-def slice_single_csv(source: Path, target: Path, n: int, channels: set[str]) -> list[str]:
-    """Keep the first ``n`` sample columns and the MainRuns rows of ``channels``."""
+def slice_single_csv(source: Path, target: Path, labels: list[str], channels: set[str]) -> None:
+    """Keep selected acquisition columns and channel rows, including all metadata."""
     bom, lines, newline = read_lines(source)
+    source_labels = lines[1].split(",")[4:-1]
+    indices = [4 + source_labels.index(label) for label in labels]
     out = []
-    labels: list[str] = []
     for index, line in enumerate(lines):
         cells = line.split(",")
         if index >= 2 and cells[0] == "MainRuns" and cells[2] not in channels:
             continue
-        # Four key columns, n acquisition columns, and the trailing empty
-        # cell that every row of the export ends with.
-        kept = cells[: 4 + n] + [""]
-        if index == 1:
-            labels = cells[4 : 4 + n]
-        out.append(",".join(kept))
+        out.append(",".join(cells[:4] + [cells[i] for i in indices] + [""]))
     write_lines(target, bom, out, newline)
-    return labels
 
 
 def spot_files_by_label(folder: Path) -> dict[str, Path]:
     found = {}
-    for path in sorted(folder.glob("*.csv")):
-        with path.open(encoding="utf-8") as handle:
+    for path in sorted(folder.rglob("*.csv")):
+        with path.open(encoding="utf-8-sig") as handle:
             match = SPOT_FIRST_LINE.match(handle.readline())
         if match:
-            found[match.group("label")] = path
+            label = match.group("label")
+            if label in found:
+                raise ValueError(f"duplicate per-spot label: {label}")
+            found[label] = path
     return found
 
 
@@ -106,48 +99,60 @@ def slice_spot_file(source: Path, target: Path, channels: set[str]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("source", type=Path, help="folder holding the three exports")
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path(__file__).resolve().parents[1]
-        / "tests" / "fixtures" / "qtegra" / SLICE_PREFIX,
-    )
-    parser.add_argument("-n", type=int, default=12, help="number of acquisitions")
-    parser.add_argument(
-        "--channels",
-        default=",".join(DEFAULT_CHANNELS),
-        help="comma-separated channels to keep, or 'all'",
-    )
+    parser.add_argument("source", type=Path, help="folder holding the source exports")
+    parser.add_argument("--rich", type=Path, help="source Rich CSV, relative to source or absolute")
+    parser.add_argument("--name", default=DEFAULT_NAME, help="neutral output session name")
+    parser.add_argument("--out", type=Path, help="output folder (default: tests/fixtures/qtegra/<name>)")
+    parser.add_argument("--labels", default=",".join(DEFAULT_LABELS), help="comma-separated acquisition labels")
+    parser.add_argument("--allow-non-reference", action="store_true", help="explicitly allow non-reference labels")
+    parser.add_argument("--channels", default=",".join(DEFAULT_CHANNELS), help="comma-separated channels, or 'all'")
     args = parser.parse_args(argv)
     source = args.source.expanduser()
-    out = args.out
-    channels_arg = args.channels.strip()
-
-    rich = source / RICH_NAME
-    folder = source / FOLDER_NAME
-    for path in (rich, folder):
-        if not path.exists():
-            parser.error(f"missing source: {path}")
-    if channels_arg == "all":
-        _bom, lines, _nl = read_lines(rich)
-        channels = {line.split(",")[2] for line in lines[2:] if line.startswith("MainRuns,")}
-    else:
-        channels = {name.strip() for name in channels_arg.split(",") if name.strip()}
-
-    spot_out = out / FOLDER_NAME
+    if not source.is_dir():
+        parser.error("source must be an existing folder")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.name):
+        parser.error("name must contain only letters, digits, underscores and hyphens")
+    candidates = [source / args.rich] if args.rich else sorted(source.rglob("*Rich.csv"))
+    if len(candidates) != 1 or not candidates[0].is_file():
+        parser.error("source must contain exactly one *Rich.csv; otherwise use --rich")
+    rich = candidates[0]
+    _bom, lines, _nl = read_lines(rich)
+    source_labels = lines[1].split(",")[4:-1]
+    requested = [label.strip() for label in args.labels.split(",") if label.strip()]
+    if not requested or len(set(requested)) != len(requested):
+        parser.error("labels must be nonempty and unique")
+    if not args.allow_non_reference and any(
+        label.rsplit("_", 1)[0] not in KNOWN_REFERENCE_MATERIALS for label in requested
+    ):
+        parser.error("non-reference labels require --allow-non-reference")
+    if set(requested) - set(source_labels):
+        parser.error("requested labels are missing from the Rich export")
+    if any(source_labels.count(label) != 1 for label in requested):
+        parser.error("requested labels must occur exactly once in the Rich export")
+    labels = [label for label in source_labels if label in requested]
+    available_channels = {line.split(",")[2] for line in lines[2:] if line.startswith("MainRuns,")}
+    channels = available_channels if args.channels.strip() == "all" else {
+        name.strip() for name in args.channels.split(",") if name.strip()
+    }
+    if not channels or channels - available_channels:
+        parser.error("channels must be a nonempty subset of the source channels")
+    spots = spot_files_by_label(source)
+    if set(labels) - spots.keys():
+        parser.error("missing matching per-spot exports")
+    out = args.out or Path(__file__).resolve().parents[1] / "tests/fixtures/qtegra" / args.name
+    if out.resolve() == source.resolve() or source.resolve() in out.resolve().parents:
+        parser.error("output must be outside the read-only source folder")
+    if out.exists() and any(out.iterdir()):
+        expected = {f"{args.name}_Rich.csv", args.name.lower()}
+        if {p.name for p in out.iterdir()} != expected:
+            parser.error("refusing to overwrite an unrelated output folder")
+    spot_out = out / args.name.lower()
     spot_out.mkdir(parents=True, exist_ok=True)
     for stale in spot_out.glob("*.csv"):
         stale.unlink()
-
-    labels = slice_single_csv(rich, out / f"{SLICE_PREFIX}_Rich.csv", args.n, channels)
-    spots = spot_files_by_label(folder)
-    for label in labels:
-        if label not in spots:
-            raise SystemExit(f"no per-spot file for {label}")
-        source_file = spots[label]
-        slice_spot_file(source_file, spot_out / source_file.name, channels)
-
+    slice_single_csv(rich, out / f"{args.name}_Rich.csv", labels, channels)
+    for index, label in enumerate(labels, 1):
+        slice_spot_file(spots[label], spot_out / f"{args.name}_{index}.csv", channels)
     total = sum(path.stat().st_size for path in out.rglob("*") if path.is_file())
     print(f"wrote {len(labels)} acquisitions, {len(channels)} channels, {total / 1024:.0f} KiB to {out}")
     return 0

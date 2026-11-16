@@ -21,8 +21,8 @@ from UPbRPy.autosave import default_autosave_dir, selection_autosave_path
 from UPbRPy.pipeline import PipelineStage
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
 
 
 def test_autosave_locations(tmp_path, monkeypatch):

@@ -17,7 +17,7 @@ from GUI.main import StudioWindowController
 from GUI.main_window import MainWindow
 from GUI.theme import apply_theme, build_application
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
 
 
 def process_deletes(app):

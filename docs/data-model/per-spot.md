@@ -27,7 +27,7 @@ use the Qtegra layout, including the trailing comma.
 ## Per-file contract
 
 Examples are short real values from
-`Zircon_demo_1.csv` in the fixture's `zircon_04Nov26/`
+`Zircon_demo_1.csv` in the fixture's `zircon_demo/`
 folder. `Acquisition` is abbreviated to `A`, `QtegraSession` to `S`.
 
 | Name / position | Required/optional | Type and definition | Unit | Example | Model destination | Without it |

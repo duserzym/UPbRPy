@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from UPbRPy.qtegra import counting_dwell, read_rich_csv  # noqa: E402
 
-RICH = ROOT / "tests/fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = ROOT / "tests/fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 OUT = ROOT / "docs/images"
 
 COLORS = {"29Si": "#2e7d32", "206Pb": "#8d6e00", "207Pb": "#c77700", "238U": "#1e4fd8"}

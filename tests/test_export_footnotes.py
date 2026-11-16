@@ -28,7 +28,7 @@ from test_data_model_docs import DOCS, pipe_table
 from test_export_table import synthetic_pipeline
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
 
 
 def fixture_pipeline():
@@ -168,7 +168,7 @@ def test_fixture_acquisition_summary_and_footnotes():
     assert summary["laser_output_settings_percent"] == ["46"]
     table = build_export_table(pipeline)
     notes = {n.id: n for n in build_footnotes(table, pipeline)}
-    assert "Zircon_04Nov26_slice" in notes["session"].text
+    assert "Zircon_demo" in notes["session"].text
     assert "BOISESTATE" in notes["session"].text
     assert "NIST610" in notes["total_pb"].text and "NIST612" in notes["total_pb"].text
     assert "204Pb contributed to 0 of 12 analyses" in notes["total_pb"].text
@@ -189,7 +189,7 @@ def test_summary_medians_missing_metadata_and_documented_keys():
     assert summary["sweeps_per_acquisition"] == dict(median=72., min=71, max=72)
     rows = pipe_table(DOCS / "acquisition-model.md", "Acquisition summary")
     assert {row["Name"] for row in rows} == set(summary)
-    rich = qtegra.read_rich_csv(FIXTURE / "Zircon_04Nov26_slice_Rich.csv")
+    rich = qtegra.read_rich_csv(FIXTURE / "Zircon_demo_Rich.csv")
     for a in rich.acquisitions:
         a.start = a.stop = a.start_text = a.stop_text = None
     missing = io.experiment_from_session(rich)[0].attrs["qtegra"]["acquisition_summary"]
@@ -280,7 +280,7 @@ def test_compact_journal_prose_preserves_values_sources_and_clock(monkeypatch):
     assert '208Pb/232Th 0.028154 (561.18 Ma; UPbR26plus archive value, no DOI)' in standards
     assert 'Concentration reference glasses NIST610 and NIST612 (Jochum et al., 2011' in standards
     assert standards.count('Jochum') == 1
-    assert 'acquisition starts: 2026-11-04 15:55 to 16:01 (instrument clock)' in notes['session'].text
+    assert 'acquisition starts: 2026-11-04 15:55 to 16:20 (instrument clock)' in notes['session'].text
     assert notes['session'].text.count('2026-11-04') == 1
     assert 'baseline median duration' in notes['method'].text
     assert re.search(r'median duration \d+\.\d s', notes['method'].text)

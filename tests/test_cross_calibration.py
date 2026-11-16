@@ -23,9 +23,9 @@ from UPbRPy.reproducibility import build_reproducibility_notebook, export_reduct
 from UPbRPy.results import FinalizedReduction, ReductionDecision, build_publication_tables
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-FOLDER = FIXTURE / "zircon_04Nov26"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+FOLDER = FIXTURE / "zircon_demo"
 WINDOW = (1e5, 2.4e6)
 
 

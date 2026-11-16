@@ -17,9 +17,9 @@ from GUI.studio_window import StudioWindow
 from GUI.theme import build_application
 from UPbRPy.qtegra import companion_folder, open_qtegra
 
-ROOT = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = ROOT / "Zircon_04Nov26_slice_Rich.csv"
-SPOTS = ROOT / "zircon_04Nov26"
+ROOT = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = ROOT / "Zircon_demo_Rich.csv"
+SPOTS = ROOT / "zircon_demo"
 
 
 @pytest.fixture(scope="module")

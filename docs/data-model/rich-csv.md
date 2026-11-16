@@ -34,7 +34,7 @@ optional. A capability is set by row-group presence, even if cells are empty.
 “unspecified” are not defined or converted by the reader.
 
 Examples are exact short cells from
-`tests/fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv`.
+`tests/fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv`.
 `empty` denotes an empty fixture cell, not the literal string `empty`.
 
 | Name | Required/optional | Type and definition | Unit | Example | Capability | Model destination | Without it |

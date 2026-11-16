@@ -6,7 +6,7 @@ import pytest
 
 from GUI.workflows import WORKFLOW_PRESETS, resolve_reference_standards
 
-FIXTURE = Path(__file__).parent / "fixtures" / "qtegra" / "Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures" / "qtegra" / "Zircon_demo"
 
 
 def test_zircon_prefers_s513_when_measured():
@@ -37,7 +37,7 @@ def test_load_session_picks_s513_from_the_rich_fixture():
     pytest.importorskip("PySide6")
     from GUI.services import load_session
 
-    session = load_session(str(FIXTURE / "Zircon_04Nov26_slice_Rich.csv"), preset=WORKFLOW_PRESETS["zircon"])
+    session = load_session(str(FIXTURE / "Zircon_demo_Rich.csv"), preset=WORKFLOW_PRESETS["zircon"])
     assert session.primary_68_standard == "S513"
     assert session.primary_82_standard == "S513"
 
@@ -63,7 +63,7 @@ def test_load_session_groups_underscore_labels_under_the_apatite_preset():
     pytest.importorskip("PySide6")
     from GUI.services import load_session
 
-    session = load_session(str(FIXTURE / "Zircon_04Nov26_slice_Rich.csv"), primary_channel="29Si",
+    session = load_session(str(FIXTURE / "Zircon_demo_Rich.csv"), primary_channel="29Si",
                            preset=WORKFLOW_PRESETS["apatite"])
     assert session.import_settings["sep"] == "_"
     samples = set(session.experiment["sample"])

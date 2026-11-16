@@ -31,12 +31,12 @@ def sample_map(experiment):
 @pytest.mark.parametrize("given, aliases, chosen, overridden", [
     (None, {}, "SMP1", False),
     ("", {}, "SMP1", False),
-    ("SMP1", {}, "SMP1", False),
+    ("smp1", {}, "SMP1", False),
     ("SMP2", {}, "SMP2", True),
-    ("SMP1", {"SMP1": "Original"}, "Original", False),
-    ("oRIGINAL", {"SMP1": "Original"}, "Original", False),
+    ("smp1", {"SMP1": "Original"}, "Original", False),
+    ("oRIGINAL", {"smp1": "Original"}, "Original", False),
     ("other", {"SMP1": "Original", "OTHER": "Original"}, "Original", False),
-    ("SMP2", {"SMP1": "Original", "SMP2": "Corrected"}, "Corrected", True),
+    ("smp2", {"SMP1": "Original", "SMP2": "Corrected"}, "Corrected", True),
 ])
 def test_sample_override_rule(tmp_path, given, aliases, chosen, overridden):
     labels = ("SMP1_S_91", "SMP1_S_108")

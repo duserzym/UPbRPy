@@ -14,7 +14,7 @@ from GUI.main_window import MainWindow
 from GUI.services import current_standard_archive
 from GUI.theme import build_application
 
-RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+RICH = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
 
 
 @pytest.fixture(scope="module")

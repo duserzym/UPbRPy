@@ -189,7 +189,7 @@ def test_new_material_provenance_separates_published_and_archive_values():
 
 
 def test_qtegra_fixture_selects_s513_and_resolves_its_library_ratios():
-    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+    fixture = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
     experiment, channels, data = read_experiment_data(fixture)
     config = PipelineConfig(
         primary_68_standard="S513", primary_76_standard="S513",

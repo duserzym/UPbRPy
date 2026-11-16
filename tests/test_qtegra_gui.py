@@ -27,9 +27,9 @@ from UPbRPy.pipeline import PipelineStage
 from UPbRPy.reproducibility import build_reproducibility_notebook, selection_export_frame
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-FORMATS = [(RICH, "rich", "Rich"), (FIXTURE / "zircon_04Nov26", "spot_folder", "Per-spot folder"),
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+FORMATS = [(RICH, "rich", "Rich"), (FIXTURE / "zircon_demo", "spot_folder", "Per-spot folder"),
            (FIXTURE, "rich+spot_folder", "Rich + per-spot")]
 
 

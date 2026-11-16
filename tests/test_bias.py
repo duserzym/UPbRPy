@@ -172,7 +172,7 @@ def test_unequal_errors_determine_means_and_regression_weights():
 def test_demo_session_shared_pipeline(archive):
     from UPbRPy.io import read_experiment_data
     from UPbRPy.pipeline import FitSettings, PipelineConfig, ReductionPipeline
-    fixture = Path(__file__).parent / 'fixtures/qtegra/Zircon_04Nov26_slice'
+    fixture = Path(__file__).parent / 'fixtures/qtegra/Zircon_demo'
     experiment, channels, sweeps = read_experiment_data(fixture)
     # The trimmed fixture omits 202Hg, which calc_raw_ratios requires even
     # for uncorrected dates. Supply a constant background only in memory;
@@ -188,8 +188,15 @@ def test_demo_session_shared_pipeline(archive):
     finalized = pipeline.run_finalize()
     table = standard_bias_table(finalized.parallel_results, archive, quantity='238U_cps',
                                 signal_quantities=signals)
-    assert set(table.spot_name) == {'S513_628', 'S513_629'}
-    assert table['sample'].tolist() == ['S513', 'S513']
+    assert set(table.spot_name) == {'S513_628', 'S513_629', '91500_738', '91500_739', 'PL_836', 'PL_837'}
+    assert table['sample'].tolist() == ['91500', '91500', 'PL', 'PL', 'S513', 'S513']
     assert np.isfinite(table.offset_percent).all()
     assert (table.offset_percent.abs() < 5).all()
     assert (table.x > 0).all()
+
+    # These secondary RMs exercise the sample path without unpublished data.
+    dates = finalized.parallel_results.set_index('spot_name')['206Pb/238U_age']
+    np.testing.assert_allclose(dates.loc[['91500_738', '91500_739']],
+                               [1048.856015, 1051.801173], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(dates.loc[['PL_836', 'PL_837']],
+                               [323.475338, 322.856025], rtol=0, atol=1e-6)

@@ -12,9 +12,9 @@ from UPbRPy.qtegra import _count_quantum, counting_dwell, read_rich_csv, read_sp
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests/fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-FOLDER = FIXTURE / "zircon_04Nov26"
+FIXTURE = ROOT / "tests/fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+FOLDER = FIXTURE / "zircon_demo"
 CHANNELS = ("202Hg", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U")
 
 

@@ -17,7 +17,7 @@ from GUI.theme import build_application
 from UPbRPy.pipeline import PipelineStage
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
 
 
 @pytest.fixture(scope="module")

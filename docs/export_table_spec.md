@@ -2,8 +2,8 @@
 
 Status: agreed design for the "Export results" table (2026-11-06). The
 model is the FinalDataTable, Table S2 (sample data) and Table S3 (standard
-data) sheets of Mark Schmitz's UPbR26plus workbook, as used for the Boise
-DemoSession session of 4 November 2026. UPbRPy keeps the content of those
+data) sheets of Mark Schmitz's UPbR26plus workbook, as used for a Boise iCAP RQ
+zircon session of 4 November 2026. UPbRPy keeps the content of those
 sheets and changes the layout where that makes the table easier to publish
 and to read.
 
@@ -25,7 +25,7 @@ Decisions by Yiming Zhang on 2026-11-06 that this table follows:
 | Sheet | Rows | Header rows | Notes |
 |---|---|---|---|
 | FinalDataTable | all 245 analyses incl. glasses, run order by sample | title (2 rows: settings), group row, two name rows | Has `Notes` (e.g. `high 204`), `Zr`, `Experiment`, and a secondary-correction block (cols 132-156) |
-| Table S2 Sample data | 165 unknowns (SAMPLE-B, SAMPLE-A) | same | No Notes, no Zr, no sample header rows, no footnotes |
+| Table S2 Sample data | unknown-sample analyses | same | No Notes, no Zr, no sample header rows, no footnotes |
 | Table S3 Standard data | 72 reference-material zircons, glasses omitted | same | Text rows "Primary standards", "Secondary standards" separate the blocks |
 | Table S1 Instrumental data | metadata | — | Laboratory, laser, ICP-MS, dwell list, data processing, reference materials, QC weighted means: the content of our footnotes |
 
@@ -49,10 +49,10 @@ Units are those of the spreadsheet. "UPbRPy source" names the column in
 
 | Spreadsheet column | Unit | UPbRPy source | Status |
 |---|---|---|---|
-| U | ppm (µg/g) | `U` | ok (median +0.6 % vs spreadsheet) |
-| Th | ppm | `Th` | ok (median -1.1 %) |
-| Pb | ppm | `Pb` | **wrong quantity today**: UPbRPy's `Pb` is calibrated from 208Pb against natural Pb in NIST glass, so for radiogenic zircon it is not total Pb (median -78 %; 91500 2.4 vs 14.9 µg/g). New: total Pb = sum of the per-isotope Pb mass fractions 204 (where measured) + 206 + 207 + 208, each calibrated against the glass's own Pb isotope composition (section 3.2). The 208Pb-based value stays available as `Pb (208)` |
-| Th/U | — | `Th/U` | ok (median -1.5 %) |
+| U | ppm (µg/g) | `U` | ok |
+| Th | ppm | `Th` | ok |
+| Pb | ppm | `Pb` | **wrong quantity today**: UPbRPy's `Pb` is calibrated from 208Pb against natural Pb in NIST glass, so for radiogenic zircon it is not total Pb (91500 2.4 vs 14.9 µg/g). New: total Pb = sum of the per-isotope Pb mass fractions 204 (where measured) + 206 + 207 + 208, each calibrated against the glass's own Pb isotope composition (section 3.2). The 208Pb-based value stays available as `Pb (208)` |
+| Th/U | — | `Th/U` | ok |
 | 206Pb | cps | not in results | **new**: plateau-mean baseline-subtracted 206Pb count rate (`UPbRPy.bias.spot_signal_quantities` already computes it) |
 | 206Pb/204Pb | — | `206Pb/204Pb` | ok as a value; spreadsheet reports Hg-corrected 204 even when it is at background (values up to 2e8); UPbRPy leaves it blank when 204 is not detected. Keep UPbRPy's rule and footnote it |
 | ±1s | absolute | `206Pb/204Pb_2e` / 2 | ok |
@@ -70,11 +70,6 @@ Units are those of the spreadsheet. "UPbRPy source" names the column in
 | (task list) 208Pb/206Pb, ±2s | —, % | 1 / `206Pb/208Pb` | optional column, off by default (not in S2/S3) |
 | (UPbRPy extra) ρ Tera-Wasserburg | — | `tw_rho_no_calibration` | optional column, off by default |
 
-Comparison on DemoSession before this work (218 matched analyses, median
-and interquartile range of the relative difference UPbRPy minus spreadsheet):
-206Pb/238U +0.15 % (-0.72..+0.71), 207Pb/235U +0.44 %, 207Pb/206Pb +0.38 %,
-208Pb/232Th -0.21 %.
-
 ### 2.4 Dates (Ma)
 
 The spreadsheet's `±2s` is analytical. Its `±2s-sys` adds, in quadrature,
@@ -85,8 +80,7 @@ twice the session reproducibility of the primary standard for that ratio
 
 UPbRPy has the same two pieces: `*_2e_no_calibration` (analytical) and
 `*_2e_with_calibration` (analytical plus the session-calibration residual
-scatter of the primary standard). Before this work UPbRPy's analytical 2s was
-1.03 x (206/238), 1.16 x (207/206) and 1.14 x (208/232) the spreadsheet's.
+scatter of the primary standard).
 
 | Spreadsheet column | Unit | UPbRPy source | Status |
 |---|---|---|---|
@@ -95,8 +89,8 @@ scatter of the primary standard). Before this work UPbRPy's analytical 2s was
 | 207Pb/235U date, ±2s, ±2s-sys | Ma | `207Pb/235U_age`, ... | ±2s-sys new |
 | 206Pb/238U date, ±2s, ±2s-sys | Ma | `206Pb/238U_age`, ... | ±2s-sys new |
 | disc., ±2s | % | `disc%`, `disc_2e%` | **two fixes**: UPbRPy uses 7/6-6/8 (`1 - t68/t76`) where the spreadsheet default is 7/5-6/8 (`1 - t68/t75`); and `disc_2e%` is the 2s relative to the discordance itself (e.g. 1400 %), not in percentage points. New: a setting `discordance_definition` ("7/5-6/8" default, "7/6-6/8"), discordance and its 2s both in percent (percentage points) |
-| 207-method 206Pb*/238U* date, ±2s | Ma | `207Pb_corrected_age`, `207Pb_corrected_age_2e_no_calibration` | ok (median +0.3 Ma) |
-| 208-method 206Pb*/238U* date, ±2s | Ma | `208Pb_corrected_age`, `208Pb_corrected_age_2e_no_calibration` | ok (median +0.4 Ma) |
+| 207-method 206Pb*/238U* date, ±2s | Ma | `207Pb_corrected_age`, `207Pb_corrected_age_2e_no_calibration` | ok |
+| 208-method 206Pb*/238U* date, ±2s | Ma | `208Pb_corrected_age`, `208Pb_corrected_age_2e_no_calibration` | ok |
 | (UPbRPy) preferred date, ±2s, ±2s-sys, method | Ma, text | `preferred_date`, `preferred_date_2e`, `preferred_date_method` | ok; its own column group (the spreadsheet marks it with bold font only) |
 
 New ±2s-sys definition (all four systems and the preferred date):
@@ -265,14 +259,9 @@ test. Decided by Yiming Zhang on 2026-11-06 ("Use high 204"). The engine's
 `flag_detectable_204pb` (3 sigma, Hg-corrected) is a different and more
 sensitive test; it still drives the automatic flags but not this note.
 
-On DemoSession the rule notes 5 of the spreadsheet's 9 unknowns and no
-others, and the same 18 glasses (the note is suppressed on glass rows). The
-session spread of baseline means is 19.5 cps in UPbRPy against 14.8 cps in
-the workbook (thresholds 97 and 74 cps), because UPbRPy's automatic baseline
-windows (10 sweeps, about 4 s) differ from the spreadsheet's 10 s gas blank.
-Three of the four missed analyses have net mass-204 between the two
-thresholds (81, 85, 97 cps); the fourth (44 cps) differs through the
-windows. Before this rule UPbRPy's detection flag fired on 50 unknowns.
+Different baseline windows can change the session spread of baseline means
+and therefore the high-204 threshold. Compare the selected gas-blank
+windows when checking this rule against the spreadsheet.
 
 ### 4.6 Number formats
 
@@ -340,7 +329,7 @@ export preview so the user can fill them in.
 
 ## 6. Comparison test
 
-`tests/test_export_vs_upbr26plus.py` runs only when the DemoSession session
+`tests/test_export_vs_upbr26plus.py` runs only when the Boise zircon session
 folder and a CSV extracted from its Table S2 and S3 are present (paths in
 environment variables); it is skipped elsewhere because the data stay on the
 laptop. Acceptance: per analysis, ratios and dates within the combined 2s of

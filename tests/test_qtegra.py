@@ -17,15 +17,15 @@ from UPbRPy import qtegra as q
 from qtegra_helpers import write_y_only_csv
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "qtegra" / "Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-SPOTS = FIXTURE / "zircon_04Nov26"
+FIXTURE = Path(__file__).parent / "fixtures" / "qtegra" / "Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+SPOTS = FIXTURE / "zircon_demo"
 SPOT = SPOTS / "Zircon_demo_1.csv"
 NAMES = ("29Si", "91Zr", "177Hf", "204Hg", "206Pb", "207Pb", "208Pb", "232Th", "238U")
 LABELS = [
     "NIST612_896", "NIST612_897", "NIST612_898", "NIST610_863", "NIST610_864",
-    "NIST610_865", "S513_628", "S513_629", "SAMPLE-A_S_323",
-    "SAMPLE-A_S_324", "SAMPLE-A_S_325", "SAMPLE-A_S_326",
+    "NIST610_865", "S513_628", "S513_629", "91500_738",
+    "91500_739", "PL_836", "PL_837",
 ]
 
 
@@ -121,7 +121,7 @@ def test_rich_metadata_and_per_channel_time(rich):
         "Identifier": "<Identifier>", "Laser Scan Position Number": "896",
         "Laser Output Setting [%]": "46",
     }
-    assert [a.spot_number for a in rich.acquisitions] == [896, 897, 898, 863, 864, 865, 628, 629, 323, 324, 325, 326]
+    assert [a.spot_number for a in rich.acquisitions] == [896, 897, 898, 863, 864, 865, 628, 629, 738, 739, 836, 837]
     assert first.channels[0].mass == 28.97599983215332
     assert first.channels[-1].mass == 238.05099487304687
     assert all(c.dwell_s is None and c.xcal is None for c in first.channels)

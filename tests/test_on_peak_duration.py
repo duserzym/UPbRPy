@@ -101,8 +101,8 @@ def test_duration_needs_times():
         select_signal_regions(values, signal_duration_limit_seconds=9.5, **APATITE)
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
 
 
 def test_engine_reader_and_services_pass_the_option_through():

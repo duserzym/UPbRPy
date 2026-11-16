@@ -20,7 +20,7 @@ from UPbRPy.project import restore_project_selections, selection_records, write_
 from UPbRPy.qtegra import open_qtegra
 
 
-FIXTURE = Path(__file__).parent / 'fixtures/qtegra/Zircon_04Nov26_slice'
+FIXTURE = Path(__file__).parent / 'fixtures/qtegra/Zircon_demo'
 
 
 def _original_concentration(data, calibration):

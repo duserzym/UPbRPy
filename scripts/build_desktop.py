@@ -150,8 +150,8 @@ def run_pyinstaller(
     return application
 
 
-SMOKE_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "qtegra" / "Zircon_04Nov26_slice"
-SMOKE_CSV = SMOKE_FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
+SMOKE_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "qtegra" / "Zircon_demo"
+SMOKE_CSV = SMOKE_FIXTURE / "Zircon_demo_Rich.csv"
 
 
 def _run_frozen(application: Path, arguments: list[str], work_directory: Path) -> subprocess.CompletedProcess:

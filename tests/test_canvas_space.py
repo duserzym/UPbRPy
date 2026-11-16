@@ -15,7 +15,7 @@ from GUI.studio_window import StudioWindow
 from GUI.theme import build_application
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
 
 
 @pytest.fixture(scope="module")

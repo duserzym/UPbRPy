@@ -225,7 +225,7 @@ def test_rich_detector_panel_fits_laptop_sizes(app, settings_reset, size):
     from pathlib import Path
     from GUI.studio_window import StudioWindow
 
-    source = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    source = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     shell = StudioWindow()
     shell.add_tab()
     window = shell.active_reduction

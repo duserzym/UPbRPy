@@ -96,7 +96,7 @@ def test_step_card_spacing_and_full_stage_labels_on_resize(app, mode):
     shell.resize(1440, 900)
     shell.show()
     reduction = shell.active_reduction
-    source = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice/Zircon_04Nov26_slice_Rich.csv"
+    source = Path(__file__).parent / "fixtures/qtegra/Zircon_demo/Zircon_demo_Rich.csv"
     try:
         for loaded in (False, True):
             if loaded:

@@ -12,9 +12,9 @@ from UPbRPy import io, qtegra as q
 from UPbRPy.pipeline import PipelineConfig, ReductionPipeline
 
 
-FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_04Nov26_slice"
-RICH = FIXTURE / "Zircon_04Nov26_slice_Rich.csv"
-SPOTS = FIXTURE / "zircon_04Nov26"
+FIXTURE = Path(__file__).parent / "fixtures/qtegra/Zircon_demo"
+RICH = FIXTURE / "Zircon_demo_Rich.csv"
+SPOTS = FIXTURE / "zircon_demo"
 FULL = q.CAPABILITIES - {"dwell_xcal"}
 
 
