@@ -516,7 +516,7 @@ class _Workbook:
         if isinstance(value, str):
             sheet.write_string(row, col, value, style or self.body)
         elif np.isfinite(value):
-            sheet.write_number(row, col, float(value), style or self.style())
+            sheet.write_number(row, col, float(value), style or self.style(valign="top"))
 
 
 def _write_readme(book, sessions, info, samples, rows, omitted, title):
@@ -755,7 +755,9 @@ def _write_qc(book, sessions, references):
     sheet = book.sheet("Table S4 QC", "Table S4. Reference-material quality control", len(headers) - 1)
     for col, text in enumerate(headers):
         sheet.write_string(1, col, text, book.header)
-        sheet.set_column(col, col, 38 if col == 2 else 21 if col < 4 else 16, book.body)
+        width = (max(21, *(len(s.label) + 2 for s in sessions)) if col == 0
+                 else 38 if col == 2 else 21 if col < 4 else 16)
+        sheet.set_column(col, col, width, book.body)
     sheet.set_row(1, 42)
     sheet.freeze_panes(2, 4)
     materials = dict.fromkeys(name for s in sessions for name in s.table.secondary_summary.get("sample", ()))
@@ -778,8 +780,7 @@ def _write_qc(book, sessions, references):
                     record["accepted_date"], error, record["offset_ma"], record["offset_percent"], within)
                 for col, value in enumerate(values):
                     code = "0" if col == 4 else "0.0000" if col == 8 else "0.00" if col in (7, 12) else "0.0"
-                    book.cell(sheet, row, col, value, book.body if isinstance(value, str) else book.style(num_format=code))
-                sheet.set_row(row, 32)
+                    book.cell(sheet, row, col, value, book.body if isinstance(value, str) else book.style(num_format=code, valign="top"))
                 row += 1
     for text in ("Weighted means use analytical 2s of included analyses. Flags alone do not exclude analyses.",
             "Within 2s: |offset| ≤ sqrt((weighted-mean 2s)² + (accepted 2s)²). When accepted uncertainty is not recorded its cell is blank and the test uses the weighted-mean 2s alone.",
