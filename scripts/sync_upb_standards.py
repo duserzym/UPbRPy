@@ -13,7 +13,7 @@ import tarfile
 import tomllib
 
 REPOSITORY = "https://github.com/duserzym/upb-standards"
-DEFAULT_REV = "47c15a5998db3ccf74a8886c6412ece16e66df20"
+DEFAULT_REV = "e00070088b5e0f70edb28ad1c87147e9a1008966"
 SNAPSHOT = Path(__file__).resolve().parents[1] / "UPbRPy/reference_materials"
 MINERALS = {"apatite", "carbonate", "glass", "hematite", "rutile", "titanite", "zircon"}
 

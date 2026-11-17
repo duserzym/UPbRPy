@@ -26,7 +26,7 @@ constructs the wide calibration table. The reference-library format version
 is **2**, independently of this data-model document's version.
 
 
-The bundled snapshot is revision `47c15a5998db3ccf74a8886c6412ece16e66df20`.
+The bundled snapshot is revision `e00070088b5e0f70edb28ad1c87147e9a1008966`.
 `UPSTREAM.toml` records its repository, commit, commit date, MIT license,
 file list and SHA-256 hashes; `LICENSE` preserves the upstream license text.
 Refresh from committed Git objects with

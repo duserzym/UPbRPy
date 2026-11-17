@@ -121,7 +121,7 @@ are unsupported because they contain no timing.
 
 Reference-material values come from a pinned MIT-licensed
 [upb-standards](https://github.com/duserzym/upb-standards) snapshot
-(`47c15a5998db`), shipped with Python and Studio. The
+(`e00070088b5e`), shipped with Python and Studio. The
 [reference-material guide](docs/data-model/reference-materials.md) describes
 provenance, shared checkouts and `scripts/sync_upb_standards.py` refreshes.
 

@@ -2,7 +2,7 @@
 
 `UPbRPy/reference_materials/` bundles a pinned MIT-licensed snapshot of
 [upb-standards](https://github.com/duserzym/upb-standards), revision
-`47c15a5998db3ccf74a8886c6412ece16e66df20`. The wide CSV library and the
+`e00070088b5e0f70edb28ad1c87147e9a1008966`. The wide CSV library and the
 `standard_archive_legacy` / `standard_archive_csv` exports have been removed.
 
 ```python
