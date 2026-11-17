@@ -201,8 +201,14 @@ in the `.upbr` project. Old projects without that key use defaults.
 | fluence_j_cm2 | Empty | Laser fluence in J/cm² |
 | operator | Empty | Operator override; otherwise acquisition users |
 | table_title | Empty | Custom title; blank uses Table <n>. U-Pb isotope ratios, dates and trace-element concentrations by LA-ICP-MS: <session> |
+| citation | Empty | How-to-cite text for the supplementary-information workbook |
 
 ## Files written
+
+`write_supplement_xlsx(sessions, path, info=None) -> Path` writes a stand-alone
+SI workbook. The optional bundle format `si` writes `<stem>_SI.xlsx`; the
+default bundle formats remain XLSX, CSV and Markdown. See the
+[SI workbook contract](../export_table_spec.md#supplementary-information-workbook).
 
 `write_export_xlsx(table, path) -> Path` writes a `Table` sheet and a
 `Reference materials` sheet. The latter contains long summaries for all four

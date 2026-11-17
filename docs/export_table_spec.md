@@ -336,3 +336,48 @@ laptop. Acceptance: per analysis, ratios and dates within the combined 2s of
 the two reductions for at least 95 % of analyses; median relative differences
 below 0.5 % for the four ratios; total Pb within 10 % (median) or the
 difference explained in the test docstring.
+
+## Supplementary-information workbook
+
+`UPbRPy.supplement.write_supplement_xlsx(sessions, path, info=None)` accepts
+one or more `SupplementSession` objects, prepared with
+`supplement_session(pipeline, settings=None, *, excluded_spots=(), label="")`.
+`SupplementInfo` supplies the title, citation, sample list, methods, general
+notes, paper size and export date. `supplement_info_from_settings(settings)`
+maps recorded export metadata to this information. The bundle format `si`
+writes `<stem>_SI.xlsx` without changing the default export formats.
+
+The sheets are ordered as follows:
+
+- **README** records the citation, export date, software and reference-library
+  provenance, contents, session counts, sample descriptions and conventions.
+- **Table S1 Methods** records laboratory and instrument metadata, acquisition
+  settings, processing methods, reference values and citations, uncertainty
+  propagation, preferred-date and flag rules, and trace-element definitions.
+  Equal values are merged across session columns. Missing values say
+  "not recorded"; a supplied method entry replaces the recorded row with the
+  same section and parameter, and supplied entries precede recorded fields.
+- **Table S2 Sample data** groups unknown analyses by sample, then session and
+  run order, with analytical weighted means under the existing probability
+  and single-method rule. Systematic uncertainty is not combined across sessions.
+- **Table S3 Standard data** retains all primary, secondary and glass analyses,
+  with each session's reference-material summary. Glass dates stay blank.
+- **Table S4 QC** compares analytical weighted means for each reference
+  material and system with its accepted date. Primary results are labelled
+  calibration evidence, not independent QC. The within-2s test compares the
+  absolute offset with the quadrature sum of weighted-mean and recorded
+  accepted-date 2s; absent accepted uncertainty contributes no term.
+
+When `info.samples` is supplied, only unknowns matching a listed display name
+or alias, case-insensitively, enter S2. Other unknowns are omitted everywhere;
+README reports only their count. Unmeasured entries remain in the sample list
+as "no analyses in these sessions". Without a sample list, all unknowns are
+included under their reduction names. Reference materials and glasses are
+always retained in full.
+
+S2 and S3 number column footnotes in first-use order, followed on S2 by sample
+notes. Identical text across sessions is written once. Differing text becomes
+one note containing session-labelled sentences. Global provenance and method
+notes are replaced by a cross-reference to S1. Isotope masses and heading
+markers are superscript; numerical cells retain full precision. Concentration
+and later columns have an expanded Excel outline group.

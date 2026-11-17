@@ -44,9 +44,9 @@ class ExportResultsDialog(QtWidgets.QDialog):
         formats_layout = QtWidgets.QHBoxLayout(formats_row)
         formats_layout.setContentsMargins(0, 0, 0, 0)
         self.format_checks = {}
-        for fmt in ("xlsx", "csv", "md"):
-            check = QtWidgets.QCheckBox("." + fmt)
-            check.setChecked(True)
+        for fmt in ("xlsx", "csv", "md", "si"):
+            check = QtWidgets.QCheckBox("SI workbook (.xlsx)" if fmt == "si" else "." + fmt)
+            check.setChecked(fmt != "si")
             self.format_checks[fmt] = check
             formats_layout.addWidget(check)
         self.audit_check = QtWidgets.QCheckBox("Audit files and replay notebook")
@@ -166,6 +166,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
     def export_settings(self) -> ExportSettings:
         checked = {key for key, item in self.column_items.items() if item.checkState(0) == QtCore.Qt.CheckState.Checked}
         return ExportSettings(discordance_definition=self.discordance_combo.currentText(),
+            citation=self.base_table.settings.citation,
             **{key: spin.value() for key, spin in self.numeric_fields.items()},
             **{key: edit.text() for key, edit in self.text_fields.items()},
             csv_full_precision=self.csv_precision_check.isChecked(),

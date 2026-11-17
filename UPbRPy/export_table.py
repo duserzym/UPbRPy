@@ -67,6 +67,7 @@ class ExportSettings:
     fluence_j_cm2: str = ""
     operator: str = ""
     table_title: str = ""
+    citation: str = ""
 
     def __post_init__(self):
         if self.discordance_definition not in {"7/5-6/8", "7/6-6/8"}:
@@ -84,7 +85,7 @@ class ExportSettings:
         if not isinstance(self.csv_full_precision, bool):
             raise ValueError("csv_full_precision must be a bool")
         for name in ("laboratory", "laser_system", "spot_diameter_um", "repetition_rate_hz",
-                     "fluence_j_cm2", "operator", "table_title"):
+                     "fluence_j_cm2", "operator", "table_title", "citation"):
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
 
@@ -741,6 +742,19 @@ def _reference_records(measurements, archive, name, system, seen=()):
     return direct("concordia_age") if system == SYSTEMS[2] else measurements.iloc[:0]
 
 
+def session_display_name(context: Mapping) -> str:
+    """Resolve the recorded session identity before a bundle's raw folder name."""
+    manifest = context.get("manifest", {})
+    metadata = context.get("experiment_metadata", {})
+    sources = metadata.get("qtegra", {}).get("sources", [])
+    rich = [Path(s["path"]).stem for s in sources if s.get("format") == "rich"]
+    paths = [Path(s["path"]) for s in sources] or [Path(s["path"]) for s in manifest.get("input_files", [])]
+    return (metadata.get("session_name")
+            or manifest.get("metadata", {}).get("origin", {}).get("session_key")
+            or (", ".join(re.sub(r"_Rich$", "", x, flags=re.I) for x in rich) if rich else None)
+            or (paths[0].parent.name if paths else None) or "not recorded")
+
+
 def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Footnote]:
     """Generate global notes, then notes in first visible-column use order.
 
@@ -767,12 +781,9 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     def sentence(note, value):
         notes[note] = value
 
-    sources = qtegra.get("sources", [])
-    rich = [Path(s["path"]).stem for s in sources if s.get("format") == "rich"]
-    paths = [Path(s["path"]) for s in sources] or [Path(s["path"]) for s in manifest.get("input_files", [])]
-    session_name = (metadata.get("session_name") or manifest.get("metadata", {}).get("origin", {}).get("session_key")
-                    or (", ".join(re.sub(r"_Rich$", "", x, flags=re.I) for x in rich) if rich else None)
-                    or (paths[0].parent.name if paths else None))
+    session_name = session_display_name(context)
+    if session_name == "not recorded":
+        session_name = None
     first, last = acquisition.get("first_start_date"), acquisition.get("last_start_date")
     dates = first if first == last else f"{first} to {last}" if first and last else None
     starts = None

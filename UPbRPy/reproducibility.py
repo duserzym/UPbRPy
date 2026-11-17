@@ -17,7 +17,9 @@ from .results import build_publication_tables, export_publication_tables
 from .export_table import (
     ExportSettings, ExportTable, ExportColumn, build_export_table,
     write_export_xlsx, write_export_csv, write_export_markdown,
+    build_footnotes, _table_footnotes,
 )
+from .supplement import SupplementSession, supplement_info_from_settings, write_supplement_xlsx
 
 
 SELECTION_EXPORT_COLUMNS = (
@@ -321,8 +323,8 @@ def export_reduction_bundle(
     """
     formats = tuple(dict.fromkeys(formats))
     excluded_spots = tuple(excluded_spots)
-    if set(formats) - {"xlsx", "csv", "md"}:
-        raise ValueError("formats must contain only xlsx, csv, md")
+    if set(formats) - {"xlsx", "csv", "md", "si"}:
+        raise ValueError("formats must contain only xlsx, csv, md, si")
     settings = export_settings or (table.settings if table is not None else pipeline.config.export_settings) or ExportSettings()
     stem = file_stem or f"{Path(pipeline.source_directory).stem if pipeline.source_directory else 'session'}_results_table"
     if not stem.strip() or Path(stem).name != stem or stem in {".", ".."}:
@@ -349,6 +351,11 @@ def export_reduction_bundle(
                 table = ExportTable(frame, columns, pd.DataFrame(), pd.DataFrame(), settings,
                     {"session_name": stem.removesuffix("_results_table"), "legacy_audit": True})
         for fmt in formats:
+            if fmt == "si":
+                notes = _table_footnotes(table) if table.context.get("legacy_audit") else build_footnotes(table, pipeline)
+                files.append(write_supplement_xlsx([SupplementSession(table, tuple(notes))],
+                    root / (stem + "_SI.xlsx"), supplement_info_from_settings(settings)))
+                continue
             path = root / (stem + "." + fmt)
             written = {"xlsx": write_export_xlsx, "csv": write_export_csv, "md": write_export_markdown}[fmt](table, path)
             files.extend(written if isinstance(written, list) else [written])

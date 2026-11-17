@@ -11,6 +11,9 @@ separate definitions and numbered provenance footnotes. See the
 [publication-table contract](export_table_spec.md) and
 [export data model](data-model/export-table.md) for column sources, settings
 and output files. The existing audit workbook remains available by default.
+The optional SI workbook adds methods, sample and standard tables, and QC
+across one or more sessions; it does not combine systematic uncertainties
+between sessions.
 
 ## Analytical uncertainty
 
