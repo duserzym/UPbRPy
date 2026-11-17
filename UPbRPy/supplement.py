@@ -548,7 +548,9 @@ class _Workbook:
 
     def rich(self, sheet, row, col, segments, style):
         if len(segments) > 1:
-            args = [x for value, sup in segments if value for x in (self.sup if sup else self.bold, value)]
+            # Header cells are bold; body cells (e.g. dwell channel lists) are not.
+            plain, raised = (self.bold, self.sup) if style is self.header else (self.style(), self.style(font_script=1))
+            args = [x for value, sup in segments if value for x in (raised if sup else plain, value)]
             sheet.write_rich_string(row, col, *args, style)
         else:
             sheet.write_string(row, col, "".join(v for v, _ in segments), style)
