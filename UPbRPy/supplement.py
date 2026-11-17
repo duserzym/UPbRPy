@@ -5,7 +5,7 @@ sessions never combines their systematic uncertainty budgets.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 import math
@@ -295,7 +295,10 @@ def _recorded_methods(session):
     add(1, "Laser output settings seen (%)", ", ".join(map(str, acquisition.get("laser_output_settings_percent", []))))
     add(1, "Tune names", ", ".join(acquisition.get("tune_names", [])))
     add(2, "Instrument", acquisition.get("machine") or qtegra.get("machine"))
-    add(2, "Operator", table.settings.operator or ", ".join(acquisition.get("users", [])))
+    # Instrument logins are personal identifiers: an operator is written only
+    # when supplied in the export settings, never from the Qtegra user field.
+    if table.settings.operator.strip():
+        add(2, "Operator", table.settings.operator, "export settings")
     add(3, "Acquisition starts", _starts(session))
     add(3, "Analyses (n)", len(table.rows))
     sweeps = acquisition.get("sweeps_per_acquisition", {})
@@ -454,11 +457,33 @@ def _reference_rows(session):
     return result
 
 
+def _logins(sessions):
+    """Return instrument login strings recorded in the sessions' metadata."""
+    found = set()
+    def walk(value, key=""):
+        if isinstance(value, Mapping):
+            for k, v in value.items():
+                walk(v, str(k))
+        elif isinstance(value, (list, tuple)):
+            for v in value:
+                walk(v, key)
+        elif isinstance(value, str) and key.casefold() in {"users", "user", "username", "user_name"} and value.strip():
+            found.add(value.strip())
+    for session in sessions:
+        walk(session.table.context.get("experiment_metadata", {}))
+        for record in session.table.context.get("selections", ()):
+            walk({k: v for k, v in record.items() if str(k).casefold() in {"user", "username", "user_name"}})
+    # A domain login such as DOMAIN\account also hides the bare account.
+    parts = {x.rsplit("\\", 1)[-1] for x in found if "\\" in x}
+    return sorted(found | {x for x in parts if len(x) >= 3}, key=len, reverse=True)
+
+
 class _Workbook:
     """Small formatting helpers shared by the five SI sheets."""
 
-    def __init__(self, workbook, info):
+    def __init__(self, workbook, info, logins=()):
         self.workbook, self.info = workbook, info
+        self.logins = tuple(logins)
         self.styles = {}
         self.body = self.style(text_wrap=True, valign="top")
         self.header = self.style(bold=True, bg_color="#EAF0F6", text_wrap=True, valign="top", bottom=1, bottom_color="#D0D5DB")
@@ -472,8 +497,26 @@ class _Workbook:
             self.styles[key] = self.workbook.add_format({"font_name": "Calibri", "font_size": 10, **options})
         return self.styles[key]
 
+    def clean(self, text):
+        """Replace recorded instrument logins in any text written to the workbook."""
+        text = str(text)
+        for login in self.logins:
+            text = text.replace(login, "[instrument account]")
+        return text
+
+    def _guard(self, sheet):
+        # Every string path of the worksheet goes through clean(), so a login
+        # in reduction prose or supplied text can never reach a cell.
+        write_string, merge_range, write_rich = sheet.write_string, sheet.merge_range, sheet.write_rich_string
+        sheet.write_string = lambda row, col, text, *a: write_string(row, col, self.clean(text), *a)
+        sheet.merge_range = lambda r1, c1, r2, c2, data, *a: merge_range(
+            r1, c1, r2, c2, self.clean(data) if isinstance(data, str) else data, *a)
+        sheet.write_rich_string = lambda row, col, *a: write_rich(
+            row, col, *(self.clean(x) if isinstance(x, str) else x for x in a))
+        return sheet
+
     def sheet(self, name, title, last, *, headers=2, portrait=False, fit=True):
-        sheet = self.workbook.add_worksheet(name)
+        sheet = self._guard(self.workbook.add_worksheet(name))
         sheet.hide_gridlines(2)
         sheet.set_default_row(15)
         self.merge(sheet, 0, 0, last, title, self.title)
@@ -811,7 +854,7 @@ def write_supplement_xlsx(sessions: Sequence[SupplementSession], path,
         # Set the default as well as explicit formats, including blank cells.
         workbook.formats[0].set_font_name("Calibri")
         workbook.formats[0].set_font_size(10)
-        book = _Workbook(workbook, info)
+        book = _Workbook(workbook, info, _logins(sessions))
         _write_readme(book, sessions, info, samples, rows, omitted, title)
         _write_methods(book, sessions, info, references)
         _write_data(book, sessions, samples, rows)

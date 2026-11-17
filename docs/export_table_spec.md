@@ -375,6 +375,11 @@ as "no analyses in these sessions". Without a sample list, all unknowns are
 included under their reduction names. Reference materials and glasses are
 always retained in full.
 
+Instrument login names recorded in the Qtegra export (the `User` field) are
+personal identifiers and are never written to the SI workbook: S1 has an
+Operator row only when an operator is supplied in the export settings, and
+any recorded login found in other text is replaced by `[instrument account]`.
+
 S2 and S3 number column footnotes in first-use order, followed on S2 by sample
 notes. Identical text across sessions is written once. Differing text becomes
 one note containing session-labelled sentences. Global provenance and method

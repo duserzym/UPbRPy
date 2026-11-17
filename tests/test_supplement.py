@@ -287,3 +287,21 @@ def test_supplied_method_entry_replaces_recorded_row(tmp_path):
     assert len(laboratory) == 1 and laboratory[0]["C"] == "Example laboratory"
     titles = [r.get("A", "") for r in xml.rows(2)]
     assert not any("1 sessions" in text for text in titles)
+
+
+def test_instrument_login_never_reaches_workbook(tmp_path):
+    login = "EXAMPLEDOMAIN\\op1234"
+    _, first, second = sessions()
+    for session in (first, second):
+        session.table.context["experiment_metadata"]["qtegra"]["acquisition_summary"]["users"] = [login]
+    info = SupplementInfo(notes=(f"Acquired under {login}.",),
+                          methods=(MethodsEntry("ICP-MS", "Account", "op1234", "instrument log"),))
+    target = write_supplement_xlsx([first, second], tmp_path / "si.xlsx", info)
+    with zipfile.ZipFile(target) as archive:
+        text = "".join(archive.read(n).decode() for n in archive.namelist() if n.endswith(".xml"))
+    assert "op1234" not in text and "EXAMPLEDOMAIN" not in text
+    xml = WorkbookXML(target)
+    assert not [r for r in xml.rows(1) if r.get("B") == "Operator"]
+    staffed = replace(first, table=replace(first.table, settings=replace(first.table.settings, operator="Laboratory staff")))
+    xml = WorkbookXML(write_supplement_xlsx([staffed], tmp_path / "staffed.xlsx"))
+    assert [r["C"] for r in xml.rows(1) if r.get("B") == "Operator"] == ["Laboratory staff"]
