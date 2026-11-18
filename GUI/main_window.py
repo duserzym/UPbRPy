@@ -7482,10 +7482,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if data is None:
             return
+        self.bias_controls.set_quantities(data["quantities"])
         self.bias_plot.show_bias(
             data["table"], data["summary"], theme=theme, log_x=data["log_x"],
             x_label=data["x_label"], y_label=data["y_label"],
-            y_tooltip=data.get("date_tooltip"),
+            y_tooltip=data.get("date_tooltip"), unknowns=data.get("unknowns"),
+            x_tooltip=data.get("x_tooltip"),
         )
         self.bias_controls.set_date_tooltip(data.get("date_tooltip", ""))
         self.bias_controls.set_summary(data["summary"])

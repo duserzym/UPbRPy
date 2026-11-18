@@ -1957,7 +1957,8 @@ def get_standard_bias_data(
     Returns ``None`` until the session has finalized results.
     """
     from UPbRPy.bias import (
-        BIAS_QUANTITIES,
+        bias_quantities,
+        project_unknowns,
         bias_date_description,
         bias_summary,
         calibrated_bias_date,
@@ -1976,6 +1977,9 @@ def get_standard_bias_data(
         date = calibrated_bias_date(pipeline.config.common_pb_calibration)
     description = bias_date_description(date, pipeline.config.common_pb_calibration)
     finalized = pipeline.run_finalize()
+    quantities = bias_quantities(finalized.parallel_results, standard_archive=pipeline.standard_archive)
+    if quantity not in quantities:
+        quantity = "U" if "U" in quantities else next(iter(quantities))
     signals = spot_signal_quantities(pipeline.experiment, pipeline.run_baseline())
     table = standard_bias_table(
         finalized.parallel_results,
@@ -1989,11 +1993,17 @@ def get_standard_bias_data(
             else "analytical"
         ),
     )
+    summary = bias_summary(table, log_x=log_x)
+    from UPbRPy.radiation_damage import ALPHA_DOSE_TOOLTIP
     return {
+        "quantities": quantities,
+        "unknowns": project_unknowns(finalized.parallel_results, pipeline.standard_archive, summary["trend"],
+                                     date=date, quantity=quantity, log_x=log_x, signal_quantities=signals),
+        "x_tooltip": ALPHA_DOSE_TOOLTIP if quantity == "alpha_dose" else "",
         "table": table,
-        "summary": bias_summary(table, log_x=log_x),
+        "summary": summary,
         "log_x": log_x,
-        "x_label": str(BIAS_QUANTITIES.get(quantity, quantity)),
+        "x_label": str(quantities.get(quantity, quantity)),
         "y_label": description["axis"],
         "date": date,
         "date_tooltip": description["tooltip"],

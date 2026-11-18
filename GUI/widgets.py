@@ -21,6 +21,7 @@ from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard_archive
 from GUI.state import ReductionSession
+from GUI.legend_series import LegendSeries
 from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from GUI.workers import FunctionWorker
@@ -1616,7 +1617,9 @@ class _ConcordiaLegendSample(ItemSample):
     def paint(self, painter, *args):
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(self.item.opts["brush"])
+        painter.setBrush(self.item.opts["brush"] if self.item.isVisible() else pg.mkBrush(None))
+        if not self.item.isVisible():
+            painter.setPen(pg.mkPen(self.item.opts["brush"].color(), width=1))
         painter.drawEllipse(QtCore.QPointF(6, 7), 3.25, 3.25)
 
 
@@ -2084,6 +2087,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._point_errors = np.empty((0, 2))
         self._included_spots: set[str] | None = None
         self._legend_samples: list[str] = []
+        self._legend_series = LegendSeries()
+        self._visible_spot_names = set()
         self._metadata_by_spot = {}
         self._include_flags = {}
         self._spot_colors = {}
@@ -2556,7 +2561,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         changed = previous ^ names if previous is not None and names is not None else None
         for name, ellipse, _color in self._ellipses:
             if changed is None or name in changed:
-                ellipse.setVisible(names is None or name in names)
+                ellipse.setVisible(name in self._visible_spot_names)
         self._ellipse_batch.rebuild()
         self._update_selection_style(positions_changed=True)
         old_rect = self._legend.sceneBoundingRect() if self._legend is not None else None
@@ -2572,11 +2577,17 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     def _update_visible_points(self) -> None:
         included = self._included_spots
+        hidden = set()
+        if self._kind == "spot" and self._colour_mode == "sample" and self._legend_series.hidden:
+            frame = self._all_point_rows.frame if isinstance(self._all_point_rows, _ConcordiaRows) else self._frame
+            if "sample" in frame and "spot_name" in frame:
+                hidden = set(frame.loc[frame["sample"].astype(str).isin(self._legend_series.hidden), "spot_name"].astype(str))
         indices = [
             index for index, point in enumerate(self._all_points)
-            if included is None or point[0] in included
+            if (included is None or point[0] in included) and point[0] not in hidden
         ]
         self._points = [self._all_points[index] for index in indices]
+        self._visible_spot_names = {p[0] for p in self._points}
         if isinstance(self._all_point_rows, _ConcordiaRows):
             self._point_rows = _ConcordiaRows(self._all_point_rows.frame, self._all_point_rows.positions[indices])
         else:
@@ -2755,6 +2766,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     def _draw(self, *, preserve_view=False) -> None:
         retained_range = self._plot_item.vb.viewRange() if preserve_view and self._plot_item else None
         hovered = (self._points[self._hover_index][0] if self._hover_index is not None else None)
+        self._legend_series.reset()
         self._label_timer.stop()
         if self._hover_index is not None:
             self._set_hover(None)
@@ -2993,7 +3005,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._ellipse_batch.handles = [handle for _, handle, _ in self._ellipses]
         self._ellipse_batch.dirty = True
         for name, handle, _ in self._ellipses:
-            handle.setVisible(self._included_spots is None or name in self._included_spots)
+            handle.setVisible(name in self._visible_spot_names)
         if self._scatter is None:
             self._scatter = pg.ScatterPlotItem(symbol="o", size=6 if self._kind == "depth" else 8,
                                              pen=pg.mkPen(theme.axis_text, width=.7))
@@ -3168,15 +3180,17 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     def _update_sample_legend(self):
         if self._kind != "spot" or self._colour_mode != "sample":
             return
-        samples = sorted({
-            str(value) for value in (
-                self._point_rows.frame["sample"].iloc[self._point_rows.positions]
-                if isinstance(self._point_rows, _ConcordiaRows) and "sample" in self._point_rows.frame else []
-            ) if self._has_value(value)
-        })
+        values = []
+        if isinstance(self._all_point_rows, _ConcordiaRows) and "sample" in self._all_point_rows.frame:
+            rows = self._all_point_rows.frame.iloc[self._all_point_rows.positions]
+            if self._included_spots is not None:
+                rows = rows.loc[rows["spot_name"].astype(str).isin(self._included_spots)]
+            values = rows["sample"]
+        samples = sorted({str(value) for value in values if self._has_value(value)})
         if samples == self._legend_samples:
             return
         self._legend_samples = samples
+        self._legend_series.reset()
         if self._legend is not None:
             self.scene().removeItem(self._legend)
             self._legend.deleteLater()
@@ -3196,11 +3210,22 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             swatch = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None),
                                         brush=pg.mkBrush(self._sample_colors[sample]))
             self._legend.addItem(swatch, escape(sample))
+            self._legend_series.bind(sample, swatch, legend=self._legend, changed=self._sample_visibility_changed)
             label = self._legend.items[-1][1]
             label.item.document().setDocumentMargin(0)
             label.updateMin()
         self._legend.layout.activate()
         self._legend.updateSize()
+
+    def _sample_visibility_changed(self, key, visible):
+        self._set_hover(None)
+        self._last_hit = None
+        self._update_visible_points()
+        for name, ellipse, _color in self._ellipses:
+            ellipse.setVisible(name in self._visible_spot_names)
+        self._update_selection_style(positions_changed=True)
+        self._update_highlight()
+        self._schedule_labels()
 
     def _position_sample_legend(self):
         """Choose the corner covering the fewest drawn centres in this view."""
@@ -7771,7 +7796,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._channel: str | None = None
-        self._scatter_for_line: dict[pg.PlotDataItem, pg.ScatterPlotItem] = {}
+        self._legend_series = LegendSeries()
         self._plot_item: pg.PlotItem | None = None
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
@@ -7779,6 +7804,12 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                   QtWidgets.QSizePolicy.Policy.Expanding)
         )
+
+    @property
+    def _scatter_for_line(self):
+        """Compatibility view for diagnostic callers; links live in LegendSeries."""
+        return {primary: companions[0] for _key, primary, companions in self._legend_series.items()
+                if companions}
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -7903,8 +7934,8 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
         super().mouseDoubleClickEvent(event)
 
     def _draw(self) -> None:
+        self._legend_series.reset()
         self.clear()
-        self._scatter_for_line = {}
         self._plot_item = None
         self._grid_items = {}
         self._drawn_columns = 0
@@ -7984,19 +8015,10 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
                     pen=pg.mkPen(color, width=2.0, style=QtCore.Qt.PenStyle.DashLine),
                     name=channel,
                 )
-            self._scatter_for_line[line_item] = scatter
+            self._legend_series.bind(channel, line_item, [scatter], legend=legend)
 
-        if legend is not None:
-            legend.sigSampleClicked.connect(self._on_legend_sample_clicked)
         self._apply_zoom_mode()
         self._apply_interaction_mode()
-
-    def _on_legend_sample_clicked(self, line_item: object) -> None:
-        if not isinstance(line_item, pg.PlotDataItem):
-            return
-        scatter = self._scatter_for_line.get(line_item)
-        if scatter is not None:
-            scatter.setVisible(line_item.isVisible())
 
     def _legend_column_count(self, n_channels: int) -> int:
         if n_channels <= 0:
@@ -8109,6 +8131,7 @@ class TracePlotWidget(RoundedPlotWidget):
         )
         self.plot_item = self.getPlotItem()
         self._theme = active_theme()
+        self._legend_series = LegendSeries()
         self._region_overlays: dict[str, dict[str, object]] = {}
         self._signal_boundaries: dict[str, pg.InfiniteLine] = {}
         self._signal_markers: dict[str, pg.ScatterPlotItem] = {}
@@ -8196,6 +8219,8 @@ class TracePlotWidget(RoundedPlotWidget):
         # Keep the empty legend's graphics-layout geometry valid on narrow
         # canvases, without adding entries or data items.
         legend.setMinimumHeight(1)
+        if getattr(self, "_series_items", None):
+            self._link_trace_series()
 
     def _update_spot_label(self, spot_name: str | None) -> None:
         if not hasattr(self, "_spot_name_label"):
@@ -8358,6 +8383,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self.plot_item.showAxis("bottom")
 
     def _reset_items(self) -> None:
+        self._legend_series.reset()
         legend = self.plot_item.legend
         if legend is not None and legend.scene() is not None:
             if getattr(legend, "_outside_trace", False):
@@ -8466,6 +8492,7 @@ class TracePlotWidget(RoundedPlotWidget):
             measurements.setZValue(5)
             measurements.setProperty("measurement_points", True)
             self._measurement_layers[channel] = measurements
+            self._series_items[channel] = curve
             self._hover_series[channel] = (x_values, y_values)
             finite_values = y_values[np.isfinite(y_values)]
             if finite_values.size:
@@ -8510,6 +8537,7 @@ class TracePlotWidget(RoundedPlotWidget):
                 bounds=(end_minimum, maximum_time),
             )
 
+        self._link_trace_series()
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
         if y_min is not None and y_max is not None:
             lower = y_min - max(1.0, abs(y_min) * 0.08)
@@ -8535,7 +8563,7 @@ class TracePlotWidget(RoundedPlotWidget):
         order = [name for name in series_names if name in frame]
         retained = [name for name in self._series_items if name in order]
         appended = [name for name in order if name not in self._series_items]
-        if not self._series_items or retained + appended != order:
+        if self._measurement_layers or not self._series_items or retained + appended != order:
             self._reset_items()
         wanted = set(series_names)
         for name in list(self._series_items):
@@ -8588,12 +8616,28 @@ class TracePlotWidget(RoundedPlotWidget):
             y_min = current_min if y_min is None else min(y_min, current_min)
             y_max = current_max if y_max is None else max(y_max, current_max)
 
+        self._link_trace_series()
         ranges = dict(xRange=(float(np.min(x_values)), float(np.max(x_values))))
         if y_min is not None and y_max is not None:
             lower = y_min - abs(y_min) * 0.08 if y_min < 0 else y_min * 0.92
             upper = y_max * 1.08 if y_max > 0 else 1.0
             ranges["yRange"] = (lower, upper)
         self.plot_item.vb.setRange(**ranges, padding=0.02)
+
+    def _link_trace_series(self):
+        for channel, curve in self._series_items.items():
+            companions = []
+            if channel in self._measurement_layers:
+                companions.append(self._measurement_layers[channel])
+            if channel == self._selection_channel:
+                companions.extend(self._signal_markers.values())
+            for overlay in self._region_overlays.values():
+                if overlay["channel"] == channel:
+                    # The region is the shared selection window, not part of the series.
+                    companions.extend(overlay[key] for key in (
+                        "fill", "mean_line", "upper_line", "lower_line", "selected_points",
+                        "excluded_points", "excluded_segments", "excluded_segment_mask"))
+            self._legend_series.bind(channel, curve, companions, legend=self.plot_item.legend)
 
     def current_regions(self) -> dict[str, tuple[float, float] | None]:
         regions = {
@@ -8805,6 +8849,7 @@ class TracePlotWidget(RoundedPlotWidget):
         overlay_frame = frame[["Time", stats_channel]].dropna().copy() if stats_channel and stats_channel in frame else frame[["Time"]].copy()
         self._region_overlays[name] = {
             "region": region,
+            "fill": fill,
             "mean_line": mean_line,
             "upper_line": upper_line,
             "lower_line": lower_line,
@@ -9349,6 +9394,8 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         super().__init__(parent=parent)
         self._theme = active_theme()
         self._table = pd.DataFrame()
+        self._unknowns = pd.DataFrame()
+        self._legend_series = LegendSeries()
         self._summary = {}
         self._log_x = False
         self._per_sample_trends = False
@@ -9370,15 +9417,17 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
     def show_bias(self, table, summary, *, theme, log_x=False, x_label, y_label,
-                  y_tooltip: str | None = None) -> None:
+                  y_tooltip: str | None = None, unknowns=None, x_tooltip=None) -> None:
         """Draw a bias table and matching summary; labels describe original units."""
         self._table = table.copy()
+        self._unknowns = unknowns.copy() if unknowns is not None else pd.DataFrame()
         self._summary = summary
         self._theme = theme
         self._log_x = bool(log_x)
         self._x_label, self._y_label = x_label, y_label
         self._draw()
         self._plot_item.getAxis("left").setToolTip(y_tooltip or "")
+        self._plot_item.getAxis("bottom").setToolTip(x_tooltip or "")
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Redraw using the supplied Studio palette."""
@@ -9393,6 +9442,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
     def _draw(self):
         plot, theme = self._plot_item, self._theme
         self._set_hover(None)
+        self._legend_series.reset()
         plot.clear()
         for item in (self._legend, self._hover_text, self._trend_text):
             if item is not None and item.scene() is not None:
@@ -9449,15 +9499,23 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
                 stats = self._summary.get("samples", {}).get(sample, {})
                 mean, error = stats.get("weighted_mean", np.nan), stats.get("weighted_mean_2e", np.nan)
                 self._legend.addItem(scatter, f"{sample}  {mean:+.1f} ± {error:.1f} %  n {stats.get('n', 0)}")
+                companions = [bars]
                 if np.isfinite(mean):
                     self._mean_lines.append(plot.plot([x.min(), x.max()], [mean, mean],
                         pen=pg.mkPen(color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)))
+                    companions.append(self._mean_lines[-1])
                 if self._per_sample_trends:
-                    self._draw_trend(self._summary.get("trend_by_sample", {}).get(sample), color)
-            self._point_xy = np.array([
-                [np.log10(row['x']) if self._log_x else row['x'], row['offset_percent']]
-                for row in self._point_rows], dtype=float).reshape(-1, 2)
+                    line = self._draw_trend(self._summary.get("trend_by_sample", {}).get(sample), color)
+                    if line is not None:
+                        companions.append(line)
+                self._legend_series.bind(str(sample), scatter, companions, legend=self._legend,
+                                         changed=self._bias_visibility_changed)
         self._draw_trend(self._summary.get("trend"), theme.text)
+        self._draw_unknowns()
+        self._point_xy = np.array([
+            [np.log10(row['x']) if self._log_x else row['x'],
+             row.get('predicted_offset_percent', row.get('offset_percent', np.nan))]
+            for row in self._point_rows], dtype=float).reshape(-1, 2)
         background = theme_color(theme.surface)
         background.setAlpha(245)
         self._hover_text = pg.TextItem(color=theme.axis_text, fill=pg.mkBrush(background),
@@ -9490,7 +9548,61 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         bounds = fit["x_range"]
         x = np.geomspace(*bounds, 100) if self._log_x else np.linspace(*bounds, 100)
         y = fit["intercept"] + fit["slope"] * (np.log10(x) if self._log_x else x)
-        self._trend_lines.append(self._plot_item.plot(x, y, pen=pg.mkPen(color, width=1.8)))
+        line = self._plot_item.plot(x, y, pen=pg.mkPen(color, width=1.8))
+        self._trend_lines.append(line)
+        return line
+
+    def _draw_unknowns(self):
+        fit = self._summary.get("trend")
+        if not fit or self._unknowns.empty:
+            return
+        frame = self._unknowns
+        valid = frame.plottable & np.isfinite(frame.x)
+        if self._log_x:
+            valid &= frame.x > 0
+        frame = frame.loc[valid]
+        if self._legend is None:
+            self._legend = _rounded_legend(self._plot_item, offset=(-10, 32),
+                                           labelTextColor=self._theme.axis_text)
+        for extrapolated, label, color in (
+                (False, "Unknowns on trend", self._theme.muted),
+                (True, "Unknowns extrapolated", self._theme.danger)):
+            group = frame.loc[frame.extrapolated == extrapolated]
+            if group.empty:
+                continue
+            x = group.x.to_numpy(dtype=float)
+            display_x = np.log10(x) if self._log_x else x
+            scatter = pg.ScatterPlotItem(x=display_x, y=group.predicted_offset_percent.to_numpy(),
+                                         symbol="d", size=8, brush=pg.mkBrush(None), pen=pg.mkPen(color))
+            scatter._bias_color = color
+            scatter._bias_rows = group.to_dict("records")
+            scatter.sigClicked.connect(self._spot_clicked)
+            self._plot_item.addItem(scatter)
+            self._scatters[label] = scatter
+            self._point_rows.extend(scatter._bias_rows)
+            self._legend.addItem(scatter, f"{label} ({len(group)})")
+            extensions = []
+            if extrapolated:
+                low, high = fit["x_range"]
+                for bounds in ((min(x.min(), low), low), (high, max(x.max(), high))):
+                    if bounds[0] == bounds[1]:
+                        continue
+                    line_x = np.geomspace(*bounds, 100) if self._log_x else np.linspace(*bounds, 100)
+                    line_y = fit["intercept"] + fit["slope"] * (np.log10(line_x) if self._log_x else line_x)
+                    line = self._plot_item.plot(line_x, line_y, pen=pg.mkPen(
+                        self._theme.text, width=1.8, style=QtCore.Qt.PenStyle.DashLine))
+                    extensions.append(line)
+                    self._trend_lines.append(line)
+            self._legend_series.bind(label, scatter, extensions, legend=self._legend,
+                                     changed=self._bias_visibility_changed)
+
+    def _bias_visibility_changed(self, key, visible):
+        self._set_hover(None)
+
+    def _visible_point_mask(self):
+        visible = {str(r["spot_name"]) for scatter in self._scatters.values() if scatter.isVisible()
+                   for r in scatter._bias_rows}
+        return np.array([str(row["spot_name"]) in visible for row in self._point_rows], dtype=bool)
 
     def set_selected_spots(self, names) -> None:
         """Highlight spot names without emitting selectionChanged."""
@@ -9536,12 +9648,23 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
     def select_rectangle(self, rect, *, extend=False) -> None:
         """Select centres in view coordinates, including log coordinates."""
         rect = rect.normalized()
-        self.select_spots({str(row["spot_name"]) for row, xy in zip(self._point_rows, self._point_xy)
-                           if rect.contains(QtCore.QPointF(*xy))}, extend=extend)
+        self.select_spots({str(row["spot_name"]) for row, xy, visible in zip(self._point_rows, self._point_xy, self._visible_point_mask())
+                           if visible and rect.contains(QtCore.QPointF(*xy))}, extend=extend)
 
     def nearest_point(self, scene_pos, *, radius=6):
         """Return the nearest visible point within a radius in screen pixels."""
-        return ConcordiaReviewWidget.nearest_point(self, scene_pos, radius=radius)
+        if not len(self._point_xy) or not self._plot_item.vb.sceneBoundingRect().contains(scene_pos):
+            return None
+        vb = self._plot_item.vb
+        point = vb.mapSceneToView(scene_pos)
+        scale = np.abs(vb.viewPixelSize())
+        if np.any(scale <= 0) or not np.all(np.isfinite(scale)):
+            return None
+        delta = (self._point_xy - [point.x(), point.y()]) / scale
+        distances = np.einsum("ij,ij->i", delta, delta)
+        distances[~self._visible_point_mask()] = np.inf
+        index = int(np.argmin(distances))
+        return index if distances[index] <= radius**2 else None
 
     def _reset_from_double_click(self, scene_pos):
         self._plot_item.autoRange()
@@ -9549,6 +9672,17 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
     def tooltip_text(self, index: int) -> str:
         """Return the spot's date, reference value and offset with absolute 2s."""
         row = self._point_rows[index]
+        if "predicted_offset_percent" in row:
+            text = (f"{row['spot_name']}\n{row['sample']}\n{self._x_label}: {row['x']:.5g}\n"
+                    f"Date ({row['date_system']}): {row['date']:.5g} Ma\n"
+                    f"Predicted bias: {row['predicted_offset_percent']:+.4g} ± "
+                    f"{row['predicted_offset_2s_percent']:.4g} % (2σ)\n"
+                    f"Implied correction: {row['implied_correction_percent']:+.4g} %, "
+                    f"{row['implied_correction_ma']:+.4g} Ma\n"
+                    f"Corrected date: {row['corrected_date_ma']:.5g} Ma (not applied)")
+            if row['extrapolated']:
+                text += "\noutside the reference-material x-range (extrapolated)"
+            return text
         return (f"{row['spot_name']}\n{row['sample']}\n{self._x_label}: {row['x']:.5g}\n"
                 f"Date: {row['date']:.5g} ± {row['date_2s']:.4g} Ma (2σ)\n"
                 f"Accepted {row['date_system']}: {row['accepted']:.5g} Ma\n"
@@ -9629,6 +9763,8 @@ class StandardBiasControls(QtWidgets.QWidget):
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.date_combo = StyledComboBox()
         self.quantity_combo = StyledComboBox()
+        self._pending_quantity = None
+        self._quantities_known = False
         self.date_combo.addItem("As calibrated", "calibrated")
         for system in BIAS_DATE_SYSTEMS:
             label = ("Preferred" if system == "preferred" else
@@ -9661,7 +9797,7 @@ class StandardBiasControls(QtWidgets.QWidget):
 
     def state(self) -> dict:
         """Return date, quantity, log_x and per_sample_trends settings."""
-        return {"version": 2, "date": self.date_combo.currentData(), "quantity": self.quantity_combo.currentData(),
+        return {"version": 2, "date": self.date_combo.currentData(), "quantity": self._pending_quantity or self.quantity_combo.currentData(),
                 "log_x": self.log_x_check.isChecked(),
                 "per_sample_trends": self.per_sample_trends_check.isChecked()}
 
@@ -9677,10 +9813,57 @@ class StandardBiasControls(QtWidgets.QWidget):
                 index = combo.findData(state[key])
                 if index >= 0:
                     combo.setCurrentIndex(index)
+                if key == "quantity":
+                    self._pending_quantity = state[key] if not self._quantities_known else None
+                    if index < 0 and self._quantities_known:
+                        fallback = combo.findData("U")
+                        if fallback < 0:
+                            fallback = next((i for i in range(combo.count())
+                                             if combo.itemData(i) is not None), -1)
+                        combo.setCurrentIndex(fallback)
         for key, check in (("log_x", self.log_x_check), ("per_sample_trends", self.per_sample_trends_check)):
             if key in state:
                 check.setChecked(bool(state[key]))
+        from UPbRPy.radiation_damage import ALPHA_DOSE_TOOLTIP
+        self.quantity_combo.setToolTip(ALPHA_DOSE_TOOLTIP if self.quantity_combo.currentData() == "alpha_dose" else "")
         del blockers
+
+    def set_quantities(self, mapping):
+        """Refill grouped measured attributes silently, retaining restored choices."""
+        from UPbRPy.bias import _RATIO_INPUTS, _SIGNALS
+        from UPbRPy.radiation_damage import ALPHA_DOSE_TOOLTIP
+        current = self._pending_quantity or self.quantity_combo.currentData()
+        blocker = QtCore.QSignalBlocker(self.quantity_combo)
+        self.quantity_combo.clear()
+        groups = [
+            ("Signal", [key for key in mapping if key in _SIGNALS]),
+            ("Composition µg/g", [key for key in mapping if key not in _SIGNALS
+                                  and key not in _RATIO_INPUTS and key not in {"alpha_dose", "206Pb/204Pb"}]),
+            ("Ratios", [key for key in mapping if key in _RATIO_INPUTS or key == "206Pb/204Pb"]),
+            ("Radiation damage", [key for key in mapping if key == "alpha_dose"]),
+        ]
+        for title, keys in groups:
+            if not keys:
+                continue
+            index = self.quantity_combo.count()
+            self.quantity_combo.insertSeparator(index)
+            self.quantity_combo.setItemText(index, title)
+            for key in keys:
+                self.quantity_combo.addItem(mapping[key], key)
+                if key == "alpha_dose":
+                    self.quantity_combo.setItemData(self.quantity_combo.count()-1, ALPHA_DOSE_TOOLTIP,
+                                                    QtCore.Qt.ItemDataRole.ToolTipRole)
+        index = self.quantity_combo.findData(current) if current is not None else -1
+        if index < 0:
+            index = self.quantity_combo.findData("U")
+        if index < 0:
+            index = next((i for i in range(self.quantity_combo.count())
+                          if self.quantity_combo.itemData(i) is not None), -1)
+        self.quantity_combo.setCurrentIndex(index)
+        self._pending_quantity = None
+        self._quantities_known = True
+        self.quantity_combo.setToolTip(ALPHA_DOSE_TOOLTIP if self.quantity_combo.currentData() == "alpha_dose" else "")
+        del blocker
 
     def set_date_tooltip(self, text: str) -> None:
         """Explain the selected date quantity and its initial-Pb convention."""
@@ -9695,4 +9878,8 @@ class StandardBiasControls(QtWidgets.QWidget):
         self.summary_label.setText("\n".join(lines))
 
     def _emit_changed(self, *args):
+        if self.sender() is self.quantity_combo:
+            self._pending_quantity = None
+        from UPbRPy.radiation_damage import ALPHA_DOSE_TOOLTIP
+        self.quantity_combo.setToolTip(ALPHA_DOSE_TOOLTIP if self.quantity_combo.currentData() == "alpha_dose" else "")
         self.changed.emit(self.state())
