@@ -1,6 +1,7 @@
 """Calibration controls retain results and fit laptop inspector widths."""
 
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pandas as pd
@@ -387,6 +388,62 @@ def test_91500_offset_uses_cached_same_system_summary(window):
     assert row[3] == "ok"
     assert row[4] == "206Pb/238U dates. Within 2σ of the reference value"
     assert window.secondary_materials.grid.itemAt(0).widget().toolTip() == row[4]
+
+
+@pytest.mark.parametrize("calibration", ["tera_wasserburg", "radiogenic"])
+def test_secondary_corrected_date_depends_on_session_calibration(window, monkeypatch, calibration):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Calibration summary computed results")
+
+    for name in ("run_downhole", "run_session", "run_concentration", "run_finalize"):
+        monkeypatch.setattr(window.session.pipeline, name, forbidden)
+    window.session.secondary_standards = ("91500",)
+    window.session.pipeline.config = replace(window.session.pipeline.config, common_pb_calibration=calibration)
+    legacy = pd.DataFrame([dict(sample="91500", offset_percent=6.4, mswd=8.)])
+    by_system = pd.DataFrame([
+        dict(sample="91500", system="206Pb/238U", accepted_date=1000., offset_ma=64.,
+             offset_percent=6.4, mswd=8.),
+        dict(sample="91500", system="207Pb-corrected 206Pb/238U", accepted_date=1000.,
+             offset_ma=2., offset_percent=.2, mswd=.75, weighted_mean_2e=3.),
+    ])
+    final = SimpleNamespace(secondary_standard_summary=legacy, reference_material_summary_by_system=by_system)
+    window.session.reduction_cache["finalized_results"] = final
+    window._refresh_calibration_summary()
+    row = window.secondary_materials.rows[0]
+    if calibration == "tera_wasserburg":
+        assert row[2] == "+0.2 % · MSWD 0.75"
+        assert row[3] == "ok"
+        assert row[4] == ("207Pb-corrected 206Pb/238U date; uncorrected offset +6.4 %. "
+                          "Within 2σ of the reference value")
+    else:
+        assert row[2] == "+6.4 % · MSWD 8"
+        assert "207Pb-corrected" not in row[4]
+    assert window.secondary_materials.grid.itemAt(0).widget().toolTip() == row[4]
+    # The calibration mode is part of the summary key, even with the same cached final result.
+    other = "radiogenic" if calibration == "tera_wasserburg" else "tera_wasserburg"
+    window.session.pipeline.config = replace(window.session.pipeline.config, common_pb_calibration=other)
+    window._refresh_calibration_summary()
+    assert window.secondary_materials.rows[0][2] != row[2]
+
+
+@pytest.mark.parametrize("corrected_offset", [None, float("nan"), float("inf")])
+@pytest.mark.parametrize("legacy_offset", [6.4, float("nan")])
+def test_tw_secondary_falls_back_without_finite_corrected_offset(window, corrected_offset, legacy_offset):
+    window.session.secondary_standards = ("91500",)
+    window.session.pipeline.config = replace(window.session.pipeline.config, common_pb_calibration="tera_wasserburg")
+    legacy = pd.DataFrame([dict(sample="91500", offset_percent=legacy_offset, mswd=8.)])
+    records = [dict(sample="91500", system="206Pb/238U", offset_percent=6.4, mswd=8.)]
+    # Another material's corrected date must not be used for this material.
+    records.append(dict(sample="PL", system="207Pb-corrected 206Pb/238U", offset_percent=.1, mswd=.5))
+    if corrected_offset is not None:
+        records.append(dict(sample="91500", system="207Pb-corrected 206Pb/238U",
+                            offset_percent=corrected_offset, mswd=.75))
+    window.session.reduction_cache["finalized_results"] = SimpleNamespace(
+        secondary_standard_summary=legacy, reference_material_summary_by_system=pd.DataFrame(records))
+    window._refresh_calibration_summary()
+    row = window.secondary_materials.rows[0]
+    assert row[2] == "+6.4 % · MSWD 8"
+    assert "207Pb-corrected" not in row[4]
 
 
 @pytest.mark.parametrize("accepted,mean,reason", [

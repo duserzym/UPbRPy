@@ -4153,10 +4153,13 @@ class MainWindow(QtWidgets.QMainWindow):
         session_fit = self._cached_calibration_product("session_correction_results", PipelineStage.SESSION)
         final = self._cached_calibration_product("finalized_results", PipelineStage.FINALIZE)
         concentrations = self._cached_calibration_product("concentration_results", PipelineStage.CONCENTRATION)
+        calibration = (self.session.pipeline.config.common_pb_calibration if self.session.pipeline is not None
+                       else self.workflow_preset.common_pb_calibration)
         config = (self.session.primary_68_standard, self.session.primary_76_standard,
                   self.session.primary_82_standard, self.session.secondary_standards,
                   self.session.concentration_standards, self.session.internal_standard_channel,
-                  tuple(self.session.channels), self.workflow_preset.key, self.session.ratio_aggregation)
+                  tuple(self.session.channels), self.workflow_preset.key, self.session.ratio_aggregation,
+                  calibration)
         key = (self._calibration_samples_key, config, id(downhole), id(session_fit), id(final),
                id(concentrations), id(current_standard_archive()), repr(self.session.reference_overrides))
         if key == getattr(self, "_calibration_summary_key", None):
@@ -4201,16 +4204,28 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in self.session.secondary_standards:
             detail, status, tooltip = "", "", ""
             match = summary[summary["sample"].eq(name)] if "sample" in summary else pd.DataFrame()
+            material_systems = (by_system[by_system["sample"].eq(name)] if {
+                "sample", "system"}.issubset(by_system.columns) else pd.DataFrame())
+            system_match = (material_systems[material_systems["system"].eq(ratio)]
+                            if not material_systems.empty else pd.DataFrame())
             # Older summaries require a concordia age, which some materials
             # (including 91500) deliberately lack. Use the cached same-system
             # date summary rather than substituting a different reference age.
-            if (match.empty or not np.isfinite(match.iloc[0].get("offset_percent", np.nan))) and {
-                    "sample", "system"}.issubset(by_system.columns):
-                system_match = by_system[by_system["sample"].eq(name) & by_system["system"].eq(ratio)]
+            if match.empty or not np.isfinite(match.iloc[0].get("offset_percent", np.nan)):
                 if not system_match.empty:
                     match = system_match.rename(columns={"accepted_date": "accepted_age",
                                                           "offset_ma": "offset_from_accepted_age"})
                     tooltip = f"{ratio} dates. "
+            if calibration == "tera_wasserburg" and not material_systems.empty:
+                corrected_system = "207Pb-corrected 206Pb/238U"
+                corrected = material_systems[material_systems["system"].eq(corrected_system)]
+                if not corrected.empty and np.isfinite(corrected.iloc[0].get("offset_percent", np.nan)):
+                    uncorrected = system_match if not system_match.empty else match
+                    offset = uncorrected.iloc[0].get("offset_percent", np.nan) if not uncorrected.empty else np.nan
+                    tooltip = f"{corrected_system} date; uncorrected offset "
+                    tooltip += f"{offset:+.2g} %. " if np.isfinite(offset) else "unavailable. "
+                    match = corrected.rename(columns={"accepted_date": "accepted_age",
+                                                       "offset_ma": "offset_from_accepted_age"})
             if not match.empty:
                 status = "ok"
                 values = match.iloc[0]
