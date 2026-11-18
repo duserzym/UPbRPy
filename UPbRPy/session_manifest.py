@@ -63,6 +63,10 @@ except ModuleNotFoundError:  # pragma: no cover
 
 SESSION_MANIFEST_FILENAME = "session_manifest.toml"
 RAW_DIRECTORY_NAME = "raw"
+SESSION_BUNDLE_FORMATS = (
+    "upbdb-session-bundle",
+    "laicpmsdb-session-bundle",  # written before the 2026-11-15 rename
+)
 
 # Plan role -> PipelineConfig field. Scalar fields take the first name.
 ROLE_FIELDS = {
@@ -212,9 +216,11 @@ def parse_session_manifest(
     path: str | Path,
 ) -> SessionManifest:
     """Validate a parsed TOML document and return a :class:`SessionManifest`."""
-    if "format" in document and document["format"] != "upbdb-session-bundle":
+    if "format" in document and document["format"] not in SESSION_BUNDLE_FORMATS:
         raise SessionManifestError(
-            "Unsupported session bundle format; expected upbdb-session-bundle."
+            f"Unsupported session bundle format {document['format']}. "
+            "Download the session again from UPbDB, or open its Qtegra export "
+            "folder directly."
         )
     session = document.get("session", {})
     if not isinstance(session, Mapping):
@@ -311,6 +317,7 @@ def raw_directory_for(directory: str | Path) -> Path:
 __all__ = [
     "SESSION_MANIFEST_FILENAME",
     "RAW_DIRECTORY_NAME",
+    "SESSION_BUNDLE_FORMATS",
     "ROLE_FIELDS",
     "SessionManifestError",
     "SessionAcquisition",

@@ -229,6 +229,7 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 
 | Manifest key | Required/optional | Type / unit | Example | Meaning / without it |
 | --- | --- | --- | --- | --- |
+| format | Optional | String | `upbdb-session-bundle` | Also accepts `laicpmsdb-session-bundle`, written before the 2026-11-15 rename; other values rejected. Reading preserves the manifest file |
 | session | Optional | Table | `[session]` | Defaults empty; if present must be a table |
 | session.id | Optional | Scalar converted to text | Session UUID | Defaults empty; not used to gate raw parsing |
 | session.key | Optional | Scalar converted to text | `Zircon_04Nov26` | Defaults empty; unpacker falls back to folder name |
