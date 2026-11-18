@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm, t
 
+from .notices import ReductionError, ReductionNotice, _add_notice
+
 
 _ISOTOPE_CHANNEL_PATTERN = re.compile(r"^(?:\d+)?([A-Z][a-z]?)$")
 
@@ -39,7 +41,11 @@ def resolve_element_concentration(standard_archive, standard, channel):
         Archive quantity from which the value was obtained.
     """
     if standard not in standard_archive.index:
-        raise KeyError(f"Unknown concentration standard {standard!r}.")
+        raise ReductionError(
+            f"Unknown concentration standard {standard}.", "concentration",
+            "Choose a standard from the reference material library.",
+            ("choose_standard",),
+        )
     element = element_from_channel(channel)
     if element is None:
         raise KeyError(f"{channel!r} is not an elemental isotope channel.")
@@ -81,10 +87,28 @@ def channel_for_element(channels, preferred_channel):
         channel for channel in channels if element_from_channel(channel) == element
     ]
     if not matches:
-        raise KeyError(
-            f"No measured {element} channel is available for internal normalization."
+        raise ReductionError(
+            f"No measured {element} channel is available for internal normalization.",
+            "normalization",
+            f"Choose a measured {element} internal-standard channel or open data containing it.",
         )
     return matches[0]
+
+
+_MATERIAL_INTERNAL_CHANNELS = {
+    'zircon': '29Si', 'titanite': '29Si', 'apatite': '44Ca', 'rutile': '49Ti',
+}
+
+
+def resolve_internal_standard_channel(channels, material='zircon', internal_channel=None):
+    """Resolve an explicit internal channel or the material's measured default."""
+    preferred = internal_channel or _MATERIAL_INTERNAL_CHANNELS.get(material)
+    if preferred is None:
+        raise ReductionError(
+            f"Unknown material {material}.", "normalization",
+            "Choose zircon, titanite, apatite, or rutile as the material.",
+        )
+    return channel_for_element(channels, preferred)
 
 
 def internal_normalization(
@@ -96,6 +120,8 @@ def internal_normalization(
     *,
     internal_channel=None,
     region='plateau',
+    notices=None,
+    notice_stage='normalization',
 ):
     """Select reviewed rows and apply sweep-wise internal normalization.
 
@@ -111,35 +137,18 @@ def internal_normalization(
         distinction explicit prevents concentration data from shortening a
         full-signal isotope depth profile during the final merge.
     """
+    notices = [] if notices is None else notices
     region = str(region).strip().casefold()
     if region not in {'plateau', 'signal'}:
         raise ValueError("region must be 'plateau' or 'signal'.")
-    if material == 'zircon':
-        preferred_internal_channel = '29Si'
-        unknown_concentration = 151443
-    elif material == 'apatite':
-        preferred_internal_channel = '44Ca'
-        unknown_concentration = 400443
-    elif material == 'rutile':
-        preferred_internal_channel = '49Ti'
-        unknown_concentration = 599499
-    elif material == 'titanite':
-        preferred_internal_channel = '29Si'
-        unknown_concentration = 151443
-    else:
-        raise ValueError(
-            "material must be 'zircon', 'apatite', 'rutile', or 'titanite'"
-        )
-    if internal_channel is not None:
-        preferred_internal_channel = internal_channel
-    internal_analyte = channel_for_element(
-        channels,
-        preferred_internal_channel,
-    )
-
-    this_standard_archive = standard_archive[
+    unknown_concentration = {
+        'zircon': 151443, 'titanite': 151443, 'apatite': 400443, 'rutile': 599499,
+    }.get(material)
+    internal_analyte = resolve_internal_standard_channel(channels, material, internal_channel)
+    material_archive = standard_archive[
         standard_archive['material'].isin([material, 'glass'])
     ]
+
     if region == 'plateau':
         start_column = 'plateau_start_times'
         end_column = 'plateau_end_times'
@@ -163,12 +172,19 @@ def internal_normalization(
         'spot_name', sort=False
     ):
         sample_name = spot_frame['sample'].iloc[0]
-        if sample_name in this_standard_archive.index:
-            internal_analyte_concentration, _ = resolve_element_concentration(
-                this_standard_archive,
-                sample_name,
-                internal_analyte,
-            )
+        if sample_name in material_archive.index:
+            try:
+                internal_analyte_concentration, _ = resolve_element_concentration(
+                    material_archive, sample_name, internal_analyte,
+                )
+            except KeyError:
+                element = element_from_channel(internal_analyte)
+                _add_notice(notices, ReductionNotice(
+                    notice_stage, 'missing_internal_value',
+                    f"No {element} value for {sample_name}: its analyses are not normalized.",
+                    str(sample_name), internal_analyte, ('choose_standard', 'enter_value'),
+                ))
+                continue
         else:
             internal_analyte_concentration = unknown_concentration
 
@@ -192,14 +208,21 @@ def internal_normalization(
         )
         normalized_frames.append(selected)
 
-    if not normalized_frames:
-        return baseline_subtracted_total_data.iloc[0:0].copy()
-    normalized = pd.concat(normalized_frames, ignore_index=True)
+    normalized = (pd.concat(normalized_frames, ignore_index=True) if normalized_frames
+                  else baseline_subtracted_total_data.iloc[0:0].copy())
+    if 'internal_normalization_factor' not in normalized:
+        normalized['internal_normalization_factor'] = pd.Series(dtype=float)
+    if normalized.empty and normalized_frames:
+        raise ReductionError(
+            "No sweeps fall inside the selected normalization intervals.", notice_stage,
+            "Review the plateau and signal limits and select an interval containing sweeps.",
+        )
     normalized = normalized.sort_values(by='Time', ignore_index=True)
     # Preserve the channel needed to reconstruct the original integrated
     # counts when sweep-wise concentration uncertainties are calculated.
     normalized.attrs['internal_channel'] = internal_analyte
     normalized.attrs['selection_region'] = region
+    normalized.attrs['notices'] = [notice for notice in notices if notice.stage == notice_stage]
     return normalized
 
 
@@ -249,6 +272,8 @@ def calc_concentration_calibration_factor(
     *,
     internal_channel='29Si',
     build_plot=True,
+    notices=None,
+    notice_stage='concentration',
 ):
     """Calculate total-element calibration factors from glass standards.
 
@@ -261,11 +286,28 @@ def calc_concentration_calibration_factor(
 
     ``internal_channel`` identifies the element fixed by internal
     normalization and excludes it from external concentration calibration.
+    Missing standard/element pairs are skipped independently and recorded in
+    ``notices`` (also returned in calibration metadata). An element without
+    any reference value is omitted from calibration and concentration results.
+
     Set ``build_plot=False`` in a frontend that draws its own diagnostics to
     avoid importing and constructing the optional Bokeh figure.
     """
+    notices = [] if notices is None else notices
+    if NIST_data.empty:
+        raise ReductionError(
+            "No selected concentration-standard analyses are available.", notice_stage,
+            "Choose a measured concentration standard and review its plateau selections.",
+            ("choose_standard",),
+        )
     calibration_factors = pd.Series(dtype=float)
     sample_names = NIST_data['sample'].dropna().astype(str).unique().tolist()
+    for sample in sample_names:
+        if sample not in standard_archive.index:
+            raise ReductionError(
+                f'Unknown concentration standard {sample}.', notice_stage,
+                'Choose a standard from the reference material library.', ('choose_standard',),
+            )
     internal_element = element_from_channel(internal_channel)
     effective_channels = []
     reference_channels = {}
@@ -292,25 +334,35 @@ def calc_concentration_calibration_factor(
             )
         ]
         candidates = [*exact_channels, *element_channels]
-        for channel in dict.fromkeys(candidates):
-            resolved = {}
+        # Keep the established mass preference, resolving each standard
+        # independently so a missing value cannot discard other calibrants.
+        channel = next(iter(dict.fromkeys(candidates)))
+        resolved = {}
+        missing_samples = []
+        for sample in sample_names:
             try:
-                for sample in sample_names:
-                    _, archive_channel = resolve_element_concentration(
-                        standard_archive,
-                        sample,
-                        channel,
-                    )
-                    resolved[sample] = archive_channel
+                _, archive_channel = resolve_element_concentration(
+                    standard_archive, sample, channel,
+                )
+                resolved[sample] = archive_channel
             except KeyError:
-                continue
-            effective_channels.append(channel)
-            reference_channels[channel] = resolved
-            break
-    print(
-        'Analytes that can be calibrated for concentration measurements are: ',
-        effective_channels,
-    )
+                missing_samples.append(sample)
+        element = element_from_channel(channel)
+        if not resolved:
+            _add_notice(notices, ReductionNotice(
+                notice_stage, 'element_not_calibrated',
+                f"No {element} value in {', '.join(sample_names)}: {element} not calibrated.",
+                sample_names[0], channel, ('choose_standard', 'enter_value'),
+            ))
+            continue
+        effective_channels.append(channel)
+        reference_channels[channel] = resolved
+        for sample in missing_samples:
+            _add_notice(notices, ReductionNotice(
+                notice_stage, 'missing_reference_value',
+                f"No {element} value for {sample}: {element} not calibrated with it.",
+                sample, channel, ('choose_standard', 'enter_value'),
+            ))
 
     # Calculate every per-spot channel mean in one grouped operation instead of
     # rescanning the full NIST table for each channel and spot combination.
@@ -334,9 +386,12 @@ def calc_concentration_calibration_factor(
             active_scroll='wheel_zoom',
         )
     for i, channel in enumerate(effective_channels):
-        this_channel_measured_cps = spot_means[channel].to_numpy(dtype=float)
-        sample_list = spot_samples.astype(str).tolist()
-        spot_list = spot_means.index.astype(str).tolist()
+        valid = spot_samples.isin(reference_channels[channel])
+        if not valid.any():
+            continue
+        this_channel_measured_cps = spot_means.loc[valid, channel].to_numpy(dtype=float)
+        sample_list = spot_samples.loc[valid].astype(str).tolist()
+        spot_list = spot_means.index[valid].astype(str).tolist()
         this_channel_known_ppm = np.asarray(
             [
                 resolve_element_concentration(
@@ -399,6 +454,8 @@ def calc_concentration_calibration_factor(
         # plotting canvas. Move that same model into a dedicated side panel.
         plot.center.remove(legend)
         plot.add_layout(legend, 'right')
+    calibration_factors = calibration_factors.reindex(effective_channels)
+    calibration_factors.attrs['notices'] = [notice for notice in notices if notice.stage == notice_stage]
     calibration_factors.attrs['reference_channels'] = reference_channels
     calibration_factors.attrs['internal_channel'] = internal_channel
     return calibration_factors, plot
@@ -437,6 +494,10 @@ def calc_concentration(unknown_standard_data, concentration_calibration, sep='_'
         }
         spot_t_multiplier = t.ppf(0.975, this_spot_data.shape[0] - 1)
         for channel, element in zip(element_channels, elements):
+            if not np.isfinite(concentration_calibration[channel]):
+                record[element] = np.nan
+                record[element + '_95CI'] = np.nan
+                continue
             values = this_spot_data[channel]
             cache_key = None
             if (
@@ -604,6 +665,7 @@ __all__ = [
     'channel_for_element',
     'element_from_channel',
     'resolve_element_concentration',
+    'resolve_internal_standard_channel',
     'internal_normalization',
     'filter_concentration_outliers',
     'calc_concentration_calibration_factor',

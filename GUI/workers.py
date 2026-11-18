@@ -24,6 +24,7 @@ class FunctionWorker(QtCore.QRunnable):
         """Store the callable without executing it on the GUI thread."""
         super().__init__()
         self.function = function
+        self.error: Exception | None = None
         self.signals = WorkerSignals()
         self.setAutoDelete(True)
 
@@ -33,6 +34,7 @@ class FunctionWorker(QtCore.QRunnable):
         try:
             result = self.function()
         except Exception as exc:
+            self.error = exc
             self.signals.failed.emit(str(exc), traceback.format_exc())
         else:
             self.signals.succeeded.emit(result)

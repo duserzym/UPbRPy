@@ -306,8 +306,11 @@ def test_open_qtegra_file_shows_missing_time_error(window, app, monkeypatch, tmp
         monkeypatch.setattr(window, "load_experiment_directory", lambda path: loader(path, background=False))
     window.choose_qtegra_file()
     assert wait_for(app, lambda: window._active_worker is None)
-    assert len(messages) == 1
-    assert messages[0][1].startswith("Unsupported Qtegra export: no time information")
-    assert source.name in messages[0][1]
-    assert "Export the Rich single CSV" in messages[0][1]
+    assert not messages
+    assert not window.issue_banner.isHidden()
+    message = window.issue_banner.message.text()
+    assert window.issue_banner.stage == "import"
+    assert message.startswith("Import: Unsupported Qtegra export: no time information")
+    assert source.name in message
+    assert "Export the Rich single CSV" in message
     assert not window.session.loaded

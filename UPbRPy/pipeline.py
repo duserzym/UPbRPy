@@ -9,6 +9,7 @@ separate reduction algorithms.
 from __future__ import annotations
 
 import hashlib
+import math
 import pickle
 import platform
 import sys
@@ -35,6 +36,7 @@ from .results import (
     finalize_reduction_results,
 )
 from .uncertainty import UncertaintySettings
+from .notices import ReductionError, ReductionNotice
 from .standards import (
     canonicalize_reference_material_samples,
     reference_library_info,
@@ -120,7 +122,7 @@ PIPELINE_STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
     StageDefinition(
         PipelineStage.DEPTH_PROFILE,
         "Calculate sweep-wise depth profiles",
-        (PipelineStage.SESSION,),
+        (PipelineStage.SESSION, PipelineStage.CONCENTRATION),
         optional=True,
     ),
     StageDefinition(
@@ -272,9 +274,23 @@ class PipelineConfig:
     depth_calibration: LinearDepthCalibration | None = None
     detector_calibration: dict = field(default_factory=dict)
     export_settings: ExportSettings | None = None
+    internal_standard_channel: str | None = None
+    reference_overrides: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate calibration mode and required configuration invariants."""
+        overrides = {}
+        from .concentration import element_from_channel
+        for standard, values in self.reference_overrides.items():
+            overrides[standard] = {}
+            for channel, value in values.items():
+                if element_from_channel(channel) is None or not math.isfinite(float(value)) or float(value) <= 0:
+                    raise ReductionError(
+                        f"Invalid reference value for {standard}, {channel}.", "normalization",
+                        "Enter a finite concentration greater than zero in µg/g.",
+                    )
+                overrides[standard][channel] = float(value)
+        object.__setattr__(self, "reference_overrides", overrides)
         if self.export_settings is not None:
             from .export_table import ExportSettings
 
@@ -330,6 +346,8 @@ class PipelineConfig:
             "workflow_key": self.workflow_key,
             "material": self.material,
             "primary_channel": self.primary_channel,
+            "internal_standard_channel": self.internal_standard_channel,
+            "reference_overrides": {name: dict(values) for name, values in self.reference_overrides.items()},
             "selection_method": self.selection_method,
             "selection_options": dict(self.selection_options),
             "detector_calibration": dict(self.detector_calibration),
@@ -355,6 +373,52 @@ class PipelineConfig:
                 else self.depth_calibration.to_dict()
             ),
         }
+
+
+def config_invalidation_stage(
+    previous: PipelineConfig,
+    current: PipelineConfig,
+) -> PipelineStage:
+    """Return the earliest stage affected by a configuration change.
+
+    Check stages in dependency order so earlier changes take precedence when
+    reference settings and other configuration fields change together. Callers
+    pass the result to ``ReductionPipeline.update_config`` explicitly.
+    """
+    if previous.detector_calibration != current.detector_calibration:
+        return PipelineStage.BASELINE
+    if (
+        previous.material != current.material
+        or previous.primary_channel != current.primary_channel
+        or previous.internal_standard_channel != current.internal_standard_channel
+        or previous.reference_overrides != current.reference_overrides
+    ):
+        return PipelineStage.NORMALIZATION
+    if previous.concentration_standards != current.concentration_standards:
+        return PipelineStage.CONCENTRATION
+    if (
+        previous.primary_68_standard != current.primary_68_standard
+        or previous.primary_76_standard != current.primary_76_standard
+        or previous.primary_82_standard != current.primary_82_standard
+        or previous.ratio_names != current.ratio_names
+        or previous.ratio_aggregation != current.ratio_aggregation
+        or previous.common_pb_calibration != current.common_pb_calibration
+        or previous.downhole != current.downhole
+    ):
+        return PipelineStage.DOWNHOLE
+    if previous.session != current.session:
+        return PipelineStage.SESSION
+    if previous.uncertainty != current.uncertainty:
+        # Both the spot decision branch and the independently cached depth
+        # product carry these reporting components.
+        return PipelineStage.SESSION
+    if (
+        previous.decision != current.decision
+        or previous.automatic_flags != current.automatic_flags
+        or previous.common_pb_options != current.common_pb_options
+    ):
+        return PipelineStage.FINALIZE
+    return PipelineStage.FINALIZE
 
 
 def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
@@ -536,7 +600,8 @@ class ReductionPipeline:
             standard_archive,
         )
         self.channels = tuple(str(channel) for channel in channels)
-        self.standard_archive = standard_archive
+        self.base_standard_archive = standard_archive
+        self._override_archive_key = None
         self.config = config
         self.source_directory = (
             None if source_directory is None else Path(source_directory)
@@ -549,6 +614,7 @@ class ReductionPipeline:
         self.input_files = tuple(Path(path) for path in input_files)
         self.build_diagnostic_plots = bool(build_diagnostic_plots)
         self.origin = None if origin is None else dict(origin)
+        self.notices: list[ReductionNotice] = []
         self.cache = PipelineCache()
         self.cache.set(
             PipelineStage.IMPORT,
@@ -559,6 +625,50 @@ class ReductionPipeline:
             },
         )
         self.cache.set(PipelineStage.SELECTION, self.experiment)
+
+    @property
+    def standard_archive(self) -> pd.DataFrame:
+        """Return pipeline-local reference values, leaving the shared library intact."""
+        from .concentration import element_from_channel
+
+        overrides = self.config.reference_overrides
+        if not overrides:
+            return self.base_standard_archive
+        key = (id(self.base_standard_archive), pickle.dumps(overrides))
+        if key != self._override_archive_key:
+            archive = self.base_standard_archive.copy(deep=True)
+            for standard, values in overrides.items():
+                if standard not in archive.index:
+                    raise ReductionError(
+                        f"Unknown reference standard {standard}.", "normalization",
+                        "Choose a standard from the reference material library.", ('choose_standard',),
+                    )
+                for channel, value in values.items():
+                    # Reference values are total-element concentrations, so an
+                    # override must also apply to other masses of this element.
+                    for existing in archive.columns:
+                        if element_from_channel(existing) == element_from_channel(channel):
+                            archive.loc[standard, existing] = value
+                    archive.loc[standard, channel] = value
+            self._effective_standard_archive = archive
+            self._override_archive_key = key
+        return self._effective_standard_archive
+
+    @standard_archive.setter
+    def standard_archive(self, archive: pd.DataFrame) -> None:
+        self.base_standard_archive = archive
+        self._override_archive_key = None
+
+    def resolve_internal_standard_channel(self) -> str:
+        """Resolve the material's internal standard independently of signal picking."""
+        from .concentration import resolve_internal_standard_channel
+
+        return resolve_internal_standard_channel(
+            self.channels, self.config.material, self.config.internal_standard_channel,
+        )
+
+    def _clear_notices(self, stage: PipelineStage) -> None:
+        self.notices[:] = [notice for notice in self.notices if notice.stage != stage.value]
 
     def matches_source_experiment(self, experiment: pd.DataFrame) -> bool:
         """Return whether the source frame and its contents match the last sync.
@@ -591,24 +701,28 @@ class ReductionPipeline:
         *,
         invalidate_from: PipelineStage | str = PipelineStage.BASELINE,
     ) -> None:
-        """Replace settings and invalidate calculations affected by the change."""
+        """Replace settings and invalidate from the caller-selected stage."""
         self.config = config
         self.cache.invalidate(invalidate_from)
 
-    def require_samples(self, names: tuple[str, ...], label: str) -> None:
+    def require_samples(self, names: tuple[str, ...], label: str,
+                        stage: str = "downhole") -> None:
         """Raise a focused error when configured reference materials are absent."""
         requested = tuple(name for name in names if name)
         if not requested:
-            raise ValueError(f"No {label} is configured")
+            raise ReductionError(f"No {label} is configured.", stage,
+                                 "Choose a measured standard in Calibration materials.", ("choose_standard",))
         if "sample" not in self.total_data.columns:
-            raise KeyError("total_data must contain a sample column")
+            raise ReductionError("The loaded data has no sample labels.", "import",
+                                 "Open a Qtegra export with sample labels.")
         available = set(
             self.total_data["sample"].dropna().astype(str).unique().tolist()
         )
         missing = [name for name in requested if name not in available]
         if missing:
-            raise ValueError(
-                f"Missing {label} in the loaded session: {', '.join(missing)}"
+            raise ReductionError(
+                f"Missing {label} in the loaded session: {', '.join(missing)}.", stage,
+                "Choose a standard measured in this session in Calibration materials.", ("choose_standard",),
             )
 
     def run_baseline(self) -> pd.DataFrame:
@@ -618,6 +732,12 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.BASELINE)
         if isinstance(cached, pd.DataFrame):
             return cached
+        self._clear_notices(PipelineStage.BASELINE)
+        if self.experiment.empty or self.total_data.empty:
+            raise ReductionError(
+                "No analyses are selected for reduction.", "selection",
+                "Open a session and review its baseline and signal selections.",
+            )
         result = subtract_baseline(
             self.experiment,
             list(self.channels),
@@ -632,14 +752,16 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.NORMALIZATION)
         if isinstance(cached, pd.DataFrame):
             return cached
+        self._clear_notices(PipelineStage.NORMALIZATION)
         result = internal_normalization(
             self.experiment,
             list(self.channels),
             self.run_baseline(),
             self.standard_archive,
             material=self.config.material,
-            internal_channel=self.config.primary_channel,
+            internal_channel=self.resolve_internal_standard_channel(),
             region="plateau",
+            notices=self.notices,
         )
         return self.cache.set(PipelineStage.NORMALIZATION, result)
 
@@ -653,6 +775,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.CONCENTRATION)
         if isinstance(cached, dict):
             return cached
+        self._clear_notices(PipelineStage.CONCENTRATION)
         standards = self.config.concentration_standards
         normalized = self.run_normalization()
         available_samples = set(
@@ -664,7 +787,13 @@ class ReductionPipeline:
             if standard in available_samples
         )
         if not active_standards:
-            self.require_samples(standards, "concentration standards")
+            self.require_samples(standards, "concentration standards", "concentration")
+        if normalized.empty:
+            raise ReductionError(
+                "No analyses have selected plateau sweeps for normalization.", "normalization",
+                "Review plateau selections and supply missing internal reference values.",
+                ('choose_standard',),
+            )
         calibrants = normalized[
             normalized["sample"].isin(active_standards)
         ].reset_index(drop=True)
@@ -672,8 +801,9 @@ class ReductionPipeline:
             calibrants,
             list(self.channels),
             self.standard_archive,
-            internal_channel=self.config.primary_channel,
+            internal_channel=self.resolve_internal_standard_channel(),
             build_plot=self.build_diagnostic_plots,
+            notices=self.notices,
         )
         unknowns = normalized[
             ~normalized["sample"].isin(active_standards)
@@ -717,6 +847,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.RATIOS)
         if isinstance(cached, dict):
             return cached
+        self._clear_notices(PipelineStage.RATIOS)
         baseline = self.run_baseline()
         result = {
             region: calc_raw_ratios(
@@ -728,6 +859,11 @@ class ReductionPipeline:
             )
             for region in ("plateau", "signal")
         }
+        if result["plateau"].empty or result["signal"].empty:
+            raise ReductionError(
+                "No isotope-ratio sweeps remain in the selected intervals.", "ratios",
+                "Review the baseline, plateau, and signal selections for the analyses.",
+            )
         return self.cache.set(PipelineStage.RATIOS, result)
 
     def standard_rows(
@@ -735,12 +871,19 @@ class ReductionPipeline:
         frame: pd.DataFrame,
         standard: str,
         label: str,
+        stage: str = "downhole",
     ) -> pd.DataFrame:
         """Return one configured standard's rows after validating availability."""
-        self.require_samples((standard,), label)
+        self.require_samples((standard,), label, stage)
+        if standard not in self.standard_archive.index:
+            raise ReductionError(
+                f"Unknown reference standard {standard}.", stage,
+                "Choose a standard from the reference material library.", ('choose_standard',),
+            )
         selected = frame[frame["sample"].eq(standard)].reset_index(drop=True)
         if selected.empty:
-            raise ValueError(f"No {label} rows were produced for {standard!r}")
+            raise ReductionError(f"No {label} rows were produced for {standard}.", stage,
+                                 "Review the standard’s plateau and signal selections.", ("choose_standard",))
         return selected
 
     def run_downhole(self) -> dict[str, object]:
@@ -754,6 +897,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.DOWNHOLE)
         if isinstance(cached, dict):
             return cached
+        self._clear_notices(PipelineStage.DOWNHOLE)
         ratios = self.run_ratios()
         signal = ratios["signal"]
         config = self.config
@@ -819,6 +963,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.SESSION)
         if isinstance(cached, dict):
             return cached
+        self._clear_notices(PipelineStage.SESSION)
         downhole = self.run_downhole()
         plateau = downhole["plateau_corrected"]
         config = self.config
@@ -826,6 +971,7 @@ class ReductionPipeline:
             plateau,
             config.primary_68_standard,
             "Pb/U primary standard",
+            stage="session",
         )
         options = dict(config.session.options)
         degree = int(options.pop("degree", 2))
@@ -834,11 +980,13 @@ class ReductionPipeline:
                 plateau,
                 config.primary_76_standard,
                 "Pb/Pb primary standard",
+                stage="session",
             )
             primary_82 = self.standard_rows(
                 plateau,
                 config.primary_82_standard,
                 "Th/Pb primary standard",
+                stage="session",
             )
             correction = calc_session_fractionation_TW(
                 primary_68,
@@ -884,6 +1032,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.SPOT_MEANS)
         if isinstance(cached, pd.DataFrame):
             return cached
+        self._clear_notices(PipelineStage.SPOT_MEANS)
         session = self.run_session()
         ratio_means = calc_ratio_mean_and_uncertainty(
             session["plateau_corrected"],
@@ -931,6 +1080,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.DEPTH_PROFILE)
         if isinstance(cached, pd.DataFrame):
             return cached
+        self._clear_notices(PipelineStage.DEPTH_PROFILE)
         session = self.run_session()
         ratio_profile = calc_depth_profile(
             session["signal_corrected"],
@@ -944,8 +1094,10 @@ class ReductionPipeline:
                 self.run_baseline(),
                 self.standard_archive,
                 material=self.config.material,
-                internal_channel=self.config.primary_channel,
+                internal_channel=self.resolve_internal_standard_channel(),
                 region="signal",
+                notices=self.notices,
+                notice_stage="depth_profile",
             )
             active_standards = concentration_result["active_standards"]
             analytes = signal_normalized[
@@ -954,7 +1106,7 @@ class ReductionPipeline:
             concentration_profile = calc_concentration_depth_profile(
                 analytes,
                 concentration_result["calibration"],
-                internal_channel=self.config.primary_channel,
+                internal_channel=self.resolve_internal_standard_channel(),
                 dwell_s=self.counting_dwell_s,
             )
             result = construct_final_depthpro_df(
@@ -995,6 +1147,7 @@ class ReductionPipeline:
         cached = self.cache.get(PipelineStage.FINALIZE)
         if isinstance(cached, FinalizedReduction):
             return cached
+        self._clear_notices(PipelineStage.FINALIZE)
         session = self.run_session()
         accepted_secondary_ages = {
             name: float(self.standard_archive.loc[name, "concordia_age"])
@@ -1126,6 +1279,7 @@ __all__ = [
     "PipelineCache",
     "ReductionPipeline",
     "pipeline_config_from_dict",
+    "config_invalidation_stage",
     "pipeline_descendants",
     "callable_reference",
     "resolve_calibration_method",

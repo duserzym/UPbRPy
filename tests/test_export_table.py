@@ -79,6 +79,18 @@ def test_settings_roundtrip_and_validation():
             ExportSettings.from_dict(values)
 
 
+def test_uncertified_element_is_omitted_from_concentrations_and_export():
+    pipeline = synthetic_pipeline()
+    table = build_export_table(pipeline)
+    concentration = pipeline.run_concentration()
+    assert not any(channel.endswith("Hg") for channel in concentration["calibration"].index)
+    assert not any(column.startswith("Hg") for column in concentration["final_concentration_df"].columns)
+    assert not any(column.startswith("Hg") for column in table.rows.columns)
+    notices = [notice for notice in pipeline.notices if notice.element in {"202Hg", "204Hg"}]
+    assert len(notices) == 1
+    assert notices[0].message == "No Hg value in NIST612: Hg not calibrated."
+
+
 def test_sys_decomposition_order_notes_and_no_mutation():
     pipeline = synthetic_pipeline()
     original = pipeline.run_finalize().parallel_results.copy(deep=True)

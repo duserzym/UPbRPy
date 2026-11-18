@@ -33,6 +33,7 @@ from UPbRPy.pipeline import (
     PipelineStage,
     ReductionPipeline,
     pipeline_config_from_dict,
+    config_invalidation_stage,
 )
 from UPbRPy.project import (
     completed_project_stages,
@@ -207,6 +208,8 @@ def pipeline_config_from_session(
         workflow_key=preset.key,
         material=preset.internal_material,
         primary_channel=session.primary_channel,
+        internal_standard_channel=session.internal_standard_channel,
+        reference_overrides=deepcopy(session.reference_overrides),
         selection_method=str(
             session.import_settings.get(
                 "selection_method",
@@ -271,45 +274,6 @@ def pipeline_config_from_session(
             ),
         ),
     )
-
-
-def config_invalidation_stage(
-    previous: PipelineConfig,
-    current: PipelineConfig,
-) -> PipelineStage:
-    """Return the earliest stage affected by a configuration change."""
-    if previous.detector_calibration != current.detector_calibration:
-        return PipelineStage.BASELINE
-    if (
-        previous.material != current.material
-        or previous.primary_channel != current.primary_channel
-    ):
-        return PipelineStage.NORMALIZATION
-    if previous.concentration_standards != current.concentration_standards:
-        return PipelineStage.CONCENTRATION
-    if (
-        previous.primary_68_standard != current.primary_68_standard
-        or previous.primary_76_standard != current.primary_76_standard
-        or previous.primary_82_standard != current.primary_82_standard
-        or previous.ratio_names != current.ratio_names
-        or previous.ratio_aggregation != current.ratio_aggregation
-        or previous.common_pb_calibration != current.common_pb_calibration
-        or previous.downhole != current.downhole
-    ):
-        return PipelineStage.DOWNHOLE
-    if previous.session != current.session:
-        return PipelineStage.SESSION
-    if previous.uncertainty != current.uncertainty:
-        # Both the spot decision branch and the independently cached depth
-        # product carry these reporting components.
-        return PipelineStage.SESSION
-    if (
-        previous.decision != current.decision
-        or previous.automatic_flags != current.automatic_flags
-        or previous.common_pb_options != current.common_pb_options
-    ):
-        return PipelineStage.FINALIZE
-    return PipelineStage.FINALIZE
 
 
 def raw_input_files(directory: str | Path | QtegraSession) -> tuple[Path, ...]:
@@ -404,7 +368,7 @@ def ensure_shared_pipeline(
             )
         if not pipeline.matches_source_experiment(session.experiment):
             pipeline.update_experiment(session.experiment)
-        if pipeline.standard_archive is not current_standard_archive():
+        if pipeline.base_standard_archive is not current_standard_archive():
             pipeline.standard_archive = current_standard_archive()
             pipeline.reference_library_path = Path(
                 current_standard_archive_path()
@@ -931,6 +895,8 @@ def restore_session_from_project(
     session.workflow_key = preset.key
     session.workflow_title = preset.title
     session.primary_channel = config.primary_channel
+    session.internal_standard_channel = config.internal_standard_channel
+    session.reference_overrides = deepcopy(config.reference_overrides)
     session.concentration_standards = config.concentration_standards
     session.primary_68_standard = config.primary_68_standard
     session.primary_76_standard = config.primary_76_standard

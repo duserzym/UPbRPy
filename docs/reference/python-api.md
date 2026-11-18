@@ -82,6 +82,38 @@ build_diagnostic_plots=True, origin=None)` caches stage products.
 this same pipeline. `PipelineConfig` stores scientific choices; Studio's
 workflow presets additionally supply import and display defaults.
 
+`primary_channel` controls signal picking. Internal normalization uses
+`internal_standard_channel=None` by default: 29Si for zircon/titanite, 44Ca
+for apatite, and 49Ti for rutile (or another measured mass of that element).
+An explicit channel overrides that choice. `reference_overrides`, for example
+`{"S513": {"31P": 42.5}}`, supplies project-local concentrations in µg/g.
+Both fields round-trip through `.upbr`; older projects load with the defaults.
+`config_invalidation_stage(previous: PipelineConfig, current: PipelineConfig)`
+returns the earliest affected `PipelineStage`. Pass it as `invalidate_from` to
+`pipeline.update_config(config, *, invalidate_from=PipelineStage.BASELINE)`,
+which honors the caller's stage. Updating only these reference settings
+invalidates normalization, concentration, and dependent products while
+preserving isotope-ratio fits.
+
+`pipeline.notices` contains `ReductionNotice(stage, code, message,
+standard=None, element=None, fixes=())` from `UPbRPy.notices`. Each stage
+replaces its own notices when recalculated. A standard missing the internal
+element is omitted from normalized output. Calibration uses each element's
+available reference values independently; an element with no reference value
+is omitted from concentration results. Notice action codes are
+`choose_standard` and `enter_value`;
+`element` identifies the measured channel for the action. The standalone
+normalization and calibration-factor functions accept a `notices` list and
+also attach notices to returned metadata.
+
+`ReductionError(message, stage, next_step, fixes=())` reports a failure that
+needs a settings or selection change. Frontends can show its plain message,
+one-sentence next step, and action codes without parsing a traceback. Studio
+shows these issues above the plot, with details collapsed and snapshot undo
+when available. Reference notices and project-local value fields appear in
+Calibration materials. Optional elemental results omitted during export are
+recorded in `ExportTable.context["reduction_notices"]`.
+
 ## Export a publication table
 
 ```python

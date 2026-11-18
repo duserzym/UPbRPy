@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import traceback
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,7 @@ import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 import shiboken6
 
+from UPbRPy.notices import ReductionError
 from UPbRPy.standards import canonicalize_reference_material_samples
 
 from GUI.icon import (
@@ -75,6 +77,8 @@ from GUI.widgets import (
     SPOT_TREE_COUNT_ROLE,
     CALIBRATION_GRID,
     CalibrationSlopesWidget,
+    IssueBanner,
+    ReductionNoticeList,
     DownholeFractionationWidget,
     DetectorCalibrationPanel,
     ElidedLabel,
@@ -1132,6 +1136,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "origin": self.session.origin,
             "workflow_key": self.workflow_preset.key,
             "primary_channel": self.session.primary_channel,
+            "internal_standard_channel": self.session.internal_standard_channel,
+            "reference_overrides": self.session.reference_overrides,
             "import_settings": self.session.import_settings,
             "concentration_standards": self.session.concentration_standards,
             "primary_standards": (
@@ -2267,6 +2273,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.choose_reference_material_library
         )
         layout.addWidget(self.reference_library_button)
+        self.reference_library_error = QtWidgets.QLabel()
+        self.reference_library_error.setWordWrap(True)
+        self.reference_library_error.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.reference_library_error.hide()
+        layout.addWidget(self.reference_library_error)
 
         # These labels retain programmatic access to the resolved library
         # paths; the compact rail exposes them as a tooltip rather than as two
@@ -2541,6 +2552,12 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+
+        self.issue_banner = IssueBanner(widget)
+        self.issue_banner.undo_requested.connect(self._undo_reduction_issue)
+        self.issue_banner.fix_requested.connect(self._fix_reduction_issue)
+        self.issue_banner.dismissed.connect(self._dismiss_reduction_issue)
+        layout.addWidget(self.issue_banner)
 
         plot_card = NeumorphicFrame()
         plot_card.setObjectName("PlotCard")
@@ -3229,6 +3246,32 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.secondary_standards_edit.textEdited.connect(self.update_project_window_title)
         standards_layout.addRow("Secondary", self.secondary_standards_edit)
+        self.reduction_notices = ReductionNoticeList()
+        self.reduction_notices.fix_requested.connect(self._fix_reduction_issue)
+        standards_layout.addRow(self.reduction_notices)
+        self.reference_value_editor = QtWidgets.QWidget()
+        value_layout = QtWidgets.QVBoxLayout(self.reference_value_editor)
+        value_layout.setContentsMargins(0, 0, 0, 0)
+        self.reference_value_label = QtWidgets.QLabel()
+        self.reference_value_label.setWordWrap(True)
+        value_layout.addWidget(self.reference_value_label)
+        self.reference_value_edit = QtWidgets.QLineEdit()
+        self.reference_value_edit.setPlaceholderText("Concentration (µg/g)")
+        value_layout.addWidget(self.reference_value_edit)
+        self.reference_value_feedback = QtWidgets.QLabel()
+        self.reference_value_feedback.setWordWrap(True)
+        value_layout.addWidget(self.reference_value_feedback)
+        self.reference_value_feedback.hide()
+        value_actions = QtWidgets.QVBoxLayout()
+        self.reference_value_apply_button = QtWidgets.QPushButton("Save and recompute")
+        self.reference_value_apply_button.clicked.connect(self._save_reference_value)
+        value_actions.addWidget(self.reference_value_apply_button)
+        cancel_value = QtWidgets.QPushButton("Cancel")
+        cancel_value.clicked.connect(self.reference_value_editor.hide)
+        value_actions.addWidget(cancel_value)
+        value_layout.addLayout(value_actions)
+        standards_layout.addRow(self.reference_value_editor)
+        self.reference_value_editor.hide()
         calibration_layout.addWidget(standards_card, 0)
 
         fit_card = NeumorphicFrame()
@@ -4231,9 +4274,12 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             load_standard_archive_from_path(file_path)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "Failed to load library", str(exc))
+            self.reference_library_error.setText(f"Failed to load library: {exc}\nChoose a readable library.toml file and try again.")
+            self.reference_library_error.show()
+            self.set_workspace_panel_visible("sidebar", True)
             self.append_log(f"Reference material library load failed: {file_path}: {exc}")
             return False
+        self.reference_library_error.hide()
         self.reference_library_path = current_standard_archive_path()
         self.settings.setValue("reference_library_path", self.reference_library_path)
         self._update_reference_library_labels()
@@ -7368,6 +7414,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _refresh_workflow_status(self) -> None:
+        self._refresh_reduction_notices()
         if getattr(self, "_installing_project", False):
             return
         self._sync_selection_history_actions()
@@ -7435,6 +7482,8 @@ class MainWindow(QtWidgets.QMainWindow):
         unlocked_rows = unlocked_workflow_rows(
             self.workflow_preset.stage_sequence, completed, self.session.loaded,
         )
+        if getattr(self, "_reduction_failed", False) and self.session.loaded:
+            unlocked_rows = [True] * len(unlocked_rows)
         from GUI.database import database_availability
 
         submit_enabled = self.session.loaded and database_availability()[0]
@@ -7469,9 +7518,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 stage,
                 self.workflow_preset.steps[index].title,
             )
-            item.setText(f"{index + 1}  {label}")
+            notices = [notice.message for notice in self.session.pipeline.notices
+                       if notice.stage == stage.value] if self.session.pipeline else []
+            has_issue = stage.value == getattr(self, "_issue_stage", None)
+            attention = has_issue or bool(notices)
+            item.setText(f"{index + 1}  {label}" + (" · Needs attention" if attention else ""))
+            item.setToolTip(self.issue_banner.message.text() if has_issue else "\n".join(notices) or label)
             item.setIcon(
-                build_workflow_stage_icon(
+                self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning) if attention else build_workflow_stage_icon(
                     stage.value,
                     state=icon_state,
                     accent=theme.accent if theme else "#2468d4",
@@ -7536,10 +7590,109 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    def _refresh_reduction_notices(self) -> None:
+        if not hasattr(self, "reduction_notices"):
+            return
+        pipeline = self.session.pipeline
+        notices = [notice for notice in pipeline.notices
+                   if notice.stage in {"normalization", "concentration"}] if pipeline else []
+        self.reduction_notices.set_notices(notices)
+
+    def _dismiss_reduction_issue(self) -> None:
+        self._issue_stage = None
+        self._sync_workflow_step_locks()
+
+    def _undo_reduction_issue(self) -> None:
+        self.change_guard.undo()
+        self.issue_banner.hide()
+        self._issue_stage = None
+        self._reduction_failed = False
+        self._refresh_workflow_status()
+
+    def _show_reduction_issue(self, title: str, exc: Exception, details: str = "") -> None:
+        stage = getattr(exc, "stage", None)
+        if not stage:
+            labels = (("open", "import"), ("load", "import"), ("import", "import"),
+                      ("baseline", "baseline"), ("normaliz", "normalization"),
+                      ("concentrat", "concentration"), ("downhole", "downhole"),
+                      ("session", "session"), ("spot mean", "spot_means"),
+                      ("depth", "depth_profile"), ("finaliz", "finalize"), ("export", "export"))
+            stage = next((stage_id for text, stage_id in labels if text in title.casefold()), None)
+            if stage is None:
+                row = self.workflow_step_list.currentRow()
+                sequence = self.workflow_preset.stage_sequence
+                stage = sequence[row].value if 0 <= row < len(sequence) else title
+        self._issue_stage = stage
+        self._reduction_failed = True
+        if isinstance(exc, KeyError):
+            exc = ReductionError(str(exc.args[0]), stage,
+                                 "Review the settings and reference values for this step.")
+        self.issue_banner.show_issue(
+            exc, stage=stage, details=details,
+            can_undo=self.change_guard.record is not None,
+        )
+        self._refresh_workflow_status()
+        self.statusBar().showMessage(f"{title} failed")
+
+    def _fix_reduction_issue(self, issue, code: str) -> None:
+        self.set_workspace_panel_visible("inspector", True)
+        # Reveal the calibration page wherever the compact layout places it.
+        for tabs in self.findChildren(QtWidgets.QTabWidget):
+            for index in range(tabs.count()):
+                if tabs.widget(index).isAncestorOf(self.standards_card):
+                    tabs.setCurrentIndex(index)
+        if code == "choose_standard":
+            stage = getattr(issue, "stage", "concentration")
+            control = (self.primary_68_combo if stage in {"downhole", "session"}
+                       else self.concentration_standards_edit)
+            control.setFocus()
+            if isinstance(control, QtWidgets.QLineEdit):
+                control.selectAll()
+        elif code == "enter_value" and getattr(issue, "standard", None) and getattr(issue, "element", None):
+            self._reference_value_target = (issue.standard, issue.element)
+            from UPbRPy.concentration import element_from_channel
+            self.reference_value_label.setText(f"{issue.standard}: {element_from_channel(issue.element)} (µg/g)")
+            value = self.session.reference_overrides.get(issue.standard, {}).get(issue.element)
+            self.reference_value_edit.setText("" if value is None else str(value))
+            self.reference_value_feedback.clear()
+            self.reference_value_feedback.hide()
+            self.reference_value_editor.show()
+            self.reference_value_edit.setFocus()
+        parent = self.standards_card.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QScrollArea):
+                parent.ensureWidgetVisible(self.reference_value_editor if code == "enter_value"
+                                           else self.concentration_standards_edit)
+            parent = parent.parentWidget()
+
+    def _save_reference_value(self) -> None:
+        try:
+            value = float(self.reference_value_edit.text())
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError()
+        except ValueError:
+            self.reference_value_feedback.setText("Enter a finite concentration greater than zero in µg/g.")
+            self.reference_value_feedback.show()
+            return
+        self._apply_reference_value(*self._reference_value_target, value)
+        self.reference_value_editor.hide()
+        # The guard completes the snapshot before work is queued.
+        self.run_background(
+            "Concentration calibration", lambda: ensure_concentration_results(self.session, self.workflow_preset),
+            lambda _result: self._refresh_reduction_notices(),
+        )
+
+    @confirm_change('Reference value', 'reference_value_apply_button', 'normalization', immediate=True)
+    def _apply_reference_value(self, standard: str, channel: str, value: float) -> None:
+        self.session.reference_overrides = {name: dict(values) for name, values in self.session.reference_overrides.items()}
+        self.session.reference_overrides.setdefault(standard, {})[channel] = value
+        ensure_shared_pipeline(self.session, self.workflow_preset)
+        self.update_project_window_title()
+
     def _handle_action_error(self, title: str, exc: Exception) -> None:
         if getattr(self, "change_guard", None) is not None:
             self.change_guard.fail()
-        QtWidgets.QMessageBox.critical(self, title, str(exc))
+        self._show_reduction_issue(title, exc, "".join(traceback.format_exception(exc)))
         self.append_log(f"{title} failed: {exc}")
 
     def run_background(
@@ -7593,6 +7746,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 on_success(result)
                 self.change_guard.complete()
                 succeeded = True
+                self.issue_banner.hide()
+                self._issue_stage = None
+                self._reduction_failed = False
             except Exception as exc:
                 self._handle_action_error(f"{label} display failed", exc)
 
@@ -7602,8 +7758,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._restore_task is not None and self._restore_task.cancelled:
                 return
             self.change_guard.fail()
-            if not quiet:
-                QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
+            self._show_reduction_issue(label, worker.error or RuntimeError(message), details)
             self.append_log(f"{label} failed: {message}")
             self.append_log(details.rstrip())
 
@@ -7631,7 +7786,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.export_results_button.setEnabled(self.session.loaded)
             had_queued_edits = bool(self.pending_region_updates)
             self.flush_selection_edits()
-            if quiet or label == "Updating reduction stages":
+            if succeeded and (quiet or label == "Updating reduction stages"):
                 self.refresh_view()
             self._refresh_workflow_status()
             if self._selection_recompute_stages and (succeeded or had_queued_edits) and not self._selection_recompute_timer.isActive():

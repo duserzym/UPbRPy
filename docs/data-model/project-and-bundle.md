@@ -106,6 +106,8 @@ contents depend on the selected algorithm.
 | workflow_key | String | `zircon` | Workflow preset identity |
 | material | String | `zircon` | Material classification |
 | primary_channel | String | `29Si` | Default signal selection channel |
+| internal_standard_channel | String or null | `null` | Internal normalization element channel; null uses 29Si for zircon/titanite, 44Ca for apatite, 49Ti for rutile, independently of the picking channel |
+| reference_overrides | Object of standard → channel → number, µg/g | `{}` | Project-local total-element concentrations, finite and greater than zero; applied to a private copy of the reference archive; never written to the shared library |
 | selection_method | String | `threshold` | Selection algorithm |
 | selection_options | Object | `{}` | Selection/import options; Studio restores normalized import settings from here |
 | detector_calibration | Object | `{}` | Mode/options for detector fitting; empty uses Qtegra Y |

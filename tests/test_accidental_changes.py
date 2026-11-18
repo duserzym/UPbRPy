@@ -241,7 +241,9 @@ def test_primary_channel_failed_worker_keeps_session(window, app, monkeypatch):
     window.primary_channel_combo.setCurrentText(proposed)
     window.pending_change_bar.apply_button.click()
     wait_idle(app, window)
-    assert errors
+    assert not errors
+    assert not window.issue_banner.isHidden()
+    assert "synthetic reload failure" in window.issue_banner.message.text()
     assert window.session is old
     assert window.primary_channel_combo.currentText() == old.primary_channel
     assert window.change_guard.record is None
@@ -395,7 +397,9 @@ def test_repick_worker_failure_does_not_install_modified_selections(window, app,
     window.repick_all_spots_button.click()
     assert window.change_guard.pending is None
     wait_idle(app, window)
-    assert errors
+    assert not errors
+    assert not window.issue_banner.isHidden()
+    assert "synthetic re-pick failure" in window.issue_banner.message.text()
     assert window.session is old
     assert services.get_selection_regions(old, spot) == before
 

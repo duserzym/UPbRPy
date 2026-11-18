@@ -35,6 +35,129 @@ from UPbRPy.ratios import (
 _MASS_RE = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
 
 
+class IssueBanner(QtWidgets.QFrame):
+    """Dismissible inline issue with recovery actions and collapsed details."""
+
+    undo_requested = QtCore.Signal()
+    fix_requested = QtCore.Signal(object, str)
+    dismissed = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ReductionIssueBanner")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+        heading = QtWidgets.QHBoxLayout()
+        self.message = QtWidgets.QLabel()
+        self.message.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.message.setWordWrap(True)
+        heading.addWidget(self.message, 1)
+        self.dismiss_button = QtWidgets.QToolButton()
+        self.dismiss_button.setText("Dismiss")
+        self.dismiss_button.clicked.connect(self._dismiss)
+        heading.addWidget(self.dismiss_button, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(heading)
+        self.next_step = QtWidgets.QLabel()
+        self.next_step.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.next_step.setWordWrap(True)
+        layout.addWidget(self.next_step)
+        actions = QtWidgets.QHBoxLayout()
+        self.undo_button = QtWidgets.QPushButton("Go back to previous settings")
+        self.undo_button.clicked.connect(self.undo_requested.emit)
+        actions.addWidget(self.undo_button)
+        self.details_button = QtWidgets.QPushButton("Show details")
+        self.details_button.setCheckable(True)
+        self.details_button.toggled.connect(self._toggle_details)
+        actions.addWidget(self.details_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self.fix_actions = QtWidgets.QHBoxLayout()
+        layout.addLayout(self.fix_actions)
+        self.details = QtWidgets.QPlainTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setMaximumHeight(120)
+        layout.addWidget(self.details)
+        self.details.hide()
+        self.hide()
+
+    def _toggle_details(self, checked):
+        self.details.setVisible(checked)
+        self.details_button.setText("Hide details" if checked else "Show details")
+
+    def _dismiss(self):
+        self.hide()
+        self.dismissed.emit()
+
+    def show_issue(self, issue, *, stage=None, details="", can_undo=False):
+        """Display an error or notice without entering a modal event loop."""
+        self.issue = issue
+        stage = getattr(issue, "stage", None) or stage or "Reduction"
+        self.stage = str(stage)
+        self.message.setText(f"{self.stage.replace('_', ' ').capitalize()}: {getattr(issue, 'message', str(issue))}")
+        self.next_step.setText(getattr(issue, "next_step", "Review the settings for this step and try again."))
+        self.undo_button.setVisible(can_undo)
+        self.details.setPlainText(details)
+        self.details_button.setChecked(False)
+        self.details_button.setVisible(bool(details))
+        self.details.hide()
+        while self.fix_actions.count():
+            item = self.fix_actions.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for code in getattr(issue, "fixes", ()):
+            label = {"choose_standard": "Choose standard", "enter_value": "Enter value"}.get(code)
+            if label:
+                button = QtWidgets.QPushButton(label)
+                button.clicked.connect(lambda _checked=False, action=code: self.fix_requested.emit(issue, action))
+                self.fix_actions.addWidget(button)
+        self.fix_actions.addStretch()
+        self.show()
+
+
+class ReductionNoticeList(QtWidgets.QScrollArea):
+    """Compact, non-blocking reference-value notices for calibration controls."""
+
+    fix_requested = QtCore.Signal(object, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setMaximumHeight(170)
+        self.setMinimumHeight(100)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.notices = []
+        self.hide()
+
+    def set_notices(self, notices):
+        """Replace only changed notice rows, retaining scroll position otherwise."""
+        if self.notices == list(notices):
+            return
+        self.notices = list(notices)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(4)
+        for notice in notices:
+            label = QtWidgets.QLabel(notice.message)
+            label.setWordWrap(True)
+            label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            layout.addWidget(label)
+            actions = QtWidgets.QVBoxLayout()
+            for code in notice.fixes:
+                button = QtWidgets.QPushButton({"choose_standard": "Choose standard", "enter_value": "Enter value"}.get(code, code))
+                button.clicked.connect(lambda _checked=False, item=notice, action=code: self.fix_requested.emit(item, action))
+                actions.addWidget(button)
+            layout.addLayout(actions)
+        layout.addStretch()
+        previous = self.takeWidget()
+        if previous is not None:
+            previous.deleteLater()
+        self.setWidget(content)
+        self.setVisible(bool(notices))
+
+
 class PendingChangeBar(QtWidgets.QFrame):
     """Inline confirmation and one-level undo for a destructive setting change."""
 

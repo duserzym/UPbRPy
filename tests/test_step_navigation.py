@@ -260,13 +260,23 @@ def test_background_finish_refreshes_navigation_and_status(window, app, outcome)
     assert window.step_actions_block.isEnabled()
     assert window.workflow_step_list.isEnabled()
     failed = outcome in {"failure", "display-failure"}
-    assert bool(window._test_errors) == failed
+    if failed:
+        assert not window._test_errors
+        assert not window.issue_banner.isHidden()
+        message = "deliberate calculation failure" if outcome == "failure" else "deliberate display failure"
+        assert message in window.issue_banner.message.text()
+    else:
+        assert bool(window._test_errors) == failed
     expected = ("Calibrating concentrations failed" if failed else
                 "Calibrated the selected standard" if outcome == "specific" else
                 "Calibrating concentrations done")
     assert window.statusBar().currentMessage() == expected
-    assert window.step_next_button.isEnabled() == (outcome != "failure")
-    assert window.step_primary_button.property("accent") == (outcome == "failure")
+    if failed:
+        assert window.step_next_button.isEnabled()
+        assert window.step_primary_button.property("accent") is False
+    else:
+        assert window.step_next_button.isEnabled() == (outcome != "failure")
+        assert window.step_primary_button.property("accent") == (outcome == "failure")
 
 
 def test_walk_workflow_as_far_as_fixture_allows(window, app):

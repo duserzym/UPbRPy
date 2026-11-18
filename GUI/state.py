@@ -62,6 +62,8 @@ class ReductionSession:
     # Database origin of the session (the .upbr ``origin`` block), or None
     # for a standalone reduction.
     origin: Optional[dict[str, str]] = None
+    internal_standard_channel: str | None = None
+    reference_overrides: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @property
     def loaded(self) -> bool:

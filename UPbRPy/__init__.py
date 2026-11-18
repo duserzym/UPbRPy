@@ -30,6 +30,7 @@ FOCUSED_SUBMODULES = frozenset(
         "isochron",
         "isoplot",
         "mpl_concordia",
+        "notices",
         "pipeline",
         "project",
         "qtegra",

@@ -224,7 +224,12 @@ class StudioWindowController(QtCore.QObject):
         try:
             target = value if isinstance(value, LaunchTarget) else parse_open_target(value)
         except LaunchError as exc:
-            QtWidgets.QMessageBox.warning(self.active_window(), "Cannot open", str(exc))
+            shell = self.active_window() or self.create_window()
+            from UPbRPy.notices import ReductionError
+            reduction = shell.active_reduction or shell.add_tab()
+            reduction._handle_action_error("Cannot open", ReductionError(
+                str(exc), "import", "Open an existing Qtegra export, .upbr project, or session bundle.",
+            ))
             return
         if target.is_url:
             self.database.handle(target)

@@ -561,8 +561,19 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     rows["Pb"] = np.nan
     element_masses = dict(_ELEMENT_MASSES)
     pb_context = dict(measured_channels=[], omitted_204_spots=rows.spot_name.tolist(), hg_correction="not calibrated")
+    concentration = None
     if config.concentration_standards:
-        concentration = pipeline.run_concentration()
+        from .notices import ReductionError, ReductionNotice
+        try:
+            concentration = pipeline.run_concentration()
+        except ReductionError as exc:
+            # Final dates can be cached independently of optional elemental
+            # results. Export them with a visible note if calibration needs repair.
+            notice = ReductionNotice("concentration", "export_concentrations_unavailable",
+                                     f"Concentrations omitted: {exc.message}", fixes=exc.fixes)
+            if notice not in pipeline.notices:
+                pipeline.notices.append(notice)
+    if concentration is not None:
         normalized = pipeline.run_normalization()
         # Calibrant concentrations are intentionally absent from finalization;
         # calculate their table values using the already fitted factors.
@@ -661,7 +672,8 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
         # Only materials analysed in this session are cited in footnotes.
         secondary_standards=tuple(x for x in config.secondary_standards if rows["sample"].eq(x).any()),
         concentration_standards=config.concentration_standards,
-        active_concentration_standards=tuple(concentration["active_standards"]) if config.concentration_standards else (),
+        active_concentration_standards=tuple(concentration["active_standards"]) if concentration is not None else (),
+        reduction_notices=[asdict(notice) for notice in pipeline.notices],
         decision=asdict(finalized.decision), uncertainty_settings=config.uncertainty.to_dict(),
         primary_reference_terms=reference, long_term_relative_1s=long_term,
         systematic_components={base: {key: dict(zip(frame.spot_name, values.tolist())) for key, values in parts.items()} for base, parts in components.items()},

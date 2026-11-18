@@ -63,6 +63,7 @@ def copy_session(session):
     updated.reduction_cache = dict(session.reduction_cache)
     if session.pipeline is not None:
         updated.pipeline = copy(session.pipeline)
+        updated.pipeline.notices = list(session.pipeline.notices)
         updated.pipeline.cache = PipelineCache()
         for stage, result in session.pipeline.cache.as_mapping().items():
             updated.pipeline.cache.set(stage, result)
@@ -321,6 +322,7 @@ class ChangeGuard:
             config=pipeline.config if pipeline else None,
             products={key: value for key, value in session.reduction_cache.items() if key in change["cache_keys"]},
             stages={stage: value for stage, value in pipeline.cache.as_mapping().items() if stage in change["targets"]} if pipeline else {},
+            notices=list(pipeline.notices) if pipeline else [],
             workspace=w.project_workspace_state(), path=w.project_path, fingerprint=w._saved_project_fingerprint,
             history=(list(w._selection_undo), list(w._selection_redo), set(w._spots_edited_since_write)),
             library=(services.current_standard_archive(), services.current_standard_archive_path(), w.reference_library_path),
@@ -458,6 +460,7 @@ class ChangeGuard:
                 for stage, value in record["stages"].items():
                     session.pipeline.cache.set(stage, value)
                 session.pipeline.config = record["config"]
+                session.pipeline.notices = list(record["notices"])
         w._sync_workflow_combo()
         w._sync_selection_method_combo()
         if record["change"]["replace_session"]:

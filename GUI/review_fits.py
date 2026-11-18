@@ -502,4 +502,4 @@ class ReviewFitPanel(QtWidgets.QWidget):
             _export_svg(self.canvas.scene(), Path(folder) / (stem + ".svg"))
             ImageExporter(self.canvas.scene()).export(str(Path(folder) / (stem + ".png")))
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "Fit export failed", str(exc))
+            self.readout.setPlainText(f"Fit export failed: {exc}\nChoose a writable export folder and try again.")
