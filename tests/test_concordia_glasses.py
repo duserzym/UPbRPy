@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtTest, QtWidgets
 
 from GUI.theme import THEMES, build_application
 from GUI.widgets import ResultsTableWidget
-from UPbRPy.isochron import concordia_age_readout, tera_wasserburg_point, wetherill_point
+from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 
 
 @pytest.fixture(scope="module")
@@ -30,6 +30,9 @@ def results(names=("grain_1", "grain_2", "glass_3", "glass_4"),
                           "238U/206Pb": tx, "207Pb/206Pb": ty})
     for ratio in ("207Pb/235U", "206Pb/238U", "238U/206Pb", "207Pb/206Pb"):
         frame[f"{ratio}_2e"] = frame[ratio] * .02
+    for system in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb"):
+        frame[system + "_age"] = ages
+        frame[system + "_age_2e"] = 10.
     return SimpleNamespace(parallel_results=frame, selected_results=frame.copy())
 
 
@@ -79,8 +82,8 @@ def test_glasses_default_excluded_from_all_spot_views_and_readout(review):
     assert not review.depth_glasses_toggle.isHidden()
     assert_inclusion(review, {"grain_1": True, "grain_2": True,
                               "glass_3": False, "glass_4": False})
-    assert review.concordia_readout.n == 2
-    assert review.concordia_readout.age_ma == pytest.approx(500., abs=.001)
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 2
+    assert review.weighted_mean_dates["206Pb/238U"]["weighted_mean"] == pytest.approx(500., abs=.001)
 
 
 def test_default_materials_come_from_current_archive(app, monkeypatch):
@@ -99,28 +102,27 @@ def test_default_materials_come_from_current_archive(app, monkeypatch):
 
 def test_user_toggles_sync_pages_and_readout_and_allow_manual_ticks(review, app):
     spy = QtTest.QSignalSpy(review.showGlassesChanged)
-    original = review.concordia_readout
+    original = review.weighted_mean_dates["206Pb/238U"]
     review.spot_glasses_toggle.click()
     app.processEvents()
     assert spy.count() == 1 and spy.at(0) == [True]
     assert review.show_glasses() and review.depth_glasses_toggle.isChecked()
     assert_inclusion(review, dict.fromkeys(review.include_flags, True))
-    expected = concordia_age_readout(results().parallel_results)
-    assert review.concordia_readout.n == 4
-    assert review.concordia_readout.age_ma == pytest.approx(expected.age_ma)
-    assert review.concordia_readout.age_ma != pytest.approx(original.age_ma)
-    assert review.concordia_readout.mswd > original.mswd
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 4
+    assert review.weighted_mean_dates["206Pb/238U"]["weighted_mean"] == pytest.approx(700.)
+    assert review.weighted_mean_dates["206Pb/238U"]["weighted_mean"] != pytest.approx(original["weighted_mean"])
+    assert review.weighted_mean_dates["206Pb/238U"]["mswd"] > original["mswd"]
     review.depth_glasses_toggle.click()
     app.processEvents()
     assert spy.count() == 2 and spy.at(1) == [False]
     assert not review.spot_glasses_toggle.isChecked()
-    assert review.concordia_readout.n == 2
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 2
     item = review.spot_choice_list.findItems("glass_3", QtCore.Qt.MatchFlag.MatchExactly)[0]
     item.setCheckState(QtCore.Qt.CheckState.Checked)
     app.processEvents()
     assert review.include_flags["glass_3"] and not review.include_flags["glass_4"]
     assert not review.show_glasses()
-    assert review.concordia_readout.n == 3
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 3
     assert spy.count() == 2
 
 
@@ -208,8 +210,11 @@ def test_glass_controls_fit_chooser_at_laptop_size(review, app):
     app.processEvents()
     page = review.spot_concordia_page
     assert page.horizontalScrollBar().maximum() == 0
+    menu = review.spot_spots_button.menu()
+    menu.popup(review.mapToGlobal(QtCore.QPoint(20, 20)))
+    app.processEvents()
     for control in (review.spot_group_toggle, review.spot_glasses_toggle):
-        rect = QtCore.QRect(control.mapTo(page.viewport(), QtCore.QPoint()), control.size())
-        assert page.viewport().rect().contains(rect)
+        assert menu.rect().contains(QtCore.QRect(control.mapTo(menu, QtCore.QPoint()), control.size()))
     assert not review.spot_group_toggle.geometry().intersects(review.spot_glasses_toggle.geometry())
     assert review._chooser_stack.height() >= 80
+    menu.hide()

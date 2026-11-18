@@ -23,7 +23,7 @@ from GUI.state import ReductionSession
 from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from UPbRPy.calibration import fit_cross_calibration
-from UPbRPy.isochron import concordia_age_readout, tera_wasserburg_point, wetherill_point
+from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
 from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
 from UPbRPy.ratios import (
@@ -1438,6 +1438,34 @@ class _ConcordiaViewBox(AxisZoomViewBox):
         self._selection_box.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._selection_box.hide()
 
+    def zoom_gesture(self, scale, center):
+        mask = self._zoom_mask()
+        self._resetTarget()
+        self.scaleBy([scale if enabled else None for enabled in mask], center)
+        self.sigRangeChangedManually.emit(mask)
+
+    def gesture_wheel(self, event, scene_pos):
+        """Trackpad gestures pan; wheel notches and modified scroll zoom."""
+        pixel = event.pixelDelta()
+        angle = event.angleDelta()
+        modified = event.modifiers() & (QtCore.Qt.KeyboardModifier.ControlModifier |
+                                        QtCore.Qt.KeyboardModifier.MetaModifier)
+        trackpad = (not pixel.isNull() or event.phase() != QtCore.Qt.ScrollPhase.NoScrollPhase
+                    or event.source() != QtCore.Qt.MouseEventSource.MouseEventNotSynthesized)
+        if trackpad and not modified:
+            delta = pixel if not pixel.isNull() else angle / 8
+            rect = self.sceneBoundingRect()
+            ranges = self.viewRange()
+            self._resetTarget()
+            self.translateBy(x=-delta.x() * (ranges[0][1]-ranges[0][0]) / max(1, rect.width()),
+                             y=delta.y() * (ranges[1][1]-ranges[1][0]) / max(1, rect.height()))
+            self.sigRangeChangedManually.emit([True, True])
+        else:
+            amount = angle.y() or pixel.y() or angle.x() or pixel.x()
+            self.zoom_gesture(1.02 ** (amount * self.state["wheelScaleFactor"]),
+                              self.mapSceneToView(scene_pos))
+        event.accept()
+
     def mouseClickEvent(self, event):
         self.review.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         if event.double() and event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -1455,6 +1483,23 @@ class _ConcordiaViewBox(AxisZoomViewBox):
             super().mouseClickEvent(event)
 
     def mouseDragEvent(self, event, axis=None):
+        if (isinstance(self.review, ConcordiaReviewWidget)
+                and (event.button() == QtCore.Qt.MouseButton.MiddleButton
+                     or (event.button() == QtCore.Qt.MouseButton.LeftButton and self.review._space_pan))):
+            self.review.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+            self.review.viewport().setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            previous = self.state["mouseMode"]
+            self.state["mouseMode"] = self.PanMode
+            try:
+                AxisZoomViewBox.mouseDragEvent(self, event, axis)
+            finally:
+                self.state["mouseMode"] = previous
+            if event.isFinish():
+                if self.review._space_pan:
+                    self.review.viewport().setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+                else:
+                    self.review.viewport().unsetCursor()
+            return
         shift = QtCore.Qt.KeyboardModifier.ShiftModifier
         modifiers = (event.modifiers() if hasattr(event, "modifiers")
                      else QtCore.Qt.KeyboardModifier.NoModifier)
@@ -1474,7 +1519,8 @@ class _ConcordiaViewBox(AxisZoomViewBox):
                 if isinstance(self.review, ConcordiaReviewWidget):
                     self.review.select_rectangle(
                         rect, extend=bool(modifiers & shift),
-                        toggle=bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier))
+                        toggle=bool(modifiers & (QtCore.Qt.KeyboardModifier.ControlModifier |
+                                                QtCore.Qt.KeyboardModifier.MetaModifier)))
                 else:
                     # The standard-bias canvas also uses this ViewBox.
                     self.review.select_rectangle(rect, extend=bool(modifiers & (
@@ -1643,7 +1689,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._include_calibration_uncertainty = True
         self._plot_item: pg.PlotItem | None = None
         self._zoom_mode = "xy"
-        self._interaction_mode = "pan"
+        self._interaction_mode = "select"
+        self._space_pan = False
         # Diagnostic axis styling historically enables both concordia grids.
         self._grid_visible = True
         self.selected_spots: set[str] = set()
@@ -1666,8 +1713,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._colour_mode = "sample"
         self._depth_colormap = "plasma"
         self._colorbar = None
-        self._concordia_age_ma = None
-        self._age_marker = None
         self._default_range = None
         self._age_items = []
         self._label_ages = np.array([])
@@ -1860,6 +1905,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     def keyPressEvent(self, event):
         action = None
+        if event.key() == QtCore.Qt.Key.Key_Space:
+            self._space_pan = True
+            self.viewport().setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
         if event.matches(QtGui.QKeySequence.StandardKey.SelectAll):
             self.select_spots({p[0] for p in self._points})
         elif event.key() == QtCore.Qt.Key.Key_Escape:
@@ -1873,6 +1923,41 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if action:
             self.reviewAction.emit(action)
         event.accept()
+
+    def keyReleaseEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
+                self._space_pan = False
+                self.viewport().unsetCursor()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        self._space_pan = False
+        self.viewport().unsetCursor()
+        super().focusOutEvent(event)
+
+    def event(self, event):
+        if (event.type() == QtCore.QEvent.Type.ShortcutOverride
+                and event.key() == QtCore.Qt.Key.Key_Space):
+            event.accept()
+            return True
+        return super().event(event)
+
+    def viewportEvent(self, event):
+        if getattr(self, "_plot_item", None) is not None:
+            vb = self._plot_item.vb
+            if event.type() == QtCore.QEvent.Type.Wheel:
+                vb.gesture_wheel(event, self.mapToScene(event.position().toPoint()))
+                return True
+            if (event.type() == QtCore.QEvent.Type.NativeGesture
+                    and event.gestureType() == QtCore.Qt.NativeGestureType.ZoomNativeGesture):
+                center = vb.mapSceneToView(self.mapToScene(event.position().toPoint()))
+                vb.zoom_gesture(1 / max(.01, 1 + event.value()), center)
+                event.accept()
+                return True
+        return super().viewportEvent(event)
 
     def _update_selection_style(self, *, positions_changed=False):
         if self._scatter is None:
@@ -2085,24 +2170,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         ).reshape(-1, 2)
         self._visible_errors = self._point_errors[indices]
 
-    def set_concordia_age(self, age_ma: float | None) -> None:
-        """Mark the fitted age on the curve without fitting or changing the view."""
-        self._concordia_age_ma = age_ma
-        if self._plot_item is None or self._theme is None:
-            return
-        if self._age_marker is None:
-            self._age_marker = _ConcordiaMarker(symbol="d", size=10)
-            self._age_marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
-            self._age_marker.setZValue(20)
-            self._plot_item.addItem(self._age_marker, ignoreBounds=True)
-        if age_ma is None or self._kind != "spot":
-            self._age_marker.setData([], [])
-            return
-        point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
-        x, y = point(np.array([age_ma]))
-        self._age_marker.setData(x, y, brush=pg.mkBrush(self._theme.accent),
-                                 pen=pg.mkPen(self._theme.axis_text, width=.7))
-
     @staticmethod
     def depth_color_map(name: str) -> pg.ColorMap:
         """Return a built-in map oriented with its lighter endpoint at time zero."""
@@ -2287,7 +2354,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._scatter = None
         self._ellipse_batch = None
         self._empty_message = None
-        self._age_marker = None
         self._ellipses = []
         self._points = []
         self._point_xy = np.empty((0, 2))
@@ -2399,7 +2465,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         view = retained_range if retained_range is not None else self._default_range
         plot.setRange(xRange=view[0], yRange=view[1], padding=0)
         self._update_sample_legend()
-        self.set_concordia_age(self._concordia_age_ma)
         if hovered is not None:
             index = next((i for i, point in enumerate(self._points) if point[0] == hovered), None)
             self._set_hover(index)
@@ -3217,8 +3282,50 @@ class DetectorCalibrationPanel(NeumorphicFrame):
                            pen=pg.mkPen(theme.accent, width=3)).setZValue(2)
 
 
+class _ReviewSummary(QtWidgets.QToolButton):
+    """Give tab titles priority, with the complete summary in a popup."""
+
+    def __init__(self, text):
+        super().__init__()
+        self._summary_text = text
+        self._compact = False
+        self.setStyleSheet("QToolButton { padding: 2px; min-width: 0px; min-height: 0px; } "
+                           "QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QtWidgets.QMenu(self)
+        self._details = QtWidgets.QLabel()
+        self._details.setWordWrap(True)
+        self._details.setFixedWidth(360)
+        self._details.setMargin(10)
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(self._details)
+        menu.addAction(action)
+        self.setMenu(menu)
+        self.setText(text)
+
+    def text(self):
+        return self._summary_text
+
+    def setText(self, text):
+        self._summary_text = str(text)
+        self.setToolTip(self._summary_text)
+        self._details.setText(self._summary_text)
+        self._show_text()
+
+    def _show_text(self):
+        shown = "ⓘ" if self._compact else self.fontMetrics().elidedText(
+            self._summary_text, QtCore.Qt.TextElideMode.ElideRight, 150)
+        super().setText(shown)
+        self.setFixedWidth(26 if self._compact else min(160, self.fontMetrics().horizontalAdvance(shown) + 8))
+
+    def set_compact(self, compact):
+        if self._compact != compact:
+            self._compact = compact
+            self._show_text()
+
+
 class _ReviewTabs(QtWidgets.QTabWidget):
-    """Accept the original table handles when selecting their containing tab."""
+    """Accept table handles and reserve the full titles before the summary."""
 
     def setCurrentWidget(self, widget):
         """Select the tab containing a review view or page."""
@@ -3226,6 +3333,13 @@ class _ReviewTabs(QtWidgets.QTabWidget):
             widget = widget.parentWidget()
         if widget is not None:
             super().setCurrentWidget(widget)
+
+    def resizeEvent(self, event):
+        summary = self.cornerWidget(QtCore.Qt.Corner.TopRightCorner)
+        if summary is not None:
+            titles = sum(self.tabBar().tabSizeHint(i).width() for i in range(self.count()))
+            summary.set_compact(self.width() < titles + 168)
+        super().resizeEvent(event)
 
 
 class FlowLayout(QtWidgets.QLayout):
@@ -3294,7 +3408,8 @@ class _SampleChip(QtWidgets.QAbstractButton):
         self.sample_color = QtGui.QColor(color)
         self.setText(f"{sample} {count}")
         self.setAccessibleName(self.text())
-        self.setToolTip(f"{sample}: {count} spots\nClick: show only · Cmd/Ctrl-click: toggle · Shift-click: add range")
+        option = "Option" if sys.platform == "darwin" else "Alt"
+        self.setToolTip(f"{sample}: {count} spots\nClick: show or hide · {option}-click: show only · Shift-click: add range")
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.setProperty("inclusionState", "inactive")
@@ -3302,6 +3417,13 @@ class _SampleChip(QtWidgets.QAbstractButton):
         font.setPixelSize(11)
         self.setFont(font)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            self.click()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def sizeHint(self):
         # Leave one pixel for Qt's fractional glyph-advance rounding.
@@ -3393,6 +3515,7 @@ class SpotInfoCard(QtWidgets.QFrame):
 
     showSignalRequested = QtCore.Signal(str)
     excludeToggled = QtCore.Signal(str, bool)
+    expansionChanged = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3400,8 +3523,19 @@ class SpotInfoCard(QtWidgets.QFrame):
         self._name = ""
         self._excluded = False
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(1)
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.setSpacing(2)
+        self.header = ElidedLabel()
+        header_row.addWidget(self.header, 1)
+        layout.addLayout(header_row)
+        self.close_button = QtWidgets.QToolButton()
+        self.close_button.setText("×")
+        self.close_button.setFixedSize(22, 22)
+        self.close_button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
+        self.close_button.setToolTip("Hide this card until the selection changes")
+        self.setAutoFillBackground(True)
         self.body = QtWidgets.QLabel()
         self.body.setObjectName("SpotInfoBody")
         self.body.setWordWrap(True)
@@ -3414,9 +3548,10 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.body)
         self.scroll.setMinimumHeight(24)
+        self.compact_body = QtWidgets.QLabel()
+        self.compact_body.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        layout.addWidget(self.compact_body)
         layout.addWidget(self.scroll, 1)
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.setSpacing(4)
         self.show_signal_button = QtWidgets.QToolButton()
         self.show_signal_button.setText("Show signal")
         self.show_signal_button.setToolTip("Show this spot's time-resolved signal and windows")
@@ -3424,12 +3559,31 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.exclude_button = QtWidgets.QToolButton()
         self.exclude_button.setToolTip("Hide this spot from calculations or unhide it (H; E also works)")
         self.exclude_button.clicked.connect(lambda: self.excludeToggled.emit(self._name, not self._excluded))
-        for button in (self.show_signal_button, self.exclude_button):
-            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-            buttons.addWidget(button)
-        layout.addLayout(buttons)
+        self.show_signal_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        for button in (self.show_signal_button, self.exclude_button, self.close_button):
+            button.setFixedSize(18, 18)
+            button.setIconSize(QtCore.QSize(12, 12))
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+            button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
+            header_row.addWidget(button)
+        self.more_button = QtWidgets.QToolButton()
+        self.more_button.setText("More ▸")
+        self.more_button.setCheckable(True)
+        self.more_button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
+        self.more_button.toggled.connect(self.set_expanded)
+        layout.addWidget(self.more_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.set_expanded(False)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Ignored)
         self.hide()
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Show the full stored table or only the three dates."""
+        with QtCore.QSignalBlocker(self.more_button):
+            self.more_button.setChecked(expanded)
+        self.more_button.setText("Less ▾" if expanded else "More ▸")
+        self.scroll.setVisible(expanded)
+        self.compact_body.setVisible(not expanded)
+        self.expansionChanged.emit(expanded)
 
     def spot_name(self) -> str:
         return self._name
@@ -3466,6 +3620,15 @@ class SpotInfoCard(QtWidgets.QFrame):
         header = f"<b>{html.escape(name)}</b><br>{sample}"
         if acquisition is not None:
             header += f" · #{acquisition[0]}" + (f" · {html.escape(acquisition[1])}" if acquisition[1] else "")
+        self.header.setText(name + (f" · #{acquisition[0]}" if acquisition else ""))
+        self.header.setToolTip(header.replace("<br>", "\n"))
+        compact = []
+        for system in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb"):
+            base = system + "_age"
+            compact.append(line(system.replace("Pb", "").replace("U", ""),
+                                value(base, [f"{base}_2e_{branch}", f"{base}_2e"]) or "—", " Ma (2σ)"))
+        self.compact_body.setText("<table cellspacing='0' cellpadding='0'>" + "".join(compact) + "</table>")
+        self.compact_body.setToolTip("Dates ± 2σ in Ma")
         preferred = value("preferred_date", ["preferred_date_2e"])
         method = html.escape(str(row.get("preferred_date_method", "")))
         rows = [line("<b>Preferred</b>", f"<b>{preferred}</b>", " Ma (2σ)" if preferred else "")]
@@ -3502,7 +3665,7 @@ class SpotInfoCard(QtWidgets.QFrame):
                 rows.append(line(label, html.escape(str(row[column]))))
         flags = str(row.get("automatic_flags", "") or "").strip()
         rows.append(line("Flags", html.escape(flags) if flags and flags != "nan" else "none"))
-        rows.append(line("State", "excluded from fits" if excluded else "included"))
+        rows.append(line("State", "hidden from calculations" if excluded else "included"))
         footnote = (f"<br><span style='font-size:9pt'>* The method varies by spot: "
                     f"206Pb/238U below {transition_ma:g} Ma, 207Pb/206Pb above, unless a "
                     f"common-Pb correction is chosen.</span>") if method else ""
@@ -3510,6 +3673,9 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.show_signal_button.setEnabled(True)
         self.exclude_button.setEnabled(True)
         self.exclude_button.setText("Unhide" if excluded else "Hide")
+        self.exclude_button.setIcon(self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton if excluded else
+            QtWidgets.QStyle.StandardPixmap.SP_DialogCancelButton))
         self.exclude_button.setToolTip(
             (f"Unhide {name}" if excluded else f"Hide {name} from calculations") + " (H; E also works)")
         self.show()
@@ -3899,6 +4065,199 @@ class _DeferredReviewTree(QtWidgets.QTreeView):
         super().sortByColumn(column, order)
 
 
+class _PopoverContent(QtWidgets.QWidget):
+    """Make a QWidgetAction honour the content's requested minimum size."""
+
+    def sizeHint(self):
+        return super().sizeHint().expandedTo(QtCore.QSize(320, 340))
+
+    def minimumSizeHint(self):
+        return super().minimumSizeHint().expandedTo(QtCore.QSize(320, 340))
+
+
+class _PopoverButton(QtWidgets.QToolButton):
+    """A menu button whose checked state comes from its underlying control."""
+
+    def nextCheckState(self):
+        pass
+
+
+class _ConcordiaStatus(QtWidgets.QWidget):
+    """Wrap dates and move the fit below when the complete row cannot fit."""
+
+    def __init__(self, help_button, age, fit, details):
+        super().__init__()
+        self.setObjectName("ConcordiaStatus")
+        self.age, self.fit = age, fit
+        self._second_row = None
+        self.grid = QtWidgets.QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(4)
+        self.grid.setVerticalSpacing(0)
+        self.grid.addWidget(help_button, 0, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        self.grid.addWidget(details, 0, 3, QtCore.Qt.AlignmentFlag.AlignTop)
+        self.grid.setColumnStretch(1, 1)
+        self.reflow()
+
+    def reflow(self):
+        age_width = self.age.fontMetrics().horizontalAdvance(self.age.text())
+        fit_width = self.fit.fontMetrics().horizontalAdvance(self.fit.text())
+        fixed = sum(self.grid.itemAtPosition(0, col).widget().sizeHint().width() for col in (0, 3)) + 12
+        second_row = age_width + fit_width + fixed > self.width()
+        self.fit.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored if second_row else
+                               QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.fit.setMinimumWidth(0 if second_row else fit_width + 2)
+        self.fit.setMaximumWidth(16777215 if second_row else fit_width + 2)
+        if second_row != self._second_row:
+            self._second_row = second_row
+            self.grid.removeWidget(self.age)
+            self.grid.removeWidget(self.fit)
+            self.grid.addWidget(self.age, 0, 1, 1, 2 if second_row else 1)
+            self.grid.addWidget(self.fit, 1 if second_row else 0, 1 if second_row else 2,
+                                1, 2 if second_row else 1)
+            self.fit.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.updateGeometry()
+
+    def resizeEvent(self, event):
+        self.reflow()
+        super().resizeEvent(event)
+
+
+class _ConcordiaToolbar(QtWidgets.QWidget):
+    """Move secondary control groups into menus when the row is too narrow."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("ConcordiaToolbar")
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.row = QtWidgets.QHBoxLayout(self)
+        self.row.setContentsMargins(0, 0, 0, 0)
+        self.row.setSpacing(3)
+        self.entries = []
+        self._order = []
+        self.overflow = QtWidgets.QToolButton()
+        self.overflow.setText("⋯")
+        self.overflow.setFixedHeight(26)
+        self.overflow.setToolTip("More plot controls")
+        self.overflow.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu = QtWidgets.QMenu(self.overflow)
+        self.overflow.setMenu(self.menu)
+        self._style_button(self.overflow)
+        self.row.addWidget(self.overflow)
+        self.overflow.hide()
+        self._busy = False
+        self._divider_width = 0
+
+    @staticmethod
+    def _style_button(button):
+        button.setProperty("hasToolbarMenu", button.menu() is not None)
+        button.setStyleSheet(
+            "QToolButton { padding: 2px 4px; min-width: 0px; min-height: 0px; } "
+            "QToolButton[hasToolbarMenu=\"true\"] { padding-right: 14px; } "
+            "QToolButton::menu-indicator { subcontrol-origin: padding; "
+            "subcontrol-position: right center; right: 3px; width: 7px; }")
+
+    def add_separator(self):
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        line.setFixedWidth(1)
+        self.row.insertWidget(self.row.count()-1, line)
+        self._order.append(line)
+        self._divider_width += 1 + self.row.spacing()
+
+    def add_control(self, widget, title, priority=0):
+        if isinstance(widget, QtWidgets.QComboBox):
+            widget.setStyleSheet("padding: 2px 6px; min-height: 0px;")
+            widget.setFixedHeight(26)
+        popup = self.menu.addMenu(title)
+        content = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(content)
+        box.setContentsMargins(6, 6, 6, 6)
+        action = QtWidgets.QWidgetAction(popup)
+        action.setDefaultWidget(content)
+        popup.addAction(action)
+        popup.menuAction().setVisible(False)
+        for button in ([widget] if isinstance(widget, QtWidgets.QToolButton) else
+                       widget.findChildren(QtWidgets.QToolButton)):
+            self._style_button(button)
+            button.setFixedHeight(26)
+        self.row.insertWidget(self.row.count()-1, widget)
+        self._order.append(widget)
+        self.entries.append((widget, popup, content, priority))
+        widget.installEventFilter(self)
+
+    def add_stretch(self):
+        self.row.insertStretch(self.row.count()-1, 1)
+        self._order.append(None)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Hide, QtCore.QEvent.Type.LayoutRequest):
+            if not self._busy:
+                QtCore.QTimer.singleShot(0, self, self.reflow)
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.reflow()
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(50, self.sizeHint().height())
+
+    def reflow(self):
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            for w, menu, box, _ in self.entries:
+                if w.property("toolbarAvailable") is False:
+                    menu.menuAction().setVisible(False)
+            active = [(w, menu, box, priority) for w, menu, box, priority in self.entries
+                      if w.property("toolbarAvailable") is not False
+                      and (not w.isHidden() or menu.menuAction().isVisible())]
+            widths = {w: w.sizeHint().expandedTo(w.minimumSizeHint()).expandedTo(w.minimumSize())
+                      .boundedTo(w.maximumSize()).width() + self.row.spacing() for w, *_ in active}
+            total = sum(widths.values()) + self._divider_width - self.row.spacing()
+            folded = set()
+            if total > self.width():
+                total += self.overflow.sizeHint().width() + self.row.spacing()
+                for w, menu, box, priority in sorted(active, key=lambda item: -item[3]):
+                    if total <= self.width():
+                        break
+                    folded.add(w)
+                    total -= widths[w]
+            for w, menu, box, _ in active:
+                if w in folded:
+                    if w.parentWidget() is not box:
+                        self.row.removeWidget(w)
+                        box.layout().addWidget(w)
+                    w.show()
+                    menu.menuAction().setVisible(True)
+                else:
+                    if w.parentWidget() is box:
+                        box.layout().removeWidget(w)
+                        w.setParent(self)
+                    menu.menuAction().setVisible(False)
+                    w.show()
+            desired = [item for item in self._order if item is None or item.parentWidget() is self]
+            desired.append(self.overflow)
+            current = [self.row.itemAt(i).widget() for i in range(self.row.count())]
+            if current != desired:
+                while self.row.count():
+                    self.row.takeAt(0)
+                for item in desired:
+                    if item is None:
+                        self.row.addStretch(1)
+                    else:
+                        self.row.addWidget(item)
+            self.overflow.setVisible(bool(folded))
+        finally:
+            self._busy = False
+
+
 class ResultsTableWidget(QtWidgets.QWidget):
     """Sortable tables plus quick concordia reviews of final products."""
 
@@ -3911,12 +4270,21 @@ class ResultsTableWidget(QtWidgets.QWidget):
     appearance_changed = QtCore.Signal()
     excludedSpotsChanged = QtCore.Signal(object)
     concordiaGridChanged = QtCore.Signal(bool)
+    focusRequested = QtCore.Signal(bool)
+    sigmaRequested = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
         """Create review views, optionally remembering display preferences."""
         super().__init__(parent)
         self._settings = settings
+        mode = "select"
+        if settings is not None:
+            mode = settings.value("review_concordia_mouse_v2", "", type=str)
+            if not mode:
+                legacy = settings.value("review_concordia_mouse_v1", "select", type=str)
+                mode = "select" if legacy == "pan" else legacy
+        self._saved_mouse_mode = mode if mode in {"select", "pan", "zoom"} else "select"
         self._concordia_grid = (settings.value("review_concordia_grid_v1", True, type=bool)
                                 if settings is not None else True)
         self.include_flags: dict[str, bool] = {}
@@ -3933,6 +4301,14 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._show_glasses = False
         self._glass_buttons = []
         self._chip_areas = []
+        self._mouse_button_sets = []
+        self._zoom_button_sets = []
+        self._grid_buttons = []
+        self._sigma_buttons = []
+        self._focus_buttons = []
+        self._card_selection = frozenset()
+        self._card_dismissed = False
+        self._card_anchor_key = None
         self._last_sample_chip = None
         self._depth_sample_choices = False
         self._blank_empty_readout = False
@@ -3944,18 +4320,18 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._readout_timer.timeout.connect(self._update_spot_card)
         self._spot_acquisition: dict[str, tuple[int, str]] = {}
         self._age_transition_ma = 1000.0
-        self.concordia_readout = None
+        self.weighted_mean_dates = {}
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
-        self.summary_label = QtWidgets.QLabel(
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(4)
+        self.summary_label = _ReviewSummary(
             "Calculate final results to review preferred ages and flags."
         )
         self.summary_label.setObjectName("SecondaryText")
-        self.summary_label.setWordWrap(True)
-        layout.addWidget(self.summary_label)
+        self.summary_label.setMaximumWidth(190)
 
         self.tabs = _ReviewTabs()
+        self.tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 4px 7px; min-height: 18px; }")
         self.results_table, self.results_model = self.create_table(include_flags=self.include_flags)
         self.results_model.includeChanged.connect(self._table_include_changed)
         self.results_table.selectionModel().selectionChanged.connect(self._table_selection_changed)
@@ -3978,6 +4354,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.tabs.addTab(self.spot_concordia_page, "Spot concordia")
         self.tabs.addTab(self.depth_concordia_page, "Depth concordia")
         elide_tab_titles(self.tabs)
+        self.tabs.setCornerWidget(self.summary_label, QtCore.Qt.Corner.TopRightCorner)
         layout.addWidget(self.tabs, 1)
 
         self._theme: ThemeSpec | None = None
@@ -4005,6 +4382,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             canvas.customContextMenuRequested.connect(lambda pos, kind=kind: self._canvas_menu(pos, kind))
         self.spot_concordia.spotHovered.connect(self._scroll_hovered_spot)
         self.tabs.currentChanged.connect(self._results_tab_changed)
+        self.set_interaction_mode(self._saved_mouse_mode)
         self._hovered_choice_name = ""
         for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
             view.populate = lambda view=view: self._ensure_grouped_view(view)
@@ -4104,6 +4482,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _fit_panel(self, kind):
         panel = ReviewFitPanel(self, kind)
+        panel.setParent(self)
         self.fit_panels[kind] = panel
         return panel
 
@@ -4180,6 +4559,13 @@ class ResultsTableWidget(QtWidgets.QWidget):
         card = getattr(self, "spot_card", None)
         if card is None:
             return
+        selection = frozenset(self.selected_spots)
+        if selection != self._card_selection:
+            self._card_selection, self._card_dismissed = selection, False
+            self._card_anchor_key = None
+        if self._card_dismissed:
+            card.hide()
+            return
         names = [name for name in self._in_spot_order(self.selected_spots)]
         if not names:
             card.hide()
@@ -4199,6 +4585,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                        acquisition=self._spot_acquisition.get(name),
                        transition_ma=self._age_transition_ma,
                        calibration=self._include_calibration_uncertainty)
+        self._position_spot_card()
 
     def _in_spot_order(self, names) -> list[str]:
         order = {name: index for index, name in enumerate(self._spot_acquisition)}
@@ -4493,6 +4880,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 chip.update()
             area.setVisible(any(not chip.isHidden() for chip in area.chips.values()))
             area.reflow()
+            if hasattr(area, "menu_button"):
+                shown = sum(chip.property("inclusionState") != "inactive" for chip in area.chips.values())
+                area.menu_button.setText(f"Samples {shown}/{len(area.chips)}")
 
     def _sample_chip_clicked(self, sample, area):
         modifiers = QtWidgets.QApplication.keyboardModifiers()
@@ -4502,7 +4892,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             first, last = sorted((names.index(self._last_sample_chip), names.index(sample)))
             self.show_samples(names[first:last + 1], mode="add")
         else:
-            mode = "toggle" if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier else "replace"
+            mode = "replace" if modifiers & QtCore.Qt.KeyboardModifier.AltModifier else "toggle"
             self.show_samples([sample], mode=mode)
         self._last_sample_chip = sample
 
@@ -4959,9 +5349,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def set_external_chooser(self, enabled: bool) -> None:
         """Hide this page's spot list when another view (Studio's Spots tree) chooses."""
-        self.spot_chooser_section.setVisible(not enabled)
-        self.spot_summary_button.setVisible(enabled)
-        self.spot_options_filler.setVisible(enabled)
+        self.spot_spots_button.setProperty("toolbarAvailable", not enabled)
+        self.spot_spots_button.setVisible(not enabled)
+        self.spot_summary_button.hide()
+        self.spot_toolbar.reflow()
         self._update_spot_count()
 
     def set_selected_spots(self, spot_names, *, origin=None) -> None:
@@ -5096,6 +5487,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def eventFilter(self, watched, event):
         """Handle review inclusion and native Select All keyboard commands."""
+        if watched is self.spot_concordia and event.type() == QtCore.QEvent.Type.Resize:
+            QtCore.QTimer.singleShot(0, self, self._position_spot_card)
         if event.type() == QtCore.QEvent.Type.KeyPress and watched in self._review_views():
             if event.key() == QtCore.Qt.Key.Key_Space:
                 self.toggle_selected_inclusion()
@@ -5157,42 +5550,245 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def set_mouse_mode_buttons(self, mode: str) -> None:
         """Show the shared select, pan or zoom mode on the concordia panel."""
-        for key, button in self.mouse_mode_buttons.items():
-            blocker = QtCore.QSignalBlocker(button)
-            button.setChecked(key == mode)
-            del blocker
+        for buttons in self._mouse_button_sets:
+            for key, button in buttons.items():
+                with QtCore.QSignalBlocker(button):
+                    button.setChecked(key == mode)
 
     def _mouse_mode_clicked(self, mode: str) -> None:
         self.set_interaction_mode(mode)
         self.set_mouse_mode_buttons(mode)
         self.mouseModeRequested.emit(mode)
 
-    def create_spot_concordia_page(self) -> QtWidgets.QWidget:
-        """Build the selectable multi-spot concordia review page.
+    def _popover(self, text, content):
+        button = _PopoverButton()
+        button.setText(text)
+        button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QtWidgets.QMenu(button)
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        button.setMenu(menu)
+        return button
 
-        The options column has three groups: view settings (diagram, colour,
-        mouse), the spots to display (taking the spare height), and the
-        result with the fit controls pinned at the bottom.
-        """
+    def _samples_popover(self, kind):
+        content = QtWidgets.QWidget()
+        content.setMinimumWidth(360)
+        content.setMaximumWidth(420)
+        box = QtWidgets.QVBoxLayout(content)
+        row = self._create_spot_bulk_buttons()
+        row.itemAt(1).widget().setText("None")
+        row.addWidget(self._create_glass_button())
+        box.addLayout(row)
+        area = self._create_sample_chips(kind)
+        box.addWidget(area)
+        button = self._popover("Samples 0/0", content)
+        area.menu_button = button
+        return button, area
+
+    def _fit_popover(self, kind):
+        panel = self._fit_panel(kind)
+        # The original option form and toggle stay connected to the fit worker.
+        content = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(content)
+        box.addWidget(panel.fit_button)
+        options = panel.options_button.menu()
+        form = options.actions()[0].defaultWidget()
+        # Keep the original options action alive for the panel lifetime.
+        form.setParent(content)
+        box.addWidget(form)
+        form.show()
+        export = QtWidgets.QPushButton("Export fits…")
+        export.clicked.connect(panel.export_fits)
+        box.addWidget(export)
+        panel.options_button.hide()
+        panel.hide()
+        button = self._popover("Fit", content)
+        button.setCheckable(True)
+        panel.fit_button.toggled.connect(button.setChecked)
+        panel.fit_button.toggled.connect(lambda: self._update_fit_status(kind))
+        button.setChecked(panel.fit_button.isChecked())
+        panel.readout.textChanged.connect(lambda: self._update_fit_status(kind))
+        panel.recordsChanged.connect(lambda: self._update_fit_status(kind))
+        return button
+
+    def _toolbar_segment(self, buttons):
+        row = QtWidgets.QWidget()
+        box = QtWidgets.QHBoxLayout(row)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        for button in buttons.values():
+            button.setMinimumWidth(0)
+            button.setStyleSheet("padding: 3px 5px;")
+            box.addWidget(button)
+        return row
+
+    def _canvas_controls(self, toolbar, kind):
+        mouse = {}
+        group = QtWidgets.QButtonGroup(toolbar)
+        for mode in ("select", "pan", "zoom"):
+            button = QtWidgets.QToolButton()
+            button.setText(mode.title())
+            button.setCheckable(True)
+            button.setChecked(mode == "select")
+            button.setProperty("modeToggle", True)
+            button.setToolTip(("Drag: select (Shift adds, Cmd/Ctrl toggles)" if mode == "select" else
+                               f"Drag: {mode}; Shift+drag: select") + " · Space+drag or middle-drag: pan")
+            command = "Cmd" if sys.platform == "darwin" else "Ctrl"
+            button.setToolTip(button.toolTip() + "\n" +
+                f"Scroll: pan · Pinch, wheel or {command}+scroll: zoom · Double-click: reset view · "
+                "Right-click: hide/show · H hide · Shift+H show all · Esc clear")
+            button.clicked.connect(lambda checked=False, mode=mode: self._mouse_mode_clicked(mode))
+            group.addButton(button)
+            mouse[mode] = button
+        self._mouse_button_sets.append(mouse)
+        if kind == "spot":
+            self.mouse_mode_buttons = mouse
+        else:
+            self.depth_mouse_mode_buttons = mouse
+        toolbar.add_control(self._toolbar_segment(mouse), "Mouse")
+        axes = {}
+        group = QtWidgets.QButtonGroup(toolbar)
+        for mode in ("xy", "x", "y"):
+            button = QtWidgets.QToolButton()
+            button.setText(mode.upper())
+            button.setCheckable(True)
+            button.setChecked(mode == "xy")
+            button.setProperty("modeToggle", True)
+            button.setToolTip(f"Zoom {mode.upper()} axes; pan always moves both axes")
+            button.clicked.connect(lambda checked=False, mode=mode: self.set_zoom_mode(mode))
+            group.addButton(button)
+            axes[mode] = button
+        self._zoom_button_sets.append(axes)
+        toolbar.add_control(self._toolbar_segment(axes), "Zoom axes", priority=5)
+        toolbar.add_separator()
+        grid = QtWidgets.QToolButton()
+        grid.setText("Grid")
+        grid.setCheckable(True)
+        grid.setChecked(self._concordia_grid)
+        grid.toggled.connect(self.set_concordia_grid)
+        self._grid_buttons.append(grid)
+        toolbar.add_control(grid, "Grid", priority=4)
+        sigma = QtWidgets.QToolButton()
+        sigma.setText("2σ")
+        sigma.setCheckable(True)
+        sigma.setChecked(True)
+        sigma.setProperty("modeToggle", True)
+        sigma.setToolTip("Displayed uncertainty level (concordia ellipses and weighted dates use 2σ)")
+        sigma.clicked.connect(self.sigmaRequested)
+        self._sigma_buttons.append(sigma)
+        toolbar.add_control(sigma, "Uncertainty", priority=6)
+        reset = QtWidgets.QToolButton()
+        reset.setText("Reset")
+        reset.clicked.connect(lambda: getattr(self, kind + "_concordia").restore_default_view())
+        toolbar.add_control(reset, "Reset view", priority=3)
+
+    def _focus_control(self, toolbar):
+        button = QtWidgets.QToolButton()
+        button.setText("Focus")
+        button.setCheckable(True)
+        button.setToolTip("Fold or restore the workflow rail and inspector (Cmd/Ctrl+Shift+F)")
+        button.clicked.connect(self.focusRequested)
+        self._focus_buttons.append(button)
+        toolbar.add_control(button, "Focus")
+
+    def set_focus_checked(self, enabled: bool) -> None:
+        """Reflect the containing viewer's Focus preference on both pages."""
+        for button in self._focus_buttons:
+            with QtCore.QSignalBlocker(button):
+                button.setChecked(enabled)
+
+    def set_sigma_level(self, sigma_level: int) -> None:
+        """Reflect the viewer's uncertainty display toggle on both toolbars."""
+        for button in self._sigma_buttons:
+            with QtCore.QSignalBlocker(button):
+                button.setChecked(sigma_level == 2)
+                button.setText(f"{sigma_level}σ")
+
+    def _status_line(self, kind):
+        help_button = QtWidgets.QToolButton()
+        help_button.setText("?")
+        command = "Cmd" if sys.platform == "darwin" else "Ctrl"
+        help_button.setToolTip(
+            f"Drag: select (Shift adds, {command} toggles) · Space+drag or middle-drag: pan · "
+            f"Scroll: pan · Pinch, wheel or {command}+scroll: zoom · Double-click: reset view · "
+            "Right-click: hide/show · H hide · Shift+H show all · Esc clear")
+        help_button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
+        help_button.setFixedSize(24, 24)
+        age = QtWidgets.QLabel()
+        age.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        age.setWordWrap(True)
+        age.setMinimumWidth(0)
+        age.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        age.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse |
+                                    QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        fit = QtWidgets.QLabel("Fit off")
+        fit.setWordWrap(True)
+        fit.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        fit.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+        fit.setTextInteractionFlags(age.textInteractionFlags())
+        details = QtWidgets.QToolButton()
+        details.setText("details")
+        details.setStyleSheet("padding: 2px 4px; min-height: 0px;")
+        details.setFixedHeight(24)
+        details.clicked.connect(lambda: self._show_readout_details(kind))
+        line = _ConcordiaStatus(help_button, age, fit, details)
+        setattr(self, kind + "_age_label", age)
+        setattr(self, kind + "_fit_label", fit)
+        setattr(self, kind + "_status_line", line)
+        return line
+
+    def _update_fit_status(self, kind):
+        label = getattr(self, kind + "_fit_label", None)
+        if label is None:
+            return
+        panel = self.fit_panels[kind]
+        parts = []
+        for record in panel.records:
+            fields = [str(record.get("label", "Fit"))]
+            suffix = "_1s_with_decay" if record.get("decay_uncertainty_included") else "_1s"
+            for which in ("lower", "upper"):
+                age = record.get(which + "_age_ma", np.nan)
+                if np.isfinite(age):
+                    value = format_value_with_uncertainty(age, 2 * record.get(which + "_age" + suffix, np.nan))
+                    fields.append(f"{which} {value} Ma")
+            fields.append(f"MSWD {format_mswd(record.get('mswd', np.nan))}")
+            fields.append(f"bootstrap {record.get('bootstrap_resamples', 0)}/{record.get('requested_resamples', panel.resamples.value())}")
+            parts.append(" · ".join(fields))
+        label.setText((("Fit off · " if not panel.fit_button.isChecked() else "") + "; ".join(parts)) if parts else (panel.readout.toPlainText().split("\n")[0]
+                                                       if panel.fit_button.isChecked() else "Fit off"))
+        label.setToolTip(panel.readout.toPlainText())
+        getattr(self, kind + "_status_line").reflow()
+
+    def _show_readout_details(self, kind):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Dates and fit details")
+        dialog.resize(620, 380)
+        box = QtWidgets.QVBoxLayout(dialog)
+        readout = QtWidgets.QPlainTextEdit()
+        readout.setReadOnly(True)
+        def update():
+            readout.setPlainText(getattr(self, kind + "_age_label").toolTip() + "\n\n" +
+                                 self.fit_panels[kind].readout.toPlainText())
+        update()
+        self.fit_panels[kind].readout.textChanged.connect(update)
+        self._readout_timer.timeout.connect(update)
+        box.addWidget(readout)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        def closed():
+            self.fit_panels[kind].readout.textChanged.disconnect(update)
+            self._readout_timer.timeout.disconnect(update)
+        dialog.finished.connect(closed)
+        dialog.show()
+
+    def create_spot_concordia_page(self) -> QtWidgets.QWidget:
+        """Full-width concordia with one responsive toolbar and a status line."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        self.spot_sample_chips = self._create_sample_chips("spot")
-        layout.addWidget(self.spot_sample_chips)
-        review_row = QtWidgets.QHBoxLayout()
-        review_row.setSpacing(8)
-        layout.addLayout(review_row, 1)
-        controls = QtWidgets.QWidget()
-        controls.setObjectName("ConcordiaOptions")
-        controls.setMaximumWidth(230)
-        controls.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum,
-                               QtWidgets.QSizePolicy.Policy.Preferred)
-        controls_layout = QtWidgets.QVBoxLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(4)
-
-        # 1. View settings.
+        toolbar = self.spot_toolbar = _ConcordiaToolbar()
+        layout.addWidget(toolbar)
         diagram_group = QtWidgets.QButtonGroup(page)
         self.spot_diagram_buttons = {}
         for key, label, tip in (("wetherill", "Wetherill", "Wetherill concordia"),
@@ -5221,41 +5817,20 @@ class ResultsTableWidget(QtWidgets.QWidget):
             button.clicked.connect(lambda checked=False, key=key: self.set_spot_colour_mode(key))
             colour_group.addButton(button)
             self.spot_colour_buttons[key] = button
-        mouse_group = QtWidgets.QButtonGroup(page)
-        self.mouse_mode_buttons = {}
-        for key, label, tip in (
-                ("select", "Select", "Drag a box to select spots; Shift adds, Cmd/Ctrl toggles. Click a spot to select it."),
-                ("pan", "Pan", "Drag to pan; Shift+drag selects"),
-                ("zoom", "Zoom", "Drag a box to zoom; Shift+drag selects")):
-            button = QtWidgets.QToolButton()
-            button.setText(label)
-            button.setToolTip(tip)
-            button.setCheckable(True)
-            button.setProperty("modeToggle", True)
-            button.setChecked(key == "pan")
-            button.clicked.connect(lambda checked=False, key=key: self._mouse_mode_clicked(key))
-            mouse_group.addButton(button)
-            self.mouse_mode_buttons[key] = button
-        view_options = QtWidgets.QWidget()
-        view_options.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                                   QtWidgets.QSizePolicy.Policy.Fixed)
-        options_grid = QtWidgets.QGridLayout(view_options)
-        options_grid.setContentsMargins(0, 0, 0, 0)
-        options_grid.setHorizontalSpacing(8)
-        options_grid.setVerticalSpacing(4)
-        options_grid.setColumnStretch(1, 1)
-        for row, (label, buttons) in enumerate((("Diagram", self.spot_diagram_buttons),
-                                               ("Colour", self.spot_colour_buttons),
-                                               ("Mouse", self.mouse_mode_buttons))):
-            caption = QtWidgets.QLabel(label)
-            caption.setObjectName("ConcordiaOptionLabel")
-            options_grid.addWidget(caption, row, 0)
-            options_grid.addWidget(self._segmented_buttons(list(buttons.values())), row, 1)
-        controls_layout.addWidget(view_options)
-        controls_layout.addWidget(self._hairline())
-
-        # 2. Spots to display: takes all spare height.
-        self.spot_chooser_section = QtWidgets.QWidget()
+        toolbar.add_control(self._toolbar_segment(self.spot_diagram_buttons), "Diagram")
+        colours = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(colours)
+        for button in self.spot_colour_buttons.values():
+            box.addWidget(button)
+        self.spot_colour_menu = self._popover("Colour: " + saved_colour.title(), colours)
+        toolbar.add_control(self.spot_colour_menu, "Colour", priority=2)
+        toolbar.add_separator()
+        self._canvas_controls(toolbar, "spot")
+        toolbar.add_stretch()
+        samples, self.spot_sample_chips = self._samples_popover("spot")
+        toolbar.add_control(samples, "Samples")
+        self.spot_chooser_section = _PopoverContent()
+        self.spot_chooser_section.setMinimumSize(320, 340)
         chooser_layout = QtWidgets.QVBoxLayout(self.spot_chooser_section)
         chooser_layout.setContentsMargins(0, 0, 0, 0)
         chooser_layout.setSpacing(4)
@@ -5307,10 +5882,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.spot_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self._chooser_stack = QtWidgets.QStackedWidget()
-        # A wrapping readout makes Qt ask this page for height-for-width.
-        # Let the chooser and canvas shrink instead of inheriting their
-        # preferred heights and scrolling the bottom controls off a laptop.
-        self._chooser_stack.setMinimumHeight(80)
+        # The chooser has its own bounded popup, outside the canvas layout.
+        self._chooser_stack.setMinimumHeight(180)
         self._chooser_stack.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                            QtWidgets.QSizePolicy.Policy.Ignored)
         self._chooser_stack.addWidget(self.spot_choice_list)
@@ -5318,7 +5891,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._chooser_stack.setCurrentIndex(int(self.spot_group_toggle.isChecked()))
         self.spot_group_toggle.toggled.connect(lambda checked: self._switch_group_view(self._chooser_stack, checked))
         chooser_layout.addWidget(self._chooser_stack, 1)
-        controls_layout.addWidget(self.spot_chooser_section, 6)
+
         # In Studio the Spots tree is the chooser; this summary takes its place.
         self.spot_summary_button = QtWidgets.QToolButton()
         self.spot_summary_button.setObjectName("SpotSummaryLink")
@@ -5327,105 +5900,144 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_summary_button.setToolTip("Choose the spots to display in the Spots list")
         self.spot_summary_button.clicked.connect(self.chooserRequested)
         self.spot_summary_button.hide()
-        controls_layout.addWidget(self.spot_summary_button)
+        self.spot_summary_button.setParent(page)
 
-        # The selected spot's card.
-        self.spot_card = SpotInfoCard()
-        self.spot_card.showSignalRequested.connect(self.showSignalRequested)
-        self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
-        controls_layout.addWidget(self.spot_card, 1)
-        # Replace the chooser's stretch when Studio uses its external Spots tree.
-        self.spot_options_filler = QtWidgets.QWidget()
-        self.spot_options_filler.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                                              QtWidgets.QSizePolicy.Policy.Expanding)
-        self.spot_options_filler.hide()
-        controls_layout.addWidget(self.spot_options_filler, 1)
-        controls_layout.addWidget(self._hairline())
-
-        # 3. Result and fit, pinned at the bottom.
-        self.concordia_age_label = QtWidgets.QLabel("Shown: No concordia age for this set")
-        self.concordia_age_label.setObjectName("ConcordiaResult")
-        self.concordia_age_label.setWordWrap(True)
-        self.concordia_age_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
-                                                       | QtCore.Qt.TextInteractionFlag.TextSelectableByKeyboard)
-        self.concordia_age_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
-                                              QtWidgets.QSizePolicy.Policy.Preferred)
-        self.concordia_age_label.setMaximumHeight(self.concordia_age_label.fontMetrics().lineSpacing() * 3 + 6)
-        controls_layout.addWidget(self.concordia_age_label)
-        controls_layout.addWidget(self._fit_panel("spot"))
+        self.spot_spots_button = self._popover("Spots", self.spot_chooser_section)
+        toolbar.add_control(self.spot_spots_button, "Spots", priority=1)
+        self.spot_fit_button = self._fit_popover("spot")
+        toolbar.add_control(self.spot_fit_button, "Fit")
+        self._focus_control(toolbar)
         self.spot_concordia = ConcordiaReviewWidget()
         self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                                          QtWidgets.QSizePolicy.Policy.Ignored)
-        review_row.addWidget(controls)
-        review_row.addWidget(self.spot_concordia, 1)
+                                         QtWidgets.QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.spot_concordia, 1)
+        layout.addWidget(self._status_line("spot"))
+        self.spot_card = SpotInfoCard(self.spot_concordia)
+        self.spot_card.set_expanded(self._settings.value("review_spot_card_expanded_v1", False, type=bool)
+                                    if self._settings is not None else False)
+        self.spot_card.expansionChanged.connect(self._spot_card_expansion_changed)
+        self.spot_card.showSignalRequested.connect(self.showSignalRequested)
+        self.spot_card.excludeToggled.connect(lambda name, excluded: self.set_spot_excluded({name}, excluded))
+        self.spot_card.close_button.clicked.connect(self._dismiss_spot_card)
+        self.spot_concordia.installEventFilter(self)
         return page
 
+    def _dismiss_spot_card(self):
+        self._card_dismissed = True
+        self.spot_card.hide()
+
+    def _spot_card_expansion_changed(self, expanded):
+        if self._settings is not None:
+            self._settings.setValue("review_spot_card_expanded_v1", expanded)
+        self._position_spot_card()
+
+    def _position_spot_card(self):
+        """Avoid the legend and selected ellipse, retaining the chosen corner."""
+        plot, card = self.spot_concordia, self.spot_card
+        card.setFont(self.spot_age_label.font())
+        expanded = card.more_button.isChecked()
+        card.layout().invalidate()
+        card.resize(min(300 if expanded else 240, max(1, plot.width() - 20)),
+                    min(260 if expanded else card.sizeHint().height(), max(1, plot.height() - 20)))
+        key = (self._card_selection, plot.size(), card.size())
+        if key != self._card_anchor_key:
+            self._card_anchor_key = key
+            obstacles = []
+            if plot._legend is not None:
+                # Resizing a hidden tab can position the card before the
+                # canvas's deferred label pass positions its legend.
+                plot._position_sample_legend()
+                obstacles.append(plot.mapFromScene(plot._legend.sceneBoundingRect()).boundingRect())
+            if plot._plot_item is not None:
+                vb = plot._plot_item.vb
+                for name, ellipse, _color in plot._ellipses:
+                    if name in self._card_selection and ellipse.isVisible():
+                        x, y = ellipse.getData()
+                        bounds = QtCore.QRectF(QtCore.QPointF(float(np.min(x)), float(np.min(y))),
+                                              QtCore.QPointF(float(np.max(x)), float(np.max(y))))
+                        obstacles.append(plot.mapFromScene(vb.mapViewToScene(bounds)).boundingRect())
+            point = next((p for p in plot._points if p[0] in self._card_selection), None)
+            preferred = (True, True)
+            if point is not None and plot._plot_item is not None:
+                scene = plot._plot_item.vb.mapViewToScene(QtCore.QPointF(point[1], point[2]))
+                centre = plot.mapFromScene(scene)
+                preferred = (centre.x() < plot.width()/2, centre.y() < plot.height()/2)
+
+            def overlap(corner):
+                right, bottom = corner
+                box = QtCore.QRect(plot.width() - card.width() - 10 if right else 10,
+                                   plot.height() - card.height() - 10 if bottom else 10,
+                                   card.width(), card.height())
+                intersections = [box.intersected(obstacle) for obstacle in obstacles]
+                return sum(r.width() * r.height() for r in intersections), corner != preferred
+
+            self._card_corner = min(((True, True), (False, True), (True, False), (False, False)),
+                                    key=overlap)
+        right, bottom = self._card_corner
+        card.move(max(0, plot.width() - card.width() - 10) if right else 10,
+                  max(0, plot.height() - card.height() - 10) if bottom else 10)
+        card.raise_()
+
     def create_depth_concordia_page(self) -> QtWidgets.QWidget:
-        """Build the one-spot sweep-wise concordia review page."""
+        """Full-width depth concordia with acquisition and fit popovers."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        self.depth_sample_chips = self._create_sample_chips("depth")
-        layout.addWidget(self.depth_sample_chips)
-        review_row = QtWidgets.QHBoxLayout()
-        review_row.setSpacing(8)
-        layout.addLayout(review_row, 1)
-        chooser = QtWidgets.QWidget()
-        chooser.setMaximumWidth(230)
-        controls = QtWidgets.QVBoxLayout(chooser)
-        controls.setContentsMargins(0, 0, 0, 0)
-        review_row.addWidget(chooser)
-        controls.addWidget(QtWidgets.QLabel("Focus one acquisition"))
+        toolbar = self.depth_toolbar = _ConcordiaToolbar()
+        layout.addWidget(toolbar)
         self.depth_spot_combo = StyledComboBox(elide_mode=QtCore.Qt.TextElideMode.ElideMiddle)
-        self.depth_spot_combo.currentTextChanged.connect(self.depth_spot_combo.setToolTip)
         self.depth_spot_combo.setMinimumContentsLength(8)
-        self.depth_spot_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.depth_spot_combo.currentIndexChanged.connect(
-            self._depth_spot_changed
-        )
-        controls.addWidget(self.depth_spot_combo)
+        self.depth_spot_combo.setMaximumWidth(145)
+        self.depth_spot_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.depth_spot_combo.currentTextChanged.connect(self.depth_spot_combo.setToolTip)
+        self.depth_spot_combo.currentIndexChanged.connect(self._depth_spot_changed)
+        toolbar.add_control(self.depth_spot_combo, "Focused acquisition")
         self.depth_glasses_toggle = self._create_glass_button()
-        controls.addWidget(self.depth_glasses_toggle, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
-        self.depth_choice_tree, self.depth_choice_group_model = self._create_grouped_view()
-        self.depth_choice_tree.setHeaderHidden(True)
-        self.depth_choice_tree.setMinimumHeight(80)
-        self.depth_choice_tree.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
-        self.depth_choice_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.depth_choice_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
-        controls.addWidget(self.depth_choice_tree, 1)
-        controls.addLayout(self._create_spot_bulk_buttons())
-        diagram_row, self.depth_diagram_buttons = self.create_diagram_buttons(
-            self.refresh_depth_concordia
-        )
-        controls.addWidget(diagram_row)
-        cmap_row = QtWidgets.QHBoxLayout()
-        cmap_row.setSpacing(6)
-        cmap_row.addWidget(QtWidgets.QLabel("Colour map"))
+        toolbar.add_control(self.depth_glasses_toggle, "Glasses", priority=1)
+        diagram, self.depth_diagram_buttons = self.create_diagram_buttons(self.refresh_depth_concordia)
+        self.depth_diagram_buttons["tera_wasserburg"].setText("T–W")
+        # Remove the caption used by the previous options column.
+        diagram.hide()
+        diagram.setParent(page)
+        self._depth_diagram_group = QtWidgets.QButtonGroup(page)
+        for button in self.depth_diagram_buttons.values():
+            self._depth_diagram_group.addButton(button)
+        toolbar.add_control(self._toolbar_segment(self.depth_diagram_buttons), "Diagram", priority=1)
         self.depth_colormap_combo = StyledComboBox()
-        self.depth_colormap_combo.setMinimumContentsLength(7)
-        self.depth_colormap_combo.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        available = set(pg.colormap.listMaps())
+        self.depth_colormap_combo.setToolTip("Colour map for depth / signal time")
         self.depth_colormap_combo.addItems([name for name in (
             "plasma", "viridis", "inferno", "magma", "cividis", "turbo", "CET-L1", "CET-L2")
-            if name in available])
-        saved_map = (self._settings.value("review_depth_colormap_v1", "plasma", type=str)
-                     if self._settings is not None else "plasma")
-        index = self.depth_colormap_combo.findText(saved_map)
-        self.depth_colormap_combo.setCurrentIndex(max(0, index))
+            if name in set(pg.colormap.listMaps())])
+        saved_map = self._settings.value("review_depth_colormap_v1", "plasma", type=str) if self._settings else "plasma"
+        self.depth_colormap_combo.setCurrentIndex(max(0, self.depth_colormap_combo.findText(saved_map)))
         self.depth_colormap_combo.currentTextChanged.connect(self.set_depth_colormap)
-        cmap_row.addWidget(self.depth_colormap_combo)
-        cmap_row.addStretch(1)
-        controls.addLayout(cmap_row)
-        controls.addWidget(self._selection_actions("depth"))
-        controls.addWidget(self._fit_panel("depth"))
+        toolbar.add_control(self.depth_colormap_combo, "Colour map", priority=2)
+        toolbar.add_separator()
+        self._canvas_controls(toolbar, "depth")
+        toolbar.add_stretch()
+        samples, self.depth_sample_chips = self._samples_popover("depth")
+        toolbar.add_control(samples, "Samples", priority=1)
+        content = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(content)
+        self.depth_choice_tree, self.depth_choice_group_model = self._create_grouped_view()
+        self.depth_choice_tree.setHeaderHidden(True)
+        self.depth_choice_tree.setMinimumSize(300, 220)
+        box.addWidget(self.depth_choice_tree)
+        box.addLayout(self._create_spot_bulk_buttons())
+        actions = self._selection_actions("depth")
+        actions.setText("Actions")
+        toolbar.add_control(actions, "Selection actions", priority=1)
+        self.depth_spots_button = self._popover("Spots", content)
+        toolbar.add_control(self.depth_spots_button, "Spots", priority=1)
+        self.depth_fit_button = self._fit_popover("depth")
+        toolbar.add_control(self.depth_fit_button, "Fit")
+        self._focus_control(toolbar)
         self.depth_concordia = ConcordiaReviewWidget()
         self.depth_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                                           QtWidgets.QSizePolicy.Policy.Ignored)
-        review_row.addWidget(self.depth_concordia, 1)
+                                          QtWidgets.QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.depth_concordia, 1)
+        layout.addWidget(self._status_line("depth"))
         return page
 
     @staticmethod
@@ -5441,6 +6053,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Theme and redraw both embedded concordia canvases."""
         self._theme = theme
+        fill = theme_color(theme.glass_strong)
+        fill.setAlpha(232)
+        self.spot_card.setStyleSheet(
+            f"QFrame#SpotInfoCard {{ background: rgba({fill.red()}, {fill.green()}, {fill.blue()}, 232); "
+            f"border: 1px solid {theme.input_border}; border-radius: 9px; }}")
         self.results_model.review_theme = self.depth_model.review_theme = theme
         self._update_exclusion_styles()
         self.refresh_spot_concordia()
@@ -5459,9 +6076,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def set_zoom_mode(self, mode: str) -> None:
         """Forward zoom-axis changes to the visible concordia canvas."""
-        target = self.active_concordia()
-        if target is not None:
+        for target in (self.spot_concordia, self.depth_concordia):
             target.set_zoom_mode(mode)
+        for buttons in self._zoom_button_sets:
+            for key, button in buttons.items():
+                with QtCore.QSignalBlocker(button):
+                    button.setChecked(key == mode)
 
     def zoom_mode(self) -> str:
         """Return the visible concordia zoom mode, or the default."""
@@ -5473,10 +6093,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
         for canvas in (self.spot_concordia, self.depth_concordia):
             canvas.set_interaction_mode(mode)
         self.set_mouse_mode_buttons(self.spot_concordia.interaction_mode())
+        if self._settings is not None:
+            self._settings.setValue("review_concordia_mouse_v2", self.spot_concordia.interaction_mode())
 
     def set_concordia_grid(self, visible: bool) -> None:
         """Apply both concordia grids and remember this viewer preference."""
         self._concordia_grid = bool(visible)
+        for button in self._grid_buttons:
+            with QtCore.QSignalBlocker(button):
+                button.setChecked(visible)
         for canvas in (self.spot_concordia, self.depth_concordia):
             canvas.set_grid_visible(visible)
         if self._settings is not None:
@@ -5558,7 +6183,6 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 colour_mode=self.spot_colour_mode(),
                 included_spots=selected_names,
             )
-        self.spot_concordia.set_concordia_age(None)
         self._readout_timer.start(0)
         self._schedule_fits()
 
@@ -5571,6 +6195,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if mode not in self.spot_colour_buttons:
             return
         self.spot_colour_buttons[mode].setChecked(True)
+        self.spot_colour_menu.setText("Colour: " + mode.title())
         if self._settings is not None:
             self._settings.setValue("review_spot_colour_v1", mode)
         self.refresh_spot_concordia()
@@ -5590,30 +6215,55 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.appearance_changed.emit()
 
     def _update_age_readout(self):
-        frame = self._spot_frame
+        # Three column-wise reductions; no Python loop over acquisitions.
+        source = self.results_model.frame
         selected = bool(self.selected_spots)
-        names = {name for name, included in self.include_flags.items() if included
-                 and name not in self.excluded_spots and (not selected or name in self.selected_spots)}
-        frame = (frame.loc[frame.spot_name.astype(str).isin(names)] if "spot_name" in frame
-                 else frame.iloc[0:0])
-        self.concordia_readout = concordia_age_readout(
-            frame, space=self.selected_diagram(self.spot_diagram_buttons),
-            include_calibration_uncertainty=self._include_calibration_uncertainty)
-        prefix = "Selected" if selected else "Included"
-        result = self.concordia_readout
-        if result is None:
-            text = "" if self._blank_empty_readout and not names else f"{prefix}: No concordia age for this set"
-            tooltip = text
+        systems = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb")
+        # Final decisions supply dates; spot means supply any absent branches.
+        if "spot_name" in source and "spot_name" in self._spot_frame:
+            missing = [system + suffix for system in systems for suffix in (
+                "_age", "_age_2e", "_age_2e_with_calibration", "_age_2e_no_calibration")
+                if system + suffix not in source and system + suffix in self._spot_frame]
+            if missing:
+                source = source.merge(self._spot_frame[["spot_name", *missing]], on="spot_name", how="left")
+        if "spot_name" in source:
+            keys = source.spot_name.astype(str)
+            shown = keys.map(self.include_flags).fillna(False).astype(bool)
+            requested = keys.isin(self.selected_spots) if selected else shown
+            mask = requested & shown & ~keys.isin(self.excluded_spots)
+            frame = source.loc[mask]
+            total = len(self.selected_spots) if selected else int(shown.sum())
         else:
-            age = format_value_with_uncertainty(result.age_ma, result.age_2se)
-            text = (f"{prefix}: Concordia age\n{age} Ma (2σ)\n"
-                    f"MSWD {format_mswd(result.mswd)} · n = {result.n}")
-            tooltip = f"{prefix}: {result.text}"
-            if selected and len(names) < len(self.selected_spots):
-                tooltip += f"\n{len(names)} of {len(self.selected_spots)} selected are included (shown and used)"
-        self.concordia_age_label.setText(text)
-        self.concordia_age_label.setToolTip(tooltip)
-        self.spot_concordia.set_concordia_age(result.age_ma if result else None)
+            frame, total = source.iloc[:0], 0
+        prefix = "Selected" if selected else "Included"
+        count = len(frame)
+        scope = f"{prefix} {count}" if count == total else f"{prefix} {count} of {total} used"
+        parts, details = [scope], [scope]
+        self.weighted_mean_dates = {}
+        branch = "with_calibration" if self._include_calibration_uncertainty else "no_calibration"
+        for system in systems:
+            base = system + "_age"
+            error = next((column for column in (base + "_2e_" + branch, base + "_2e") if column in frame), None)
+            if base not in frame or error is None:
+                continue
+            result = weighted_mean_and_mswd(pd.to_numeric(frame[base], errors="coerce"),
+                                            pd.to_numeric(frame[error], errors="coerce"))
+            self.weighted_mean_dates[system] = result
+            if result["n"]:
+                value = format_value_with_uncertainty(result["weighted_mean"], result["weighted_mean_2e"])
+                compact_system = system.replace("Pb", "").replace("U", "")
+                parts.append(f"{compact_system} {value}")
+                details.append(f"{system} {value} Ma (2σ) · MSWD {format_mswd(result['mswd'])} · n={result['n']}")
+        text = " · ".join(parts) + (" Ma (2σ)" if len(parts) > 1 else " · No dates available")
+        if self._blank_empty_readout and total == 0:
+            text = ""
+        details.append("Inverse-variance weighted means, internal 2σ uncertainties; no MSWD inflation. "
+                       + "Calibration uncertainty " + ("included." if self._include_calibration_uncertainty else "excluded."))
+        for label in (self.spot_age_label, self.depth_age_label):
+            label.setText(text)
+            label.setToolTip("\n".join(details))
+        for line in (self.spot_status_line, self.depth_status_line):
+            line.reflow()
 
     def hideEvent(self, event):
         """Stop pending fits before closing or hiding the review views."""
@@ -8138,7 +8788,7 @@ class StandardBiasControls(QtWidgets.QWidget):
         self.per_sample_trends_check = QtWidgets.QCheckBox("Per-standard trends")
         layout.addWidget(self.log_x_check)
         layout.addWidget(self.per_sample_trends_check)
-        self.summary_label = QtWidgets.QLabel()
+        self.summary_label = ElidedLabel()
         self.summary_label.setWordWrap(True)
         self.summary_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         self.summary_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)

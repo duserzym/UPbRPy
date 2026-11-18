@@ -112,26 +112,14 @@ def test_review_controls_clear_navigation_and_stay_in_active_plot(studio, app, f
         if plot is None:
             assert not window.plot_control_scroll.isVisible()
             continue
-        controls = assert_inside_plot(window, plot)
-        for widget in (review.tabs.tabBar(), review.summary_label, *review._chip_areas):
-            if widget.isVisible():
-                assert not controls.intersects(rect_in(widget, window))
+        assert not window.plot_control_scroll.isVisible()
+        toolbar = review.spot_toolbar if plot is review.spot_concordia else review.depth_toolbar
+        assert rect_in(toolbar, window).bottom() < rect_in(plot, window).top()
         for offset in (-10000, 10000):
-            window._plot_control_anchors[window._plot_control_kind()] = (
-                "bottom_right", offset, offset)
+            window._plot_control_anchors[window._plot_control_kind()] = ("bottom_right", offset, offset)
             window._position_plot_controls()
             settle(app)
-            assert_inside_plot(window, plot)
-        window._move_plot_controls(QtCore.QPoint(-10000, 10000))
-        window._remember_plot_control_place()
-        settle(app)
-        before = window.plot_control_scroll.geometry()
-        window._position_plot_controls()
-        settle(app)
-        assert window.plot_control_scroll.geometry() == before
-        window.reset_plot_controls()
-        settle(app)
-        assert_inside_plot(window, plot)
+            assert not window.plot_control_scroll.isVisible()
 
 
 def test_trace_controls_stay_in_trace_and_empty_state_follows_stack(studio, app):

@@ -118,6 +118,8 @@ def test_deferred_trees_keep_review_state(review, finalized, app, monkeypatch, t
     ):
         toggle.setChecked(True)
         review.tabs.setCurrentWidget(page)
+        if view is review.spot_choice_tree:
+            review.spot_spots_button.menu().popup(review.mapToGlobal(QtCore.QPoint(10, 10)))
         app.processEvents()
         assert view.isVisible()
         assert view not in review._pending_group_views
@@ -173,6 +175,7 @@ def test_visible_tree_refreshes_once_and_hidden_trees_use_new_results(review, fi
     assert review.spot_choice_tree in review._pending_group_views
     review.spot_group_toggle.setChecked(True)
     review.tabs.setCurrentWidget(review.spot_concordia_page)
+    review.spot_spots_button.menu().popup(review.mapToGlobal(QtCore.QPoint(10, 10)))
     app.processEvents()
     assert review.spot_choice_group_model.rowCount() == 1
     assert review.spot_choice_group_model.item(0).text() == "Reinstalled · 400/400"
@@ -189,6 +192,7 @@ def test_depth_tree_is_deferred_until_its_page_is_shown(review, finalized, app):
     review.tabs.setCurrentWidget(review.depth_concordia_page)
     review.resize(1000, 600)
     review.show()
+    review.depth_spots_button.menu().popup(review.mapToGlobal(QtCore.QPoint(10, 10)))
     app.processEvents()
     assert view not in review._pending_group_views
     model = review.depth_choice_group_model

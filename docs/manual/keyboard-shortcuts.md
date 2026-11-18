@@ -29,11 +29,16 @@ editing shortcuts apply in the import and selection steps.
 | Show reduction notes and activity log | Ctrl+Shift+L |
 | Submit reduction to database | Ctrl+Shift+D |
 | Show shortcut sheet | Ctrl+/ |
+| Focus on the plot / restore panels | Ctrl+Shift+F |
 
 In concordia plots: click selects, Shift-click extends, Command/Ctrl-click
-toggles, H hides the selection, Shift+H shows all, E toggles calculation
-exclusion, Escape clears selection and Command/Ctrl+A selects shown spots.
-Double-click resets the plot. In the chooser, Space toggles visibility checks.
+toggles. Select is the default drag mode: Shift+drag adds and Command/Ctrl+drag
+toggles. Space+drag, middle-drag and trackpad scroll pan in every mode; pinch,
+mouse wheel and Command/Ctrl+scroll zoom. H/E toggles calculation hiding,
+Shift+H shows all, Escape clears selection and Command/Ctrl+A selects shown
+spots. Double-click resets the plot. In the chooser, Space toggles visibility
+checks. In Samples, Space/Return toggles a focused chip; Option-click
+(Alt-click elsewhere) isolates a sample and Shift-click adds a range.
 
 Use **Window > Move Tab to New Window** to move a reduction with its state.
 Use **View > Reset Layout** to fit the layout to the current display. On a

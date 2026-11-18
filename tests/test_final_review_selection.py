@@ -349,7 +349,7 @@ def test_select_drag_uses_data_rectangle_without_zoom(review):
     assert vb.viewRange() == before
 
 
-def test_select_toolbar_available_only_for_spot_concordia(app):
+def test_select_toolbar_available_for_both_concordia_views(app):
     from GUI.studio_window import StudioWindow
 
     settings = QtCore.QSettings("UPbRPy", "Studio")
@@ -372,13 +372,15 @@ def test_select_toolbar_available_only_for_spot_concordia(app):
             for _ in range(8):
                 app.processEvents()
             for scroll, bar in window._toolbar_strips:
+                if not scroll.isVisible():
+                    continue
                 assert scroll.horizontalScrollBar().maximum() == 0
                 assert bar.width() <= scroll.viewport().width()
         window.set_interaction_mode("select")
         assert window.results_table.spot_concordia.interaction_mode() == "select"
         window.results_table.tabs.setCurrentWidget(window.results_table.depth_concordia_page)
-        assert not button.isEnabled()
-        assert window._selected_interaction_mode() == "zoom"
+        assert button.isEnabled()
+        assert window._selected_interaction_mode() == "select"
         window.session.plot_mode = "raw"
         window._apply_interaction_controls_to_current_plot()
         window.set_interaction_mode("select")

@@ -49,7 +49,7 @@ def test_presets_default_live_fits_on_only_for_common_pb_phases():
         key for key, preset in WORKFLOW_PRESETS.items() if preset.common_pb_calibration != "radiogenic"}
 
 
-def test_new_zircon_session_opens_concordia_in_pan_with_fits_off(window, app):
+def test_new_zircon_session_opens_concordia_in_select_with_fits_off(window, app):
     # A per-user preference left on (for example from an apatite session).
     for panel in window.results_table.fit_panels.values():
         panel.fit_button.setChecked(True)
@@ -59,8 +59,8 @@ def test_new_zircon_session_opens_concordia_in_pan_with_fits_off(window, app):
     window.set_plot_mode("final_results", refresh=False)
     window.results_table.tabs.setCurrentWidget(window.results_table.spot_concordia_page)
     window._apply_interaction_controls_to_current_plot()
-    assert window._selected_interaction_mode() == "pan"
-    assert window.results_table.spot_concordia.interaction_mode() == "pan"
+    assert window._selected_interaction_mode() == "select"
+    assert window.results_table.spot_concordia.interaction_mode() == "select"
     # Box stays available, and trace plots keep Box.
     window.set_interaction_mode("zoom")
     assert window.results_table.spot_concordia.interaction_mode() == "zoom"

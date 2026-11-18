@@ -326,6 +326,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._build_menu()
         self._build_ui()
+        self._initialize_plot_focus()
+        self._initialize_concordia_layout()
         self.restore_progress.connect(
             self.busy_progress.set_progress, QtCore.Qt.ConnectionType.QueuedConnection)
         QtWidgets.QApplication.instance().aboutToQuit.connect(self._cancel_restore)
@@ -999,7 +1001,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Concordia plots", "Select all shown spots", self._shortcut_text([QtGui.QKeySequence.StandardKey.SelectAll])),
             ("Concordia plots", "Clear the selection", "Esc"),
             ("Concordia plots", "Hide / unhide selected spots from calculations", "H / E"),
-            ("Concordia plots", "Add / toggle spots in a selection rectangle", "Shift+drag / " + command + "Shift+drag"),
+            ("Concordia plots", "Add / toggle spots in a selection rectangle", "Shift+drag / " + command + "drag"),
+            ("Concordia plots", "Pan in every mouse mode", "Space+drag / middle-drag / trackpad scroll"),
+            ("Concordia plots", "Zoom about the cursor", "Pinch / mouse wheel / " + command + "scroll"),
             ("Concordia plots", "Show all spots", "Shift+H"),
         ])
         return rows
@@ -1398,6 +1402,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Remember this reduction's splitter positions and notes visibility."""
         try:
             for name, splitter in self._layout_splitters().items():
+                if name == "workspace" and getattr(self, "_focus_folded", set()):
+                    continue
                 state = (self._expanded_workspace_state if name == "workspace"
                          and getattr(self, "_width_mode", None) == "compact" else splitter.saveState())
                 self.settings.setValue(self.LAYOUT_SETTINGS[name], state)
@@ -1422,6 +1428,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_default_layout(self) -> None:
         """Panel widths and the notes/log strip chosen for this window size."""
+        if getattr(self, "_focus_folded", set()):
+            return
         width = max(self.width(), 760)
         compact = width < 1400
         rail = 195 if compact else 205 if width < 1500 else 240
@@ -1430,9 +1438,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_notes_log_visible(self.window().height() >= 950)
         self.spot_channel_splitter.setSizes([3, 2])
         self._apply_width_layout(force=True)
+        self._fit_default_concordia_panels()
 
     def reset_layout(self) -> None:
         """View > Reset Layout: forget saved sizes, fit the default to the screen."""
+        self.set_plot_focus(False)
         for key in self.LAYOUT_SETTINGS.values():
             self.settings.remove(key)
         self.set_workspace_panel_visible("sidebar", True)
@@ -1513,24 +1523,151 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._layout_restored:
                 self.apply_default_layout()
 
+    def _initialize_plot_focus(self):
+        """Add Focus after menu construction, away from the inspector actions."""
+        self._focus_folded = set()
+        self._focus_strips = {}
+        self._focus_sizes = None
+        view_menu = next(menu for menu in self.menuBar().findChildren(QtWidgets.QMenu)
+                         if menu.title().replace("&", "") == "View")
+        self.plot_focus_action = view_menu.addAction("Focus on the plot")
+        self.plot_focus_action.setCheckable(True)
+        sequence = QtGui.QKeySequence("Ctrl+Shift+F")
+        if not any(sequence in action.shortcuts() for action in self.findChildren(QtGui.QAction)):
+            self.plot_focus_action.setShortcut(sequence)
+        self.plot_focus_action.triggered.connect(self.set_plot_focus)
+        for panel, handle in (("sidebar", "»"), ("inspector", "«")):
+            strip = QtWidgets.QWidget(self.centralWidget())
+            strip.setFixedWidth(26)
+            box = QtWidgets.QVBoxLayout(strip)
+            box.setContentsMargins(0, 4, 0, 4)
+            button = QtWidgets.QToolButton()
+            button.setText(handle)
+            button.setFixedWidth(26)
+            button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
+            button.setToolTip("Unfold " + ("workflow rail" if panel == "sidebar" else "inspector"))
+            button.clicked.connect(lambda checked=False, panel=panel: self._unfold_focus_panel(panel))
+            box.addWidget(button)
+            box.addStretch()
+            strip.hide()
+            self._focus_strips[panel] = strip
+        try:
+            saved = json.loads(self.settings.value("workspace_focus_v1", "{}", type=str))
+        except (TypeError, ValueError):
+            saved = {}
+        if isinstance(saved, dict) and saved.get("folded"):
+            def restore():
+                self.set_plot_focus(True)
+                if isinstance(saved.get("visible"), dict):
+                    self._focus_visible.update(saved["visible"])
+                    for panel in self._focus_folded:
+                        self._focus_strips[panel].setVisible(self._focus_visible.get(panel, True))
+                sizes = saved.get("sizes")
+                if isinstance(sizes, list) and len(sizes) == 3:
+                    self._focus_sizes = [int(value) for value in sizes]
+                for panel in ("sidebar", "inspector"):
+                    if panel not in saved["folded"]:
+                        self._unfold_focus_panel(panel)
+                self._save_plot_focus()
+            QtCore.QTimer.singleShot(0, self, restore)
+
+    def _save_plot_focus(self):
+        enabled = bool(self._focus_folded)
+        self.plot_focus_action.setChecked(enabled)
+        self.results_table.set_focus_checked(enabled)
+        for panel, action in (("sidebar", self.sidebar_action), ("inspector", self.inspector_action)):
+            if panel in getattr(self, "_focus_visible", {}):
+                with QtCore.QSignalBlocker(action):
+                    action.setChecked(self._focus_visible[panel])
+        self.settings.setValue("workspace_focus_v1", json.dumps({
+            "folded": sorted(self._focus_folded), "sizes": self._focus_sizes,
+            "visible": getattr(self, "_focus_visible", {})}))
+
+    def set_plot_focus(self, enabled: bool) -> None:
+        """Fold both workspace panels, or restore their previous splitter sizes."""
+        if not hasattr(self, "_focus_folded"):
+            return
+        if not enabled:
+            for panel in tuple(self._focus_folded):
+                self._unfold_focus_panel(panel)
+            return
+        if self._focus_folded:
+            return
+        self._focus_sizes = self.workspace_splitter.sizes()
+        self._focus_previous_mode = getattr(self, "_width_mode", None)
+        self._focus_compact_sizes = (list(self._focus_sizes)
+                                     if self._focus_previous_mode == "compact" else None)
+        self._focus_visible = {panel: not widget.isHidden() for panel, widget in (
+            ("sidebar", self.sidebar_panel), ("inspector", self.inspector_panel))}
+        # Bring compact's floating inspector into the existing splitter first.
+        if self.workspace_splitter.indexOf(self.inspector_panel) < 0:
+            self._focus_sizes = [*self._focus_sizes[:2], self.inspector_panel.width()]
+            self.inspector_panel.setMinimumWidth(260)
+            self.inspector_panel.setMaximumWidth(16777215)
+            self.workspace_splitter.addWidget(self.inspector_panel)
+        for panel, index, widget in (("sidebar", 0, self.sidebar_panel),
+                                     ("inspector", 2, self.inspector_panel)):
+            self.workspace_splitter.replaceWidget(index, self._focus_strips[panel])
+            widget.setParent(self.centralWidget())
+            widget.hide()
+            self._focus_strips[panel].setVisible(self._focus_visible[panel])
+            self._focus_folded.add(panel)
+        total = sum(self.workspace_splitter.sizes())
+        self.workspace_splitter.setSizes([26, max(1, total-52), 26])
+        self._save_plot_focus()
+
+    def _unfold_focus_panel(self, panel):
+        if panel not in self._focus_folded:
+            return
+        index = 0 if panel == "sidebar" else 2
+        widget = self.sidebar_panel if panel == "sidebar" else self.inspector_panel
+        self.workspace_splitter.replaceWidget(index, widget)
+        self._focus_strips[panel].hide()
+        self._focus_strips[panel].setParent(self.centralWidget())
+        widget.setVisible(self._focus_visible.get(panel, True))
+        self._focus_folded.remove(panel)
+        sizes = list(self._focus_sizes or self.workspace_splitter.sizes())
+        total = sum(self.workspace_splitter.sizes())
+        if self._focus_folded:
+            sizes[0 if "sidebar" in self._focus_folded else 2] = 26
+            sizes[1] = max(1, total-sizes[0]-sizes[2])
+        self.workspace_splitter.setSizes(sizes)
+        self._save_plot_focus()
+        if not self._focus_folded:
+            if self._focus_previous_mode == "compact":
+                self.inspector_panel.setParent(self.centralWidget())
+                self.inspector_panel.setFixedWidth(310)
+                self.inspector_panel.setVisible(self._focus_visible.get("inspector", False))
+                self.workspace_splitter.setSizes(self._focus_compact_sizes)
+            # Responsive mode changes deferred during Focus apply only if the
+            # window crossed a breakpoint. Same-size unfolding is exact.
+            self._apply_width_layout()
+
     def persist_workspace_splitter_state(
         self,
         _position: int,
         _index: int,
     ) -> None:
         """Remember a valid user-adjusted three-panel layout."""
+        self._workspace_user_resized = True
         self.persist_layout_state()
         if self.autopick_settings_toggle.isChecked():
             self._position_compact_panels()
 
     def set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
         """Expose responsive side panels through the View menu."""
+        if panel in getattr(self, "_focus_folded", set()):
+            self._unfold_focus_panel(panel)
         widget = (
             self.sidebar_panel
             if panel == "sidebar"
             else self.inspector_panel
         )
         widget.setVisible(visible)
+        if hasattr(self, "_focus_visible"):
+            self._focus_visible[panel] = bool(visible)
+            if self._focus_folded:
+                self._save_plot_focus()
         if panel == "sidebar" and not visible:
             self.autopick_settings_toggle.setChecked(False)
         action = (
@@ -1584,17 +1721,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # Keep the nine stage labels readable on laptops, including when a
         # wider inspector was restored or the shell shrinks from 1440 px.
         # Below laptop size retain user widths and allow the existing scrolls.
-        if 1280 <= event.size().width() < 1400:
+        if not getattr(self, "_focus_folded", set()) and 1280 <= event.size().width() < 1400:
             sizes = self.workspace_splitter.sizes()
             rail, inspector = min(sizes[0], 195), min(sizes[2], 335)
             if (rail, inspector) != (sizes[0], sizes[2]):
                 self.workspace_splitter.setSizes(
                     [rail, sum(sizes) - rail - inspector, inspector]
                 )
+        self._fit_default_concordia_panels()
         self._position_compact_panels()
 
     def _apply_width_layout(self, *, force: bool = False) -> None:
         """Change layout only at width boundaries, with a 20 px return band."""
+        if getattr(self, "_focus_folded", set()):
+            return
         width = self.width()
         previous = getattr(self, "_width_mode", None)
         compact = width < (1020 if previous == "compact" else 1000)
@@ -2390,9 +2530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.plots_stack.currentIndex() == 0:
             plot = self.trace_plot
         elif plot is self.results_table:
-            plot = self.results_table.active_concordia()
-            if plot is None:
-                return QtCore.QRect()
+            return QtCore.QRect()
         rect = plot.rect()
         item = getattr(plot, "plot_item", None) or getattr(plot, "_plot_item", None)
         if item is None:
@@ -2563,11 +2701,15 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_card.setObjectName("PlotCard")
         self.plot_card = plot_card
         plot_layout = QtWidgets.QVBoxLayout(plot_card)
-        plot_layout.setContentsMargins(10, 8, 10, 10)
+        plot_layout.setContentsMargins(6, 8, 6, 10)
         plot_layout.setSpacing(4)
         # Database state stays above the plot modes, including on the Submit page.
         self.database_panel = DatabasePanel(self)
-        plot_layout.addWidget(self.database_panel.strip)
+        self._database_strip_container = QtWidgets.QWidget()
+        strip_box = QtWidgets.QVBoxLayout(self._database_strip_container)
+        strip_box.setContentsMargins(0, 0, 0, 0)
+        strip_box.addWidget(self.database_panel.strip)
+        plot_layout.addWidget(self._database_strip_container)
         mode_bar = SegmentedBar()
         self.stage_segment_bar = mode_bar
         mode_bar.setObjectName("StageSegmentBar")
@@ -2692,6 +2834,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.results_table.selectedSpotsChanged.connect(self._follow_review_selection)
         self.results_table.showSignalRequested.connect(self.show_spot_signal)
         self.results_table.mouseModeRequested.connect(self._on_review_mouse_mode)
+        self.results_table.focusRequested.connect(self.set_plot_focus)
+        self.results_table.sigmaRequested.connect(lambda: self.sigma_toggle_button.click())
         self.results_table.chooserRequested.connect(self._focus_spot_tree)
         # The Spots tree is Studio's one spot list; the concordia panel keeps
         # a link to it instead of a second list.
@@ -2762,10 +2906,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.interact_mode_buttons[imode] = ibtn
             cb_layout.addWidget(ibtn)
         self.interact_mode_buttons["zoom"].setChecked(True)
-        # Drag mode per kind of view for this window: concordia views open in
-        # Pan, trace and diagnostic plots in Zoom; a choice made in one kind of
-        # view is kept for it.
-        self._interaction_mode_by_view = {"concordia": "pan", "plots": "zoom"}
+        # Concordia defaults to Select; other plots retain Zoom.
+        self._interaction_mode_by_view = {"concordia": self.results_table.spot_concordia.interaction_mode(), "plots": "zoom"}
         self.interact_mode_buttons["pan"].setToolTip("Drag to pan in x and y")
         self.interact_mode_buttons["zoom"].setToolTip("Drag a box to zoom")
         self.interact_mode_buttons["select"].setToolTip(
@@ -6422,6 +6564,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _update_sigma_button_text(self) -> None:
         if hasattr(self, "sigma_toggle_button"):
             self.sigma_toggle_button.setText(f"{self.sigma_level}σ")
+        if hasattr(self, "results_table"):
+            self.results_table.set_sigma_level(self.sigma_level)
 
     def on_plot_region_changed(self, region_name: str, bounds: tuple[float, float]) -> None:
         self.change_guard.clear()
@@ -6842,10 +6986,36 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.results_table
         return self.trace_plot
 
+    def _fit_default_concordia_panels(self):
+        """Give a new concordia viewer a useful canvas, retaining custom widths."""
+        if (getattr(self, "_focus_folded", set()) or getattr(self, "_layout_restored", False)
+                or getattr(self, "_workspace_user_resized", False) or self.width() < 1280
+                or self.plots_stack.currentWidget() is not self.results_table
+                or self.results_table.active_concordia() is None):
+            return
+        sizes = self.workspace_splitter.sizes()
+        inspector = 260 if self.width() < 1400 else 280 if self.width() < 1500 else sizes[2]
+        if sizes[2] > inspector:
+            self.workspace_splitter.setSizes([sizes[0], sum(sizes) - sizes[0] - inspector, inspector])
+
+    def _initialize_concordia_layout(self):
+        """Keep concordia chrome compact while retaining database provenance."""
+        self.plots_stack.currentChanged.connect(self._sync_concordia_layout)
+        self.results_table.tabs.currentChanged.connect(self._sync_concordia_layout)
+        self._sync_concordia_layout()
+
+    def _sync_concordia_layout(self, *_args):
+        concordia = (self.plots_stack.currentWidget() is self.results_table
+                     and self.results_table.active_concordia() is not None)
+        self.version_chip.setVisible(not concordia)
+        if concordia:
+            self._fit_default_concordia_panels()
+
     def on_results_review_tab_changed(self, _index: int) -> None:
         """Apply the shared pan/zoom toolbar when a concordia tab opens."""
         if self.session.plot_mode not in {"depth_profile", "final_results"}:
             return
+        self._sync_concordia_layout()
         self._apply_interaction_controls_to_current_plot()
         self._set_plot_controls_enabled(
             self.results_table.active_concordia() is not None
@@ -6891,6 +7061,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_interaction_controls_to_current_plot(self) -> None:
         target = self._current_plot_interaction_target()
+        if self._interaction_view_kind() == "concordia" and self.results_table.active_concordia() is None:
+            self.concordia_grid_button.hide()
+            self.interact_mode_buttons["select"].setEnabled(False)
+            return
         supports_select = hasattr(target, "supports_select_mode") and target.supports_select_mode()
         concordia = self._interaction_view_kind() == "concordia" and self.results_table.active_concordia() is not None
         grid_visibility_changed = self.concordia_grid_button.isHidden() == concordia

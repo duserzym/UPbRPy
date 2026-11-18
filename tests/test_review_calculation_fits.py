@@ -103,7 +103,7 @@ def test_visibility_and_calculation_exclusions_are_independent(review, app):
         assert canvas._scatter.points()[index].brush().style() == QtCore.Qt.BrushStyle.NoBrush
         assert "Excluded from calculations" in canvas.tooltip_text(index)
     app.processEvents()
-    assert review.concordia_readout.n == 10
+    assert review.spot_age_label.text().startswith("Included 10")
     item = review.spot_choice_list.findItems("A_1", QtCore.Qt.MatchFlag.MatchExactly)[0]
     assert item.font().italic() and "Excluded from calculations" in item.toolTip()
     row = next(i for i in range(review.results_model.rowCount()) if review.results_model.spot_name(i) == "A_1")
@@ -121,6 +121,11 @@ def test_tree_multiselection_mixed_state_and_actions(review, app, kind):
     view = review.spot_choice_tree if kind == "spot" else review.depth_choice_tree
     review.tabs.setCurrentWidget(review.spot_concordia_page if kind == "spot" else review.depth_concordia_page)
     review.spot_group_toggle.setChecked(True)
+    app.processEvents()
+    menu = (review.spot_spots_button if kind == "spot" else review.depth_spots_button).menu()
+    menu.popup(review.mapToGlobal(QtCore.QPoint(20, 20)))
+    for _ in range(8): app.processEvents()
+    view.expandAll()
     app.processEvents()
     indices = children(view)
     QtTest.QTest.mouseClick(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
@@ -171,7 +176,7 @@ def test_canvas_gestures_selection_shortcuts_and_batched_highlight(review, app, 
     QtTest.QTest.keyClick(canvas, QtCore.Qt.Key.Key_E)
     assert review.excluded_spots == {n}
     QtTest.QTest.keyClick(canvas, QtCore.Qt.Key.Key_H)
-    assert not review.include_flags[n]
+    assert review.include_flags[n] and not review.excluded_spots
     QtTest.QTest.keyClick(canvas, QtCore.Qt.Key.Key_H, QtCore.Qt.KeyboardModifier.ShiftModifier)
     assert all(review.include_flags.values())
     QtTest.QTest.keyClick(canvas, QtCore.Qt.Key.Key_A, QtCore.Qt.KeyboardModifier.ControlModifier)
@@ -290,7 +295,12 @@ def test_concordia_fit_panels_fit_laptop(review, app):
         app.processEvents()
         page = getattr(review, kind + "_concordia_page")
         assert page.horizontalScrollBar().maximum() == 0
-        assert panel.parentWidget().width() <= 230
+        menu = getattr(review, kind + "_fit_button").menu()
+        menu.popup(review.mapToGlobal(QtCore.QPoint(10, 10)))
+        for _ in range(5): app.processEvents()
+        assert menu.isAncestorOf(panel.model_combo)
+        assert menu.width() <= 600 and menu.height() <= 700
+        menu.hide()
         assert not clipped_widgets(review)
 
 
@@ -498,11 +508,11 @@ def test_selection_action_menu_triggers_visibility_and_calculation_actions(revie
             next(a for a in menu.actions() if a.text().startswith(prefix)).trigger()
         trigger("Show only selected")
         assert {n for n, shown in review.include_flags.items() if shown} == {"A_0", "A_1"}
-        trigger("Exclude selected from calculations")
+        trigger("Hide 2 spots from calculations")
         assert review.excluded_spots == {"A_0", "A_1"}
-        trigger("Include selected in calculations")
+        trigger("Unhide 2 spots")
         assert not review.excluded_spots
-        trigger("Hide selected")
+        trigger("Remove selected from plot")
         assert not any(review.include_flags.values())
         trigger("Show all")
         assert all(review.include_flags.values())

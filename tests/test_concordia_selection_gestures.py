@@ -324,7 +324,7 @@ def test_hide_keys_keep_spots_drawn_and_exclude_readout(review, app, kind):
     app.processEvents()
     assert review.excluded_spots == {"A_1", "A_2"}
     assert all(review.include_flags.values())
-    assert review.concordia_readout is None
+    assert not any(r["n"] for r in review.weighted_mean_dates.values())
     assert {p[0] for p in canvas._points} == set(review.include_flags)
     QtTest.QTest.keyClick(canvas, QtCore.Qt.Key.Key_E)
     assert not review.excluded_spots
@@ -409,7 +409,8 @@ def test_toolbar_modes_grid_visibility_and_workspace_key(app, monkeypatch, final
         window._set_plot_controls_enabled(True)
         window.show()
         app.processEvents()
-        assert window.concordia_grid_button.isVisible()
+        assert not window.plot_control_scroll.isVisible()
+        assert review._grid_buttons[0].isVisible() or review.spot_toolbar.overflow.isVisible()
         for mode in ("select", "zoom", "pan"):
             review.mouse_mode_buttons[mode].click()
             assert window._selected_interaction_mode() == mode

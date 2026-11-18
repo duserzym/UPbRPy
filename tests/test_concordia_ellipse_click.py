@@ -135,7 +135,7 @@ def test_spot_card_matches_results_table_and_toggles_exclusion(review, app, fina
             for i in selected_rows} == {"small"}
     card.exclude_button.click()
     assert "small" in review.excluded_spots
-    assert card.exclude_button.text() == "Include"
+    assert card.exclude_button.text() == "Unhide"
     card.exclude_button.click()
     assert "small" not in review.excluded_spots
     shown = []
@@ -145,7 +145,7 @@ def test_spot_card_matches_results_table_and_toggles_exclusion(review, app, fina
     review.set_selected_spots({"small", "far"})
     app.processEvents()
     assert not card.isVisible()  # the readout shows the count and pooled age
-    assert review.concordia_age_label.text().startswith("Selected:")
+    assert review.spot_age_label.text().startswith("Selected ")
     review.set_selected_spots(set())
     app.processEvents()
     assert not card.isVisible()

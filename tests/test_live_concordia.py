@@ -30,6 +30,10 @@ def finalized():
     for ratio in ("207Pb/235U", "206Pb/238U", "238U/206Pb", "207Pb/206Pb"):
         frame[f"{ratio}_2e_with_calibration"] = frame[ratio] * .02
         frame[f"{ratio}_2e_no_calibration"] = frame[ratio] * .01
+    for system in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb"):
+        frame[system + "_age"] = 500.
+        frame[system + "_age_2e_with_calibration"] = 10.
+        frame[system + "_age_2e_no_calibration"] = 5.
     return SimpleNamespace(parallel_results=frame, selected_results=frame.copy())
 
 
@@ -57,61 +61,50 @@ def review(app, finalized):
 
 def test_live_readout_follows_shared_selection_inclusion_diagram_and_results(review, app, finalized):
     widget = review
-    assert widget.concordia_age_label.text().startswith("Included: Concordia age")
-    assert "n = 4" in widget.concordia_age_label.text()
-    assert widget.concordia_readout.age_ma == pytest.approx(500, abs=.001)
-    marker = widget.spot_concordia._age_marker
-    np.testing.assert_allclose([data[0] for data in marker.getData()], wetherill_point(500.))
+    assert widget.spot_age_label.text().startswith("Included 4")
+    assert widget.weighted_mean_dates["206Pb/238U"]["weighted_mean"] == pytest.approx(500.)
+    assert not hasattr(widget.spot_concordia, "_age_marker")
     widget.set_selected_spots({"A_1", "B_3"})
     app.processEvents()
-    assert widget.concordia_age_label.text().startswith("Selected: Concordia age")
-    assert "n = 2" in widget.concordia_age_label.text()
+    assert widget.spot_age_label.text().startswith("Selected 2")
     widget.set_spot_included({"B_3"}, False)
     app.processEvents()
-    assert widget.concordia_readout.n == 1
-    assert "1 of 2 selected are included" in widget.concordia_age_label.toolTip()
-    previous = widget.concordia_readout
+    assert widget.weighted_mean_dates["206Pb/238U"]["n"] == 1
+    assert "1 of 2 used" in widget.spot_age_label.toolTip()
+    previous = widget.weighted_mean_dates.copy()
     widget.spot_diagram_buttons["tera_wasserburg"].click()
     app.processEvents()
-    assert widget.concordia_readout.space == "tera_wasserburg"
-    assert widget.concordia_readout.age_2se != previous.age_2se
-    marker = widget.spot_concordia._age_marker
-    np.testing.assert_allclose([data[0] for data in marker.getData()], tera_wasserburg_point(500.))
+    assert widget.weighted_mean_dates == previous
     finalized.decision = SimpleNamespace(include_calibration_uncertainty=False)
-    before = widget.concordia_readout.age_2se
+    before = previous["206Pb/238U"]["weighted_mean_2e"]
     widget.show_results(finalized)
     app.processEvents()
-    assert widget.concordia_readout.age_2se == pytest.approx(before / 2, rel=.001)
+    assert widget.weighted_mean_dates["206Pb/238U"]["weighted_mean_2e"] == pytest.approx(before/2)
     widget.set_selected_spots(set())
     app.processEvents()
-    assert "Included:" in widget.concordia_age_label.text()
-    assert widget.concordia_readout.n == 3
+    assert widget.spot_age_label.text().startswith("Included 3")
     widget.set_all_spot_choices(False)
     app.processEvents()
-    assert "No concordia age for this set" in widget.concordia_age_label.text()
-    assert widget.concordia_readout is None
-    assert len(widget.spot_concordia._age_marker.getData()[0]) == 0
+    assert not any(r["n"] for r in widget.weighted_mean_dates.values())
+    assert "No dates available" in widget.spot_age_label.text()
 
 
 def test_readout_debounces_selection_changes_and_does_not_fit_on_zoom(review, app, monkeypatch):
     import GUI.widgets as widgets
-
     calls = []
-    original = widgets.concordia_age_readout
-
-    def fit(frame, **kwargs):
-        calls.append(len(frame))
-        return original(frame, **kwargs)
-
-    monkeypatch.setattr(widgets, "concordia_age_readout", fit)
+    original = widgets.weighted_mean_and_mswd
+    def mean(values, errors):
+        calls.append(len(values))
+        return original(values, errors)
+    monkeypatch.setattr(widgets, "weighted_mean_and_mswd", mean)
     for names in ({"A_1"}, {"A_1", "A_2"}, {"A_1", "A_2", "B_3"}):
         review.set_selected_spots(names)
     assert calls == []
     app.processEvents()
-    assert calls == [3]
+    assert calls == [3, 3, 3]
     review.spot_concordia._plot_item.setRange(xRange=(.1, .3), yRange=(.01, .05))
     app.processEvents()
-    assert calls == [3]
+    assert calls == [3, 3, 3]
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -131,13 +124,10 @@ def test_sample_default_single_colour_selection_and_label_fit(review, app, theme
     review.set_selected_spots({"A_1"})
     assert plot._scatter.points()[0].size() > plot._scatter.points()[1].size()
     app.processEvents()
-    label = review.concordia_age_label
-    bounds = label.fontMetrics().boundingRect(
-        QtCore.QRect(0, 0, label.contentsRect().width(), 1000),
-        int(QtCore.Qt.TextFlag.TextWordWrap), label.text())
-    assert bounds.height() <= label.height()
-    assert bounds.height() <= label.fontMetrics().lineSpacing() * 3 + 6
-    assert review.spot_choice_list.height() >= 100
+    label = review.spot_age_label
+    assert label.height() >= label.fontMetrics().height()
+    assert "MSWD" in label.toolTip()
+    assert review.spot_spots_button.menu() is not None
 
 
 def luminance(color):
@@ -297,13 +287,13 @@ def test_readout_controls_stay_visible_at_laptop_sizes(app, finalized, theme):
             page = review.spot_concordia_page
             assert page.verticalScrollBar().maximum() == 0
             assert page.horizontalScrollBar().maximum() == 0
-            label = review.concordia_age_label
+            label = review.spot_age_label
             rect = QtCore.QRect(label.mapTo(page.viewport(), QtCore.QPoint()), label.size())
             assert page.viewport().rect().contains(rect)
             # In Studio the Spots tree chooses the shown spots (the two lists
             # were merged by request); a link summarises and focuses it.
             link = review.spot_summary_button
-            assert link.isVisible() and not review._chooser_stack.isVisible()
+            assert not review.spot_spots_button.isVisible() and not review._chooser_stack.isVisible()
             shown = sum(review.include_flags.values())
             assert link.text() == f"Showing {shown} of {len(review.include_flags)} spots"
             assert review.spot_concordia.height() >= 250

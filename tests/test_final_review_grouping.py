@@ -286,7 +286,12 @@ def test_chooser_compact_label_at_laptop_width(review, app):
     view.itemDelegate().initStyleOption(option, index)
     option.rect = view.visualRect(index)
     text_rect = view.style().subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, option, view)
-    assert view.width() <= 230
+    menu = widget.spot_spots_button.menu()
+    menu.popup(widget.mapToGlobal(QtCore.QPoint(10, 10)))
+    for _ in range(5): app.processEvents()
+    option.rect = view.visualRect(index)
+    text_rect = view.style().subElementRect(QtWidgets.QStyle.SubElement.SE_ItemViewItemText, option, view)
+    assert menu.rect().contains(QtCore.QRect(view.mapTo(menu, QtCore.QPoint()), view.size()))
     assert option.fontMetrics.horizontalAdvance(parent.text()) <= text_rect.width()
 
 

@@ -81,6 +81,22 @@ def test_strip_hidden_without_extra_or_loaded_session(window, monkeypatch):
     assert panel.strip.isHidden()
 
 
+@pytest.mark.parametrize("submitted", [False, True])
+def test_linked_strip_visible_on_concordia_pages(window, app, submitted):
+    set_origin(window, submitted=submitted)
+    review = window.results_table
+    window.session.plot_mode = "final_results"
+    window.plots_stack.setCurrentWidget(review)
+    for page in (review.spot_concordia_page, review.depth_concordia_page):
+        review.tabs.setCurrentWidget(page)
+        for focus in (False, True):
+            window.set_plot_focus(focus)
+            app.processEvents()
+            assert window.database_panel.strip.isVisibleTo(window)
+            assert window.database_panel.strip_detail.text() == "Synthetic_20Mar25 on lab.example.org"
+    window.set_plot_focus(False)
+
+
 def test_submit_step_in_all_presets_and_selection_runs_nothing(window, monkeypatch):
     refresh = Mock()
     flush = Mock()

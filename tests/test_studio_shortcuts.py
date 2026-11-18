@@ -272,7 +272,7 @@ def test_shortcut_sheet_lists_every_menu_shortcut_and_fits_a_14_inch_screen(wind
                      "Edit Baseline Window", "Edit Plateau Window", "Move Window Start Later",
                      "Exclude Current Spot from Calculations", "Return to Raw Traces",
                      "Recalculate Reduction Stages", "Next Step", "Previous Step", "Next Tab",
-                     "Tab 1", "Keyboard Shortcuts", "Hide selected spots"):
+                     "Tab 1", "Keyboard Shortcuts", "Hide / unhide selected spots from calculations", "Focus on the plot", "Pan in every mouse mode"):
         assert expected in actions, expected
     sequences = {}
     for action in window.findChildren(QtGui.QAction):

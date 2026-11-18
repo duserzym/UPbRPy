@@ -395,7 +395,8 @@ def test_hover_reveals_chooser_once_and_results_tab_reveals_selection(review, ap
     finalized.parallel_results = frame
     finalized.selected_results = frame.copy()
     widget.show_results(finalized)
-    app.processEvents()
+    widget.spot_spots_button.menu().popup(widget.mapToGlobal(QtCore.QPoint(10, 10)))
+    for _ in range(6): app.processEvents()
     table, chooser = widget.results_table, widget.spot_choice_list
     table.sortByColumn(1, QtCore.Qt.SortOrder.DescendingOrder)
     chooser_scrolls, table_scrolls = [], []

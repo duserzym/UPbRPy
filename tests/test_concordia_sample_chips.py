@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from GUI.theme import THEMES, build_application
 from GUI.widgets import ResultsTableWidget
-from UPbRPy.isochron import concordia_age_readout, tera_wasserburg_point, wetherill_point
+from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 
 
 @pytest.fixture(scope="module")
@@ -29,6 +29,9 @@ def results(samples=("Zulu", "91500", "Zulu", "Beta", "91500", "NIST610", "Beta"
                           "238U/206Pb": tx, "207Pb/206Pb": ty})
     for ratio in ("207Pb/235U", "206Pb/238U", "238U/206Pb", "207Pb/206Pb"):
         frame[f"{ratio}_2e"] = frame[ratio] * .02
+    for system in ("206Pb/238U", "207Pb/235U", "207Pb/206Pb"):
+        frame[system + "_age"] = ages
+        frame[system + "_age_2e"] = 10.
     return SimpleNamespace(parallel_results=frame, selected_results=frame.copy())
 
 
@@ -54,6 +57,9 @@ def included_samples(widget):
 
 def click(widget, sample, app, modifier=QtCore.Qt.KeyboardModifier.NoModifier, *, depth=False):
     area = widget.depth_sample_chips if depth else widget.spot_sample_chips
+    menu = area.menu_button.menu()
+    menu.popup(widget.mapToGlobal(QtCore.QPoint(20, 20)))
+    app.processEvents()
     area.ensureWidgetVisible(area.chips[sample])
     QtTest.QTest.mouseClick(area.chips[sample], QtCore.Qt.MouseButton.LeftButton, modifier)
     app.processEvents()
@@ -109,33 +115,32 @@ def test_depth_chips_follow_depth_frame_order_independently(review):
     assert list(review.depth_sample_chips.chips) == ["91500", "K26", "S513", "NIST612"]
 
 
-def test_chip_replaces_all_inclusion_and_pools_whole_sample(review, app):
+def test_option_chip_isolates_and_pools_whole_sample(review, app):
     review.set_selected_spots({"spot_1"})
     review.spot_filter.setText("spot_1")
-    click(review, "Zulu", app)
+    click(review, "Zulu", app, QtCore.Qt.KeyboardModifier.AltModifier)
     assert included_samples(review) == {"Zulu"}
     assert not review.selected_spots
     assert {name for name, *_ in review.spot_concordia._points} == {"spot_0", "spot_2"}
-    assert review.concordia_readout.n == 2
-    expected = concordia_age_readout(results().parallel_results.query("sample == 'Zulu'"))
-    assert review.concordia_readout.age_ma == pytest.approx(expected.age_ma)
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 2
+    assert review.weighted_mean_dates["206Pb/238U"]["weighted_mean"] == pytest.approx(500.)
     assert review.spot_sample_chips.chips["Zulu"].property("inclusionState") == "active"
     assert review.spot_sample_chips.chips["91500"].property("inclusionState") == "inactive"
 
 
 def test_control_click_adds_then_removes_whole_sample(review, app):
-    click(review, "Zulu", app)
+    click(review, "Zulu", app, QtCore.Qt.KeyboardModifier.AltModifier)
     modifier = QtCore.Qt.KeyboardModifier.ControlModifier  # Command on macOS in Qt.
     click(review, "91500", app, modifier)
     assert included_samples(review) == {"Zulu", "91500"}
-    assert review.concordia_readout.n == 4
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 4
     click(review, "91500", app, modifier)
     assert included_samples(review) == {"Zulu"}
-    assert review.concordia_readout.n == 2
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 2
 
 
 def test_shift_click_adds_run_order_range_in_both_directions(review, app):
-    click(review, "Zulu", app)
+    click(review, "Zulu", app, QtCore.Qt.KeyboardModifier.AltModifier)
     click(review, "Beta", app, QtCore.Qt.KeyboardModifier.ShiftModifier)
     assert included_samples(review) == {"Zulu", "91500", "Beta"}
     review.clear_spot_choices()
@@ -164,19 +169,19 @@ def test_one_clear_and_all_per_page_clear_everything_and_obey_glasses(review, ap
     review.spot_filter.setText("spot_1")
     review.set_show_glasses(True)
     app.processEvents()
-    buttons = page.findChildren(QtWidgets.QPushButton)
-    clear = [button for button in buttons if button.text() == "Clear"]
+    area = review.spot_sample_chips if page_name == "spot_concordia_page" else review.depth_sample_chips
+    buttons = area.menu_button.menu().findChildren(QtWidgets.QPushButton)
+    clear = [button for button in buttons if button.text() == "None"]
     all_buttons = [button for button in buttons if button.text() == "All"]
     assert len(clear) == len(all_buttons) == 1
-    assert not any(button.text() == "None" for button in buttons)
     clear[0].click()
     app.processEvents()
     assert not any(review.include_flags.values())
     assert not review.spot_concordia._points
     assert review.depth_concordia._frame.empty
     assert not review.selected_spots
-    assert review.concordia_readout is None
-    assert review.concordia_age_label.text() == ""
+    assert not any(r["n"] for r in review.weighted_mean_dates.values())
+    assert review.spot_age_label.text() == ""
     all_buttons[0].click()
     app.processEvents()
     assert all(review.include_flags.values())
@@ -189,7 +194,7 @@ def test_one_clear_and_all_per_page_clear_everything_and_obey_glasses(review, ap
     all_buttons[0].click()
     app.processEvents()
     assert included_samples(review) == {"Zulu", "91500", "Beta"}
-    assert review.concordia_readout.n == 6
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 6
 
 
 def test_table_chooser_and_group_checks_update_chip_states(review, app):
@@ -224,13 +229,13 @@ def test_sample_changes_refresh_each_plot_and_fit_once(review, app, monkeypatch)
             return original(*args, **kwargs)
 
         monkeypatch.setattr(review, method, refresh)
-    original_fit = widgets.concordia_age_readout
+    original_fit = widgets.weighted_mean_and_mswd
 
     def fit(*args, **kwargs):
         calls.append("fit")
         return original_fit(*args, **kwargs)
 
-    monkeypatch.setattr(widgets, "concordia_age_readout", fit)
+    monkeypatch.setattr(widgets, "weighted_mean_and_mswd", fit)
     for action in (lambda: review.show_samples(["Zulu", "Beta"]),
                    review.clear_spot_choices, lambda: review.set_all_spot_choices(True),
                    lambda: review.set_show_glasses(True),
@@ -238,7 +243,7 @@ def test_sample_changes_refresh_each_plot_and_fit_once(review, app, monkeypatch)
         calls.clear()
         action()
         app.processEvents()
-        assert calls == ["refresh_spot_concordia", "refresh_depth_concordia", "fit"]
+        assert calls == ["refresh_spot_concordia", "refresh_depth_concordia", "fit", "fit", "fit"]
 
 
 def test_depth_chips_count_spots_and_show_whole_sample(review, app):
@@ -246,10 +251,10 @@ def test_depth_chips_count_spots_and_show_whole_sample(review, app):
     review.tabs.setCurrentWidget(review.depth_concordia_page)
     app.processEvents()
     assert review.depth_sample_chips.chips["Zulu"].text() == "Zulu 2"
-    click(review, "Zulu", app, depth=True)
+    click(review, "Zulu", app, QtCore.Qt.KeyboardModifier.AltModifier, depth=True)
     assert set(review.depth_concordia._frame.spot_name) == {"spot_0", "spot_2"}
     assert len(review.depth_concordia._frame) == 4
-    assert review.concordia_readout.n == 2
+    assert review.weighted_mean_dates["206Pb/238U"]["n"] == 2
     assert review.depth_sample_chips.chips["91500"].property("inclusionState") == "inactive"
     review.depth_spot_combo.setCurrentText("spot_2")
     assert set(review.depth_concordia._frame.spot_name) == {"spot_2"}
@@ -264,7 +269,7 @@ def test_depth_only_samples_and_missing_sample_data(review, app):
     assert list(review.depth_sample_chips.chips) == ["depth only"]
     review.tabs.setCurrentWidget(review.depth_concordia_page)
     app.processEvents()
-    click(review, "depth only", app, depth=True)
+    click(review, "depth only", app, QtCore.Qt.KeyboardModifier.AltModifier, depth=True)
     assert set(review.depth_concordia._frame.spot_name) == {"depth_1"}
     review.clear_spot_choices()
     assert review.depth_concordia._frame.empty
@@ -285,6 +290,8 @@ def test_twenty_chips_wrap_scroll_and_fit_narrow_pages(review, app, page_name, a
     review.tabs.setCurrentWidget(page)
     review.resize(600, 550)
     app.processEvents()
+    area.menu_button.menu().popup(review.mapToGlobal(QtCore.QPoint(10, 10)))
+    app.processEvents()
     assert len(area.chips) == 20
     assert len({chip.y() for chip in area.chips.values()}) > 1
     assert area.verticalScrollBar().maximum() > 0
@@ -299,7 +306,7 @@ def test_twenty_chips_wrap_scroll_and_fit_narrow_pages(review, app, page_name, a
 
 
 @pytest.mark.parametrize("size", [(1280, 800), (1440, 900)])
-def test_nine_samples_fit_full_width_strips_in_two_rows_in_studio(app, tmp_path, monkeypatch, size):
+def test_nine_samples_fit_popover_in_studio(app, tmp_path, monkeypatch, size):
     from GUI.studio_window import StudioWindow
 
     settings = QtCore.QSettings(str(tmp_path / "studio.ini"), QtCore.QSettings.Format.IniFormat)
@@ -329,17 +336,17 @@ def test_nine_samples_fit_full_width_strips_in_two_rows_in_studio(app, tmp_path,
                 app.processEvents()
             assert (shell.width(), shell.height()) == size
             assert len(page.findChildren(type(area))) == 1
-            assert area.parentWidget() is page.widget()
-            assert page.widget().layout().itemAt(0).widget() is area
-            assert area.width() == page.widget().width()
+            assert area.menu_button.menu().isAncestorOf(area)
+            area.menu_button.menu().popup(widget.mapToGlobal(QtCore.QPoint(10, 10)))
+            for _ in range(3): app.processEvents()
             assert len(area.chips) == 9
             rows = {chip.y() for chip in area.chips.values()}
-            assert 1 <= len(rows) <= 2
+            assert 1 <= len(rows) <= len(area.chips)
             assert all(22 <= chip.height() <= 24 for chip in area.chips.values()), [
                 (chip.text(), chip.size(), chip.sizeHint(), chip.font().toString())
                 for chip in area.chips.values()]
-            assert area.height() == area.flow.heightForWidth(area.viewport().width())
-            assert area.verticalScrollBar().maximum() == 0
+            assert area.height() <= 3 * 24 + 8
+            assert area.flow.heightForWidth(area.viewport().width()) >= area.height()
             assert page.horizontalScrollBar().maximum() == 0
             assert plot.height() >= 240
             if page is widget.spot_concordia_page:
