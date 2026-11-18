@@ -120,6 +120,50 @@ For one-off migration or auditing, `load_standard_measurements(path)` still
 accepts the former normalized CSV layout when `path` ends in `.csv`. TOML is
 the packaged source of truth.
 
+## Lab reference-material overlay
+
+Private libraries stay outside this public repository. By default UPbRPy and
+Studio load `~/UPbRPy/lab-standards` when it contains `library.toml`.
+`UPBRPY_LAB_STANDARDS` selects another directory or manifest; an empty value
+or `none` disables overlays. `default_lab_overlay_path()` reports the selected
+path. The overlay is applied to the bundled library or whichever library the
+user or project selected. Engine loading raises on an invalid overlay; Studio
+reports the error and falls back to the selected base library.
+
+Use the same TOML manifest, source registry and material-file format described
+above. Only an overlay manifest accepts the optional `lab` string and
+`replaces` list. Names and aliases are compared without case, spaces or
+punctuation. A clash with a base name or alias is an error unless `replaces`
+names that base standard (or its unambiguous alias); all its base rows are
+then removed. Unknown or ambiguous replacement entries are errors.
+Source IDs and display citations must remain unique across both libraries.
+
+For internal working values that have not been published, use
+`status = "internal_unpublished"` on measurements and sources, and explain
+their provenance in the source's `no_doi_reason`. Outputs label them
+"internal, unpublished laboratory reference value". This status does not
+imply publication or a missing publication DOI.
+
+`load_standard_measurements(path=None, *, overlay=...)` and
+`reference_library_info(path=None, *, overlay=...)` select the default overlay
+when the keyword is omitted; `overlay=None` disables it. Measurement attrs
+record its path, lab, digest, standards and replacements. Provenance versions
+append `+overlay.<lab>.<sha12>` and include `overlay_sha256`, `overlay_path`
+and `overlay_lab`, so run records, bundles, footnotes and exports identify
+the private values used. Keep exported private values and lab metadata private.
+
+For older Studio builds, call `write_merged_library(target, base=None,
+overlay=...)` to write a self-contained TOML directory, then select its
+`library.toml` with **Reference library**; keep this directory outside the
+public repository, and the writer refuses a nonempty target unless its marker
+identifies an earlier output. Older builds read the merged directory directly
+and see internal records as `provisional`, labelling these materials only
+through the source text retained in notes and source metadata. The TOML
+`.upbrpy-merged-library` marker records the overlay identity and standards plus
+the standards with internal records, allowing current Studio to restore
+`internal_unpublished`, skip an identical overlay, or refresh its recorded
+materials from a changed overlay while rejecting unrelated clashes.
+
 ## Iolite imports
 
 The converter can reproduce all 29 JSON files from the supplied iolite
@@ -181,6 +225,6 @@ Unpublished lab archive values are marked provisional and identified in the
 source registry. Published values retain their source locators, uncertainty
 conventions and audit notes from upb-standards.
 
-Legacy-only names `Zirconia`, `MADJCU`, `MOA`, `MOM`, `TR1`, `TC`, `RTFT`,
+Legacy-only names `Zirconia`, `MADJCU`, `MOA`, `MOM`, `TC`, `RTFT`,
 and `RC` are not available. They should return only through an upstream
 record with identifiable provenance and a value-level review.

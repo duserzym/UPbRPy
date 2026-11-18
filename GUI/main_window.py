@@ -4844,6 +4844,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_reference_library_labels(self) -> None:
         current_path = self.reference_library_path or current_standard_archive_path()
+        overlay_error = current_standard_archive().attrs.get("overlay_error")
+        if overlay_error:
+            self._reference_library_notice = overlay_error
+            self.reference_library_error.setText(overlay_error)
+            self.reference_library_error.show()
+            self.statusBar().showMessage(overlay_error)
         from GUI.standards_updates import library_revision
 
         revision = library_revision(current_path)
@@ -4884,7 +4890,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_reference_library_labels()
         self._clear_reduction_cache()
         self.append_log(f"Loaded reference material library: {self.reference_library_path}")
-        self.statusBar().showMessage(f"Reference material library loaded from {Path(self.reference_library_path).name}")
+        overlay_error = current_standard_archive().attrs.get("overlay_error")
+        if overlay_error:
+            self.append_log(overlay_error)
+        self.statusBar().showMessage(overlay_error or f"Reference material library loaded from {Path(self.reference_library_path).name}")
         self.refresh_view()
         return True
 

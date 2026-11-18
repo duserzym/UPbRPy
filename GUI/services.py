@@ -571,10 +571,13 @@ def load_standard_archive_from_path(path: str | None) -> pd.DataFrame:
     target_path = Path(path).expanduser().resolve() if path else Path(DEFAULT_REFERENCE_LIBRARY_PATH)
     if target_path.suffix.lower() == ".csv":
         raise ValueError("Select a TOML library directory or library.toml manifest.")
-    if not path:
-        loaded_archive = standard_archive
-    else:
+    try:
         loaded_archive = build_standard_archive(load_standard_measurements(target_path))
+    except (OSError, ValueError) as exc:
+        # A base-library failure still propagates. Only a usable base permits
+        # overlay fallback, and its identity must describe the values in use.
+        loaded_archive = build_standard_archive(load_standard_measurements(target_path, overlay=None))
+        loaded_archive.attrs["overlay_error"] = f"Lab reference-material overlay could not be loaded; using the base library: {exc}"
     # Other tabs may have cached reductions using the same archive. Keep
     # that identity when opening or restoring a tab with the same library.
     if (

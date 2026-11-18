@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from importlib.resources import files
 from pathlib import Path
+import os
 import warnings
 
 import numpy as np
@@ -29,6 +30,34 @@ LAMBDA_232 = 4.94752e-11
 ARCHIVE_FORMAT_VERSION = 2
 REFERENCE_MATERIALS_DIRECTORY = "reference_materials"
 MANIFEST_FILENAME = "library.toml"
+_AUTO_OVERLAY = object()
+_MERGED_MARKER = ".upbrpy-merged-library"
+_MERGED_MARKER_TEXT = "UPbRPy merged reference library, format 2\n"
+INTERNAL_REFERENCE_LABEL = "internal, unpublished laboratory reference value"
+
+
+def default_lab_overlay_path() -> Path | None:
+    """Resolve the private lab library, or None when absent or disabled."""
+    configured = os.environ.get("UPBRPY_LAB_STANDARDS")
+    if configured is not None:
+        if configured.strip().casefold() in {"", "none"}:
+            return None
+        return Path(configured).expanduser()
+    candidate = Path.home() / "UPbRPy" / "lab-standards"
+    return candidate if (candidate / MANIFEST_FILENAME).is_file() else None
+
+
+def _library_root(path):
+    if path is None:
+        return files(__package__) / REFERENCE_MATERIALS_DIRECTORY
+    path = Path(path).expanduser()
+    return path.parent if path.name == MANIFEST_FILENAME else path
+
+
+def _standard_key(value):
+    """Use the same typography-insensitive key for aliases and overlay clashes."""
+    return "".join(character for character in str(value).casefold() if character.isalnum())
+
 
 REQUIRED_COLUMNS = (
     "standard",
@@ -57,7 +86,7 @@ VALID_ROLES = {
     "reference_age",
 }
 
-VALID_STATUSES = {"recommended", "provisional"}
+VALID_STATUSES = {"recommended", "provisional", "internal_unpublished"}
 VALID_UNCERTAINTY_TYPES = {
     "",
     "1sd",
@@ -204,7 +233,7 @@ def check_reference_sources(path: str | Path | None = None) -> list[str]:
     if path is None:
         root = files(__package__) / REFERENCE_MATERIALS_DIRECTORY
     else:
-        source_path = Path(path)
+        source_path = Path(path).expanduser()
         root = source_path.parent if source_path.name == MANIFEST_FILENAME else source_path
     manifest = _read_toml(_resolve_resource_case_insensitive(root, MANIFEST_FILENAME))
     _validate_format_version(manifest, MANIFEST_FILENAME)
@@ -297,7 +326,7 @@ def _measurement_record(
     }
 
 
-def _load_toml_measurements(root) -> tuple[pd.DataFrame, dict[str, dict]]:
+def _load_toml_measurements(root, *, is_overlay=False) -> tuple[pd.DataFrame, dict[str, dict]]:
     """Expand the manifest-driven TOML library into normalized rows."""
     manifest_resource = _resolve_resource_case_insensitive(root, MANIFEST_FILENAME)
     manifest = _read_toml(manifest_resource)
@@ -308,6 +337,15 @@ def _load_toml_measurements(root) -> tuple[pd.DataFrame, dict[str, dict]]:
         "sources",
         "material_files",
     }
+    if is_overlay:
+        allowed_manifest_keys |= {"lab", "replaces"}
+        if not isinstance(manifest.get("lab", ""), str):
+            raise ValueError("Overlay lab must be a string.")
+        replaces = manifest.get("replaces", [])
+        if not isinstance(replaces, list) or not all(
+            isinstance(name, str) and name.strip() for name in replaces
+        ):
+            raise ValueError("Overlay replaces must be a list of standard names.")
     _reject_unknown_keys(manifest, allowed_manifest_keys, MANIFEST_FILENAME)
     library_version = manifest.get("version")
     if library_version is not None and not isinstance(library_version, str):
@@ -411,7 +449,7 @@ def _load_csv_measurements(path) -> pd.DataFrame:
     return pd.read_csv(path, keep_default_na=False)
 
 
-def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
+def _base_reference_library_info(path: str | Path | None = None) -> dict[str, str]:
     """Identify a reference-material library for provenance records.
 
     Returns ``version``, a human-readable string, and ``sha256``, a digest of
@@ -427,13 +465,13 @@ def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
 
     digest = hashlib.sha256()
     if path is not None and Path(path).suffix.lower() == ".csv":
-        digest.update(Path(path).read_bytes())
+        digest.update(Path(path).expanduser().read_bytes())
         label = "legacy-csv"
     else:
         if path is None:
             root = files(__package__) / REFERENCE_MATERIALS_DIRECTORY
         else:
-            source_path = Path(path)
+            source_path = Path(path).expanduser()
             root = (
                 source_path.parent
                 if source_path.name == MANIFEST_FILENAME
@@ -476,7 +514,7 @@ def reference_library_info(path: str | Path | None = None) -> dict[str, str]:
     return info
 
 
-def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:
+def _load_standard_measurements(path: str | Path | None = None, *, is_overlay=False) -> pd.DataFrame:
     """Load and validate normalized reference-material measurements.
 
     Parameters
@@ -502,9 +540,9 @@ def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:
     sources = {}
     if path is None:
         source_root = files(__package__) / REFERENCE_MATERIALS_DIRECTORY
-        measurements, sources = _load_toml_measurements(source_root)
+        measurements, sources = _load_toml_measurements(source_root, is_overlay=is_overlay)
     else:
-        source_path = Path(path)
+        source_path = Path(path).expanduser()
         if source_path.suffix.lower() == ".csv":
             measurements = _load_csv_measurements(source_path)
         else:
@@ -513,7 +551,7 @@ def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:
                 if source_path.name == MANIFEST_FILENAME
                 else source_path
             )
-            measurements, sources = _load_toml_measurements(source_root)
+            measurements, sources = _load_toml_measurements(source_root, is_overlay=is_overlay)
 
     missing_columns = set(REQUIRED_COLUMNS) - set(measurements.columns)
     if missing_columns:
@@ -626,6 +664,268 @@ def load_standard_measurements(path: str | Path | None = None) -> pd.DataFrame:
 
     measurements.attrs["sources"] = sources
     return measurements
+
+
+def _overlay_path(overlay):
+    return default_lab_overlay_path() if overlay is _AUTO_OVERLAY else overlay
+
+
+def _merged_library_marker(path):
+    """Read writer metadata, accepting the original text marker without it."""
+    if path is not None and Path(path).suffix.lower() == ".csv":
+        return None
+    marker = _library_root(path) / _MERGED_MARKER
+    if not marker.is_file():
+        return None
+    text = marker.read_text(encoding="utf-8")
+    if text == _MERGED_MARKER_TEXT:
+        return {}
+    try:
+        metadata = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Invalid merged-library marker: {exc}") from exc
+    fields = {"format", "lab", "sha256", "standards", "internal_unpublished"}
+    if (set(metadata) != fields or type(metadata.get("format")) is not int
+            or metadata["format"] != 1
+            or not isinstance(metadata.get("lab"), str)
+            or not isinstance(metadata.get("sha256"), str)
+            or (metadata["sha256"] and (len(metadata["sha256"]) != 64
+                or any(c not in "0123456789abcdef" for c in metadata["sha256"])))
+            or any(not isinstance(metadata.get(key), list)
+                   or not all(isinstance(name, str) and name.strip() for name in metadata[key])
+                   for key in ("standards", "internal_unpublished"))):
+        raise ValueError("Invalid merged-library marker metadata.")
+    return metadata
+
+
+def _with_overlay_info(info, overlay):
+    info = dict(info)
+    if overlay:
+        info["version"] += f"+overlay.{overlay['lab']}.{overlay['sha256'][:12]}"
+        info.update(overlay_sha256=overlay["sha256"], overlay_path=overlay["path"],
+                    overlay_lab=overlay["lab"])
+    return info
+
+
+def load_standard_measurements(
+    path: str | Path | None = None, *, overlay=_AUTO_OVERLAY,
+) -> pd.DataFrame:
+    """Load validated base measurements with an optional private TOML overlay.
+
+    ``path`` selects a TOML directory, manifest or legacy normalized CSV.
+    Omit ``overlay`` to use :func:`default_lab_overlay_path`; pass None to
+    disable it, or a directory/manifest path to select it explicitly. Overlay
+    names and aliases cannot collide with the base unless ``replaces`` names
+    that base standard (or its unambiguous alias). Source IDs must be unique.
+    The returned attrs contain ``sources``, ``overlay`` and ``reference_library``.
+    A merged-library marker restores internal record statuses and permits its
+    recorded overlay standards to be refreshed. ``merged_library.overlay_action``
+    in attrs records ``same``, ``updated``, ``disabled`` or ``legacy``.
+    """
+    measurements = _load_standard_measurements(path)
+    marker = _merged_library_marker(path)
+    if marker:
+        internal = (measurements.standard.isin(marker["internal_unpublished"])
+                    & measurements.status.eq("provisional")
+                    & measurements.notes.str.startswith(INTERNAL_REFERENCE_LABEL))
+        measurements.loc[internal, "status"] = "internal_unpublished"
+    active = _overlay_path(overlay)
+    metadata = {}
+    action = "legacy" if marker == {} else "disabled"
+    info = _base_reference_library_info(path)
+    if marker and marker["sha256"]:
+        metadata = dict(path=str(Path(_library_root(path)).resolve()), lab=marker["lab"],
+                        sha256=marker["sha256"], standards=marker["standards"], replaces=[])
+        # The writer already included this overlay in the manifest version.
+        suffix = f"+overlay.{marker['lab']}.{marker['sha256'][:12]}"
+        digest_suffix = f"+sha256.{info['sha256'][:12]}"
+        info["version"] = info["version"].removesuffix(digest_suffix).removesuffix(suffix) + digest_suffix
+    if active is not None:
+        root = _library_root(active)
+        extra = _load_standard_measurements(root, is_overlay=True)
+        manifest = _read_toml(_resolve_resource_case_insensitive(root, MANIFEST_FILENAME))
+        digest = _base_reference_library_info(root)["sha256"]
+        same = bool(marker and digest == marker["sha256"])
+        metadata = dict(path=str(Path(root).resolve()), lab=manifest.get("lab", ""),
+                        sha256=digest, standards=extra.standard.drop_duplicates().tolist(),
+                        replaces=list(manifest.get("replaces", [])))
+        if same:
+            action = "same"
+        else:
+            measurements = _apply_overlay(measurements, extra, manifest, marker)
+            action = "updated"
+    measurements.attrs["overlay"] = metadata
+    if marker is not None:
+        measurements.attrs["merged_library"] = {**marker, "overlay_action": action}
+    measurements.attrs["reference_library"] = _with_overlay_info(info, metadata)
+    return measurements
+
+
+def _apply_overlay(measurements, extra, manifest, marker):
+    """Compose an overlay, allowing replacement of its recorded merged copies."""
+    base_names = {}
+    for name, aliases in measurements[["standard", "aliases"]].drop_duplicates().itertuples(index=False, name=None):
+        for spelling in (name, *aliases.split(";")):
+            if _standard_key(spelling):
+                base_names.setdefault(_standard_key(spelling), set()).add(name)
+    current_keys = {_standard_key(name) for name in extra.standard.unique()}
+    merged_copies = {name for name in (marker or {}).get("standards", [])
+                     if _standard_key(name) in current_keys}
+    replaced = set(merged_copies)
+    for name in manifest.get("replaces", []):
+        matches = base_names.get(_standard_key(name), set())
+        if len(matches) != 1:
+            raise ValueError(f"Overlay replaces entry {name!r} is unknown or ambiguous in the base library.")
+        replaced.update(matches)
+    for name, aliases in extra[["standard", "aliases"]].drop_duplicates().itertuples(index=False, name=None):
+        for spelling in (name, *aliases.split(";")):
+            for base_name in base_names.get(_standard_key(spelling), ()):
+                if base_name not in replaced:
+                    raise ValueError(f"Overlay standard {name!r} ({spelling!r}) clashes with base standard {base_name!r}; list it in replaces.")
+    sources = measurements.attrs["sources"]
+    remaining = measurements.loc[~measurements.standard.isin(replaced)]
+    # Only discard registry entries belonging to refreshed merged copies.
+    # A source still referenced by another base material must keep clashing.
+    old_citations = set(measurements.loc[measurements.standard.isin(merged_copies), "source"])
+    unused = old_citations - set(remaining.source)
+    sources = {key: entry for key, entry in sources.items() if entry["display"] not in unused}
+    extra_sources = extra.attrs["sources"]
+    clashes = sources.keys() & extra_sources.keys()
+    if clashes:
+        raise ValueError("Overlay source IDs clash with base source IDs: " + ", ".join(sorted(clashes)))
+    merged_sources = {**sources, **extra_sources}
+    displays = [entry["display"].strip() for entry in merged_sources.values()]
+    if len(displays) != len(set(displays)):
+        raise ValueError("Source display citations must be unique across base and overlay.")
+    measurements = pd.concat([remaining, extra], ignore_index=True)
+    measurements.attrs["sources"] = merged_sources
+    return measurements
+
+
+def reference_library_info(
+    path: str | Path | None = None, *, overlay=_AUTO_OVERLAY,
+) -> dict[str, str]:
+    """Return the library version and digest, including validated overlay identity.
+
+    Without an overlay this is the original base-library provenance dictionary.
+    An overlay appends ``+overlay.<lab>.<sha12>`` to the version and adds
+    ``overlay_sha256``, ``overlay_path`` and ``overlay_lab``. The base digest
+    retains its original meaning. ``overlay=None`` disables the overlay.
+    """
+    active = _overlay_path(overlay)
+    if active is None and _merged_library_marker(path) is None:
+        return _base_reference_library_info(path)
+    return dict(load_standard_measurements(path, overlay=active).attrs["reference_library"])
+
+
+def write_merged_library(target: str | Path, base=None, overlay=_AUTO_OVERLAY) -> Path:
+    """Write a standalone TOML library for Studio versions without overlays.
+
+    Refuse a nonempty target without this writer's marker. Validate all input
+    and generated TOML before replacing a previously generated directory.
+    Internal records use the legacy ``provisional`` status on disk, retaining
+    their explicit internal/unpublished label in notes and source metadata.
+    Their calibration values and aliases are unchanged.
+    """
+    import json
+    import shutil
+    import tempfile
+
+    target = Path(target).expanduser().absolute()
+    active = _overlay_path(overlay)
+    for source in (base, active):
+        if source is not None and Path(_library_root(source)).resolve().is_relative_to(target.resolve()):
+            raise ValueError("Merged target must not contain an input library.")
+    if target.is_symlink():
+        raise ValueError("Merged target must not be a symlink.")
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        if not target.is_dir() or _merged_library_marker(target) is None:
+            raise ValueError("Refusing a non-empty target not written by write_merged_library.")
+    measurements = load_standard_measurements(base, overlay=active)
+    sources = measurements.attrs["sources"]
+    if not sources:
+        raise ValueError("A merged TOML library requires a source registry.")
+    source_ids = {entry["display"].strip(): key for key, entry in sources.items()}
+    def quoted(value):
+        return json.dumps(str(value), ensure_ascii=False)
+    def scalar(value):
+        return quoted(value) if isinstance(value, str) else repr(value)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".upbrpy-merged-", dir=target.parent) as temporary:
+        staged = Path(temporary) / "library"
+        staged.mkdir()
+        text = [f"format_version = {ARCHIVE_FORMAT_VERSION}"]
+        for source_id, original in sources.items():
+            entry = dict(original)
+            if entry.get("status") == "internal_unpublished":
+                entry["status"] = "provisional"
+                for field in ("notes", "no_doi_reason"):
+                    original_text = entry.get(field, "")
+                    entry[field] = INTERNAL_REFERENCE_LABEL + ("; " + original_text if original_text else "")
+            text += [f"\n[sources.{quoted(source_id)}]"]
+            text += [f"{key} = {quoted(value)}" for key, value in entry.items()]
+        (staged / "sources.toml").write_text("\n".join(text) + "\n", encoding="utf-8")
+        names = []
+        for index, (name, records) in enumerate(measurements.groupby("standard", sort=False)):
+            filename = f"material-{index:04d}.toml"
+            names.append(filename)
+            first = records.iloc[0]
+            table = f"standards.{quoted(name)}"
+            aliases = first.aliases.split(";") if first.aliases else []
+            text = [f"format_version = {ARCHIVE_FORMAT_VERSION}", f"material = {quoted(first.material)}",
+                    f"[{table}]", "aliases = [" + ", ".join(map(quoted, aliases)) + "]"]
+            for record in records.itertuples(index=False):
+                text += [f"\n[[{table}.measurements]]"]
+                internal = record.status == "internal_unpublished"
+                for key in ("role", "unit", "status", "notes"):
+                    field_value = getattr(record, key)
+                    if internal and key == "status":
+                        field_value = "provisional"
+                    elif internal and key == "notes":
+                        field_value = INTERNAL_REFERENCE_LABEL + ("; " + field_value if field_value else "")
+                    text += [f"{key} = {quoted(field_value)}"]
+                text += [f"source = {quoted(source_ids[record.source])}", f"locator = {quoted(record.source_locator)}",
+                         f"[{table}.measurements.values]"]
+                value = "value = " + scalar(record.value)
+                if pd.notna(record.uncertainty):
+                    value += f", uncertainty = {scalar(record.uncertainty)}, uncertainty_type = {quoted(record.uncertainty_type)}"
+                text += [f"{quoted(record.quantity)} = {{ {value} }}"]
+            (staged / filename).write_text("\n".join(text) + "\n", encoding="utf-8")
+        version = measurements.attrs["reference_library"]["version"]
+        manifest = [f"format_version = {ARCHIVE_FORMAT_VERSION}", f"version = {quoted(version)}",
+                    'sources = "sources.toml"', "material_files = [" + ", ".join(map(quoted, names)) + "]"]
+        (staged / MANIFEST_FILENAME).write_text("\n".join(manifest) + "\n", encoding="utf-8")
+        overlay_info = measurements.attrs["overlay"]
+        marker = ["format = 1", f"lab = {quoted(overlay_info.get('lab', ''))}",
+                  f"sha256 = {quoted(overlay_info.get('sha256', ''))}"]
+        for key, values in (
+            ("standards", overlay_info.get("standards", [])),
+            ("internal_unpublished", measurements.loc[
+                measurements.status.eq("internal_unpublished"), "standard"].drop_duplicates().tolist()),
+        ):
+            marker += [f"{key} = [" + ", ".join(map(quoted, values)) + "]"]
+        (staged / _MERGED_MARKER).write_text("\n".join(marker) + "\n", encoding="utf-8")
+        load_standard_measurements(staged, overlay=None)
+        if target.exists():
+            shutil.rmtree(target)
+        staged.rename(target)
+    return target
+
+
+def _internal_reference_note(records, entry):
+    """Describe an internal source without implying a missing publication DOI."""
+    internal = (
+        entry.get("status") == "internal_unpublished"
+        or str(entry.get("notes", "")).startswith(INTERNAL_REFERENCE_LABEL)
+        or ("status" in records and records.status.eq("internal_unpublished").any())
+        or ("notes" in records and records.notes.str.startswith(INTERNAL_REFERENCE_LABEL).any())
+    )
+    if not internal:
+        return ""
+    reason = entry.get("no_doi_reason", "")
+    if reason.startswith(INTERNAL_REFERENCE_LABEL):
+        reason = reason.removeprefix(INTERNAL_REFERENCE_LABEL).lstrip("; ")
+    return INTERNAL_REFERENCE_LABEL + ("; " + reason if reason else "")
 
 
 def _fill_if_missing(
@@ -851,6 +1151,11 @@ def build_standard_archive(
     # DataFrame operations safe and avoids carrying a second table through
     # every archive slice.
     archive.attrs["source_library"] = "TOML"
+    archive.attrs["overlay"] = dict(measurements.attrs.get("overlay", {}))
+    if "merged_library" in measurements.attrs:
+        archive.attrs["merged_library"] = dict(measurements.attrs["merged_library"])
+    if "reference_library" in measurements.attrs:
+        archive.attrs["reference_library"] = dict(measurements.attrs["reference_library"])
     archive.attrs["measurement_count"] = int(len(measurements))
     archive.attrs["derived_values_included"] = bool(include_derived)
     if "aliases" in measurements:
@@ -873,7 +1178,7 @@ def canonicalize_reference_material_samples(data, archive):
     """Return a copy with unambiguous reference-material labels canonicalized.
 
     Instrument files and reference libraries commonly differ only by case,
-    spaces, underscores, or hyphens (for example ``TR-1`` versus ``TR1``).
+    spaces, underscores, or hyphens (for example ``LAB-X`` versus ``LABX``).
     Matching on an alphanumeric case-folded key keeps calibration lookup
     independent of filename typography while leaving unknown sample labels
     untouched. Canonical names take priority over aliases. Ambiguous aliases
@@ -886,13 +1191,7 @@ def canonicalize_reference_material_samples(data, archive):
     if "sample" not in data.columns:
         return data.copy()
 
-    def key(value):
-        """Normalize one display label for unambiguous library matching."""
-        return "".join(
-            character
-            for character in str(value).casefold()
-            if character.isalnum()
-        )
+    key = _standard_key
 
     candidates = {}
     ambiguous = set()
@@ -934,6 +1233,8 @@ def canonicalize_reference_material_samples(data, archive):
 __all__ = [
     "ARCHIVE_FORMAT_VERSION",
     "reference_library_info",
+    "default_lab_overlay_path",
+    "write_merged_library",
     "LAMBDA_232",
     "MANIFEST_FILENAME",
     "REFERENCE_MATERIALS_DIRECTORY",

@@ -219,7 +219,8 @@ def _primary_terms(pipeline):
 
     path = pipeline.reference_library_path
     try:
-        measurements = load_standard_measurements(path)
+        overlay = pipeline.standard_archive.attrs.get("overlay")
+        measurements = load_standard_measurements(path, **({"overlay": overlay.get("path") if overlay else None} if overlay is not None else {}))
     except (OSError, ValueError, KeyError):
         measurements = pd.DataFrame(columns=("standard", "quantity", "value", "uncertainty", "uncertainty_type"))
     names = (pipeline.config.primary_68_standard, pipeline.config.primary_68_standard,
@@ -678,6 +679,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     context = dict(material=config.material, channels=tuple(pipeline.channels),
         common_pb_calibration=config.common_pb_calibration,
         reference_library_path=pipeline.reference_library_path,
+        reference_overlay=dict(pipeline.standard_archive.attrs.get("overlay", {})),
         session_name=Path(pipeline.source_directory).stem if pipeline.source_directory else "session",
         primary_standards=dict(zip(SYSTEMS, (config.primary_68_standard, config.primary_68_standard, config.primary_76_standard, config.primary_82_standard))),
         # Only materials analysed in this session are cited in footnotes.
@@ -785,7 +787,7 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
     stable identifiers for an export preview; missing values are never guessed.
     Rebuild the notes after changing visible columns or export settings.
     """
-    from .standards import build_standard_archive, load_standard_measurements
+    from .standards import build_standard_archive, load_standard_measurements, _internal_reference_note
 
     context, settings = table.context, table.settings
     manifest = context["manifest"]
@@ -855,7 +857,9 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         f"Tune names: {tune}. Laser output settings seen: {laser_output}.")
 
     try:
-        measurements = load_standard_measurements(pipeline.reference_library_path)
+        overlay = context.get("reference_overlay")
+        measurements = load_standard_measurements(pipeline.reference_library_path,
+            **({"overlay": overlay.get("path") if overlay else None} if overlay is not None else {}))
     except (OSError, ValueError, KeyError):
         measurements = pd.DataFrame(columns=("standard", "quantity", "role", "value", "source"))
     registry = measurements.attrs.get("sources", {})
@@ -873,7 +877,10 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
                     text = f"{author_year[1]}, {author_year[2]}"
                 elif "UPbR26plus" in display:
                     text = "UPbR26plus archive value"
-            if doi and doi not in text:
+            internal = _internal_reference_note(records.loc[records.source.eq(display)], entry)
+            if internal:
+                text += "; " + internal
+            elif doi and doi not in text:
                 text += f", doi:{doi}"
             elif not doi:
                 missing_doi = fmt(note, field + ".doi", None)
@@ -1031,10 +1038,12 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         "loucks2024": "Loucks et al. (2024), doi:10.5382/econgeo.5071",
     }.items():
         sentence(key, citation + ".")
+    overlay_lab = manifest.get("overlay_lab")
+    overlay_note = f" Lab overlay: {overlay_lab or 'unlabelled'} ({manifest['overlay_sha256'][:12]})." if manifest.get("overlay_sha256") else ""
     sentence("software", f"Reduced with UPbRPy {fmt('software', 'upbrpy_version', manifest.get('upbrpy_version'))}, "
         + f"git commit {fmt('software', 'git_commit', (_git_commit() or '')[:12])}; reference library version "
         + f"{fmt('software', 'reference_library_version', manifest.get('reference_library_version') or (manifest.get('reference_library_sha256') or '')[:12])}. "
-        + f"Data-reduction date: {date.today().isoformat()}.")
+        + f"Data-reduction date: {date.today().isoformat()}." + overlay_note)
     vocabulary = {
         "excluded": "Excluded analyses remain in the table and are omitted from weighted means.",
         "discordant": "Discordant means |disc| − 2s exceeds the configured discordance threshold.",
@@ -1371,6 +1380,11 @@ def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
                         style = None if isinstance(value, str) else reference_format(frame.columns[i])
                         reference.write(r, i, value, style)
             offset += len(frame) + 4
+        for note in notes:
+            if note.id in {"standards", "software"}:
+                reference.write_string(offset, 0, note.text, wrapped)
+                reference.set_row(offset, 60)
+                offset += 2
         if table.context.get("common_pb_calibration") == "tera_wasserburg":
             reference.write_string(offset, 0,
                 "207Pb-corrected 206Pb/238U rows use each material's library initial "

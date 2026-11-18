@@ -56,6 +56,7 @@ def pytest_collection_finish(session):
 
 
 # Install before collection, including GUI modules with import-time defaults.
+os.environ.setdefault("UPBRPY_LAB_STANDARDS", "none")
 _autosave_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-autosave-")
 os.environ["UPBRPY_AUTOSAVE_DIR"] = _autosave_folder.name
 _results_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-results-")

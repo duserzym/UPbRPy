@@ -1207,6 +1207,9 @@ class ReductionPipeline:
         A missing or unreadable library yields ``None`` values rather than an
         error, because provenance must never block an export.
         """
+        recorded = self.base_standard_archive.attrs.get("reference_library")
+        if recorded is not None:
+            return dict(recorded)
         try:
             return dict(reference_library_info(self.reference_library_path))
         except (OSError, ValueError, TypeError):
@@ -1251,6 +1254,7 @@ class ReductionPipeline:
             ),
             "reference_library_version": library.get("version"),
             "reference_library_sha256": library.get("sha256"),
+            **{key: library[key] for key in ("overlay_sha256", "overlay_path", "overlay_lab") if key in library},
             "input_files": files,
             "config": self.config.to_dict(),
             "detector_calibration": self.experiment.attrs.get(

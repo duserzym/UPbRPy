@@ -182,13 +182,16 @@ def _starts(session):
 def _library(session):
     from .standards import reference_library_info
     try:
-        record = reference_library_info(session.table.context.get("reference_library_path"))
+        context = session.table.context
+        overlay = context.get("reference_overlay")
+        record = reference_library_info(context.get("reference_library_path"),
+            **({"overlay": overlay.get("path") if overlay else None} if overlay is not None else {}))
     except (OSError, ValueError, KeyError):
         record = {}
     manifest = session.table.context.get("manifest", {})
     version = manifest.get("reference_library_version") or record.get("version")
     return "; ".join([_text(version), *(f"{key}: {record[key]}" for key in
-                     ("repository", "revision", "commit_date") if record.get(key))])
+                     ("repository", "revision", "commit_date", "overlay_lab", "overlay_sha256") if record.get(key))])
 
 
 def _selected(sessions, info):
@@ -399,11 +402,13 @@ def _recorded_methods(session):
 def _reference_rows(session):
     """Use matching library records for ratios, date uncertainties and citations."""
     from .bias import accepted_dates
-    from .standards import load_standard_measurements, build_standard_archive
+    from .standards import load_standard_measurements, build_standard_archive, _internal_reference_note
     context = session.table.context
     archive = pd.DataFrame.from_dict(context.get("reference_values", {}), orient="index")
     try:
-        measurements = load_standard_measurements(context.get("reference_library_path"))
+        overlay = context.get("reference_overlay")
+        measurements = load_standard_measurements(context.get("reference_library_path"),
+            **({"overlay": overlay.get("path") if overlay else None} if overlay is not None else {}))
     except (OSError, ValueError, KeyError):
         measurements = pd.DataFrame(columns=("standard", "quantity", "role", "value", "source", "uncertainty", "uncertainty_type"))
     registry = measurements.attrs.get("sources", {})
@@ -416,8 +421,11 @@ def _reference_rows(session):
         texts = []
         for display in records.source.dropna().unique():
             matches = [entry for entry in registry.values() if entry["display"] == display]
-            doi = matches[0].get("doi") if len(matches) == 1 else None
-            texts.append(str(display) + (f", doi:{doi}" if doi and doi not in display else "" if doi else ", no DOI"))
+            entry = matches[0] if len(matches) == 1 else {}
+            doi = entry.get("doi")
+            internal = _internal_reference_note(records.loc[records.source.eq(display)], entry)
+            texts.append(str(display) + ("; " + internal if internal else
+                f", doi:{doi}" if doi and doi not in display else "" if doi else ", no DOI"))
         return "; ".join(texts) or "not recorded"
     result = []
     for name in names:
