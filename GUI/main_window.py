@@ -1619,6 +1619,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                      if self._focus_previous_mode == "compact" else None)
         self._focus_visible = {panel: not widget.isHidden() for panel, widget in (
             ("sidebar", self.sidebar_panel), ("inspector", self.inspector_panel))}
+        # Reparenting splitter children can synchronously resize an embedded
+        # viewer. Guard responsive layout before the first geometry mutation.
+        self._focus_folded.update(("sidebar", "inspector"))
         # Bring compact's floating inspector into the existing splitter first.
         if self.workspace_splitter.indexOf(self.inspector_panel) < 0:
             self._focus_sizes = [*self._focus_sizes[:2], self.inspector_panel.width()]
@@ -1631,7 +1634,6 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.setParent(self.centralWidget())
             widget.hide()
             self._focus_strips[panel].setVisible(self._focus_visible[panel])
-            self._focus_folded.add(panel)
         total = sum(self.workspace_splitter.sizes())
         self.workspace_splitter.setSizes([26, max(1, total-52), 26])
         self._save_plot_focus()

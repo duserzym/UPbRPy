@@ -72,6 +72,63 @@ def fixture_preview():
                            decision=SimpleNamespace(include_calibration_uncertainty=False)), depth
 
 
+def detail_crops(shell, window, output, app):
+    """Render vector details and a long-sample popup directly at DPR 2."""
+    import pandas as pd
+    from PySide6 import QtCore, QtGui, QtWidgets
+
+    review = window.results_table
+    finalized, _ = fixture_preview()
+    # Synthetic labels only: repeat measured fixture ratios for layout review.
+    frame = pd.concat([finalized.parallel_results.iloc[[i % len(finalized.parallel_results)]]
+                       for i in range(20)], ignore_index=True)
+    frame["sample"] = [f"Long sample name for layout preview {i:02d} with additional field description"
+                       for i in range(20)]
+    frame["spot_name"] = [f"preview_{i}" for i in range(20)]
+    review.show_depth_profile(pd.DataFrame(), "")
+    review.show_results(SimpleNamespace(selected_results=frame.copy(), parallel_results=frame))
+    review.refresh_spot_concordia(reset_view=True)
+    review.set_spot_excluded({"preview_1"}, True)
+    review.set_selected_spots({"preview_0"})
+    review.tabs.setCurrentWidget(review.spot_concordia_page)
+    window.plots_stack.setCurrentWidget(review)
+
+    def save(widget, rect, filename):
+        # QWidget.render repaints at the target DPR; no enlarged 1x bitmap.
+        pixmap = QtGui.QPixmap(widget.width() * 2, widget.height() * 2)
+        pixmap.setDevicePixelRatio(2)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        QtWidgets.QWidget.render(widget, pixmap)
+        pixels = QtCore.QRect(rect.x()*2, rect.y()*2, rect.width()*2, rect.height()*2)
+        if not pixmap.copy(pixels).save(str(output / filename)):
+            raise RuntimeError(f"Could not save {filename}")
+
+    for size in ((1280, 800), (1440, 900)):
+        window.set_plot_focus(False)
+        shell.resize(*size)
+        window.apply_default_layout()
+        for _ in range(12): app.processEvents()
+        canvas = review.spot_concordia
+        canvas._set_hover(None)
+        review.spot_card.hide()
+        for name, label in (("preview_0", "selected-outline"), ("preview_1", "hidden-dashed")):
+            canvas.set_included_spots({name})
+            handle = next(ellipse for key, ellipse, _ in canvas._ellipses if key == name)
+            scene = canvas._plot_item.vb.mapViewToScene(handle.path.boundingRect())
+            rect = canvas.mapFromScene(scene).boundingRect().adjusted(-16, -16, 16, 16)
+            rect = rect.intersected(canvas.rect())
+            save(canvas, rect, f"{label}-{size[0]}x{size[1]}-dpr2.png")
+        canvas.set_included_spots(set(frame.spot_name))
+        save(canvas, QtCore.QRect(0, max(0, canvas.height()-120), min(320, canvas.width()),
+                                 min(120, canvas.height())),
+             f"lower-left-{size[0]}x{size[1]}-dpr2.png")
+        review.spot_sample_chips.menu_button.showMenu()
+        for _ in range(8): app.processEvents()
+        popup = review.spot_sample_chips.menu_button.menu()
+        save(popup, popup.rect(), f"samples-long-20-{size[0]}x{size[1]}-dpr2.png")
+        popup.hide()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -81,7 +138,7 @@ def main():
     from PySide6 import QtCore
     from GUI.theme import build_application
     from GUI import main_window
-    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
 
     app = build_application([], "light")
     main_window.Updater.start_scheduler = lambda self: None
@@ -89,7 +146,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="upbrpy-concordia-shots-") as scratch:
         settings = original_settings(str(Path(scratch)/"viewer.ini"), original_settings.Format.IniFormat)
         QtCore.QSettings = lambda *a, **kw: settings
-        window = MainWindow(theme_mode="light")
+        shell = StudioWindow(theme_mode="light")
+        window = shell.active_reduction
         try:
             if args.project:
                 window.load_project_file(args.project, background=False)
@@ -111,13 +169,13 @@ def main():
                 review.set_selected_spots({shown[0]})
             review.tabs.setCurrentWidget(review.spot_concordia_page)
             window._apply_interaction_controls_to_current_plot()
-            window.show()
+            shell.show()
             dimensions = []
             for theme in ("light", "dark"):
                 window.apply_theme_mode(theme, persist=False)
                 for width, height in ((1280, 800), (1440, 900)):
                     window.set_plot_focus(False)
-                    window.resize(width, height)
+                    shell.resize(width, height)
                     window.apply_default_layout()
                     for focus in (False, True):
                         window.set_plot_focus(focus)
@@ -128,7 +186,7 @@ def main():
                             if not args.project:
                                 review.summary_label.setText("Uncalibrated fixture preview · measured ratios")
                             filename = f"{kind}-{width}x{height}-{'focus' if focus else 'open'}-{theme}.png"
-                            if not window.grab().save(str(args.output / filename)):
+                            if not shell.grab().save(str(args.output / filename)):
                                 raise RuntimeError(f"Could not save {filename}")
                             plot = getattr(review, kind + "_concordia")
                             toolbar = getattr(review, kind + "_toolbar")
@@ -139,12 +197,14 @@ def main():
                                               f"overflow={', '.join(folded) or 'none'}" +
                                               (f" · card {review.spot_card.width()}x{review.spot_card.height()}"
                                                if kind == "spot" else ""))
+            window.apply_theme_mode("light", persist=False)
+            detail_crops(shell, window, args.output, app)
             (args.output / "dimensions.txt").write_text("\n".join(dimensions) + "\n")
             print("\n".join(dimensions))
         finally:
             window.set_plot_focus(False)
             window.has_unsaved_changes = lambda: False
-            window.close()
+            shell.close()
             app.processEvents()
             QtCore.QSettings = original_settings
 

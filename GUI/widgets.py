@@ -1690,6 +1690,42 @@ class AxisZoomViewBox(pg.ViewBox):
         self.sigRangeChangedManually.emit(mask)
 
 
+class _AntialiasedPathItem(QtWidgets.QGraphicsPathItem):
+    """Paint vector overlays smoothly without enabling trace antialiasing."""
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        super().paint(painter, option, widget)
+
+
+class _AntialiasedRectItem(QtWidgets.QGraphicsRectItem):
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        super().paint(painter, option, widget)
+
+
+class _ConcordiaHoverRing(_AntialiasedPathItem):
+    """A cosmetic, device-resolution ring with no scatter symbol atlas."""
+
+    def __init__(self, pen):
+        super().__init__()
+        self.setPen(pen)
+        self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.setData([], [])
+
+    def setData(self, x, y):
+        self._data = x, y
+        path = QtGui.QPainterPath()
+        if len(x):
+            path.addEllipse(QtCore.QRectF(-8, -8, 16, 16))
+            self.setPos(float(x[0]), float(y[0]))
+        self.setPath(path)
+
+    def getData(self):
+        return self._data
+
+
 class _ConcordiaViewBox(AxisZoomViewBox):
     """Route spot clicks and selection rectangles to the review widget."""
 
@@ -1697,7 +1733,7 @@ class _ConcordiaViewBox(AxisZoomViewBox):
         super().__init__()
         self.review = weakref.proxy(review)
         self._selection_drag_modifiers = None
-        self._selection_box = QtWidgets.QGraphicsRectItem(self)
+        self._selection_box = _AntialiasedRectItem(self)
         self._selection_box.setZValue(1e9)
         self._selection_box.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self._selection_box.hide()
@@ -2214,7 +2250,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._plot_item is None:
             return
         if self._highlight is None or self._highlight.scene() is None:
-            self._highlight = QtWidgets.QGraphicsPathItem()
+            self._highlight = _AntialiasedPathItem()
             self._highlight.setZValue(30)
             self._highlight.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             self._plot_item.addItem(self._highlight, ignoreBounds=True)
@@ -2245,6 +2281,15 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._update_selection_style()
 
     def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key.Key_H, QtCore.Qt.Key.Key_E):
+            # A held key must not toggle back on a delayed repeat, including
+            # repeats queued while the user clicks a toolbar control.
+            if event.isAutoRepeat() or event.modifiers() & (
+                    QtCore.Qt.KeyboardModifier.ControlModifier |
+                    QtCore.Qt.KeyboardModifier.MetaModifier |
+                    QtCore.Qt.KeyboardModifier.AltModifier):
+                event.accept()
+                return
         action = None
         if event.key() == QtCore.Qt.Key.Key_Space:
             self._space_pan = True
@@ -2259,6 +2304,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             action = "all" if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier else "exclude_toggle"
         elif event.key() == QtCore.Qt.Key.Key_E:
             action = "exclude_toggle"
+        elif event.key() == QtCore.Qt.Key.Key_0:
+            self.restore_default_view()
         else:
             return super().keyPressEvent(event)
         if action:
@@ -2730,6 +2777,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.vb.sigRangeChanged.connect(self._schedule_labels)
             self._plot_item.vb.sigResized.connect(self._schedule_labels)
         plot = self._plot_item
+        plot.hideButtons()
         _make_diag_axis(plot, theme)
         self._apply_grid()
         plot.setAspectLocked(False)
@@ -2775,8 +2823,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             concordia_y,
             pen=pg.mkPen(theme.muted, width=1.4),
         )
-        self._hover_ring = _ConcordiaMarker(size=16, pen=pg.mkPen(theme.accent, width=2),
-                                             brush=pg.mkBrush(None))
+        self._hover_ring = _ConcordiaHoverRing(pg.mkPen(theme.accent, width=2))
         self._hover_ring.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         plot.addItem(self._hover_ring, ignoreBounds=True)
         hover_background = theme_color(theme.surface)
@@ -3794,10 +3841,7 @@ class _SampleChip(QtWidgets.QAbstractButton):
         return QtCore.QSize(0, self.sizeHint().height())
 
     def height_for_width(self, width):
-        bounds = self.fontMetrics().boundingRect(
-            QtCore.QRect(0, 0, max(1, width - 24), 10000),
-            QtCore.Qt.TextFlag.TextWrapAnywhere, self.text())
-        return max(22, bounds.height() + 6)
+        return max(22, self.fontMetrics().height() + 6)
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -3824,12 +3868,13 @@ class _SampleChip(QtWidgets.QAbstractButton):
         painter.drawEllipse(QtCore.QRectF(6, (self.height() - 8) / 2, 8, 8))
         painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.ButtonText))
         painter.drawText(self.rect().adjusted(18, 3, -6, -3),
-                         QtCore.Qt.TextFlag.TextWrapAnywhere | QtCore.Qt.AlignmentFlag.AlignVCenter,
-                         self.text())
+                         QtCore.Qt.AlignmentFlag.AlignVCenter,
+                         self.fontMetrics().elidedText(self.text(), QtCore.Qt.TextElideMode.ElideRight,
+                                                       max(1, self.width() - 24)))
 
 
 class _SampleChipArea(QtWidgets.QScrollArea):
-    """Wrap chips, scrolling vertically after about three rows."""
+    """Wrap chips, scrolling at the height allowed by the containing popup."""
 
     def __init__(self):
         super().__init__()
@@ -3854,7 +3899,8 @@ class _SampleChipArea(QtWidgets.QScrollArea):
         self.widget().setMinimumHeight(height)
         row_height = max((chip.sizeHint().height() for chip in self.chips.values()
                           if not chip.isHidden()), default=22)
-        self.setFixedHeight(min(height, 3 * row_height + 2 * self.flow.spacing()))
+        limit = getattr(self, "popup_height_limit", 3 * row_height + 2 * self.flow.spacing())
+        self.setFixedHeight(min(height, limit))
         self.flow.invalidate()
 
 
@@ -4450,10 +4496,78 @@ class _PopoverButton(QtWidgets.QToolButton):
         pass
 
 
+class _SamplesPopup(QtWidgets.QFrame):
+    """A persistent widget popup, independent of native menu item activation."""
+
+    def __init__(self, button, content, area):
+        super().__init__(button, QtCore.Qt.WindowType.Popup)
+        self.button, self.content, self.area = button, content, area
+        self.setObjectName("SamplesPopup")
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(content)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), theme_color(active_theme().surface))
+        painter.end()
+        super().paintEvent(event)
+
+    def popup(self, position):
+        theme = active_theme()
+        self.setStyleSheet(f"QFrame#SamplesPopup {{ background: {theme.surface}; "
+                          f"border: 1px solid {theme.input_border}; border-radius: 8px; }}")
+        window = self.button.window()
+        bounds = QtCore.QRect(window.mapToGlobal(QtCore.QPoint()), window.size()).adjusted(4, 4, -4, -4)
+        width = min(386, bounds.width())
+        margins = self.content.layout().contentsMargins()
+        inner_width = width - 12 - margins.left() - margins.right()
+        # Measure after polishing, at the width the chips will actually get.
+        self.content.ensurePolished()
+        self.area.popup_height_limit = max(22, int(bounds.height() * .6) - 80)
+        if window.width() < 760:
+            # Small standalone viewers retain a compact three-row chooser.
+            row_height = max((chip.sizeHint().height() for chip in self.area.chips.values()), default=22)
+            self.area.popup_height_limit = min(self.area.popup_height_limit,
+                                               3 * row_height + 2 * self.area.flow.spacing())
+        self.area.resize(inner_width, self.area.height())
+        self.area.reflow()
+        self.content.layout().activate()
+        height = self.content.layout().sizeHint().height() + 12
+        self.resize(width, min(height, int(bounds.height() * .6)))
+        self.move(max(bounds.left(), min(position.x(), bounds.right() - self.width() + 1)),
+                  max(bounds.top(), min(position.y(), bounds.bottom() - self.height() + 1)))
+        self.show()
+        self.area.reflow()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+
+class _SamplesButton(QtWidgets.QToolButton):
+    def paintEvent(self, event):
+        option = QtWidgets.QStyleOptionToolButton()
+        self.initStyleOption(option)
+        option.features |= QtWidgets.QStyleOptionToolButton.ToolButtonFeature.HasMenu
+        painter = QtWidgets.QStylePainter(self)
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ToolButton, option)
+
+    def menu(self):
+        return self.samples_popup
+
+    def showMenu(self):
+        self.samples_popup.popup(self.mapToGlobal(QtCore.QPoint(0, self.height())))
+
+
 class _ConcordiaStatus(QtWidgets.QWidget):
     """Wrap dates and move the fit below when the complete row cannot fit."""
 
-    def __init__(self, help_button, age, fit, details):
+    def __init__(self, age, fit, details):
         super().__init__()
         self.setObjectName("ConcordiaStatus")
         self.age, self.fit = age, fit
@@ -4462,7 +4576,6 @@ class _ConcordiaStatus(QtWidgets.QWidget):
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setHorizontalSpacing(4)
         self.grid.setVerticalSpacing(0)
-        self.grid.addWidget(help_button, 0, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         self.grid.addWidget(details, 0, 3, QtCore.Qt.AlignmentFlag.AlignTop)
         self.grid.setColumnStretch(1, 1)
         self.reflow()
@@ -4470,7 +4583,7 @@ class _ConcordiaStatus(QtWidgets.QWidget):
     def reflow(self):
         age_width = self.age.fontMetrics().horizontalAdvance(self.age.text())
         fit_width = self.fit.fontMetrics().horizontalAdvance(self.fit.text())
-        fixed = sum(self.grid.itemAtPosition(0, col).widget().sizeHint().width() for col in (0, 3)) + 12
+        fixed = self.grid.itemAtPosition(0, 3).widget().sizeHint().width() + 8
         second_row = age_width + fit_width + fixed > self.width()
         self.fit.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored if second_row else
                                QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
@@ -4500,7 +4613,7 @@ class _ConcordiaToolbar(QtWidgets.QWidget):
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.row = QtWidgets.QHBoxLayout(self)
         self.row.setContentsMargins(0, 0, 0, 0)
-        self.row.setSpacing(3)
+        self.row.setSpacing(2)
         self.entries = []
         self._order = []
         self.overflow = QtWidgets.QToolButton()
@@ -4518,9 +4631,10 @@ class _ConcordiaToolbar(QtWidgets.QWidget):
 
     @staticmethod
     def _style_button(button):
+        button.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         button.setProperty("hasToolbarMenu", button.menu() is not None)
         button.setStyleSheet(
-            "QToolButton { padding: 2px 4px; min-width: 0px; min-height: 0px; } "
+            "QToolButton { padding: 2px 3px; min-width: 0px; min-height: 0px; } "
             "QToolButton[hasToolbarMenu=\"true\"] { padding-right: 14px; } "
             "QToolButton::menu-indicator { subcontrol-origin: padding; "
             "subcontrol-position: right center; right: 3px; width: 7px; }")
@@ -6032,16 +6146,19 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _samples_popover(self, kind):
         content = QtWidgets.QWidget()
-        content.setMinimumWidth(360)
-        content.setMaximumWidth(420)
         box = QtWidgets.QVBoxLayout(content)
         row = self._create_spot_bulk_buttons()
         row.itemAt(1).widget().setText("None")
-        row.addWidget(self._create_glass_button())
+        glasses = self._create_glass_button()
+        glasses.setMinimumWidth(glasses.sizeHint().width())
+        row.addWidget(glasses)
         box.addLayout(row)
         area = self._create_sample_chips(kind)
         box.addWidget(area)
-        button = self._popover("Samples 0/0", content)
+        button = _SamplesButton()
+        button.setText("Samples 0/0")
+        button.samples_popup = _SamplesPopup(button, content, area)
+        button.clicked.connect(lambda checked=False: button.showMenu())
         area.menu_button = button
         return button, area
 
@@ -6147,7 +6264,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         button.setText("Focus")
         button.setCheckable(True)
         button.setToolTip("Fold or restore the workflow rail and inspector (Cmd/Ctrl+Shift+F)")
-        button.clicked.connect(self.focusRequested)
+        button.toggled.connect(self.focusRequested.emit)
         self._focus_buttons.append(button)
         toolbar.add_control(button, "Focus")
 
@@ -6165,15 +6282,19 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 button.setText(f"{sigma_level}σ")
 
     def _status_line(self, kind):
-        help_button = QtWidgets.QToolButton()
-        help_button.setText("?")
         command = "Cmd" if sys.platform == "darwin" else "Ctrl"
-        help_button.setToolTip(
+        gestures = (
             f"Drag: select (Shift adds, {command} toggles) · Space+drag or middle-drag: pan · "
             f"Scroll: pan · Pinch, wheel or {command}+scroll: zoom · Double-click: reset view · "
-            "Right-click: hide/show · H hide · Shift+H show all · Esc clear")
-        help_button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
-        help_button.setFixedSize(24, 24)
+            "Right-click: hide/show · H/E hide · Shift+H show all · 0 fit view · Esc clear")
+        content = QtWidgets.QLabel(gestures)
+        content.setWordWrap(True)
+        content.setFixedWidth(300)
+        content.setMargin(8)
+        help_button = self._popover("?", content)
+        help_button.setToolTip(gestures)
+        help_button.setAccessibleName("Plot gestures")
+        getattr(self, kind + "_toolbar").add_control(help_button, "Plot gestures")
         age = QtWidgets.QLabel()
         age.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         age.setWordWrap(True)
@@ -6191,7 +6312,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         details.setStyleSheet("padding: 2px 4px; min-height: 0px;")
         details.setFixedHeight(24)
         details.clicked.connect(lambda: self._show_readout_details(kind))
-        line = _ConcordiaStatus(help_button, age, fit, details)
+        line = _ConcordiaStatus(age, fit, details)
         setattr(self, kind + "_age_label", age)
         setattr(self, kind + "_fit_label", fit)
         setattr(self, kind + "_status_line", line)
