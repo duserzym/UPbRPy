@@ -7,6 +7,7 @@ import sys
 import weakref
 from collections.abc import Iterable
 from html import escape
+from types import MethodType
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,21 @@ from UPbRPy.ratios import (
 
 
 _MASS_RE = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
+
+
+def _disable_si_prefix(axis: pg.AxisItem) -> None:
+    """Keep raw tick values through pyqtgraph 0.14's prefix refresh paths."""
+    def update_auto_si_prefix(axis):
+        if axis.autoSIPrefix:
+            type(axis).updateAutoSIPrefix(axis)
+        else:
+            axis.autoSIPrefixScale = 1.0
+            axis.labelUnitPrefix = ""
+            axis._updateLabel()
+
+    axis.updateAutoSIPrefix = MethodType(update_auto_si_prefix, axis)
+    axis.autoSIPrefix = False
+    axis.updateAutoSIPrefix()
 
 
 class CalibrationPanel(QtWidgets.QWidget):
@@ -2785,7 +2801,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         tick_font = QtGui.QFont()
         tick_font.setPointSizeF(12.0)
         for axis_name in ("left", "bottom"):
-            plot.getAxis(axis_name).enableAutoSIPrefix(False)
+            _disable_si_prefix(plot.getAxis(axis_name))
             plot.getAxis(axis_name).setStyle(
                 tickFont=tick_font,
                 tickTextOffset=8,
@@ -3336,17 +3352,17 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._schedule_labels()
 
     def _initial_range(self, concordia_x: np.ndarray, concordia_y: np.ndarray):
-        """Frame observations plus their nearest concordia neighborhood."""
+        """Frame centres and nearby concordia, with bounded error margins."""
         if not len(self._point_xy):
             return [[0, 1], [0, 1]]
         x_values, y_values = self._point_xy.T
         x_errors, y_errors = self._visible_errors.T
         finite_xe = np.where(np.isfinite(x_errors), np.abs(x_errors), 0.0)
         finite_ye = np.where(np.isfinite(y_errors), np.abs(y_errors), 0.0)
-        x_low = float(np.min(x_values - finite_xe))
-        x_high = float(np.max(x_values + finite_xe))
-        y_low = float(np.min(y_values - finite_ye))
-        y_high = float(np.max(y_values + finite_ye))
+        x_low = float(np.min(x_values))
+        x_high = float(np.max(x_values))
+        y_low = float(np.min(y_values))
+        y_high = float(np.max(y_values))
 
         x_scale = max(x_high - x_low, abs(np.nanmean(x_values)) * 0.15, 1e-6)
         y_scale = max(y_high - y_low, abs(np.nanmean(y_values)) * 0.15, 1e-6)
@@ -3361,10 +3377,18 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         x_high = max(x_high, float(concordia_x[nearest]))
         y_low = min(y_low, float(concordia_y[nearest]))
         y_high = max(y_high, float(concordia_y[nearest]))
+        # Errors may extend each side by 10% of the centre/curve span.
+        # With 12% padding, the total margin stays within 24.4% of that span.
+        x_margin = max(x_high - x_low, x_scale) * 0.10
+        y_margin = max(y_high - y_low, y_scale) * 0.10
+        x_low = max(x_low - x_margin, min(x_low, float(np.min(x_values - finite_xe))))
+        x_high = min(x_high + x_margin, max(x_high, float(np.max(x_values + finite_xe))))
+        y_low = max(y_low - y_margin, min(y_low, float(np.min(y_values - finite_ye))))
+        y_high = min(y_high + y_margin, max(y_high, float(np.max(y_values + finite_ye))))
         x_padding = max((x_high - x_low) * 0.12, 1e-6)
         y_padding = max((y_high - y_low) * 0.12, 1e-6)
         return [
-            [x_low - x_padding, x_high + x_padding],
+            [max(0.0, x_low - x_padding), x_high + x_padding],
             [max(0.0, y_low - y_padding), y_high + y_padding],
         ]
 
@@ -9386,7 +9410,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         plot.setLabel("bottom", self._x_label, color=theme.axis_text)
         plot.setLabel("left", self._y_label, color=theme.axis_text)
         for name in ("bottom", "left"):
-            plot.getAxis(name).enableAutoSIPrefix(False)
+            _disable_si_prefix(plot.getAxis(name))
         plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(theme.muted, width=1)))
         table = self._table
         if not table.empty:
