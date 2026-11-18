@@ -80,6 +80,8 @@ class _PendingAction(QtCore.QObject):
         self.deadline = 0.0
         self.connection_failed = False
         self.authorization = None
+        self.on_behalf = False
+        self.oversight_offered = False
         self.runner = links.run
         self.export_failed.connect(self._failed, QtCore.Qt.ConnectionType.QueuedConnection)
         self.timer = QtCore.QTimer(self)
@@ -118,6 +120,24 @@ class _PendingAction(QtCore.QObject):
             self.stop()
             return
         from UPbRPy.integration import upbdb
+
+        if (isinstance(error, upbdb.OversightConfirmationRequired)
+                and self.operation in {"submit", "prefer"} and not self.oversight_offered):
+            self.oversight_offered = True
+            self.timer.stop()
+            # A modal question runs a nested event loop. Retry now must not
+            # send another request while consent is still being decided.
+            self.in_flight = True
+            try:
+                confirmed = self.links._confirm_on_behalf(self, error.owner)
+            finally:
+                self.in_flight = False
+            if confirmed and self.valid():
+                self.on_behalf = True
+                self.retry_now()
+            else:
+                self.stop()
+            return
 
         self.connection_failed = isinstance(error, upbdb.ConnectionFailed)
         pending = (getattr(error, "status", None) == 409
@@ -326,6 +346,22 @@ class DatabaseLinks(QtCore.QObject):
         action = self._actions.get((id(window), operation))
         if action is not None:
             action.retry_now()
+
+    def _confirm_on_behalf(self, action, owner: str) -> bool:
+        if action.operation == "submit":
+            question = (
+                f"This session belongs to {owner}. Submit this run on their behalf? "
+                "It will be recorded as your run on their session."
+            )
+            title = "Submit on behalf"
+        else:
+            question = f"Also mark it as the preferred run for {owner}'s session?"
+            title = "Mark as preferred on behalf"
+        return self._flow_dialog(action.window, lambda: QtWidgets.QMessageBox.question(
+            action.window, title, question,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        )) == QtWidgets.QMessageBox.StandardButton.Yes
 
     def stop_operation(self, window, operation: str) -> None:
         """Cancel a tab's queued action and discard its temporary export."""
@@ -1055,6 +1091,7 @@ class DatabaseLinks(QtCore.QObject):
                     lambda: db.submit_reduction(
                         server, session_id, folder, supersedes=origin.get("run_id"),
                         idempotency_key=action.key,
+                        **({"on_behalf": True} if action.on_behalf else {}),
                     ),
                     submitted,
                 )
@@ -1069,7 +1106,8 @@ class DatabaseLinks(QtCore.QObject):
             self.operation_changed.emit(session, "submit", "waiting", "Bundle prepared. Waiting for sign-in; Retry now continues without exporting again.")
             action.function, action.on_success = (
                 lambda: db.submit_reduction(server, session_id, folder, supersedes=origin.get("run_id"),
-                                             idempotency_key=action.key), submitted)
+                                             idempotency_key=action.key,
+                                             **({"on_behalf": True} if action.on_behalf else {})), submitted)
             self._authorize_action(action, upload, title)
 
         if hasattr(window, "run_background"):
@@ -1139,9 +1177,12 @@ class DatabaseLinks(QtCore.QObject):
         def call():
             if action.valid():
                 action.execute(lambda: db.prefer_run(server, session_id, run_id,
-                                                     idempotency_key=action.key), done)
+                                                     idempotency_key=action.key,
+                                                     **({"on_behalf": True} if action.on_behalf else {})), done)
 
-        action.function = lambda: db.prefer_run(server, session_id, run_id, idempotency_key=action.key)
+        action.function = lambda: db.prefer_run(
+            server, session_id, run_id, idempotency_key=action.key,
+            **({"on_behalf": True} if action.on_behalf else {}))
         action.on_success = done
         self._authorize_action(action, call, title)
 

@@ -95,6 +95,40 @@ suite still passes with the `[database]` extra absent.
   defaults in Studio (explicit project settings still win), and only `raw/*.csv`
   are hashed as inputs.
 
+### On-behalf submission (ADR-0007 step 6, 2026-11-18)
+
+Opening another person's session uses the existing handoff and the signed-in
+account's token. The server decides whether a write requires oversight consent.
+An explicit Write or Admin role is ordinary collaboration and needs no oversight
+header or additional prompt.
+
+`submit_reduction(server, session_id, bundle_dir, *, supersedes=None,
+idempotency_key=None, on_behalf=False)` and
+`prefer_run(server, session_id, run_id, *, idempotency_key=None, on_behalf=False)`
+send `X-UPbDB-Oversight: on-behalf` only when `on_behalf=True`. A 403 with
+`code="oversight_confirm"` raises
+`OversightConfirmationRequired(owner: str, *, details: str = "")`, a
+`PermissionDenied` subclass with `.owner`, `.status=403` and
+`.code="oversight_confirm"`. Other 403 replies remain `PermissionDenied`.
+
+When submission receives this error, Studio asks: “This session belongs to
+&lt;owner&gt;. Submit this run on their behalf? It will be recorded as your run on
+their session.” Confirming resends the prepared bundle once with the header;
+Cancel stops the action and sends no further request. The original
+`Idempotency-Key` and multipart bytes are reused for confirmation and any later
+network retry. A lost response can therefore be replayed without creating a
+second run. Consent belongs to this one action; a later submission asks again.
+Repeated oversight errors are shown without another automatic resend.
+
+Submission never marks a run preferred. **Mark as preferred** remains a separate
+action with separate consent. If its request receives `oversight_confirm`, Studio
+asks: “Also mark it as the preferred run for &lt;owner&gt;'s session?” Only Yes resends
+that action with `on_behalf=True`; submission consent does not authorize it.
+The first request identifies the oversight requirement and is rejected without
+changing the preferred run. The server records `run_by` as the signed-in account
+and `on_behalf_of` as the session owner; Studio does not change ownership fields.
+No oversight state is saved in the project or applied to another tab.
+
 ## 6. Qtegra input layer for UPbDB
 
 The UPbRPy input layer was implemented on 2026-11-04 and updated 2026-11-05.

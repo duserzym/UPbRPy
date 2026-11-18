@@ -57,6 +57,9 @@ class FakeState:
     runs: dict = field(default_factory=dict)  # run_id -> session_id
     preferred: dict = field(default_factory=dict)  # session_id -> run_id
     fail_next: dict = field(default_factory=dict)  # path regex -> (status, detail)
+    session_owners: dict = field(default_factory=dict)  # id -> owner's username/name
+    explicit_roles: dict = field(default_factory=dict)  # id -> caller's Write/Admin role
+    idempotent_imports: dict = field(default_factory=dict)  # (session_id, key) -> (hash, reply)
 
     def issue_code(self) -> str:
         code = secrets.token_urlsafe(12)
@@ -186,10 +189,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(204)
         match = re.fullmatch(r"/v1/sessions/([^/]+)/runs/import", path)
         if match:
+            if not self._oversight_allowed(match.group(1)):
+                return
             return self._import(match.group(1), call)
         match = re.fullmatch(r"/v1/sessions/([^/]+)/runs/([^/]+)/prefer", path)
         if match:
             session_id, run_id = match.groups()
+            if not self._oversight_allowed(session_id):
+                return
             if self.state.runs.get(run_id) != session_id:
                 return self._send(404, {"detail": "Not Found"})
             self.state.preferred[session_id] = run_id
@@ -197,6 +204,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"detail": "Not Found"})
 
     # ------------------------------------------------------------- routes
+    def _oversight_allowed(self, session_id: str) -> bool:
+        owner = self.state.session_owners.get(session_id, self.state.username)
+        if (owner != self.state.username
+                and self.state.explicit_roles.get(session_id, "").lower() not in {"write", "admin"}
+                and self.headers.get("X-UPbDB-Oversight") != "on-behalf"):
+            self._send(403, {"code": "oversight_confirm", "owner": owner})
+            return False
+        return True
+
     def _session_out(self, session_id, folder: Path) -> dict:
         return {"id": session_id, "session_key": folder.name, "material": "apatite",
                 "kind": "u_pb", "status": "ingested", "started_at": "2025-03-20T21:00:00Z",
@@ -206,6 +222,14 @@ class Handler(BaseHTTPRequestHandler):
         folder = self.state.sessions.get(session_id)
         if folder is None:
             return self._send(404, {"detail": "Not Found"})
+        key = self.headers.get("Idempotency-Key")
+        identity = (session_id, key)
+        body_hash = hashlib.sha256(call.body).hexdigest()
+        if key and identity in self.state.idempotent_imports:
+            previous_hash, payload = self.state.idempotent_imports[identity]
+            if body_hash != previous_hash:
+                return self._send(409, {"code": "idempotency_conflict"})
+            return self._send(201, payload, headers={"Idempotent-Replayed": "true"})
         if "bundle" not in call.form:
             return self._send(422, {"detail": "multipart field 'bundle' is required"})
         _, data = call.form["bundle"]
@@ -227,11 +251,14 @@ class Handler(BaseHTTPRequestHandler):
         spot_rows = 0
         if "spot_mean_results.csv" in names:
             spot_rows = max(0, len(archive.read("spot_mean_results.csv").decode().splitlines()) - 1)
-        self._send(201, {
+        payload = {
             "run_id": run_id,
             "counts": {"input_files": len(hashes), "spot_results": spot_rows},
             "quarantine": [{"kind": "unmatched_input", "sha256": h} for h in unmatched],
-        })
+        }
+        if key:
+            self.state.idempotent_imports[identity] = (body_hash, payload)
+        self._send(201, payload)
 
 
 class FakeUpbdb:

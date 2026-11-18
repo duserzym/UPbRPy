@@ -97,6 +97,17 @@ class PermissionDenied(DatabaseError):
     """Signed in, but the account may not do this (HTTP 403)."""
 
 
+class OversightConfirmationRequired(PermissionDenied):
+    """The server requires consent for a write on the session owner's behalf."""
+
+    def __init__(self, owner: str, *, details: str = "") -> None:
+        self.owner = owner
+        super().__init__(
+            f"HTTP 403: confirm this action on behalf of {owner}.",
+            status=403, code="oversight_confirm", details=details,
+        )
+
+
 class NotFound(DatabaseError):
     """The session or run does not exist or is not visible (HTTP 404)."""
 
@@ -360,6 +371,12 @@ def _raise_for(response, server: str, action: str) -> None:
             f"Sign in to {host} again to {action}" + (f" ({detail})." if detail else "."), **extra
         )
     if status == 403:
+        if code == "oversight_confirm":
+            owner = response.json().get("owner")
+            raise OversightConfirmationRequired(
+                owner.strip() if isinstance(owner, str) and owner.strip() else "the session owner",
+                details=raw,
+            )
         raise PermissionDenied(f"Your account may not {action} on {host}{suffix}", **extra)
     if status == 404:
         raise NotFound(f"Not found on {host}, or not shared with you{suffix}", **extra)
@@ -648,12 +665,14 @@ def submit_reduction(
     *,
     supersedes: str | None = None,
     idempotency_key: str | None = None,
+    on_behalf: bool = False,
 ) -> ImportResult:
     """Zip a reduction bundle and post it as a new run of the session.
 
     Multipart field ``bundle`` (``application/zip``), plus ``supersedes``
     when the run replaces an earlier one. Returns the run id, the counts and
-    the quarantine report.
+    the quarantine report. Set ``on_behalf`` only after explicit consent.
+    Reuse ``idempotency_key`` when confirming or retrying the same submit.
     """
     action = "import the reduction"
     with tempfile.TemporaryDirectory(prefix="upbrpy-submit-") as scratch:
@@ -661,6 +680,8 @@ def submit_reduction(
             bundle_dir, Path(scratch) / f"{Path(bundle_dir).name or 'reduction'}.zip"
         )
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        if on_behalf:
+            headers["X-UPbDB-Oversight"] = "on-behalf"
         if idempotency_key:
             # Stable multipart bytes matter: the server hashes the request body.
             # Stream via disk so large bundles never need a second copy in RAM.
@@ -685,7 +706,8 @@ def submit_reduction(
             with archive.open("rb") as stream:
                 response = _request(
                     "POST", server, f"sessions/{quote(str(session_id))}/runs/import",
-                    action=action, files={"bundle": (archive.name, stream, "application/zip")},
+                    action=action, headers=headers,
+                    files={"bundle": (archive.name, stream, "application/zip")},
                     data={"supersedes": supersedes} if supersedes else None,
                 )
     payload = _json(response, server, action)
@@ -706,13 +728,16 @@ def submit_reduction(
 
 
 def prefer_run(server: str, session_id: str, run_id: str, *,
-               idempotency_key: str | None = None) -> dict:
-    """Mark a run as the session's preferred run."""
+               idempotency_key: str | None = None, on_behalf: bool = False) -> dict:
+    """Mark a run as preferred; ``on_behalf`` requires separate explicit consent."""
     action = "mark the run as preferred"
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+    if on_behalf:
+        headers["X-UPbDB-Oversight"] = "on-behalf"
     response = _request(
         "POST", server,
         f"sessions/{quote(str(session_id))}/runs/{quote(str(run_id))}/prefer",
-        action=action, headers={"Idempotency-Key": idempotency_key} if idempotency_key else {},
+        action=action, headers=headers,
     )
     if not response.content:
         return {}
