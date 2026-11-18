@@ -418,3 +418,98 @@ def test_high_204_note_follows_upbr26plus_rule():
     assert bool(high["B_0"]) == (net > context["threshold_cps"])
     table = build_export_table(pipeline)
     assert "high 204" not in table.rows.set_index("spot_name").loc["A_2", "notes"]
+
+
+def mineral_pipeline(material):
+    """Add a measured Zr signal to the small concentration fixture."""
+    pipeline = synthetic_pipeline()
+    pipeline.config = replace(pipeline.config, material=material)
+    pipeline.channels = (*pipeline.channels, "91Zr")
+    pipeline.total_data["91Zr"] = pipeline.total_data["49Ti"] * 3
+    return pipeline
+
+
+@pytest.mark.parametrize("material,column,other", [
+    ("rutile", "Zr_in_rutile_C", "Zr_in_titanite_C"),
+    ("titanite", "Zr_in_titanite_C", "Zr_in_rutile_C"),
+])
+def test_thermometry_columns_by_material(material, column, other):
+    from UPbRPy.thermometry import thermometer_for
+    table = build_export_table(mineral_pipeline(material))
+    visible = {c.key for c in table.visible_columns()}
+    assert column in visible
+    assert "Ti_in_zircon_C" not in visible
+    assert other not in visible
+    thermometer = thermometer_for(material)
+    calibration = thermometer.calibration(table.settings)
+    pd.testing.assert_series_equal(table.rows[column],
+        calibration.temperature(table.rows.Zr, table.settings), check_names=False)
+    col = next(c for c in table.columns if c.key == column)
+    assert (col.group, col.label, col.unit, col.kind, col.footnotes, col.materials) == (
+        thermometer.group, "T", "°C", "temp", (thermometer.key,), (material,))
+
+
+@pytest.mark.parametrize("change", [dict(a_sio2=.7), dict(a_tio2=.8),
+    dict(pressure_gpa=2.), dict(rutile_calibration="FW2007")])
+def test_settings_recompute_all_thermometers_only(change):
+    from UPbRPy.export_table import update_export_settings
+    from UPbRPy.thermometry import THERMOMETERS
+    table = build_export_table(mineral_pipeline("rutile"))
+    original = table.rows.copy(deep=True)
+    settings = replace(table.settings, **change)
+    updated = update_export_settings(table, settings)
+    for thermometer in THERMOMETERS.values():
+        expected = thermometer.calibration(settings).temperature(updated.rows[thermometer.element], settings)
+        pd.testing.assert_series_equal(updated.rows[thermometer.column], expected, check_names=False)
+    temperature_columns = [t.column for t in THERMOMETERS.values()]
+    pd.testing.assert_frame_equal(updated.rows.drop(columns=temperature_columns), original.drop(columns=temperature_columns))
+    pd.testing.assert_frame_equal(table.rows, original)
+    assert updated.context["manifest"]["metadata"]["export_settings"] == settings.to_dict()
+    assert updated.sample_summaries is table.sample_summaries
+
+
+def test_old_settings_and_pressure_validation():
+    old = ExportSettings().to_dict()
+    del old["pressure_gpa"], old["rutile_calibration"]
+    assert ExportSettings.from_dict(old) == ExportSettings()
+    assert ExportSettings(pressure_gpa=0).pressure_gpa == 0.
+    settings = ExportSettings(pressure_gpa=2.5, rutile_calibration="FW2007")
+    assert ExportSettings.from_dict(json.loads(json.dumps(settings.to_dict()))) == settings
+    for invalid in (-1., np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError, match="pressure_gpa"):
+            ExportSettings(pressure_gpa=invalid)
+    for invalid in ("other", "", None):
+        with pytest.raises(ValueError, match="rutile_calibration"):
+            ExportSettings(rutile_calibration=invalid)
+
+
+@pytest.mark.parametrize("material", ["zircon", "rutile", "titanite", "apatite"])
+def test_column_presets_and_matching(material):
+    from UPbRPy.export_table import export_column_preset, matching_column_preset, update_export_settings
+    table = build_export_table(mineral_pipeline(material))
+    eligible = [c for c in table.columns if c.materials is None or material in c.materials]
+    assert export_column_preset(table, "publication") == ((), ())
+    assert matching_column_preset(table, ExportSettings()) == "publication"
+    optional, excluded = export_column_preset(table, "everything")
+    assert set(optional) == {c.key for c in eligible if c.optional}
+    assert excluded == ()
+    minimal_optional, minimal_excluded = export_column_preset(table, "minimal")
+    assert minimal_optional == ()
+    allowed = {"Analysis", "Isotope ratios", "Dates", "Preferred date"}
+    assert set(minimal_excluded) == {c.key for c in eligible
+        if c.group not in allowed and c.key not in {"U", "Th", "Th/U"}}
+    for name in ("publication", "everything", "minimal"):
+        optional, excluded = export_column_preset(table, name)
+        settings = ExportSettings(optional_columns=tuple(reversed(optional)), excluded_columns=tuple(reversed(excluded)))
+        assert matching_column_preset(table, settings) == name
+    minimal = update_export_settings(table, ExportSettings(excluded_columns=minimal_excluded))
+    visible = {c.key for c in minimal.visible_columns()}
+    assert {"spot_name", "notes", "preferred_date", "206Pb/238U_age"} <= visible
+    for key in ("U", "Th", "Th/U"):
+        assert key not in minimal_excluded
+        assert (key in visible) == table.rows[key].notna().any()
+    assert "Pb" not in visible
+    assert all(c.group in allowed or c.key in {"U", "Th", "Th/U"} for c in minimal.visible_columns())
+    assert matching_column_preset(table, ExportSettings(excluded_columns=("notes",))) is None
+    with pytest.raises(ValueError, match="Unknown column preset"):
+        export_column_preset(table, "other")

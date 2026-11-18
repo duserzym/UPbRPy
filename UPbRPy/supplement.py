@@ -390,10 +390,13 @@ def _recorded_methods(session):
     add(8, "High-204 threshold (cps)", context.get("high_204", {}).get("threshold_cps"))
     add(9, "Concentration glasses", ", ".join(context.get("active_concentration_standards", ())))
     present = {key for column in table.visible_columns() for key in column.footnotes}
-    for key, label in (("total_pb", "Total Pb"), ("chondrite", "Chondrite values and normalization"),
-            ("ti_in_zircon", "Ti-in-zircon activities"), ("grimes2015", "Grimes et al. (2015)"),
-            ("itano24", "Itano '24"), ("lu_pizarro", "Lu and Pizarro"),
-            ("roberts2024", "Roberts et al. (2024)"), ("loucks2024", "Loucks et al. (2024)")):
+    from .export_citations import reference
+    for key, label in (("total_pb", "Total Pb"), ("chondrite", reference("sun1989").short),
+            ("ti_in_zircon", "Ti-in-zircon activities"),
+            ("zr_in_rutile", "Zr-in-rutile calibration"), ("zr_in_titanite", "Zr-in-titanite activities and pressure"),
+            ("grimes2015", reference("grimes2015").short), ("itano24", reference("itano2024").short),
+            ("lu_pizarro", f"{reference('lu2016').short}; {reference('pizarro2020').short}"),
+            ("roberts2024", reference("roberts2024").short), ("loucks2024", reference("loucks2024").short)):
         if key in present:
             add(9, label, notes.get(key))
     return rows

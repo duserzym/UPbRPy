@@ -98,6 +98,7 @@ nav:
       - Key ideas: guide/key-ideas.md
       - Counting and dwell time: guide/counting-and-dwell.md
       - Choosing an export: guide/choosing-an-export.md
+      - Trace-element groups and thermometers: guide/trace-element-indices.md
       - Uncertainty and publication exports: uncertainty_and_publication_exports.md
       - Regression methods: isochron_regression.md
   - Reference:

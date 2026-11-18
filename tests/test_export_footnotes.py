@@ -148,11 +148,18 @@ def test_publication_labels_and_classification_citations():
     for col in table.columns:
         table.rows[col.key] = "present"  # Exercise all catalogue footnotes without requiring every isotope.
     text = footnotes_text(build_footnotes(table, pipeline))
-    for citation in ("Grimes et al. (2015)", '"Itano \'24" as labelled in UPbR26plus; citation not verified',
-                     "Lu et al. (2016, SEG Spec. Publ. 19, 329-347)", "Roberts et al. (2024)", "Loucks et al. (2024)"):
+    for citation in ("Grimes et al. (2015)", "Itano and Sawada (2024)",
+                     "Sawaki et al. (2022)", "Burnham and Berry (2017)",
+                     "Lu et al. (2016), SEG Spec. Publ. 19, 329–347", "Roberts et al. (2024)", "Loucks et al. (2024)"):
         assert citation in text
     assert "10.1007/s00410-007-0201-0" in text
     assert "aSiO2 = 1 and aTiO2 = 0.6" in text
+    from UPbRPy.export_citations import GROUPS, reference
+    notes = {note.id: note.text for note in build_footnotes(table, pipeline)}
+    for key in ("itano2024", "sawaki2022", "burnham2017"):
+        assert reference(key).footnote() in notes["itano24"]
+    assert GROUPS["Loucks et al. (2024)"].caveat in notes["loucks2024"]
+    assert "citation not verified" not in text
 
 
 def test_fixture_acquisition_summary_and_footnotes():
@@ -297,3 +304,41 @@ def test_compact_journal_prose_preserves_values_sources_and_clock(monkeypatch):
     assert text.count('U_i and Th_i restore radioactive decay') == 1
     assert all('Ratios are' not in all_notes[key].text for key in
                ('grimes2015', 'itano24', 'lu_pizarro', 'roberts2024', 'loucks2024'))
+
+
+def test_rutile_footnotes_follow_selected_calibration_and_settings():
+    from UPbRPy.export_citations import reference
+    from UPbRPy.export_table import update_export_settings
+    from test_export_table import mineral_pipeline
+    pipeline = mineral_pipeline("rutile")
+    table = build_export_table(pipeline)
+    notes = {note.id: note.text for note in build_footnotes(table, pipeline)}
+    assert "ti_in_zircon" not in notes and "zr_in_titanite" not in notes
+    text = notes["zr_in_rutile"]
+    assert reference("kohn2020").footnote() in text
+    assert "P = 1 GPa" in text
+    assert "×10⁴" in text and "R = 8.314" in text
+    assert "aSiO2 = aZrSiO4 = 1" in text
+    updated = update_export_settings(table, replace(table.settings, rutile_calibration="FW2007", a_sio2=.8))
+    text = {note.id: note.text for note in build_footnotes(updated, pipeline)}["zr_in_rutile"]
+    assert reference("ferry2007").footnote() in text
+    assert "aSiO2 = 0.8" in text
+    assert "No pressure term; assumes zircon is present" in text
+    assert "P = " not in text
+    assert not np.array_equal(updated.rows.Zr_in_rutile_C, table.rows.Zr_in_rutile_C)
+
+
+def test_titanite_footnotes_use_all_activity_and_pressure_inputs():
+    from UPbRPy.export_citations import reference
+    from UPbRPy.export_table import update_export_settings
+    from test_export_table import mineral_pipeline
+    pipeline = mineral_pipeline("titanite")
+    table = build_export_table(pipeline)
+    text = {note.id: note.text for note in build_footnotes(table, pipeline)}["zr_in_titanite"]
+    assert reference("hayden2008").footnote() in text
+    for value in ("P = 1 GPa", "aSiO2 = 1", "aTiO2 = 0.6", "960·P/T"):
+        assert value in text
+    updated = update_export_settings(table, replace(table.settings, pressure_gpa=2., a_sio2=.8, a_tio2=.7))
+    text = {note.id: note.text for note in build_footnotes(updated, pipeline)}["zr_in_titanite"]
+    assert "P = 2 GPa" in text and "aSiO2 = 0.8" in text and "aTiO2 = 0.7" in text
+    assert not np.array_equal(updated.rows.Zr_in_titanite_C, table.rows.Zr_in_titanite_C)

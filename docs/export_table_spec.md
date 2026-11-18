@@ -119,32 +119,40 @@ uncertainty for that ratio.
 
 ### 2.6 Chondrite-normalized REE
 
-CI chondrite values of Sun and McDonough (1989), doi:10.1144/GSL.SP.1989.042.01.19,
+CI chondrite values of Sun and McDonough (1989), Geol. Soc. Lond. Spec. Publ. 42, 313–345, doi:10.1144/GSL.SP.1989.042.01.19,
 in µg/g, exactly as in the spreadsheet: La 0.237, Ce 0.612, Pr 0.095,
 Nd 0.467, Sm 0.153, Eu 0.058, Gd 0.2055, Tb 0.0374, Dy 0.254, Ho 0.0566,
 Er 0.1655, Tm 0.0255, Yb 0.17, Lu 0.0254. Pm is not measured; the column is
 dropped. **new** (`<El>_N`).
 
-### 2.7 Thermometry and trace-element ratios (zircon only)
+### 2.7 Thermometry by mineral and zircon trace-element ratios
 
 Formulas checked against the spreadsheet's own concentrations (agreement to
 machine precision unless stated). Subscript N = chondrite normalized.
+Thermometry is restricted to the named mineral. T is in K in the calibration
+formulas; exported values are °C, rounded to 0.01. C is element concentration
+in µg/g. Citations come from `UPbRPy.export_citations.REFERENCES`.
 
 | Group | Column | Formula | Status |
 |---|---|---|---|
-| Ti-in-zircon | T (°C) | Ferry and Watson (2007), doi:10.1007/s00410-007-0201-0: `T = 4800 / (5.711 - log Ti - log aSiO2 + log aTiO2) - 273.15`; matches the spreadsheet to 2e-4 relative with aSiO2 = 1, aTiO2 = 0.6 | **new**: `UPbRPy.thermometry.Ti_in_zircon_thermometry` exists; needs the two activities as export settings |
+| Ti-in-zircon | T (°C) | Ferry and Watson (2007), Contrib. Mineral. Petrol. 154, 429–437, doi:10.1007/s00410-007-0201-0: `log10(Ti) = 5.711 − 4800/T − log10(aSiO2) + log10(aTiO2); T in K, Ti in µg/g` | `Ti_in_zircon_C`; assumed aSiO2 = 1, aTiO2 = 0.6 |
+| Zr-in-rutile | T (°C) | Kohn (2020), Am. Mineral. 105, 963–971, doi:10.2138/am-2020-7091: `T = (71360 + 0.378·P − 0.130·C) / (130.66 − R·ln C); T in K, C = Zr in µg/g, P in bar (input in GPa, ×10⁴), R = 8.314 J/(mol·K)` | `Zr_in_rutile_C`; Kohn2020 (default); assumed P = 1 GPa. Assumes rutile coexists with quartz and zircon (aSiO2 = aZrSiO4 = 1) |
+| Zr-in-rutile | T (°C) | Ferry and Watson (2007), Contrib. Mineral. Petrol. 154, 429–437, doi:10.1007/s00410-007-0201-0: `log10(Zr) = 7.420 − 4530/T − log10(aSiO2); T in K, Zr in µg/g` | `Zr_in_rutile_C`; FW2007; assumed aSiO2 = 1. No pressure term; assumes zircon is present |
+| Zr-in-titanite | T (°C) | Hayden et al. (2008), Contrib. Mineral. Petrol. 155, 529–540, doi:10.1007/s00410-007-0256-y: `log10(Zr) = 10.52 − 7708/T − 960·P/T − log10(aTiO2) − log10(aSiO2); T in K, Zr in µg/g, P in GPa` | `Zr_in_titanite_C`; Hayden2008; assumed aSiO2 = 1, aTiO2 = 0.6, P = 1 GPa.  |
 | Trace element ratios | Ce/Ce* | `Ce_N / sqrt(La_N Pr_N)` | new |
 | | Eu/Eu* | `Eu_N / sqrt(Sm_N Gd_N)` | new |
 | | ΣREE | La..Lu (14, no Y), µg/g | new |
 | | (Gd/Yb)_N | `Gd_N / Yb_N` | new |
 | | Lu/Hf, Nb/Ta, Nb/U, Nb/Th, Th/Y, Hf/Y | mass ratios | new (Th/U is in Composition) |
-| Grimes et al. (2015), doi:10.1007/s00410-015-1199-3 | Nb/Yb, Ce/Yb, Gd/Yb, U/Yb | mass ratios | new |
-| "Itano '24" | Nb/P, Ce/P, ΣREE+Y | mass ratios; ΣREE+Y in µg/g | new; **citation not verified** (no 2024 Itano paper with these ratios found; the Nb/P-Ce/P granite-type discrimination is Sawaki et al. 2024, Island Arc, doi:10.1111/iar.12539). Footnote names the spreadsheet's label until Yiming confirms |
-| Lu et al. (2016, SEG Spec. Publ. 19, 329-347) and Pizarro et al. (2020), doi:10.1016/j.oregeorev.2020.103771 | Dy/Yb, 10,000(Eu/Eu*)/Y, (Ce/Nd)/Y | mass ratios; Eu/Eu* as above | new (Eu/Eu* is not repeated) |
-| Roberts et al. (2024), doi:10.1016/j.epsl.2024.118638 | Ce/U | mass ratio | new (Th/U is not repeated) |
-| Loucks et al. (2024), doi:10.5382/econgeo.5071 | U_i, Th_i | `U_i = U (f238 exp(λ238 t) + f235 exp(λ235 t))` with f from 238U/235U, `Th_i = Th exp(λ232 t)`, t = preferred date | new; matches the spreadsheet to 0.7 % (U_i) and 1e-5 (Th_i) |
+| Grimes et al. (2015), Contrib. Mineral. Petrol. 170, 46, doi:10.1007/s00410-015-1199-3 | Nb/Yb, Ce/Yb, Gd/Yb, U/Yb | mass ratios | new |
+| Itano and Sawada (2024), Math. Geosci. 56, 1139–1160, doi:10.1007/s11004-023-10128-z; Sawaki et al. (2022), Island Arc 31, e12466, doi:10.1111/iar.12466; Burnham and Berry (2017), Nat. Geosci. 10, 457–461, doi:10.1038/ngeo2942 | Nb/P, Ce/P, ΣREE+Y | mass ratios; ΣREE+Y in µg/g | Group: Itano and Sawada (2024). P–REE+Y discrimination uses molar amounts; the table exports mass concentrations |
+| Lu et al. (2016), SEG Spec. Publ. 19, 329–347, doi:10.5382/SP.19.13; Pizarro et al. (2020), Ore Geol. Rev. 126, 103771, doi:10.1016/j.oregeorev.2020.103771 | Dy/Yb, 10,000(Eu/Eu*)/Y, (Ce/Nd)/Y | mass ratios; Eu/Eu* as above | new (Eu/Eu* is not repeated) |
+| Roberts et al. (2024), Earth Planet. Sci. Lett. 633, 118638, doi:10.1016/j.epsl.2024.118638 | Ce/U | mass ratio | new (Th/U is not repeated) |
+| Loucks et al. (2024), Econ. Geol. 119, 511–523, doi:10.5382/econgeo.5071 | U_i, Th_i | `U_i = U (f238 exp(λ238 t) + f235 exp(λ235 t))` with f from 238U/235U, `Th_i = Th exp(λ232 t)`, t = preferred date | new; matches the spreadsheet to 0.7 % (U_i) and 1e-5 (Th_i) |
 | | 10,000(Eu/Eu*)/Yb_N, 1000(Ce/Nd)_N/Y | as named | new |
 | | Ce/√(U_i·Ti), 10,000(Eu/Eu*)/Yb_N + 5 Ce/√(U_i·Ti) | — | **gap**: the spreadsheet's values do not follow from its own Ce, U_i and Ti (off by a factor of about 4.4 for every row, e.g. NIST612_896: 38.04 / sqrt(37.60 x 39.69) = 0.99, sheet 4.33). Left out until the definition is confirmed |
+
+Th_i and the ×1000 scale of (Ce/Nd)_N/Y follow the UPbR26plus spreadsheet, not the paper (which plots (Ce/Nd)_N/Y after Lu et al. 2016); Ce/√(U_i·Ti) itself is not exported yet.
 
 ### 2.8 Not carried over
 
@@ -181,7 +189,8 @@ All of these live in a new module `UPbRPy/export_table.py` (no Qt), built on
 Export settings (`ExportSettings`, stored in the project file and the
 reduction manifest): discordance definition and threshold (default 7/5-6/8,
 5 %), aSiO2 (1.0) and aTiO2 (0.6, as in the spreadsheet; footnoted as an
-assumption), chosen optional columns, CSV precision (displayed or full), and
+assumption), pressure_gpa (1.0, finite and nonnegative) and rutile_calibration
+(Kohn2020 default or FW2007), chosen optional columns, CSV precision (displayed or full), and
 the laboratory metadata of section 5 that the data files do not carry.
 
 ## 4. Layout
@@ -192,7 +201,7 @@ the laboratory metadata of section 5 that the data files do not carry.
   concentrations by LA-ICP-MS: <session name>".
 - One row of column groups (merged cells in .xlsx): Analysis, Composition,
   Isotope ratios, Dates (Ma), Common-Pb corrected (Ma), Preferred date (Ma),
-  Concentrations (µg/g), Chondrite-normalized, Ti-in-zircon, Trace-element
+  Concentrations (µg/g), Chondrite-normalized, the material-specific thermometer, Trace-element
   ratios, and one group per classification scheme.
 - One row of column names with units and numbered footnote markers, for
   example `206Pb/238U ±2s (%)`, `206Pb/238U date ±2s-sys (Ma)³`. In .xlsx the
@@ -323,7 +332,8 @@ export preview so the user can fill them in.
 8. Preferred date rule (age transition) and weighted-mean rule (4.3).
 9. Total Pb definition (3.2); 206Pb/204Pb blank when 204 is not detected.
 10. Chondrite values (Sun and McDonough 1989); Ti-in-zircon calibration and
-    the activities used; each classification scheme's citation.
+    the activities used; rutile and titanite calibration, formula, pressure and
+    activities used, with fixed assumptions; each classification scheme's citation.
 11. UPbRPy version and commit, reference-library version and hash,
     data-reduction date.
 

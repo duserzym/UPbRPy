@@ -22,7 +22,8 @@ from .bias import reference_corrected_dates, accepted_dates, spot_signal_quantit
 from .concentration import calc_concentration, element_from_channel
 from .constants import lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
-from .thermometry import Ti_in_zircon_thermometry
+from .export_citations import GROUPS, reference
+from .thermometry import THERMOMETERS
 from .uncertainty import (
     common_corrected_systematic_components,
     relative_ratio_date_component,
@@ -57,6 +58,8 @@ class ExportSettings:
     discordance_threshold_percent: float = 5.0
     a_sio2: float = 1.0
     a_tio2: float = .6
+    pressure_gpa: float = 1.0
+    rutile_calibration: str = "Kohn2020"
     optional_columns: tuple[str, ...] = ()
     excluded_columns: tuple[str, ...] = ()
     csv_full_precision: bool = False
@@ -72,11 +75,13 @@ class ExportSettings:
     def __post_init__(self):
         if self.discordance_definition not in {"7/5-6/8", "7/6-6/8"}:
             raise ValueError("Unsupported discordance_definition")
-        for name in ("discordance_threshold_percent", "a_sio2", "a_tio2"):
+        for name in ("discordance_threshold_percent", "a_sio2", "a_tio2", "pressure_gpa"):
             value = float(getattr(self, name))
-            if not np.isfinite(value) or value < 0 or (name != "discordance_threshold_percent" and value == 0):
-                raise ValueError(f"{name} must be finite and {'non-negative' if name == 'discordance_threshold_percent' else 'positive'}")
+            if not np.isfinite(value) or value < 0 or (name in {"a_sio2", "a_tio2"} and value == 0):
+                raise ValueError(f"{name} must be finite and {'positive' if name in {'a_sio2', 'a_tio2'} else 'non-negative'}")
             object.__setattr__(self, name, value)
+        if self.rutile_calibration not in {"Kohn2020", "FW2007"}:
+            raise ValueError("Unsupported rutile_calibration")
         for name in ("optional_columns", "excluded_columns"):
             value = getattr(self, name)
             if not isinstance(value, (tuple, list)) or any(not isinstance(x, str) or not x for x in value):
@@ -140,6 +145,33 @@ class ExportTable:
                      and (c.materials is None or self.context.get("material") in c.materials)
                      and c.key in self.rows
                      and self.rows[c.key].replace("", np.nan).notna().any())
+
+
+def export_column_preset(
+    table: ExportTable, name: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return enabled optional and excluded keys applicable to this material."""
+    columns = tuple(c for c in table.columns
+                    if c.materials is None or table.context.get("material") in c.materials)
+    if name == "publication":
+        return (), ()
+    if name == "everything":
+        return tuple(c.key for c in columns if c.optional), ()
+    if name == "minimal":
+        groups = {"Analysis", "Composition", "Isotope ratios", "Dates", "Preferred date"}
+        return (), tuple(c.key for c in columns if c.group not in groups
+                         or (c.group == "Composition" and c.key not in {"U", "Th", "Th/U"}))
+    raise ValueError(f"Unknown column preset: {name}")
+
+
+def matching_column_preset(table: ExportTable, settings: ExportSettings) -> str | None:
+    """Identify a preset using order-independent column choices."""
+    choices = set(settings.optional_columns), set(settings.excluded_columns)
+    for name in ("publication", "everything", "minimal"):
+        optional, excluded = export_column_preset(table, name)
+        if choices == (set(optional), set(excluded)):
+            return name
+    return None
 
 
 def _numeric(frame, key):
@@ -350,7 +382,9 @@ def _trace_quantities(frame, settings, uncertainty):
     n = {el: _numeric(frame, el) / value for el, value in CHONDRITE_REE.items()}
     out.update({el + "_N": value for el, value in n.items()})
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        out["Ti_in_zircon_C"] = Ti_in_zircon_thermometry(_numeric(frame, "Ti").where(_numeric(frame, "Ti") > 0), settings.a_sio2, settings.a_tio2)
+        for thermometer in THERMOMETERS.values():
+            out[thermometer.column] = thermometer.calibration(settings).temperature(
+                _numeric(frame, thermometer.element), settings)
         out["Ce/Ce*"] = n["Ce"] / np.sqrt(n["La"] * n["Pr"])
         out["Eu/Eu*"] = n["Eu"] / np.sqrt(n["Sm"] * n["Gd"])
         out["sum_REE"] = pd.DataFrame({el: _numeric(frame, el) for el in CHONDRITE_REE}).sum(axis=1, min_count=len(CHONDRITE_REE))
@@ -411,14 +445,16 @@ def _catalogue(elements):
     for element in CHONDRITE_REE:
         add(element + "_N", "Chondrite-normalized", kind="conc", footnotes=("chondrite",), label=element)
     zircon = ("zircon",)
-    add("Ti_in_zircon_C", "Ti-in-zircon", "°C", "temp", footnotes=("ti_in_zircon",), materials=zircon, label="T")
+    for thermometer in THERMOMETERS.values():
+        add(thermometer.column, thermometer.group, "°C", "temp", footnotes=(thermometer.key,),
+            materials=(thermometer.material,), label="T")
     groups = {
         "Trace-element ratios": ("Ce/Ce*", "Eu/Eu*", "sum_REE", "(Gd/Yb)_N", "Lu/Hf", "Nb/Ta", "Nb/U", "Nb/Th", "Th/Y", "Hf/Y"),
-        "Grimes et al. (2015)": ("Nb/Yb", "Ce/Yb", "Gd/Yb", "U/Yb"),
-        "Itano '24": ("Nb/P", "Ce/P", "sum_REE_Y"),
-        "Lu et al. (2016); Pizarro et al. (2020)": ("Dy/Yb", "10000Eu/Eu*/Y", "(Ce/Nd)/Y"),
-        "Roberts et al. (2024)": ("Ce/U",),
-        "Loucks et al. (2024)": ("U_i", "Th_i", "10000Eu/Eu*/Yb_N", "1000(Ce/Nd)_N/Y"),
+        reference("grimes2015").short: ("Nb/Yb", "Ce/Yb", "Gd/Yb", "U/Yb"),
+        reference("itano2024").short: ("Nb/P", "Ce/P", "sum_REE_Y"),
+        f"{reference('lu2016').short}; {reference('pizarro2020').short}": ("Dy/Yb", "10000Eu/Eu*/Y", "(Ce/Nd)/Y"),
+        reference("roberts2024").short: ("Ce/U",),
+        reference("loucks2024").short: ("U_i", "Th_i", "10000Eu/Eu*/Yb_N", "1000(Ce/Nd)_N/Y"),
     }
     for (group, keys), citation in zip(groups.items(), ("chondrite", "grimes2015", "itano24", "lu_pizarro", "roberts2024", "loucks2024")):
         for key in keys:
@@ -1025,19 +1061,34 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         + f"Glass compositions used: {composition_text}. Mass 204 is Hg-corrected where possible; unmeasured or undetected 204 contributes zero. "
         + f"204Pb contributed to {contributing} of {len(table.rows)} analyses. Pb (208), when shown, is the separate 208Pb-based elemental estimate.")
     sentence("pb204", "206Pb/204Pb uses Hg-corrected mass 204 and is blank when 204Pb is not detected; its uncertainty is absolute ±1s.")
-    sentence("chondrite", "Chondrite-normalized values use Sun and McDonough (1989), doi:10.1144/GSL.SP.1989.042.01.19. "
+    sentence("chondrite", f"Chondrite-normalized values use {reference('sun1989').footnote()}. "
         + "CI chondrite concentrations (µg/g) are " + ", ".join(f"{el} {value:g}" for el, value in CHONDRITE_REE.items())
         + ". Subscript _N denotes chondrite normalization. Ratios are mass ratios of µg/g values unless subscript N; ΣREE sums La to Lu, excluding Pm and Y. U_i and Th_i restore radioactive decay using the preferred date.")
-    sentence("ti_in_zircon", f"Ti-in-zircon temperatures use Ferry and Watson (2007), doi:10.1007/s00410-007-0201-0, "
-        + f"with assumed aSiO2 = {settings.a_sio2:g} and aTiO2 = {settings.a_tio2:g}.")
-    for key, citation in {
-        "grimes2015": "Grimes et al. (2015), doi:10.1007/s00410-015-1199-3",
-        "itano24": '"Itano \'24" as labelled in UPbR26plus; citation not verified',
-        "lu_pizarro": "Lu et al. (2016, SEG Spec. Publ. 19, 329-347) and Pizarro et al. (2020), doi:10.1016/j.oregeorev.2020.103771",
-        "roberts2024": "Roberts et al. (2024), doi:10.1016/j.epsl.2024.118638",
-        "loucks2024": "Loucks et al. (2024), doi:10.5382/econgeo.5071",
-    }.items():
-        sentence(key, citation + ".")
+    for thermometer in THERMOMETERS.values():
+        calibration = thermometer.calibration(settings)
+        if thermometer.material == "zircon":
+            assumed = f"aSiO2 = {settings.a_sio2:g} and aTiO2 = {settings.a_tio2:g}"
+        else:
+            names = {"a_sio2": "aSiO2", "a_tio2": "aTiO2", "pressure_gpa": "P"}
+            assumed = ", ".join(
+                f"{names[item.key]} = {getattr(settings, item.key):g}"
+                + (" GPa" if item.key == "pressure_gpa" else "")
+                for item in calibration.inputs)
+        fixed = " ".join(note + "." for note in calibration.fixed)
+        sentence(thermometer.key,
+            f"{thermometer.group} temperatures use {reference(calibration.reference).footnote()}, "
+            + f"{calibration.formula_text}, with assumed {assumed}."
+            + (" " + fixed if fixed else ""))
+    for key, group in (
+        ("grimes2015", reference("grimes2015").short),
+        ("itano24", reference("itano2024").short),
+        ("lu_pizarro", f"{reference('lu2016').short}; {reference('pizarro2020').short}"),
+        ("roberts2024", reference("roberts2024").short),
+        ("loucks2024", reference("loucks2024").short),
+    ):
+        info = GROUPS[group]
+        citation = "; ".join(reference(ref).footnote() for ref in info.references)
+        sentence(key, citation + "." + (" " + info.caveat if key == "loucks2024" else ""))
     overlay_lab = manifest.get("overlay_lab")
     overlay_note = f" Lab overlay: {overlay_lab or 'unlabelled'} ({manifest['overlay_sha256'][:12]})." if manifest.get("overlay_sha256") else ""
     sentence("software", f"Reduced with UPbRPy {fmt('software', 'upbrpy_version', manifest.get('upbrpy_version'))}, "
@@ -1106,7 +1157,7 @@ def footnotes_markdown(footnotes: Iterable[Footnote]) -> str:
     return "\n\n".join(f"{note.number}. {escape(note.text)}" for note in footnotes)
 
 
-__all__ = ["CHONDRITE_REE", "ExportSettings", "ExportColumn", "ExportTable", "Footnote",
+__all__ = ["export_column_preset", "matching_column_preset", "CHONDRITE_REE", "ExportSettings", "ExportColumn", "ExportTable", "Footnote",
            "build_export_table", "build_footnotes", "column_heading", "footnotes_text", "footnotes_markdown",
            "summarize_reference_materials_by_system", "secondary_summary_wide"]
 
@@ -1153,9 +1204,11 @@ def update_export_settings(table: ExportTable, settings: ExportSettings) -> Expo
         rho = _numeric(rows, "err_corr_no_calibration").fillna(0).clip(-1, 1) if other == SYSTEMS[1] else 0.
         rows["disc_pct"] = 100 * (1 - a / b)
         rows["disc_2s_pct"] = 100 * np.sqrt(np.maximum(0, (ea / b)**2 + (a * eb / b**2)**2 - 2 * rho * ea * eb * a / b**3))
-    if (settings.a_sio2, settings.a_tio2) != (table.settings.a_sio2, table.settings.a_tio2):
-        rows["Ti_in_zircon_C"] = Ti_in_zircon_thermometry(
-            _numeric(rows, "Ti").where(_numeric(rows, "Ti") > 0), settings.a_sio2, settings.a_tio2)
+    thermometer_settings = ("a_sio2", "a_tio2", "pressure_gpa", "rutile_calibration")
+    if any(getattr(settings, key) != getattr(table.settings, key) for key in thermometer_settings):
+        for thermometer in THERMOMETERS.values():
+            rows[thermometer.column] = thermometer.calibration(settings).temperature(
+                _numeric(rows, thermometer.element), settings)
     discordant = (rows.disc_pct.abs() - rows.disc_2s_pct > settings.discordance_threshold_percent) & ~rows.role.eq("glass")
     def notes(text, flagged):
         words = [w for w in str(text).split(", ") if w and w != "discordant"]

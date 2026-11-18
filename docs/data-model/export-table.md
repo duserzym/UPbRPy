@@ -30,6 +30,11 @@ exports only populated, applicable columns. Zircon-only groups are
 Ti-in-zircon, Trace-element ratios and the classification schemes. Labels
 acquire units and numbered markers at rendering time. Footnote IDs are stable;
 numbers are assigned to global notes and then in first visible-column use order.
+Zr-in-rutile and Zr-in-titanite temperatures are restricted to their respective
+minerals. Thermometer calibrations and inputs are declared in
+`UPbRPy.thermometry.THERMOMETERS`; citations and group purposes are declared in
+`UPbRPy.export_citations.REFERENCES` and `GROUPS`. Missing or nonpositive
+thermometer concentrations give NaN; temperatures are rounded to 0.01 °C.
 
 Source quantity names refer to the analytical parallel results unless stated
 otherwise. Concentrations use the concentration stage and normalization;
@@ -151,7 +156,9 @@ long-term components in date space. Optional columns start disabled.
 | Tm_N | Chondrite-normalized | Tm |  | Default | Tm / Sun–McDonough chondrite value | chondrite |
 | Yb_N | Chondrite-normalized | Yb |  | Default | Yb / Sun–McDonough chondrite value | chondrite |
 | Lu_N | Chondrite-normalized | Lu |  | Default | Lu / Sun–McDonough chondrite value | chondrite |
-| Ti_in_zircon_C | Ti-in-zircon | T | °C | Default | Ferry–Watson temperature from Ti, aSiO2, aTiO2 | ti_in_zircon |
+| Ti_in_zircon_C | Ti-in-zircon | T | °C | Default | Ferry–Watson temperature from Ti, aSiO2, aTiO2 (zircon) | ti_in_zircon |
+| Zr_in_rutile_C | Zr-in-rutile | T | °C | Default | Kohn or Ferry–Watson temperature from Zr and selected calibration inputs (rutile) | zr_in_rutile |
+| Zr_in_titanite_C | Zr-in-titanite | T | °C | Default | Hayden–Watson–Wark temperature from Zr, aSiO2, aTiO2, pressure_gpa (titanite) | zr_in_titanite |
 | Ce/Ce* | Trace-element ratios | Ce/Ce* |  | Default | Ce_N / sqrt(La_N × Pr_N) | chondrite |
 | Eu/Eu* | Trace-element ratios | Eu/Eu* |  | Default | Eu_N / sqrt(Sm_N × Gd_N) | chondrite |
 | sum_REE | Trace-element ratios | ΣREE | µg/g | Default | sum of La–Lu concentrations excluding Pm | chondrite |
@@ -166,9 +173,9 @@ long-term components in date space. Optional columns start disabled.
 | Ce/Yb | Grimes et al. (2015) | Ce/Yb |  | Default | Ce/Yb of µg/g concentrations | grimes2015 |
 | Gd/Yb | Grimes et al. (2015) | Gd/Yb |  | Default | Gd/Yb of µg/g concentrations | grimes2015 |
 | U/Yb | Grimes et al. (2015) | U/Yb |  | Default | U/Yb of µg/g concentrations | grimes2015 |
-| Nb/P | Itano '24 | Nb/P |  | Default | Nb/P of µg/g concentrations | itano24 |
-| Ce/P | Itano '24 | Ce/P |  | Default | Ce/P of µg/g concentrations | itano24 |
-| sum_REE_Y | Itano '24 | ΣREE+Y | µg/g | Default | sum_REE + Y | itano24 |
+| Nb/P | Itano and Sawada (2024) | Nb/P |  | Default | Nb/P of µg/g concentrations | itano24 |
+| Ce/P | Itano and Sawada (2024) | Ce/P |  | Default | Ce/P of µg/g concentrations | itano24 |
+| sum_REE_Y | Itano and Sawada (2024) | ΣREE+Y | µg/g | Default | sum_REE + Y | itano24 |
 | Dy/Yb | Lu et al. (2016); Pizarro et al. (2020) | Dy/Yb |  | Default | Dy/Yb of µg/g concentrations | lu_pizarro |
 | 10000Eu/Eu*/Y | Lu et al. (2016); Pizarro et al. (2020) | 10,000(Eu/Eu*)/Y |  | Default | 10000 × Eu/Eu* / Y | lu_pizarro |
 | (Ce/Nd)/Y | Lu et al. (2016); Pizarro et al. (2020) | (Ce/Nd)/Y |  | Default | Ce / Nd / Y | lu_pizarro |
@@ -189,8 +196,10 @@ in the `.upbr` project. Old projects without that key use defaults.
 | --- | --- | --- |
 | discordance_definition | 7/5-6/8 | 7/5-6/8 or 7/6-6/8 date definition |
 | discordance_threshold_percent | 5.0 | Flag when absolute discordance minus 2s exceeds this nonnegative percentage |
-| a_sio2 | 1.0 | Positive silica activity for Ti-in-zircon |
-| a_tio2 | 0.6 | Positive titania activity for Ti-in-zircon |
+| a_sio2 | 1.0 | Positive silica activity for thermometry |
+| a_tio2 | 0.6 | Positive titania activity for thermometry |
+| pressure_gpa | 1.0 | Finite, nonnegative crystallization pressure in GPa |
+| rutile_calibration | Kohn2020 | Kohn2020 or FW2007; Kohn converts pressure to bar internally |
 | optional_columns | Empty | Enabled optional column keys |
 | excluded_columns | Empty | Disabled default column keys |
 | csv_full_precision | False | Write full numeric precision in CSV instead of displayed values |
@@ -232,7 +241,16 @@ shared display policy. `export_table_preview(table, n_rows=8) -> dict` returns
 `missing_fields` (field names mapped to footnote numbers).
 The row limit includes sample and section rows. The preview does not run stages.
 `update_export_settings(table, settings) -> ExportTable` returns changed settings,
-discordance, temperature and notes over existing quantities, without engine calls.
+discordance, all three temperatures and notes over existing quantities, without engine calls.
+
+`export_column_preset(table, name) -> tuple[tuple[str, ...], tuple[str, ...]]`
+returns optional and excluded column keys applicable to the table's material.
+`publication` uses default columns; `everything` enables every optional column;
+`minimal` keeps identifiers and notes, U, Th, Th/U, isotope ratios, dates and
+preferred dates, with no optional columns. Unknown names raise `ValueError`.
+`matching_column_preset(table, settings) -> str | None` compares column choices
+without regard to order. Existing settings dictionaries without pressure or
+rutile calibration use the defaults above.
 
 ## Reduction bundle and manifest
 
