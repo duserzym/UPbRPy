@@ -292,15 +292,24 @@ def test_shortcut_sheet_lists_every_menu_shortcut_and_fits_a_14_inch_screen(wind
 
 def test_reload_asks_before_discarding_selection_edits(window, app, monkeypatch):
     spot = window.current_spot_name()
+    original = plateau(window, spot)
     press(app, window, Key.Key_Right, ALT)
     idle(app, window)
     edited = plateau(window, spot)
-    asked = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "question",
-                        lambda *args, **kwargs: asked.append(args[2]) or QtWidgets.QMessageBox.StandardButton.Cancel)
+                        lambda *args, **kwargs: pytest.fail("Reload opened a modal question"))
     window.reload_current_directory()
-    assert asked and "Reload" in asked[0]
+    assert window.change_guard.pending
+    assert "Reload" in window.pending_change_bar.message.text()
     assert plateau(window, spot) == edited
+    window.pending_change_bar.cancel_button.click()
+    assert window.change_guard.pending is None
+    assert plateau(window, spot) == edited
+    window.reload_current_directory()
+    assert window.change_guard.pending
+    window.pending_change_bar.apply_button.click()
+    idle(app, window)
+    assert plateau(window, spot) == original
 
 
 def test_focus_changes_after_a_window_is_deleted_are_ignored(app, monkeypatch, capfd):

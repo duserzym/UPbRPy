@@ -35,6 +35,49 @@ from UPbRPy.ratios import (
 _MASS_RE = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
 
 
+class PendingChangeBar(QtWidgets.QFrame):
+    """Inline confirmation and one-level undo for a destructive setting change."""
+
+    apply_requested = QtCore.Signal()
+    cancel_requested = QtCore.Signal()
+    undo_requested = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        self.message = QtWidgets.QLabel()
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        buttons = QtWidgets.QHBoxLayout()
+        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.undo_button = QtWidgets.QPushButton("Undo")
+        for button, signal in ((self.apply_button, self.apply_requested),
+                               (self.cancel_button, self.cancel_requested),
+                               (self.undo_button, self.undo_requested)):
+            button.clicked.connect(signal.emit)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        self.hide()
+
+    def show_pending(self, message: str) -> None:
+        """Show the proposed change with Apply and Cancel actions."""
+        self.message.setText(message)
+        self.apply_button.show()
+        self.cancel_button.show()
+        self.undo_button.hide()
+        self.show()
+
+    def show_undo(self, label: str) -> None:
+        """Show an applied change with its Undo action."""
+        self.message.setText(f"Changed {label}.")
+        self.apply_button.hide()
+        self.cancel_button.hide()
+        self.undo_button.show()
+        self.show()
+
+
 def _parse_channel(name: str) -> tuple[str, str] | None:
     """Return (Element_Capitalized, mass_str) for '238U' / 'U238', else None."""
     return _parse_channel_name(name)

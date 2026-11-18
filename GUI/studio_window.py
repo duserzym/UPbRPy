@@ -321,7 +321,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         for index in range(self.tabs.count()):
             reduction = self.tabs.widget(index)
             if reduction.session.loaded:
-                reduction.run_autopick_all_spots()
+                reduction.request_autopick_all_spots()
 
     def select_tab(self, index: int) -> None:
         """Show tab ``index``; -1 shows the last tab."""

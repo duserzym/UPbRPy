@@ -4,6 +4,7 @@ import json
 import re
 import sys
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
@@ -65,6 +66,8 @@ from GUI.services import (
     unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
+from GUI.change_guard import ChangeGuard, confirm_change, copy_session, sync_change_controls
+from GUI.wheel_guard import install_wheel_guard
 from GUI.database_panel import DatabasePanel, SUBMIT_STEP, is_submit_step
 from GUI.export_dialog import ExportResultsDialog
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
@@ -217,6 +220,17 @@ def _dropped_sources(mime: QtCore.QMimeData) -> list[str]:
     )]
 
 
+@dataclass
+class _SpotRemovalState:
+    """Session and annotations retained by spot-removal selection history."""
+
+    experiment: pd.DataFrame
+    total_data: pd.DataFrame
+    selected_spot: str | None
+    folders: dict
+    review_flags: dict
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """One reduction, usable alone or embedded in a Studio tab."""
 
@@ -235,6 +249,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None, updater=None) -> None:
         super().__init__()
+        install_wheel_guard(QtWidgets.QApplication.instance())
         self.updater = updater if updater is not None else Updater()
         self.updater.start_scheduler()
         # Closed sessions may contain large sweep tables. Delete the window
@@ -267,8 +282,8 @@ class MainWindow(QtWidgets.QMainWindow):
             timer.timeout.connect(callback)
         self._selection_recompute_stages: set[PipelineStage] = set()
         self._selection_autosave_pending = False
-        self._selection_undo: list[tuple[dict, dict]] = []
-        self._selection_redo: list[tuple[dict, dict]] = []
+        self._selection_undo: list[tuple[dict | _SpotRemovalState, dict | _SpotRemovalState]] = []
+        self._selection_redo: list[tuple[dict | _SpotRemovalState, dict | _SpotRemovalState]] = []
         self._flushing_selection_edits = False
         self._quiet_worker = False
         self._active_edit_window = "plateau"
@@ -314,6 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._connect_system_theme_updates()
         self.apply_theme_mode(self.theme_mode, persist=False)
         self._show_placeholder_state()
+        self.change_guard = ChangeGuard(self)
         QtWidgets.QApplication.instance().focusChanged.connect(self._sync_selection_history_actions)
 
     def _build_menu(self) -> None:
@@ -495,9 +511,9 @@ class MainWindow(QtWidgets.QMainWindow):
         run_step.triggered.connect(self.run_current_workflow_action)
         workflow_menu.addSeparator()
         auto_pick_action = workflow_menu.addAction("Auto-pick Current Spot")
-        auto_pick_action.triggered.connect(self.run_autopick_current_spot)
+        auto_pick_action.triggered.connect(self.request_autopick_current_spot)
         auto_pick_all_action = workflow_menu.addAction("Auto-pick All Spots")
-        auto_pick_all_action.triggered.connect(self.run_autopick_all_spots)
+        auto_pick_all_action.triggered.connect(lambda _checked=False: self.request_autopick_all_spots())
         apply_windows_action = workflow_menu.addAction(
             "Recalculate Reduction Stages"
         )
@@ -703,10 +719,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "Move the end of the active window one sweep later.")
         menu.addSeparator()
         self.reset_spot_action = add(
-            "Reset Current Spot", ["R"], self.run_autopick_current_spot,
+            "Reset Current Spot", ["R"], self.request_autopick_current_spot,
             "Re-pick the current spot with the auto-pick settings (undo with the Undo key).")
         self.repick_all_action = add(
-            "Re-pick All Spots", ["Ctrl+Shift+R"], lambda: self.run_autopick_all_spots(),
+            "Re-pick All Spots", ["Ctrl+Shift+R"], lambda: self.request_autopick_all_spots(),
             "Re-pick every spot with the auto-pick settings (one undo step).")
         self.repick_sample_action = add(
             "Re-pick Current Sample", ["Ctrl+Alt+R"], self.run_autopick_current_sample,
@@ -2172,7 +2188,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{self._shortcut_text([QtGui.QKeySequence.StandardKey.Undo])}."
         )
         self.repick_all_spots_button.clicked.connect(
-            lambda _checked=False: self.run_autopick_all_spots()
+            lambda _checked=False: self.request_autopick_all_spots()
         )
         layout.addWidget(self.repick_all_spots_button)
         self.repick_overwrite_manual_check = QtWidgets.QCheckBox("Also overwrite manual edits")
@@ -3314,7 +3330,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Separate scroll viewports keep the detector plot within the current
         # inspector width even when fractionation forms need a wider page.
         self.detector_calibration_panel = DetectorCalibrationPanel()
-        self.detector_calibration_panel.apply_requested.connect(self.apply_detector_calibration)
+        self.detector_calibration_panel.apply_requested.connect(self._apply_detector_choice)
+        self.detector_calibration_panel.mode_combo.currentIndexChanged.connect(self._confirm_detector_choice)
+        self.detector_calibration_panel.basis_combo.currentIndexChanged.connect(self._confirm_detector_choice)
         detector_scroll = QtWidgets.QScrollArea()
         detector_scroll.setWidgetResizable(True)
         detector_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -3475,6 +3493,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session, "include_export_depth_concentrations", bool(checked)
             )
         )
+        for check in (self.export_concentrations_check, self.export_depth_concentrations_check):
+            check.toggled.connect(self._discard_setting_undo)
         decision_layout.addRow(self.export_depth_concentrations_check)
 
         self.age_transition_spin = QtWidgets.QDoubleSpinBox()
@@ -3634,6 +3654,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.pipeline is not None:
             self.session.pipeline.cache.invalidate(PipelineStage.SESSION)
 
+    @sync_change_controls
     def _sync_fit_controls(self) -> None:
         self._is_populating = True
         try:
@@ -3719,6 +3740,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_fit_stack_page(self.session_fit_stack, self._session_fit_pages, self.session.session_fit_method)
         self._update_fit_settings_note()
 
+    @sync_change_controls
     def populate_standard_controls(self) -> None:
         """Populate standard selectors from configured and observed samples."""
         configured = [
@@ -3797,6 +3819,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parts.append("LOWESS is displayed as a planned method; it is not active in this build.")
         self.fit_settings_note_label.setText(" | ".join(parts))
 
+    @confirm_change('Ratio estimator', 'ratio_aggregation_combo', 'downhole')
     def on_ratio_aggregation_changed(self, index: int) -> None:
         """Set the ratio estimator and invalidate every dependent result."""
         if self._is_populating or index < 0:
@@ -3820,6 +3843,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded:
             self.refresh_view()
 
+    @confirm_change('Downhole fit', 'downhole_fit_combo', 'downhole')
     def on_downhole_fit_method_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
             return
@@ -3832,6 +3856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded:
             self.refresh_view()
 
+    @confirm_change('Session fit', 'session_fit_combo', 'session')
     def on_session_fit_method_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
             return
@@ -3858,6 +3883,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.pipeline.cache.invalidate(PipelineStage.DEPTH_PROFILE)
             self.session.pipeline.cache.invalidate(PipelineStage.FINALIZE)
 
+    @confirm_change('Pb/U primary', 'primary_68_combo', 'downhole')
     def on_primary_68_standard_changed(self, value: str) -> None:
         """Set the Pb/U reference material used by both correction stages."""
         if self._is_populating or not value:
@@ -3867,6 +3893,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._invalidate_downhole_fit_cache()
         self._refresh_workflow_status()
 
+    @confirm_change('Pb/Pb primary', 'primary_76_combo', 'downhole')
     def on_primary_76_standard_changed(self, value: str) -> None:
         """Set the Pb/Pb reference material used by both correction stages."""
         if self._is_populating or not value:
@@ -3875,6 +3902,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._invalidate_downhole_fit_cache()
         self._refresh_workflow_status()
 
+    @confirm_change('Th/Pb primary', 'primary_82_combo', 'downhole')
     def on_primary_82_standard_changed(self, value: str) -> None:
         """Set the Th/Pb reference material used by both correction stages."""
         if self._is_populating or not value:
@@ -3888,6 +3916,7 @@ class MainWindow(QtWidgets.QMainWindow):
         names = (part.strip() for part in edit.text().split(","))
         return tuple(name for name in names if name)
 
+    @confirm_change('Concentration standards', 'concentration_standards_edit', 'concentration')
     def on_concentration_standards_changed(self) -> None:
         """Parse comma-separated elemental calibration materials."""
         if self._is_populating:
@@ -3912,6 +3941,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.session.pipeline.cache.invalidate(PipelineStage.CONCENTRATION)
         self._refresh_workflow_status()
 
+    @confirm_change('Secondary standards', 'secondary_standards_edit', 'finalize')
     def on_secondary_standards_changed(self) -> None:
         """Parse materials used for weighted-mean and MSWD summaries."""
         if self._is_populating:
@@ -3923,6 +3953,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
+    @confirm_change('Common-Pb method', 'common_pb_method_combo', 'finalize')
     def on_common_pb_method_changed(self, index: int) -> None:
         """Choose the common-Pb branch used in the concise final table."""
         if self._is_populating or index < 0:
@@ -3933,6 +3964,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
+    @confirm_change('Common-Pb uncertainty', 'common_pb_uncertainty_combo', 'depth_profile', 'finalize')
     def on_common_pb_uncertainty_changed(self, index: int) -> None:
         """Choose an explicit initial-Pb uncertainty convention."""
         if self._is_populating or index < 0:
@@ -3943,6 +3975,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_uncertainty_products()
         self._refresh_workflow_status()
 
+    @confirm_change('Calibration uncertainty', 'calibration_uncertainty_check', 'finalize')
     def on_calibration_uncertainty_toggled(self, checked: bool) -> None:
         """Choose the calibrated or analytical-only uncertainty branch."""
         if self._is_populating:
@@ -3951,6 +3984,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
+    @confirm_change('Systematic uncertainty', 'decay_uncertainty_check u_ratio_uncertainty_check long_term_mode_combo long_term_uncertainty_spin', 'session')
     def on_systematic_uncertainty_changed(self, *_args) -> None:
         """Synchronize decay, U-isotope, and reproducibility choices."""
         if self._is_populating:
@@ -3973,6 +4007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_uncertainty_products()
         self._refresh_workflow_status()
 
+    @confirm_change('Preferred-age transition', 'age_transition_spin', 'finalize')
     def on_age_transition_changed(self, value: float) -> None:
         """Set the age boundary for Pb/U versus Pb/Pb preferred ages."""
         if self._is_populating:
@@ -3981,6 +4016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.invalidate_final_decisions()
         self._refresh_workflow_status()
 
+    @confirm_change('Downhole polynomial degree', 'downhole_polynomial_degree_spin', 'downhole')
     def on_downhole_polynomial_degree_changed(self, value: int) -> None:
         if self._is_populating:
             return
@@ -3990,6 +4026,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.downhole_fit_method == "polynomial":
             self.refresh_view()
 
+    @confirm_change('Session polynomial degree', 'session_polynomial_degree_spin', 'session')
     def on_session_polynomial_degree_changed(self, value: int) -> None:
         if self._is_populating:
             return
@@ -3999,6 +4036,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.session_fit_method == "polynomial":
             self.refresh_view()
 
+    @confirm_change('Downhole running mean window', 'downhole_running_mean_window_spin', 'downhole')
     def on_downhole_running_mean_window_changed(self, value: int) -> None:
         if self._is_populating:
             return
@@ -4008,6 +4046,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.downhole_fit_method == "running_mean":
             self.refresh_view()
 
+    @confirm_change('Primary-sweep filter', 'downhole_outlier_check', 'downhole')
     def on_downhole_outlier_filter_toggled(self, checked: bool) -> None:
         """Enable or disable robust cross-standard sweep filtering."""
         if self._is_populating:
@@ -4021,6 +4060,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._invalidate_downhole_fit_cache()
         self._update_fit_settings_note()
 
+    @confirm_change('Primary-sweep sigma', 'downhole_outlier_sigma_spin', 'downhole')
     def on_downhole_outlier_sigma_changed(self, value: float) -> None:
         """Update the active robust downhole anomaly cutoff."""
         if self._is_populating or not self.downhole_outlier_check.isChecked():
@@ -4029,6 +4069,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._invalidate_downhole_fit_cache()
         self._update_fit_settings_note()
 
+    @confirm_change('Session running mean window', 'session_running_mean_window_spin', 'session')
     def on_session_running_mean_window_changed(self, value: int) -> None:
         if self._is_populating:
             return
@@ -4038,6 +4079,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.session_fit_method == "running_mean":
             self.refresh_view()
 
+    @confirm_change('Downhole exponential decay', 'downhole_exponential_decay_spin', 'downhole')
     def on_downhole_exponential_decay_changed(self, value: float) -> None:
         if self._is_populating:
             return
@@ -4047,6 +4089,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.session.loaded and self.session.downhole_fit_method == "exponential":
             self.refresh_view()
 
+    @confirm_change('Session exponential decay', 'session_exponential_decay_spin', 'session')
     def on_session_exponential_decay_changed(self, value: float) -> None:
         if self._is_populating:
             return
@@ -4180,12 +4223,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not file_path:
             return
+        self.request_reference_material_library(file_path)
+
+    @confirm_change('Reference library', 'reference_library_button', 'baseline', replace_session=True)
+    def request_reference_material_library(self, file_path: str) -> bool:
+        """Install a chosen reference library after confirming cached-result loss."""
         try:
             load_standard_archive_from_path(file_path)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Failed to load library", str(exc))
             self.append_log(f"Reference material library load failed: {file_path}: {exc}")
-            return
+            return False
         self.reference_library_path = current_standard_archive_path()
         self.settings.setValue("reference_library_path", self.reference_library_path)
         self._update_reference_library_labels()
@@ -4193,6 +4241,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"Loaded reference material library: {self.reference_library_path}")
         self.statusBar().showMessage(f"Reference material library loaded from {Path(self.reference_library_path).name}")
         self.refresh_view()
+        return True
 
     def choose_experiment_directory(self) -> None:
         directory = self.select_experiment_directory()
@@ -4625,6 +4674,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._handle_action_error("Selection restore failed", exc)
         return True
 
+    @sync_change_controls
     def install_restored_project(self, result: object) -> None:
         """Install a recalculated project and restore its compact UI context."""
         self._installing_project = True
@@ -5033,21 +5083,9 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: build_export_table(pipeline, self.export_settings, excluded_spots=excluded),
             lambda table: QtCore.QTimer.singleShot(0, lambda: open_dialog(table)))
 
+    @confirm_change('Reload source', 'primary_channel_combo', 'baseline', replace_session=True, review=True)
     def reload_current_directory(self) -> None:
-        if not self.session.directory:
-            return
-        if self.session.loaded and (self._selection_undo or self.has_unsaved_changes()):
-            answer = QtWidgets.QMessageBox.question(
-                self,
-                "Reload source",
-                f"Reload {Path(self.session.directory).name} from the source? Selection "
-                "windows and settings in this tab return to the import defaults. "
-                "Saved project files are not changed.",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
-                QtWidgets.QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
-                return
+        """Reload import defaults after confirming replacement of existing work."""
         if self.session.directory:
             self.load_experiment_directory(self.session.directory, primary_channel=self.session.primary_channel, offer_restore=False)
 
@@ -5065,6 +5103,8 @@ class MainWindow(QtWidgets.QMainWindow):
         this source. Reloads of the open session pass False.
         """
         results_cache_warmer.cancel()
+        if getattr(self, "change_guard", None) is not None and not self.change_guard.running:
+            self.change_guard.cancel()
         if self._active_worker is not None:
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
@@ -5109,6 +5149,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.install_loaded_session(loaded_session, directory)
 
+    @sync_change_controls
     def install_loaded_session(
         self,
         loaded_session: ReductionSession,
@@ -5117,6 +5158,8 @@ class MainWindow(QtWidgets.QMainWindow):
         project_path: str | Path | None = None,
     ) -> None:
         """Install a worker-produced session and refresh lightweight widgets."""
+        if getattr(self, "change_guard", None) is not None:
+            self.change_guard.clear()
         for timer in (self._selection_edit_timer, self._selection_recompute_timer, self._selection_autosave_timer):
             timer.stop()
         self.pending_region_updates.clear()
@@ -5199,10 +5242,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self.capabilities_badge.setToolTip("\n".join(lines))
         self.detector_calibration_panel.set_session(self.session)
 
+    def _confirm_detector_choice(self, _index: int) -> None:
+        if self._is_populating or not hasattr(self, "change_guard") or self.change_guard.running:
+            return
+        if self.session.loaded:
+            self.request_detector_calibration(self.detector_calibration_panel.settings())
+
+    def _apply_detector_choice(self, settings: dict) -> None:
+        pending = self.change_guard.pending
+        if pending is None or pending["function"].__name__ != "request_detector_calibration":
+            self.request_detector_calibration(settings)
+        # The panel's explicit Apply button commits the same transaction as
+        # inline Apply, including a re-import with unchanged detector settings.
+        pending = self.change_guard.pending
+        if pending is not None and pending["function"].__name__ == "request_detector_calibration":
+            self.change_guard.apply()
+
+    @confirm_change('Detector calibration', 'detector_calibration_panel', 'baseline', replace_session=True)
+    def request_detector_calibration(self, settings: dict) -> None:
+        """Confirm discarding cached products for detector re-import."""
+        self.apply_detector_calibration(settings)
+
     def apply_detector_calibration(self, settings: dict) -> None:
         """Re-import in a worker and install the result without resetting the workspace."""
         if not self.session.loaded or self._active_worker is not None:
             return
+        self.change_guard.clear()
         self.apply_pending_project_edits()
         current = self.session
 
@@ -5319,6 +5384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    @sync_change_controls
     def _sync_selection_parameter_controls(self) -> None:
         """Show and populate the controls relevant to the onset method."""
         if not hasattr(self, "selection_parameter_stack"):
@@ -5375,6 +5441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.autopick_settings_toggle.isChecked():
             self._position_compact_panels()
 
+    @sync_change_controls
     def _sync_plateau_filter_control(self) -> None:
         """Reflect the active spot's saved spot-mean filtering decision."""
         if not hasattr(self, "plateau_filter_combo"):
@@ -5388,6 +5455,7 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    @sync_change_controls
     def _populate_workflow_ui(self) -> None:
         desc = self.workflow_preset.description
         defaults_text = format_import_defaults(self.workflow_preset)
@@ -5510,6 +5578,7 @@ class MainWindow(QtWidgets.QMainWindow):
                        self.workflow_hint_body, self.step_actions_block):
             widget.setToolTip(tooltip)
 
+    @confirm_change('Workflow / material', 'workflow_combo', 'baseline', replace_session=True)
     def on_workflow_preset_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
             return
@@ -5548,6 +5617,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.append_log(f"Workflow preset changed to {self.workflow_preset.title}; reload to apply notebook defaults.")
             self.refresh_view()
 
+    @confirm_change('Selection method', 'selection_method_combo', 'baseline', replace_session=True)
     def on_selection_method_changed(self, index: int) -> None:
         if self._is_populating or index < 0:
             return
@@ -5571,6 +5641,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"Auto-pick method set to {label}; re-pick spots to apply it.")
         self.update_project_window_title()
 
+    @confirm_change('Selection threshold', 'selection_threshold_percent_spin', 'baseline', immediate=True)
     def on_selection_threshold_percent_changed(self, value: float) -> None:
         """Update the fractional signal threshold used by threshold picking."""
         if self._is_populating or not self.session.loaded:
@@ -5582,6 +5653,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.update_project_window_title()
 
+    @confirm_change('Selection reference percentile', 'selection_reference_percentile_spin', 'baseline', immediate=True)
     def on_selection_reference_percentile_changed(self, value: float) -> None:
         """Update the percentile used to form the high-signal reference."""
         if self._is_populating or not self.session.loaded:
@@ -5593,6 +5665,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.update_project_window_title()
 
+    @confirm_change('Selection onset sigma', 'selection_sigma_spin', 'baseline', immediate=True)
     def on_selection_sigma_changed(self, value: float) -> None:
         """Update the onset sigma for either sigma-based picker."""
         if self._is_populating or not self.session.loaded:
@@ -5610,6 +5683,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.update_project_window_title()
 
+    @confirm_change('Plateau duration', 'plateau_duration_spin', 'baseline', immediate=True)
     def on_plateau_duration_changed(self, value: float) -> None:
         """Set a session-wide plateau duration or restore workflow auto."""
         if self._is_populating or not self.session.loaded:
@@ -5665,6 +5739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Set or clear the session's nominal on-peak duration."""
         if self._is_populating or not self.session.loaded:
             return
+        self.change_guard.clear()
         settings = self.session.import_settings
         options = settings.get("selection_options")
         if isinstance(options, dict):
@@ -5685,6 +5760,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(message)
         self.update_project_window_title()
 
+    def _discard_setting_undo(self, *_args) -> None:
+        if not self._is_populating and getattr(self, "change_guard", None) is not None:
+            self.change_guard.clear()
+
     def run_autopick_current_sample(self) -> None:
         """Re-pick every spot of the current spot's sample."""
         spot = self.current_spot_name()
@@ -5697,8 +5776,9 @@ class MainWindow(QtWidgets.QMainWindow):
             spots = names[experiment["sample"].astype(str).eq(sample)].tolist()
         else:
             sample, spots = spot, [spot]
-        self.run_autopick_all_spots(spots, scope=f"sample {sample}")
+        self.request_autopick_all_spots(spots, scope=f"sample {sample}")
 
+    @confirm_change('Plateau outlier filter', 'plateau_filter_combo', 'baseline', replace_session=True, immediate=True)
     def on_plateau_filter_method_changed(self, index: int) -> None:
         """Set the current spot's plateau outlier rule and display channel."""
         if self._is_populating or index < 0 or not self.session.loaded:
@@ -6111,20 +6191,35 @@ class MainWindow(QtWidgets.QMainWindow):
         spot_name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not spot_name or str(spot_name).startswith("__"):
             return
-        if QtWidgets.QMessageBox.question(
-            self,
-            "Remove spot",
-            f"Remove \"{spot_name}\" from this session?\n\nThis cannot be undone.",
-        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+        self.request_remove_spot(str(spot_name))
+
+    def request_remove_spot(self, spot_name: str) -> None:
+        """Remove a spot from the working session with one-level undo."""
+        if self._active_worker is not None or spot_name not in self.session.spot_names:
             return
-        # Remove from session spot list (doesn't delete the file)
-        if spot_name in self.session.spot_names:
-            self.session.spot_names = [s for s in self.session.spot_names if s != spot_name]
+        self.change_guard.clear()
+        self.flush_selection_edits()
+        before = _SpotRemovalState(self.session.experiment, self.session.total_data, self.session.selected_spot,
+                                   dict(self._spot_folder_overrides), dict(self._review_flags))
+        self.session = copy_session(self.session)
+        self.session.experiment = self.session.experiment.loc[
+            ~self.session.experiment["spot_names"].astype(str).eq(spot_name)
+        ].copy()
+        self.session.total_data = self.session.total_data.loc[
+            ~self.session.total_data["spot_name"].astype(str).eq(spot_name)
+        ].copy()
+        self.session.selected_spot = next(iter(self.session.spot_names), None)
         self._spot_folder_overrides.pop(spot_name, None)
         self._review_flags.pop(spot_name, None)
         self._clear_reduction_cache()
+        after = _SpotRemovalState(self.session.experiment.copy(deep=True), self.session.total_data,
+                                  self.session.selected_spot, dict(self._spot_folder_overrides), dict(self._review_flags))
+        self._selection_undo.append((before, after))
+        self._selection_redo.clear()
         self._populate_spot_tree()
         self.refresh_view()
+        self._sync_selection_history_actions()
+        self.update_project_window_title()
 
     def _on_spot_tree_item_renamed(
         self, item: QtWidgets.QTreeWidgetItem, column: int
@@ -6153,6 +6248,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setToolTip(0, new_text)
 
 
+    @sync_change_controls
     def _populate_selectors(self) -> None:
         self._is_populating = True
         try:
@@ -6187,6 +6283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
+    @confirm_change('Primary channel', 'primary_channel_combo', 'baseline', replace_session=True, review=True)
     def on_primary_channel_changed(self, channel: str) -> None:
         if self._is_populating or not channel:
             return
@@ -6267,6 +6364,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sigma_toggle_button.setText(f"{self.sigma_level}σ")
 
     def on_plot_region_changed(self, region_name: str, bounds: tuple[float, float]) -> None:
+        self.change_guard.clear()
         if not self._workflow_step_allows_region_edits():
             return
         spot_name = self.current_spot_name()
@@ -6427,6 +6525,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action.setEnabled(bool(self.session.loaded) and not editing)
 
     def _restore_selection_history(self, *, redo: bool) -> None:
+        self.change_guard.clear()
         if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
             return
         self.flush_selection_edits()
@@ -6436,6 +6535,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         entry = source.pop()
         values = entry[1] if redo else entry[0]
+        if isinstance(values, _SpotRemovalState):
+            self._remember_completed_selection_stages()
+            self.session.experiment = values.experiment.copy(deep=True)
+            self.session.total_data = values.total_data
+            self.session.selected_spot = values.selected_spot
+            self._clear_reduction_cache()
+            self._spot_folder_overrides = dict(values.folders)
+            self._review_flags = dict(values.review_flags)
+            destination.append(entry)
+            self._populate_spot_tree()
+            self._selection_edits_written()
+            self.refresh_view()
+            self._sync_selection_history_actions()
+            self.update_project_window_title()
+            return
         self.pending_region_updates.update({spot: dict(regions) for spot, regions in values.items()})
         self.flush_selection_edits(record_history=False)
         destination.append(entry)
@@ -6802,6 +6916,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_plot_mode("raw", refresh=True)
 
     def refresh_view(self) -> None:
+        if getattr(self, "change_guard", None) is not None and self.change_guard.running:
+            return
         if getattr(self, "_installing_project", False):
             return
         self.flush_selection_edits()
@@ -7196,13 +7312,13 @@ class MainWindow(QtWidgets.QMainWindow):
         stage = self.current_workflow_stage()
         if stage == PipelineStage.IMPORT:
             return [
-                ("Auto-pick current spot", self.run_autopick_current_spot, True),
+                ("Auto-pick current spot", self.request_autopick_current_spot, True),
                 ("Reload session defaults", self.reload_current_directory, False),
             ]
         if stage == PipelineStage.SELECTION:
             return [
                 ("Recalculate reduction stages", self.apply_current_windows, True),
-                ("Reset current spot", self.run_autopick_current_spot, False),
+                ("Reset current spot", self.request_autopick_current_spot, False),
                 ("Show raw traces", self.show_raw_traces, False),
             ]
         if stage == PipelineStage.BASELINE:
@@ -7374,6 +7490,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _clear_reduction_cache(self) -> None:
         """Invalidate calculated stages and immediately refresh navigation."""
+        if getattr(self, "change_guard", None) is not None:
+            self.change_guard.clear()
         clear_reduction_cache(self.session)
         self._sync_workflow_step_locks()
 
@@ -7419,6 +7537,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_populating = False
 
     def _handle_action_error(self, title: str, exc: Exception) -> None:
+        if getattr(self, "change_guard", None) is not None:
+            self.change_guard.fail()
         QtWidgets.QMessageBox.critical(self, title, str(exc))
         self.append_log(f"{title} failed: {exc}")
 
@@ -7471,6 +7591,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             try:
                 on_success(result)
+                self.change_guard.complete()
                 succeeded = True
             except Exception as exc:
                 self._handle_action_error(f"{label} display failed", exc)
@@ -7480,6 +7601,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             if self._restore_task is not None and self._restore_task.cancelled:
                 return
+            self.change_guard.fail()
             if not quiet:
                 QtWidgets.QMessageBox.critical(self, f"{label} failed", message)
             self.append_log(f"{label} failed: {message}")
@@ -7532,7 +7654,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Load a session first")
         return False
 
+    def request_autopick_current_spot(self) -> None:
+        """Re-pick the current spot, retaining its windows in selection Undo."""
+        self.run_autopick_current_spot()
+
     def run_autopick_current_spot(self) -> None:
+        self.change_guard.clear()
         if not self.flush_selection_edits():
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
@@ -7556,12 +7683,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(f"Re-applied {selection_method_label(method)} auto-pick for {spot_name}.")
         self.refresh_view()
 
+    def request_autopick_all_spots(self, spot_names=None, *, scope: str = "all spots") -> None:
+        """Re-pick directly from buttons, menus, or shortcuts with selection Undo."""
+        self.run_autopick_all_spots(spot_names, scope=scope)
+
     def run_autopick_all_spots(self, spot_names=None, *, scope: str = "all spots") -> None:
         """Apply the current selection settings to every (or the given) spot.
 
         Spots edited by hand are skipped unless "Also overwrite manual edits"
         is ticked; the status bar reports how many were skipped.
         """
+        self.change_guard.clear()
         if not self.flush_selection_edits():
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
             return
@@ -7570,6 +7702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         targets = list(self.session.spot_names if spot_names is None else spot_names)
         overwrite = self.repick_overwrite_manual_check.isChecked()
         before = self._selection_snapshot(targets)
+        working_session = copy_session(self.session)
         self._remember_completed_selection_stages()
         method = str(
             self.session.import_settings.get(
@@ -7578,6 +7711,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         def finish_repick(result: object) -> None:
+            self.session = working_session
             summary = result if isinstance(result, dict) else {}
             selected_count = int(summary.get("selected_count", 0))
             failures = summary.get("failures", {})
@@ -7610,7 +7744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_background(
             "Re-picking all spots" if spot_names is None else f"Re-picking {scope}",
             lambda: autopick_all_selection_regions(
-                self.session,
+                working_session,
                 None if spot_names is None else targets,
                 overwrite_manual=overwrite,
             ),
