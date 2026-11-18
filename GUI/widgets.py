@@ -35,6 +35,232 @@ from UPbRPy.ratios import (
 _MASS_RE = re.compile(r'^(\d+)\s*([A-Za-z]+)$')
 
 
+class CalibrationPanel(QtWidgets.QWidget):
+    """Calibration sub-tabs with a shared state and confirmation area."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.header = QtWidgets.QVBoxLayout()
+        self.header.setSpacing(4)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(4)
+        layout.addLayout(self.header)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
+        layout.addWidget(self.tabs, 1)
+
+    # Retain the inspector page's tab API for callers selecting Calibration.
+    def addTab(self, widget, title):
+        return self.tabs.addTab(widget, title)
+
+    def setCurrentIndex(self, index):
+        self.tabs.setCurrentIndex(index)
+
+    def currentIndex(self):
+        return self.tabs.currentIndex()
+
+    def currentWidget(self):
+        return self.tabs.currentWidget()
+
+    def widget(self, index):
+        return self.tabs.widget(index)
+
+    def tabText(self, index):
+        return self.tabs.tabText(index)
+
+    def count(self):
+        return self.tabs.count()
+
+
+class CalibrationScrollArea(QtWidgets.QScrollArea):
+    """Keep a calibration form's width within its scroll viewport."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def setWidget(self, widget):
+        widget.setMinimumWidth(0)
+        widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        if widget.layout():
+            widget.layout().setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
+        widget.installEventFilter(self)
+        super().setWidget(widget)
+        self._fit_width()
+
+    def viewportEvent(self, event):
+        result = super().viewportEvent(event)
+        if event.type() == QtCore.QEvent.Type.Resize:
+            self._fit_width()
+        return result
+
+    def _fit_width(self):
+        if self.widget() is not None:
+            page = self.widget()
+            width = self.viewport().width()
+            page.setFixedWidth(width)
+            if page.layout():
+                page.setMinimumHeight(max(page.layout().minimumSize().height(), page.layout().heightForWidth(width)))
+
+    def eventFilter(self, watched, event):
+        if watched is self.widget() and event.type() == QtCore.QEvent.Type.LayoutRequest:
+            self._fit_width()
+        return super().eventFilter(watched, event)
+
+
+class _CalibrationChipLayout(QtWidgets.QLayout):
+    """Wrap material pills, allowing long labels to elide within one row."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(4)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QtCore.QRect(0, 0, width, 0), measure=True)
+
+    def minimumSize(self):
+        return QtCore.QSize(0, 0)
+
+    def sizeHint(self):
+        return QtCore.QSize(200, self.heightForWidth(200))
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect)
+
+    def _arrange(self, rect, *, measure=False):
+        x, y, row_height = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            width = min(max(1, rect.width()), hint.width())
+            if row_height and x + width > rect.right() + 1:
+                x, y, row_height = rect.x(), y + row_height + self.spacing(), 0
+            if not measure:
+                item.setGeometry(QtCore.QRect(x, y, width, hint.height()))
+            x += width + self.spacing()
+            row_height = max(row_height, hint.height())
+        return y - rect.y() + row_height
+
+
+class CalibrationMaterialList(QtWidgets.QWidget):
+    """Compact removable materials, updated only when their row data changes."""
+
+    remove_requested = QtCore.Signal(str)
+
+    def __init__(self, parent=None, *, chips=False):
+        super().__init__(parent)
+        self.chips = chips
+        self.rows = None
+        self._add_button = None
+        self.grid = _CalibrationChipLayout(self) if chips else QtWidgets.QVBoxLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(4)
+        self.setMinimumWidth(0)
+
+    def set_add_button(self, button):
+        """Place the Add pill in the same wrapping layout as the materials."""
+        self._add_button = button
+        self.grid.addWidget(button)
+
+    def set_materials(self, rows):
+        """Show ``(name, count, detail, status[, tooltip])`` rows."""
+        rows = tuple(rows)
+        if rows == self.rows:
+            return
+        self.rows = rows
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget() and item.widget() is not self._add_button:
+                item.widget().hide()
+                item.widget().deleteLater()
+        for values in rows:
+            name, count, detail, status = values[:4]
+            tooltip = values[4] if len(values) > 4 else ""
+            row = QtWidgets.QFrame()
+            row.setMinimumWidth(0)
+            row.setToolTip(tooltip)
+            layout = QtWidgets.QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(4)
+            if self.chips:
+                row.setObjectName("CalibrationMaterialChip")
+                row.setStyleSheet("QFrame#CalibrationMaterialChip { border: 1px solid palette(mid); "
+                                 "border-radius: 9px; background: palette(button); }")
+                layout.setContentsMargins(7, 1, 4, 1)
+                label = ElidedLabel(name)
+                label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+                label.setStyleSheet("font-size: 11px;")
+                layout.addWidget(label, 1)
+            else:
+                lines = QtWidgets.QVBoxLayout()
+                lines.setSpacing(1)
+                heading = QtWidgets.QHBoxLayout()
+                heading.setSpacing(4)
+                icon = QtWidgets.QLabel()
+                icon.setObjectName("CalibrationMaterialStatus")
+                icon.setFixedWidth(13)
+                if status == "warn":
+                    icon.setPixmap(self.style().standardIcon(
+                        QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(12, 12))
+                elif status == "ok":
+                    icon.setPixmap(self.style().standardIcon(
+                        QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton).pixmap(12, 12))
+                    icon.setAccessibleName("Within 2σ")
+                heading.addWidget(icon)
+                label = ElidedLabel(name)
+                label.setToolTip(tooltip)
+                label.setStyleSheet("font-size: 11px;")
+                heading.addWidget(label, 1)
+                count_label = QtWidgets.QLabel(f"{count} an.")
+                count_label.setObjectName("SecondaryText")
+                count_label.setStyleSheet("font-size: 10px;")
+                heading.addWidget(count_label)
+                lines.addLayout(heading)
+                if detail:
+                    quality = ElidedLabel(detail)
+                    quality.setToolTip(tooltip)
+                    quality.setObjectName("SecondaryText")
+                    quality.setStyleSheet("font-size: 10px;")
+                    lines.addWidget(quality)
+                layout.addLayout(lines, 1)
+            label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            remove = QtWidgets.QToolButton()
+            remove.setText("×")
+            remove.setToolTip(f"Remove {name}")
+            remove.setAccessibleName(f"Remove {name}")
+            remove.setStyleSheet("QToolButton { padding: 0; border: none; background: transparent; "
+                                "min-width: 16px; min-height: 16px; font-size: 12px; }")
+            remove.clicked.connect(lambda _checked=False, value=name: self.remove_requested.emit(value))
+            layout.addWidget(remove, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.grid.addWidget(row)
+        if self._add_button is not None:
+            self.grid.addWidget(self._add_button)
+
+
 class IssueBanner(QtWidgets.QFrame):
     """Dismissible inline issue with recovery actions and collapsed details."""
 
@@ -125,7 +351,7 @@ class ReductionNoticeList(QtWidgets.QScrollArea):
         self.setWidgetResizable(True)
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.setMaximumHeight(170)
-        self.setMinimumHeight(100)
+        self.setMinimumHeight(0)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.notices = []
         self.hide()
@@ -137,25 +363,44 @@ class ReductionNoticeList(QtWidgets.QScrollArea):
         self.notices = list(notices)
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         for notice in notices:
             label = QtWidgets.QLabel(notice.message)
             label.setWordWrap(True)
             label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            if notice.level == "info":
+                label.setObjectName("SecondaryText")
             layout.addWidget(label)
-            actions = QtWidgets.QVBoxLayout()
+            actions = QtWidgets.QHBoxLayout()
+            actions.setSpacing(8)
             for code in notice.fixes:
-                button = QtWidgets.QPushButton({"choose_standard": "Choose standard", "enter_value": "Enter value"}.get(code, code))
+                button = QtWidgets.QToolButton()
+                button.setText({"choose_standard": "Choose standard", "enter_value": "Enter value"}.get(code, code))
+                button.setStyleSheet("QToolButton { border: none; background: transparent; padding: 0; "
+                                    "font-size: 10px; color: palette(highlighted-text); text-decoration: underline; }")
                 button.clicked.connect(lambda _checked=False, item=notice, action=code: self.fix_requested.emit(item, action))
                 actions.addWidget(button)
+            actions.addStretch()
             layout.addLayout(actions)
-        layout.addStretch()
         previous = self.takeWidget()
         if previous is not None:
             previous.deleteLater()
+        content.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.setWidget(content)
         self.setVisible(bool(notices))
+        self._fit_notice_height()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_notice_height()
+
+    def _fit_notice_height(self):
+        content = self.widget()
+        if content is not None:
+            content.setFixedWidth(self.viewport().width())
+            height = content.layout().heightForWidth(self.viewport().width())
+            self.setFixedHeight(min(170, max(0, height)))
 
 
 class PendingChangeBar(QtWidgets.QFrame):
@@ -3063,7 +3308,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         self._drift = None
         self._options = {}
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(8, 12, 8, 12)
         layout.setSpacing(6)
         title = ElidedLabel("Detector cross-calibration")
         title.setObjectName("SectionTitle")

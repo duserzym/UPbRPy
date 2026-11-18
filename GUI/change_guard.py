@@ -40,7 +40,7 @@ def sync_change_controls(function):
                 "_sync_plateau_filter_control": "plateau_filter_combo",
                 "_populate_selectors": "primary_channel_combo",
                 "_populate_workflow_ui": "workflow_combo selection_method_combo",
-                "populate_standard_controls": "primary_68_combo primary_76_combo primary_82_combo concentration_standards_edit secondary_standards_edit",
+                "populate_standard_controls": "primary_68_combo primary_76_combo primary_82_combo primary_standard_combo same_primary_check internal_standard_combo concentration_standards_edit secondary_standards_edit",
             }
             names = groups.get(function.__name__)
             if function.__name__ == "_sync_fit_controls":
@@ -131,7 +131,9 @@ class ChangeGuard:
             value = _value(getattr(self.window, name))
             if name in {"concentration_standards_edit", "secondary_standards_edit"}:
                 attribute = name.removesuffix("_edit")
-                accepted = getattr(self.window.session, attribute) or getattr(self.window.workflow_preset, attribute)
+                accepted = getattr(self.window.session, attribute)
+                if not self.window.session.loaded:
+                    accepted = accepted or getattr(self.window.workflow_preset, attribute)
                 if self._standard_names(value) != accepted:
                     # Typing in one field must not be accepted by an unrelated change.
                     value = self.values.get(name, ", ".join(accepted))
@@ -151,20 +153,26 @@ class ChangeGuard:
 
     def _place(self, control):
         widget = getattr(self.window, control.split()[0])
-        parent = widget.parentWidget()
+        calibration = self.window.calibration_tabs
+        is_calibration = calibration.isAncestorOf(widget)
+        parent = calibration if is_calibration else widget.parentWidget()
         while parent is not None and parent.layout() is None:
             parent = parent.parentWidget()
         if parent is None:
             return
         old_parent = self.bar.parentWidget()
         if old_parent and old_parent.layout():
-            old_layout = old_parent.layout()
+            old_layout = (self.window.calibration_pending_layout if old_parent is calibration
+                          else old_parent.layout())
             if isinstance(old_layout, QtWidgets.QFormLayout):
                 old_layout.takeRow(self.bar)
             else:
                 old_layout.removeWidget(self.bar)
         self.bar.setParent(parent)
-        layout = parent.layout()
+        layout = self.window.calibration_pending_layout if is_calibration else parent.layout()
+        if is_calibration:
+            layout.insertWidget(1, self.bar)
+            return
         if isinstance(layout, QtWidgets.QFormLayout):
             layout.addRow(self.bar)
         elif isinstance(layout, QtWidgets.QGridLayout):
@@ -291,6 +299,7 @@ class ChangeGuard:
             return
         for name, value in self.pending["old"].items():
             _set_value(getattr(self.window, name), value)
+        self.window._sync_calibration_primary_layout()
         if self.pending["function"].__name__ == "request_detector_calibration":
             self.window._sync_qtegra_controls()
         self.pending = None
@@ -469,6 +478,7 @@ class ChangeGuard:
         w._sync_selection_parameter_controls()
         for name, value in record["change"]["old"].items():
             _set_value(getattr(w, name), value)
+        w._sync_calibration_primary_layout()
         w._sync_selection_history_actions()
         w._refresh_workflow_status()
         w.update_project_window_title()

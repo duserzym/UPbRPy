@@ -353,6 +353,7 @@ def calc_concentration_calibration_factor(
                 notice_stage, 'element_not_calibrated',
                 f"No {element} value in {', '.join(sample_names)}: {element} not calibrated.",
                 sample_names[0], channel, ('choose_standard', 'enter_value'),
+                level='info',
             ))
             continue
         effective_channels.append(channel)

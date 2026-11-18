@@ -236,7 +236,7 @@ def test_rich_detector_panel_fits_laptop_sizes(app, settings_reset, size):
         shell.resize(*size)
         window.apply_default_layout()
         window.inspector_tabs.setCurrentIndex(1)
-        window.calibration_tabs.setCurrentIndex(1)  # Fractionation is the default; inspect Detector.
+        window.calibration_tabs.setCurrentIndex(2)  # Standards, Fits, Detector.
         process(app)
         panel = window.detector_calibration_panel
         scroll = window.calibration_tabs.currentWidget()

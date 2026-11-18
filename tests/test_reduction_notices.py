@@ -130,7 +130,7 @@ def test_no_calibrant_has_element_omits_results_and_records_one_notice(channel, 
     assert notices[0] == ReductionNotice(
         "concentration", "element_not_calibrated",
         f"No {element} value in NIST610, NIST612: {element} not calibrated.",
-        "NIST610", channel, ("choose_standard", "enter_value"),
+        "NIST610", channel, ("choose_standard", "enter_value"), level="info",
     )
     assert np.isfinite(result["U"]).all()
 

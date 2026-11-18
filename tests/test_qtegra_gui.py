@@ -123,11 +123,11 @@ def apply_mode(window, app, mode):
     assert window.session.import_settings["detector_calibration"]["mode"] == mode
 
 
-def test_fractionation_is_first_and_default_calibration_tab(window, app):
+def test_standards_is_first_and_default_calibration_tab(window, app):
     window.load_experiment_directory(str(RICH), background=False)
     window.inspector_tabs.setCurrentWidget(window.calibration_tabs)
     app.processEvents()
-    assert [window.calibration_tabs.tabText(i) for i in range(2)] == ["Fractionation", "Detector"]
+    assert [window.calibration_tabs.tabText(i) for i in range(3)] == ["Standards", "Fits", "Detector"]
     assert window.calibration_tabs.currentIndex() == 0
 
 
@@ -137,7 +137,7 @@ def test_detector_layout_and_table_at_1280x800(window, app, mode):
     window.resize(1280, 800)
     window.apply_default_layout()
     window.inspector_tabs.setCurrentWidget(window.calibration_tabs)
-    window.calibration_tabs.setCurrentIndex(1)
+    window.calibration_tabs.setCurrentIndex(2)
     panel = window.detector_calibration_panel
     panel.mode_combo.setCurrentIndex(panel.mode_combo.findData(mode))
     for _ in range(8):

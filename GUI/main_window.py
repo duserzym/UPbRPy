@@ -77,6 +77,9 @@ from GUI.widgets import (
     SPOT_TREE_COUNT_ROLE,
     CALIBRATION_GRID,
     CalibrationSlopesWidget,
+    CalibrationMaterialList,
+    CalibrationPanel,
+    CalibrationScrollArea,
     IssueBanner,
     ReductionNoticeList,
     DownholeFractionationWidget,
@@ -3338,73 +3341,131 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_layout.addLayout(color_controls)
         self.inspector_tabs.addTab(browse_page, "Browse")
 
-        calibration_scroll = QtWidgets.QScrollArea()
-        calibration_scroll.setWidgetResizable(True)
-        calibration_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        calibration_scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        calibration_scroll = CalibrationScrollArea()
         calibration_frame = QtWidgets.QWidget()
         calibration_layout = QtWidgets.QVBoxLayout(calibration_frame)
         calibration_layout.setContentsMargins(6, 8, 6, 8)
         calibration_layout.setSpacing(10)
 
-        standards_card = NeumorphicFrame()
-        standards_card.setObjectName("SessionCard")
-        self.standards_card = standards_card
-        standards_layout = QtWidgets.QFormLayout(standards_card)
-        standards_layout.setContentsMargins(10, 10, 10, 10)
-        standards_layout.setSpacing(9)
-        standards_layout.setRowWrapPolicy(
-            QtWidgets.QFormLayout.RowWrapPolicy.WrapAllRows
-        )
-        standards_layout.setFieldGrowthPolicy(
-            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        standards_title = QtWidgets.QLabel("Calibration materials")
-        standards_title.setObjectName("SectionTitle")
-        standards_layout.addRow(standards_title)
+        # The legacy line edits remain the model and signal API for scripts and
+        # ChangeGuard. Visible material rows edit those same models.
+        self.standards_card = calibration_frame
 
+        def card(title):
+            frame = NeumorphicFrame()
+            frame.setObjectName("SessionCard")
+            box = QtWidgets.QVBoxLayout(frame)
+            box.setContentsMargins(8, 7, 8, 7)
+            box.setSpacing(4)
+            label = QtWidgets.QLabel(title)
+            label.setObjectName("SectionTitle")
+            label.setWordWrap(True)
+            box.addWidget(label)
+            calibration_layout.addWidget(frame)
+            return frame, box
+
+        self.primary_reference_card, primary_layout = card("Primary U–Pb reference")
+        self.primary_standard_combo = StyledComboBox()
+        self.primary_standard_combo.currentTextChanged.connect(self.on_primary_standard_changed)
+        primary_layout.addWidget(self.primary_standard_combo)
+        self.same_primary_check = QtWidgets.QCheckBox("Same standard for all ratios")
+        self.same_primary_check.setStyleSheet("QCheckBox { font-size: 11px; }")
+        self.same_primary_check.toggled.connect(self._toggle_same_primary)
+        primary_layout.addWidget(self.same_primary_check)
+        self.primary_separate_controls = QtWidgets.QWidget()
+        separate_layout = QtWidgets.QFormLayout(self.primary_separate_controls)
+        separate_layout.setContentsMargins(0, 0, 0, 0)
+        separate_layout.setSpacing(4)
         self.primary_68_combo = StyledComboBox()
         self.primary_76_combo = StyledComboBox()
         self.primary_82_combo = StyledComboBox()
-        self.primary_68_combo.currentTextChanged.connect(
-            self.on_primary_68_standard_changed
-        )
-        self.primary_76_combo.currentTextChanged.connect(
-            self.on_primary_76_standard_changed
-        )
-        self.primary_82_combo.currentTextChanged.connect(
-            self.on_primary_82_standard_changed
-        )
-        standards_layout.addRow("Pb/U primary", self.primary_68_combo)
-        standards_layout.addRow("Pb/Pb primary", self.primary_76_combo)
-        standards_layout.addRow("Th/Pb primary", self.primary_82_combo)
+        for label, combo, handler in (
+            ("Pb/U", self.primary_68_combo, self.on_primary_68_standard_changed),
+            ("Pb/Pb", self.primary_76_combo, self.on_primary_76_standard_changed),
+            ("Th/Pb", self.primary_82_combo, self.on_primary_82_standard_changed),
+        ):
+            combo.currentTextChanged.connect(handler)
+            separate_layout.addRow(label, combo)
+        primary_layout.addWidget(self.primary_separate_controls)
+        self.primary_effect_label = QtWidgets.QLabel()
+        self.primary_effect_label.setObjectName("PanelBody")
+        self.primary_effect_label.setWordWrap(True)
+        primary_layout.addWidget(self.primary_effect_label)
 
-        self.concentration_standards_edit = QtWidgets.QLineEdit()
-        self.concentration_standards_edit.setPlaceholderText(
-            "NIST610, NIST612"
-        )
-        self.concentration_standards_edit.editingFinished.connect(
-            self.on_concentration_standards_changed
-        )
-        self.concentration_standards_edit.textEdited.connect(self.update_project_window_title)
-        standards_layout.addRow(
-            "Concentration",
-            self.concentration_standards_edit,
-        )
-        self.secondary_standards_edit = QtWidgets.QLineEdit()
-        self.secondary_standards_edit.setPlaceholderText(
-            "Comma-separated secondary materials"
-        )
-        self.secondary_standards_edit.editingFinished.connect(
-            self.on_secondary_standards_changed
-        )
+        self.secondary_card, secondary_layout = card("Secondary and validation")
+        self.secondary_standards_edit = QtWidgets.QLineEdit(self.secondary_card)
+        self.secondary_standards_edit.hide()
+        self.secondary_standards_edit.editingFinished.connect(self.on_secondary_standards_changed)
         self.secondary_standards_edit.textEdited.connect(self.update_project_window_title)
-        standards_layout.addRow("Secondary", self.secondary_standards_edit)
+        self.secondary_materials = CalibrationMaterialList()
+        self.secondary_materials.remove_requested.connect(
+            lambda name: self._remove_calibration_material("secondary", name))
+        secondary_layout.addWidget(self.secondary_materials)
+        self.secondary_add_button = QtWidgets.QToolButton()
+        self.secondary_add_button.setText("+ Add material in session…")
+        self.secondary_add_button.setToolTip("Add material in this session…")
+        self.secondary_add_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.secondary_add_button.setStyleSheet("QToolButton { padding: 2px 0; font-size: 11px; }")
+        self.secondary_add_menu = QtWidgets.QMenu(self.secondary_add_button)
+        self.secondary_add_menu.aboutToShow.connect(lambda: self._populate_material_menu("secondary"))
+        self.secondary_add_button.setMenu(self.secondary_add_menu)
+        secondary_layout.addWidget(self.secondary_add_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
+        self.trace_elements_card, trace_layout = card("Trace elements")
+        internal_caption = QtWidgets.QLabel("Internal standard")
+        internal_caption.setObjectName("PanelBody")
+        trace_layout.addWidget(internal_caption)
+        internal_row = QtWidgets.QHBoxLayout()
+        internal_row.setSpacing(3)
+        self.internal_standard_label = ElidedLabel()
+        self.internal_standard_label.setObjectName("PanelBody")
+        internal_row.addWidget(self.internal_standard_label, 1)
+        self.internal_standard_change_button = QtWidgets.QToolButton()
+        self.internal_standard_change_button.setText("Change")
+        self.internal_standard_change_button.setStyleSheet("QToolButton { padding: 2px; font-size: 11px; }")
+        self.internal_standard_change_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.internal_standard_menu = QtWidgets.QMenu(self.internal_standard_change_button)
+        self.internal_standard_menu.aboutToShow.connect(self._populate_internal_standard_menu)
+        self.internal_standard_change_button.setMenu(self.internal_standard_menu)
+        internal_row.addWidget(self.internal_standard_change_button)
+        trace_layout.addLayout(internal_row)
+        self.concentration_standards_edit = QtWidgets.QLineEdit(self.trace_elements_card)
+        self.concentration_standards_edit.hide()
+        self.concentration_standards_edit.editingFinished.connect(self.on_concentration_standards_changed)
+        self.concentration_standards_edit.textEdited.connect(self.update_project_window_title)
+        self.glass_count_label = QtWidgets.QLabel()
+        self.glass_count_label.setObjectName("PanelBody")
+        trace_layout.addWidget(self.glass_count_label)
+        self.glass_materials = CalibrationMaterialList(chips=True)
+        self.glass_materials.remove_requested.connect(
+            lambda name: self._remove_calibration_material("concentration", name))
+        trace_layout.addWidget(self.glass_materials)
+        self.glass_add_button = QtWidgets.QToolButton()
+        self.glass_add_button.setText("+ Add")
+        self.glass_add_button.setStyleSheet("QToolButton { padding: 1px 4px; font-size: 11px; }")
+        self.glass_add_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.glass_add_menu = QtWidgets.QMenu(self.glass_add_button)
+        self.glass_add_menu.aboutToShow.connect(lambda: self._populate_material_menu(
+            "concentration", replacing=getattr(self, "_calibration_replacing_standard", None)))
+        self.glass_add_menu.aboutToHide.connect(lambda: setattr(self, "_calibration_replacing_standard", None))
+        self.glass_add_button.setMenu(self.glass_add_menu)
+        self.glass_add_button.setStyleSheet(
+            "QToolButton { padding: 2px 6px; font-size: 11px; border: 1px solid palette(mid); "
+            "border-radius: 9px; background: palette(button); } "
+            "QToolButton::menu-indicator { image: none; }")
+        self.glass_materials.set_add_button(self.glass_add_button)
+        self.calibrated_elements_label = QtWidgets.QLabel()
+        self.calibrated_elements_label.setObjectName("PanelBody")
+        self.calibrated_elements_label.setWordWrap(True)
+        trace_layout.addWidget(self.calibrated_elements_label)
+        # A hidden combo supplies the same accepted/proposed value protocol as
+        # the existing guarded selectors; its visible interface is the menu.
+        self.internal_standard_combo = StyledComboBox(self.trace_elements_card)
+        self.internal_standard_combo.hide()
+        self.internal_standard_combo.currentTextChanged.connect(self.on_internal_standard_changed)
         self.reduction_notices = ReductionNoticeList()
         self.reduction_notices.fix_requested.connect(self._fix_reduction_issue)
-        standards_layout.addRow(self.reduction_notices)
+        trace_layout.addWidget(self.reduction_notices)
         self.reference_value_editor = QtWidgets.QWidget()
         value_layout = QtWidgets.QVBoxLayout(self.reference_value_editor)
         value_layout.setContentsMargins(0, 0, 0, 0)
@@ -3426,9 +3487,8 @@ class MainWindow(QtWidgets.QMainWindow):
         cancel_value.clicked.connect(self.reference_value_editor.hide)
         value_actions.addWidget(cancel_value)
         value_layout.addLayout(value_actions)
-        standards_layout.addRow(self.reference_value_editor)
+        trace_layout.addWidget(self.reference_value_editor)
         self.reference_value_editor.hide()
-        calibration_layout.addWidget(standards_card, 0)
 
         fit_card = NeumorphicFrame()
         fit_card.setObjectName("SessionCard")
@@ -3465,6 +3525,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.downhole_fit_combo.currentIndexChanged.connect(self.on_downhole_fit_method_changed)
         fit_layout.addWidget(downhole_label)
         fit_layout.addWidget(self.downhole_fit_combo)
+        self.downhole_quality_label = QtWidgets.QLabel()
+        self.downhole_quality_label.setWordWrap(True)
+        self.downhole_quality_label.setObjectName("PanelBody")
+        fit_layout.addWidget(self.downhole_quality_label)
 
         self.downhole_fit_stack = QtWidgets.QStackedWidget()
         self._downhole_fit_pages = self._build_fit_parameter_pages(
@@ -3508,6 +3572,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_fit_combo.currentIndexChanged.connect(self.on_session_fit_method_changed)
         fit_layout.addWidget(session_label)
         fit_layout.addWidget(self.session_fit_combo)
+        self.session_quality_label = QtWidgets.QLabel()
+        self.session_quality_label.setWordWrap(True)
+        self.session_quality_label.setObjectName("PanelBody")
+        fit_layout.addWidget(self.session_quality_label)
 
         self.session_fit_stack = QtWidgets.QStackedWidget()
         self._session_fit_pages = self._build_fit_parameter_pages(
@@ -3523,7 +3591,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_settings_note_label.setObjectName("PanelBody")
         self.fit_settings_note_label.setWordWrap(True)
         fit_layout.addWidget(self.fit_settings_note_label)
-        calibration_layout.addWidget(fit_card, 0)
         calibration_layout.addStretch(1)
         calibration_scroll.setWidget(calibration_frame)
         # Separate scroll viewports keep the detector plot within the current
@@ -3537,12 +3604,29 @@ class MainWindow(QtWidgets.QMainWindow):
         detector_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         detector_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         detector_scroll.setWidget(self.detector_calibration_panel)
-        self.calibration_tabs = QtWidgets.QTabWidget()
-        self.calibration_tabs.setDocumentMode(True)
-        self.calibration_tabs.tabBar().setDrawBase(False)
-        self.calibration_tabs.addTab(calibration_scroll, "Fractionation")
+        self.calibration_tabs = CalibrationPanel()
+        self.calibration_state_button = QtWidgets.QPushButton()
+        self.calibration_state_button.setObjectName("WorkflowLabel")
+        self.calibration_state_button.setStyleSheet("QPushButton { padding: 4px; text-align: left; font-size: 11px; }")
+        self.calibration_state_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                                   QtWidgets.QSizePolicy.Policy.Fixed)
+        self.calibration_state_button.clicked.connect(self._reveal_calibration_cause)
+        self.calibration_tabs.header.addWidget(self.calibration_state_button)
+        self.calibration_pending_layout = self.calibration_tabs.header
+        fits_scroll = CalibrationScrollArea()
+        fits_page = QtWidgets.QWidget()
+        fits_layout = QtWidgets.QVBoxLayout(fits_page)
+        fits_layout.setContentsMargins(6, 8, 6, 8)
+        fits_layout.addWidget(fit_card)
+        fits_layout.addStretch()
+        fits_scroll.setWidget(fits_page)
+        self.calibration_tabs.addTab(calibration_scroll, "Standards")
+        self.calibration_tabs.addTab(fits_scroll, "Fits")
         self.calibration_tabs.addTab(detector_scroll, "Detector")
         self.inspector_tabs.addTab(self.calibration_tabs, "Calibration")
+        self._calibration_state_timer = QtCore.QTimer(self)
+        self._calibration_state_timer.setInterval(100)
+        self._calibration_state_timer.timeout.connect(self._refresh_calibration_state)
 
         results_page = QtWidgets.QWidget()
         results_layout = QtWidgets.QVBoxLayout(results_page)
@@ -3939,6 +4023,297 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_fit_stack_page(self.session_fit_stack, self._session_fit_pages, self.session.session_fit_method)
         self._update_fit_settings_note()
 
+    def _sync_calibration_primary_layout(self) -> None:
+        same = self.same_primary_check.isChecked()
+        self.primary_standard_combo.setVisible(same)
+        self.primary_separate_controls.setVisible(not same)
+
+    def _toggle_same_primary(self, checked: bool) -> None:
+        self._sync_calibration_primary_layout()
+        if self._is_populating:
+            return
+        standards = (self.session.primary_68_standard, self.session.primary_76_standard,
+                     self.session.primary_82_standard)
+        if checked and len(set(standards)) > 1:
+            self.on_primary_standard_changed(self.primary_standard_combo.currentText())
+        elif getattr(self, "change_guard", None) is not None:
+            self.change_guard.sync(["same_primary_check"])
+
+    @confirm_change('Primary U–Pb reference', 'primary_standard_combo same_primary_check', 'downhole')
+    def on_primary_standard_changed(self, value: str) -> None:
+        """Set all three primary references as one reversible change."""
+        if self._is_populating or not value:
+            return
+        for name, combo in (("primary_68_standard", self.primary_68_combo),
+                            ("primary_76_standard", self.primary_76_combo),
+                            ("primary_82_standard", self.primary_82_combo)):
+            setattr(self.session, name, value)
+            with QtCore.QSignalBlocker(combo):
+                combo.setCurrentText(value)
+        self._sync_calibration_primary_layout()
+        self.detector_calibration_panel.set_session(self.session)
+        self._invalidate_downhole_fit_cache()
+        self._refresh_workflow_status()
+
+    @confirm_change('Internal standard', 'internal_standard_combo', 'normalization')
+    def on_internal_standard_changed(self, channel: str) -> None:
+        """Set the measured normalization channel, preserving isotope fits."""
+        if self._is_populating or channel not in self.session.channels:
+            return
+        self.session.internal_standard_channel = channel
+        ensure_shared_pipeline(self.session, self.workflow_preset)
+        self._refresh_workflow_status()
+
+    def _populate_internal_standard_menu(self) -> None:
+        from UPbRPy.concentration import element_from_channel
+
+        self.internal_standard_menu.clear()
+        selected = self.internal_standard_combo.currentText()
+        element = element_from_channel(selected)
+        for channel in self.session.channels:
+            other = element_from_channel(channel)
+            if other and other != element:
+                action = self.internal_standard_menu.addAction(f"{other} ({channel})")
+                action.triggered.connect(lambda _checked=False, value=channel:
+                                         self.internal_standard_combo.setCurrentText(value))
+        if not self.internal_standard_menu.actions():
+            self.internal_standard_menu.addAction("No other measured elements").setEnabled(False)
+
+    def _calibration_material_names(self, kind: str) -> tuple[str, ...]:
+        return self._standard_names(getattr(self, f"{kind}_standards_edit"))
+
+    def _remove_calibration_material(self, kind: str, name: str) -> None:
+        self._set_calibration_materials(kind, tuple(value for value in self._calibration_material_names(kind)
+                                                    if value != name))
+
+    def _set_calibration_materials(self, kind: str, names: tuple[str, ...]) -> None:
+        edit = getattr(self, f"{kind}_standards_edit")
+        edit.setText(", ".join(names))
+        edit.editingFinished.emit()
+
+    def _populate_material_menu(self, kind: str, *, replacing: str | None = None) -> None:
+        menu = self.glass_add_menu if kind == "concentration" else self.secondary_add_menu
+        menu.clear()
+        archive = current_standard_archive()
+        excluded = set(self._calibration_material_names(kind)) if replacing is None else {replacing}
+        excluded.update((self.session.primary_68_standard, self.session.primary_76_standard,
+                         self.session.primary_82_standard))
+        excluded.update(self._calibration_material_names("secondary" if kind == "concentration" else "concentration"))
+        for name in self._calibration_sample_counts():
+            if name in excluded or name not in archive.index:
+                continue
+            if kind == "concentration" and archive.loc[name].get("material") != "glass":
+                continue
+            action = menu.addAction(name)
+            def choose(_checked=False, value=name):
+                names = tuple(name for name in self._calibration_material_names(kind) if name != replacing)
+                self._set_calibration_materials(kind, tuple(dict.fromkeys((*names, value))))
+
+            action.triggered.connect(choose)
+        if not menu.actions():
+            menu.addAction("No other measured reference materials").setEnabled(False)
+
+    def _calibration_sample_counts(self) -> dict[str, int]:
+        frame = self.session.experiment
+        key = (id(self.session), id(frame), len(frame))
+        if key != getattr(self, "_calibration_samples_key", None):
+            self._calibration_samples_key = key
+            self._calibration_counts = (frame["sample"].astype(str).value_counts(sort=False).to_dict()
+                                        if "sample" in frame else {})
+        return self._calibration_counts
+
+    def _cached_calibration_product(self, key: str, stage: PipelineStage):
+        value = self.session.reduction_cache.get(key)
+        if value is None and self.session.pipeline is not None:
+            value = self.session.pipeline.cache.get(stage)
+        return value
+
+    def _refresh_calibration_summary(self) -> None:
+        """Summarize cached products only, retaining unchanged material rows."""
+        if not hasattr(self, "primary_effect_label"):
+            return
+        counts = self._calibration_sample_counts()
+        downhole = self._cached_calibration_product("downhole_results", PipelineStage.DOWNHOLE)
+        session_fit = self._cached_calibration_product("session_correction_results", PipelineStage.SESSION)
+        final = self._cached_calibration_product("finalized_results", PipelineStage.FINALIZE)
+        concentrations = self._cached_calibration_product("concentration_results", PipelineStage.CONCENTRATION)
+        config = (self.session.primary_68_standard, self.session.primary_76_standard,
+                  self.session.primary_82_standard, self.session.secondary_standards,
+                  self.session.concentration_standards, self.session.internal_standard_channel,
+                  tuple(self.session.channels), self.workflow_preset.key, self.session.ratio_aggregation)
+        key = (self._calibration_samples_key, config, id(downhole), id(session_fit), id(final),
+               id(concentrations), id(current_standard_archive()), repr(self.session.reference_overrides))
+        if key == getattr(self, "_calibration_summary_key", None):
+            return
+        self._calibration_summary_key = key
+        ratio = self.workflow_preset.default_ratio
+        dh = downhole.get("correction_results", {}).get(ratio, {}) if isinstance(downhole, dict) else {}
+        sf = session_fit.get("correction_results", {}).get(ratio, {}) if isinstance(session_fit, dict) else {}
+        quality = "downhole quality unavailable" if dh else "fit not computed yet"
+        metadata = dh.get("metadata", {})
+        fitted = np.asarray(metadata.get("fitted_fractionation", []), dtype=float)
+        scale = float(np.nanmean(fitted)) if fitted.size else np.nan
+        residual = dh.get("fit_residual_standard_deviation", np.nan)
+        if np.isfinite(scale) and scale != 0 and np.isfinite(residual):
+            quality = f"downhole residual 2σ {200 * residual / abs(scale):.2g} %"
+        self.downhole_quality_label.setText(quality)
+        observations = sf.get("fit_observations", {})
+        factors = np.asarray(observations.get("fractionation", []), dtype=float)
+        residuals = np.asarray(sf.get("fit_residuals", []), dtype=float)
+        drift = "session drift unavailable" if sf else "session fit not computed yet"
+        if factors.size and residuals.shape == factors.shape:
+            # Engine residuals are in factor space for both estimators.
+            predictions = factors - residuals
+            predictions = predictions[np.isfinite(predictions)]
+            if predictions.size and np.mean(predictions) != 0:
+                drift = f"session drift {100 * np.ptp(predictions) / abs(np.mean(predictions)):.2g} %"
+                times = np.asarray(observations.get("time", []), dtype=float)
+                if times.size and np.isfinite(times).any():
+                    drift += f" over {np.ptp(times[np.isfinite(times)]) / 3600:.2g} h"
+        self.session_quality_label.setText(drift)
+        primaries = tuple(dict.fromkeys((self.session.primary_68_standard, self.session.primary_76_standard,
+                                        self.session.primary_82_standard)))
+        analyses = (f"{counts.get(primaries[0], 0)} analyses" if len(primaries) == 1 else
+                    "; ".join(f"{name}: {counts.get(name, 0)} analyses" for name in primaries))
+        self.primary_effect_label.setText(f"{analyses} · {quality}\n{drift}")
+        if "excluded_count" in dh:
+            self.downhole_quality_label.setText(f"{quality} · {dh['excluded_count']} aligned points filtered")
+
+        summary = getattr(final, "secondary_standard_summary", pd.DataFrame())
+        by_system = getattr(final, "reference_material_summary_by_system", pd.DataFrame())
+        rows = []
+        for name in self.session.secondary_standards:
+            detail, status, tooltip = "", "", ""
+            match = summary[summary["sample"].eq(name)] if "sample" in summary else pd.DataFrame()
+            # Older summaries require a concordia age, which some materials
+            # (including 91500) deliberately lack. Use the cached same-system
+            # date summary rather than substituting a different reference age.
+            if (match.empty or not np.isfinite(match.iloc[0].get("offset_percent", np.nan))) and {
+                    "sample", "system"}.issubset(by_system.columns):
+                system_match = by_system[by_system["sample"].eq(name) & by_system["system"].eq(ratio)]
+                if not system_match.empty:
+                    match = system_match.rename(columns={"accepted_date": "accepted_age",
+                                                          "offset_ma": "offset_from_accepted_age"})
+                    tooltip = f"{ratio} dates. "
+            if not match.empty:
+                status = "ok"
+                values = match.iloc[0]
+                offset = values.get("offset_percent", np.nan)
+                mswd = values.get("mswd", np.nan)
+                if np.isfinite(offset):
+                    detail = f"{offset:+.2g} %".replace("-", "−")
+                elif not np.isfinite(values.get("accepted_age", np.nan)):
+                    tooltip += "Offset unavailable: no accepted reference age in the cached summary. "
+                elif not np.isfinite(values.get("weighted_mean", np.nan)):
+                    tooltip += "Offset unavailable: no finite weighted mean in the cached summary. "
+                else:
+                    tooltip += "Offset unavailable in the cached summary. "
+                if np.isfinite(mswd):
+                    detail += (" · " if detail else "") + f"MSWD {mswd:.2g}"
+                difference = values.get("offset_from_accepted_age", np.nan)
+                mean_error = values.get("weighted_mean_2e", np.nan)
+                reference_error = values.get("accepted_age_2e", np.nan)
+                error = np.hypot(mean_error, reference_error if np.isfinite(reference_error) else 0)
+                if np.isfinite(difference) and np.isfinite(error):
+                    status = "warn" if abs(difference) > error else "ok"
+                    tooltip += ("Outside" if status == "warn" else "Within") + " 2σ of the reference value"
+                else:
+                    tooltip += "Reference comparison unavailable: no finite offset or uncertainty in the cached summary."
+            rows.append((name, counts.get(name, 0), detail, status, tooltip.strip()))
+        self.secondary_materials.set_materials(rows)
+        glasses = self.session.concentration_standards
+        self.glass_materials.set_materials((name, counts.get(name, 0), "", "") for name in glasses)
+        self.glass_count_label.setText(f"Glasses · {sum(counts.get(name, 0) for name in glasses)} analyses")
+        from UPbRPy.concentration import element_from_channel, resolve_internal_standard_channel
+        try:
+            internal = resolve_internal_standard_channel(self.session.channels, self.workflow_preset.internal_material,
+                                                         self.session.internal_standard_channel)
+        except ReductionError:
+            internal = self.session.internal_standard_channel or ""
+        assumed = {"zircon": 151443, "titanite": 151443, "apatite": 400443, "rutile": 599499}.get(
+            self.workflow_preset.internal_material)
+        value = f"{assumed:,}".replace(",", " ") if assumed is not None else "unknown"
+        self.internal_standard_label.setText(f"{element_from_channel(internal) or 'unavailable'} · {value} µg/g")
+        if isinstance(concentrations, dict):
+            calibration = concentrations.get("calibration", pd.Series(dtype=float))
+            elements = {element_from_channel(channel) for channel in self.session.channels} - {None}
+            calibrated = {element_from_channel(channel) for channel, factor in calibration.items()
+                          if np.isfinite(factor) and factor > 0} - {None}
+            missing = sorted(elements - calibrated - {element_from_channel(internal)})
+            names = f" ({', '.join(missing)})" if missing else ""
+            self.calibrated_elements_label.setText(
+                f"Elements: {len(elements & calibrated)} calibrated · {len(missing)} not{names}")
+        else:
+            self.calibrated_elements_label.setText("Elements: not computed yet")
+
+    def _calibration_required_stages(self, target):
+        required = set()
+        ordered = []
+
+        def visit(stage):
+            if stage in required or stage in {PipelineStage.IMPORT, PipelineStage.SELECTION}:
+                return
+            for prerequisite in PIPELINE_STAGE_BY_ID[stage].prerequisites:
+                visit(prerequisite)
+            required.add(stage)
+            ordered.append(stage)
+
+        if target in PIPELINE_STAGE_BY_ID:
+            visit(target)
+        return tuple(ordered)
+
+    def _calibration_stage_cached(self, stage) -> bool:
+        from GUI.services import _REDUCTION_CACHE_STAGES
+        return bool(self.session.pipeline and self.session.pipeline.cache.has(stage)) or any(
+            key in self.session.reduction_cache for key, value in _REDUCTION_CACHE_STAGES.items() if value == stage)
+
+    def _refresh_calibration_state(self) -> None:
+        if not hasattr(self, "calibration_state_button"):
+            return
+        pipeline = self.session.pipeline
+        notices = [notice for notice in pipeline.notices if notice.level == "attention"] if pipeline else []
+        banner = hasattr(self, "issue_banner") and not self.issue_banner.isHidden()
+        if self._active_worker is not None:
+            icon = QtWidgets.QStyle.StandardPixmap.SP_BrowserReload
+            stages = getattr(self, "_calibration_work_stages", ())
+            remaining = [stage for stage in stages if not self._calibration_stage_cached(stage)]
+            stage = remaining[0] if remaining else (stages[-1] if stages else None)
+            label = {PipelineStage.DOWNHOLE: "downhole fit", PipelineStage.SESSION: "session fit"}.get(
+                stage, stage.value.replace("_", " ") if stage else self._busy_label.lower())
+            number = min(len(stages), len(stages) - len(remaining) + 1)
+            text = f"Recomputing {label}…\n({number or 1} of {len(stages) or 1})"
+        elif banner or notices:
+            icon = QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
+            text = f"Needs attention ({len(notices) + int(banner)})"
+        elif not self.session.loaded:
+            icon = QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton
+            text = "Open a session"
+        elif all(self._calibration_stage_cached(stage) for stage in
+                 self._calibration_required_stages(self.current_workflow_stage())):
+            icon = QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
+            text = "Up to date"
+        else:
+            icon = QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation
+            text = "Not computed yet"
+        if self.calibration_state_button.text() != text:
+            self.calibration_state_button.setText(text)
+            self.calibration_state_button.setIcon(self.style().standardIcon(icon))
+            self.calibration_state_button.setToolTip(text)
+
+    def _reveal_calibration_cause(self) -> None:
+        if not self.issue_banner.isHidden():
+            self.issue_banner.setFocus()
+            self.issue_banner.details_button.setFocus()
+        elif self.reduction_notices.notices:
+            self.calibration_tabs.setCurrentIndex(0)
+            self.calibration_tabs.widget(0).ensureWidgetVisible(self.reduction_notices)
+        elif self.session.pipeline and self.session.pipeline.notices:
+            stage = self.session.pipeline.notices[0].stage
+            for row, value in enumerate(self.workflow_preset.stage_sequence):
+                if value.value == stage:
+                    self.workflow_step_list.setCurrentRow(row)
+                    break
+
     @sync_change_controls
     def populate_standard_controls(self) -> None:
         """Populate standard selectors from configured and observed samples."""
@@ -3969,22 +4344,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.primary_68_combo,
                 self.primary_76_combo,
                 self.primary_82_combo,
+                self.primary_standard_combo,
             ),
-            configured,
+            [*configured, configured[0]],
         ):
-            combo.clear()
-            combo.addItems(choices)
-            index = combo.findText(selected)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+            with QtCore.QSignalBlocker(combo):
+                combo.clear()
+                combo.addItems(choices)
+                index = combo.findText(selected)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        with QtCore.QSignalBlocker(self.same_primary_check):
+            self.same_primary_check.setChecked(len(set(configured)) == 1)
+        self._sync_calibration_primary_layout()
+        from UPbRPy.concentration import resolve_internal_standard_channel
+        try:
+            internal = resolve_internal_standard_channel(self.session.channels, self.workflow_preset.internal_material,
+                                                         self.session.internal_standard_channel)
+        except ReductionError:
+            internal = self.session.internal_standard_channel or ""
+        with QtCore.QSignalBlocker(self.internal_standard_combo):
+            self.internal_standard_combo.clear()
+            self.internal_standard_combo.addItems(self.session.channels)
+            self.internal_standard_combo.setCurrentText(internal)
         concentration = (
             self.session.concentration_standards
             or self.workflow_preset.concentration_standards
         )
-        secondary = (
-            self.session.secondary_standards
-            or self.workflow_preset.secondary_standards
-        )
+        secondary = (self.session.secondary_standards if self.session.loaded else
+                     self.session.secondary_standards or self.workflow_preset.secondary_standards)
         self.concentration_standards_edit.setText(", ".join(concentration))
         self.secondary_standards_edit.setText(", ".join(secondary))
 
@@ -7610,6 +7998,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_workflow_status(self) -> None:
         self._refresh_reduction_notices()
+        self._refresh_calibration_summary()
+        self._refresh_calibration_state()
         if getattr(self, "_installing_project", False):
             return
         self._sync_selection_history_actions()
@@ -7714,7 +8104,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.workflow_preset.steps[index].title,
             )
             notices = [notice.message for notice in self.session.pipeline.notices
-                       if notice.stage == stage.value] if self.session.pipeline else []
+                       if notice.stage == stage.value and notice.level == "attention"] if self.session.pipeline else []
             has_issue = stage.value == getattr(self, "_issue_stage", None)
             attention = has_issue or bool(notices)
             item.setText(f"{index + 1}  {label}" + (" · Needs attention" if attention else ""))
@@ -7792,10 +8182,12 @@ class MainWindow(QtWidgets.QMainWindow):
         notices = [notice for notice in pipeline.notices
                    if notice.stage in {"normalization", "concentration"}] if pipeline else []
         self.reduction_notices.set_notices(notices)
+        self._refresh_calibration_state()
 
     def _dismiss_reduction_issue(self) -> None:
         self._issue_stage = None
         self._sync_workflow_step_locks()
+        self._refresh_calibration_state()
 
     def _undo_reduction_issue(self) -> None:
         self.change_guard.undo()
@@ -7838,8 +8230,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     tabs.setCurrentIndex(index)
         if code == "choose_standard":
             stage = getattr(issue, "stage", "concentration")
-            control = (self.primary_68_combo if stage in {"downhole", "session"}
-                       else self.concentration_standards_edit)
+            control = ((self.primary_standard_combo if self.same_primary_check.isChecked() else self.primary_68_combo)
+                       if stage in {"downhole", "session"} else self.glass_add_button)
+            if stage not in {"downhole", "session"}:
+                self._calibration_replacing_standard = getattr(issue, "standard", None)
+                self.glass_add_menu.popup(self.glass_add_button.mapToGlobal(self.glass_add_button.rect().bottomLeft()))
             control.setFocus()
             if isinstance(control, QtWidgets.QLineEdit):
                 control.selectAll()
@@ -7857,7 +8252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         while parent is not None:
             if isinstance(parent, QtWidgets.QScrollArea):
                 parent.ensureWidgetVisible(self.reference_value_editor if code == "enter_value"
-                                           else self.concentration_standards_edit)
+                                           else self.glass_add_button)
             parent = parent.parentWidget()
 
     def _save_reference_value(self) -> None:
@@ -7910,6 +8305,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._quiet_worker = quiet
         self._active_worker = worker
         self._busy_label = label
+        target = next((stage for token, stage in (
+            ("baselines", PipelineStage.BASELINE), ("normalization", PipelineStage.NORMALIZATION),
+            ("concentrat", PipelineStage.CONCENTRATION), ("isotope ratios", PipelineStage.RATIOS),
+            ("downhole", PipelineStage.DOWNHOLE), ("session fractionation", PipelineStage.SESSION),
+            ("finaliz", PipelineStage.FINALIZE), ("depth", PipelineStage.DEPTH_PROFILE),
+        ) if token in label.lower()), self.current_workflow_stage())
+        requested = (tuple(stage for stage in PIPELINE_STAGE_BY_ID if stage in self._selection_recompute_stages)
+                     if label == "Updating reduction stages" else (target,))
+        required = dict.fromkeys(stage for requested_stage in requested
+                                 for stage in self._calibration_required_stages(requested_stage))
+        self._calibration_work_stages = tuple(stage for stage in required if not self._calibration_stage_cached(stage))
+        self._refresh_calibration_state()
+        self._calibration_state_timer.start()
         self.busy_progress.start("Opening project" if self._restore_task is not None else label)
         if not quiet:
             self.step_actions_block.setEnabled(False)
@@ -7965,6 +8373,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not shiboken6.isValid(self):
                 return
             self.busy_progress.stop()
+            self._calibration_state_timer.stop()
             self.step_actions_block.setEnabled(True)
             self.workflow_step_list.setEnabled(True)
             self.fit_card.setEnabled(True)

@@ -1,6 +1,7 @@
 """Recoverable reduction issues shared by engine and frontends."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -8,7 +9,8 @@ class ReductionNotice:
     """Describe a skipped reference value and the available repairs.
 
     ``element`` is the measured element channel; ``fixes`` contains action
-    codes, with ``standard`` and ``element`` supplying their context.
+    codes, with ``standard`` and ``element`` supplying their context. ``level``
+    distinguishes informational omissions from issues needing attention.
     """
 
     stage: str
@@ -17,6 +19,7 @@ class ReductionNotice:
     standard: str | None = None
     element: str | None = None
     fixes: tuple[str, ...] = ()
+    level: Literal["info", "attention"] = "attention"
 
 
 class ReductionError(Exception):

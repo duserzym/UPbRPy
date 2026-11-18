@@ -96,7 +96,7 @@ def test_two_formats_titles_dirty_marker_and_active_panels(loaded, app, tmp_path
     assert rich.database_origin_label.text() and not spots.database_origin_label.text()
     shell.tabs.setCurrentIndex(0)
     rich.inspector_tabs.setCurrentWidget(rich.calibration_tabs)
-    rich.calibration_tabs.setCurrentIndex(1)
+    rich.calibration_tabs.setCurrentIndex(2)
     process(app)
     assert rich.detector_calibration_panel.isVisible()
     assert not spots.detector_calibration_panel.isVisible()
