@@ -115,6 +115,7 @@ nav:
   - Development:
       - Building Studio: development/building.md
       - Tests: testing.md
+      - Future bias correction limits: bias_correction_threshold.md
       - In-app updates and releases: in-app-updates.md
       - Contributing: development/contributing.md
       - Manual screenshots: development/screenshots.md

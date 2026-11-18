@@ -35,6 +35,7 @@ FOCUSED_SUBMODULES = frozenset(
         "project",
         "qtegra",
         "ratios",
+        "radiation_damage",
         "reduction",
         "reproducibility",
         "results",
@@ -64,7 +65,10 @@ def load_public_api() -> list[str]:
     for name in isochron_names:
         globals()[name] = getattr(isochron, name)
 
-    exports = [*core_names, *isochron_names]
+    damage = import_module(".radiation_damage", __name__)
+    for name in ("alpha_dose", "ALPHA_DOSE_TOOLTIP"):
+        globals()[name] = getattr(damage, name)
+    exports = [*core_names, *isochron_names, "alpha_dose", "ALPHA_DOSE_TOOLTIP"]
     globals()["__all__"] = exports
     return exports
 
@@ -73,6 +77,10 @@ def __getattr__(name: str):
     """Resolve legacy top-level names on first use."""
     if name.startswith("__") and name.endswith("__") and name != "__all__":
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if name in {"alpha_dose", "ALPHA_DOSE_TOOLTIP"}:
+        value = getattr(import_module(".radiation_damage", __name__), name)
+        globals()[name] = value
+        return value
     if name in FOCUSED_SUBMODULES:
         module = import_module(f".{name}", __name__)
         globals()[name] = module

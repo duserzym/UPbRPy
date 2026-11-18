@@ -18,6 +18,8 @@ from scipy.stats import t
 
 from .constants import common_U238_U235, lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
+from .concentration import element_from_channel
+from .radiation_damage import alpha_dose
 
 
 BIAS_DATE_SYSTEMS = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "preferred",
@@ -29,6 +31,108 @@ BIAS_QUANTITIES = {
     "206Pb_cps": "206Pb, counts per second",
 }
 _REE = "La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu".split()
+
+_SIGNALS = ("session_time", "238U_cps", "206Pb_cps")
+_SIMPLE_RATIOS = ("Lu/Hf", "Nb/Ta", "Nb/U", "Nb/Th", "Th/Y", "Hf/Y",
+                  "Nb/Yb", "Ce/Yb", "Gd/Yb", "U/Yb", "Nb/P", "Ce/P", "Dy/Yb", "Ce/U")
+_RATIO_INPUTS = {
+    "Th/U": ("Th", "U"), "REE": tuple(_REE), "sum_REE_Y": (*_REE, "Y"),
+    "Eu/Eu*": ("Eu", "Sm", "Gd"), "Ce/Ce*": ("Ce", "La", "Pr"),
+    "(Gd/Yb)_N": ("Gd", "Yb"),
+    **{key: tuple(key.split("/")) for key in _SIMPLE_RATIOS if key != "Ce/U"},
+    "10000Eu/Eu*/Y": ("Eu", "Sm", "Gd", "Y"),
+    "Ce/U": ("Ce", "U"),
+}
+_RATIO_LABELS = {key: key for key in _RATIO_INPUTS}
+_RATIO_LABELS.update({"REE": BIAS_QUANTITIES["REE"], "sum_REE_Y": "ΣREE+Y, µg/g",
+                      "10000Eu/Eu*/Y": "10,000(Eu/Eu*)/Y"})
+BIAS_QUANTITIES.update(_RATIO_LABELS)
+BIAS_QUANTITIES["alpha_dose"] = "Total alpha dose, α/g"
+
+
+def _reference_dates(standard_archive, names=None):
+    """Select date controls, excluding glass even when it has derived ratios."""
+    names = standard_archive.index if names is None else names
+    accepted = accepted_dates(standard_archive, names)
+    materials = standard_archive.reindex(accepted.index)
+    glasses = (materials["material"].astype(str).str.contains("glass", case=False, na=False)
+               if "material" in materials else pd.Series(False, index=accepted.index))
+    return accepted.loc[np.isfinite(accepted).any(axis=1) & ~glasses
+                        & ~accepted.index.isin(["NIST610", "NIST612"])]
+
+
+def bias_quantities(results, *, standard_archive=None) -> dict[str, str]:
+    """List measured x attributes among date controls, in display order.
+
+    The optional archive supports session-specific library materials. Signal
+    attributes are always offered because they are supplied separately.
+    Each required concentration must have a finite value among RM rows.
+    The historical REE sum requires only one measured REE.
+    """
+    if standard_archive is None:
+        from .standards import standard_archive
+    rm = results.loc[results["sample"].isin(_reference_dates(standard_archive).index)]
+    measured = {key for key in rm if np.isfinite(_numeric(rm, key)).any()}
+    out = {key: BIAS_QUANTITIES[key] for key in _SIGNALS}
+    for key in ("Pb", "206Pb/204Pb"):
+        if key in measured:
+            out[key] = BIAS_QUANTITIES[key]
+    # Finalization strips isotope masses using this same concentration parser.
+    for key in results:
+        if element_from_channel(key) == key and key in measured and key not in out:
+            out[key] = BIAS_QUANTITIES.get(key, f"{key}, µg/g")
+    for key, inputs in _RATIO_INPUTS.items():
+        if ((key == "REE" and measured.intersection(inputs))
+                or (key != "REE" and set(inputs).issubset(measured))):
+            out[key] = _RATIO_LABELS[key]
+    if {"U", "Th"}.issubset(measured):
+        out["alpha_dose"] = BIAS_QUANTITIES["alpha_dose"]
+    return out
+
+
+def trace_bias_quantities(frame):
+    """Compute the export's trace ratios without modifying finalized results.
+
+    REE retains the historical partial sum; sum_REE_Y requires all 14 REE.
+    Normalization constants are imported lazily to avoid the export/bias cycle.
+    """
+    from .export_table import CHONDRITE_REE
+    n = {el: _numeric(frame, el) / value for el, value in CHONDRITE_REE.items()}
+    out = {}
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        out["Th/U"] = _numeric(frame, "Th") / _numeric(frame, "U").replace(0, np.nan)
+        concentrations = pd.DataFrame({el: _numeric(frame, el) for el in _REE})
+        out["REE"] = concentrations.sum(axis=1, min_count=1)
+        out["sum_REE_Y"] = concentrations.sum(axis=1, min_count=len(_REE)) + _numeric(frame, "Y")
+        out["Eu/Eu*"] = n["Eu"] / np.sqrt(n["Sm"] * n["Gd"])
+        out["Ce/Ce*"] = n["Ce"] / np.sqrt(n["La"] * n["Pr"])
+        out["(Gd/Yb)_N"] = n["Gd"] / n["Yb"]
+        for key in _SIMPLE_RATIOS:
+            a, b = key.split("/")
+            out[key] = _numeric(frame, a) / _numeric(frame, b).replace(0, np.nan)
+        out["10000Eu/Eu*/Y"] = 10000 * out["Eu/Eu*"] / _numeric(frame, "Y").replace(0, np.nan)
+    return pd.DataFrame(out, index=frame.index).replace([np.inf, -np.inf], np.nan)
+
+
+def _quantity_x(frame, quantity, signal_quantities=None, ages=None):
+    if quantity in _SIGNALS:
+        if signal_quantities is None:
+            return pd.Series(np.nan, index=frame.index)
+        signals = signal_quantities.set_index("spot_name")
+        if not signals.index.is_unique:
+            raise ValueError("signal_quantities must have unique spot_name values")
+        return frame["spot_name"].map(_numeric(signals, quantity))
+    if quantity == "alpha_dose":
+        return alpha_dose(_numeric(frame, "U"), _numeric(frame, "Th"), ages)
+    if quantity in _RATIO_INPUTS:
+        return trace_bias_quantities(frame)[quantity]
+    return _numeric(frame, quantity)
+
+
+def _validate_quantity(results, quantity):
+    if quantity not in BIAS_QUANTITIES and not (
+            quantity in results and element_from_channel(quantity) == quantity):
+        raise ValueError(f"Unknown bias quantity: {quantity}")
 
 
 def calibrated_bias_date(common_pb_calibration: str | None) -> str:
@@ -183,19 +287,10 @@ def standard_bias_table(results, standard_archive, *, date="206Pb/238U",
     """
     if date not in BIAS_DATE_SYSTEMS:
         raise ValueError(f"Unknown bias date system: {date}")
-    if quantity not in BIAS_QUANTITIES:
-        raise ValueError(f"Unknown bias quantity: {quantity}")
+    _validate_quantity(results, quantity)
     if uncertainty not in {"analytical", "with_calibration"}:
         raise ValueError(f"Unknown uncertainty mode: {uncertainty}")
-    names = standard_archive.index if standards is None else standards
-    accepted = accepted_dates(standard_archive, names)
-    accepted = accepted.loc[np.isfinite(accepted).any(axis=1)]
-    # Glass ratios in the library can include derived radiogenic estimates;
-    # their presence does not make the glass a zircon date control.
-    materials = standard_archive.reindex(accepted.index)
-    glasses = (materials["material"].astype(str).str.contains("glass", case=False, na=False)
-               if "material" in materials else pd.Series(False, index=accepted.index))
-    accepted = accepted.loc[~glasses & ~accepted.index.isin(["NIST610", "NIST612"])]
+    accepted = _reference_dates(standard_archive, standards)
     frame = results.loc[results["sample"].isin(accepted.index)].copy().reset_index(drop=True)
     common_pb_source = pd.Series("", index=frame.index)
     if date == "preferred":
@@ -220,21 +315,8 @@ def standard_bias_table(results, standard_archive, *, date="206Pb/238U",
     reference = pd.Series([accepted.loc[sample, system] if system in accepted else np.nan
                            for sample, system in zip(frame["sample"], reference_systems)],
                           index=frame.index, dtype=float)
-    if quantity in {"session_time", "206Pb_cps", "238U_cps"}:
-        if signal_quantities is None:
-            x = pd.Series(np.nan, index=frame.index)
-        else:
-            signals = signal_quantities.set_index("spot_name")
-            if not signals.index.is_unique:
-                raise ValueError("signal_quantities must have unique spot_name values")
-            x = frame["spot_name"].map(_numeric(signals, quantity))
-    elif quantity == "REE":
-        present = [column for column in _REE if column in frame]
-        x = frame[present].apply(pd.to_numeric, errors="coerce").sum(axis=1, min_count=1)
-    elif quantity == "Th/U" and quantity not in frame:
-        x = _numeric(frame, "Th") / _numeric(frame, "U").replace(0, np.nan)
-    else:
-        x = _numeric(frame, quantity)
+    ages = frame["sample"].map(accepted["206Pb/238U"])
+    x = _quantity_x(frame, quantity, signal_quantities, ages)
     output = frame[["spot_name", "sample"]].copy()
     output["x"], output["date"], output["date_2s"] = x, values, errors
     output["accepted"] = reference
@@ -258,6 +340,8 @@ def _slope_units(table, log_x):
         return "percent per decade"
     quantity = table["quantity"].iloc[0] if len(table) else "x"
     unit = ("ug/g" if quantity in {"U", "Th", "Pb", "REE"} else
+            "µg/g" if quantity == "sum_REE_Y" or element_from_channel(quantity) == quantity else
+            "α/g" if quantity == "alpha_dose" else
             "min" if quantity == "session_time" else
             "counts per second" if quantity in {"238U_cps", "206Pb_cps"} else quantity)
     return f"percent per {unit}"
@@ -290,7 +374,9 @@ def _trend(frame, log_x, units):
             "intercept": float(intercept), "n": n, "mswd": float(mswd),
             "p_value": float(2 * t.sf(abs(slope / se), n - 2)),
             "units": units, "overdispersed": bool(mswd > 1),
-            "x_range": (float(data.x.min()), float(data.x.max()))}
+            "x_range": (float(data.x.min()), float(data.x.max())),
+            "x_centre": float(centre), "sum_weights": float(weights.sum()),
+            "weighted_x_spread": float(spread)}
 
 
 def bias_summary(table, *, log_x=False) -> dict:
@@ -320,7 +406,52 @@ def bias_summary(table, *, log_x=False) -> dict:
             "trend_by_sample": trends}
 
 
+_UNKNOWN_COLUMNS = ["spot_name", "sample", "x", "date", "date_system",
+                    "predicted_offset_percent", "predicted_offset_2s_percent",
+                    "implied_correction_percent", "implied_correction_ma", "corrected_date_ma",
+                    "extrapolated", "plottable"]
+
+
+def project_unknowns(results, standard_archive, trend, *, date, quantity, log_x=False,
+                     signal_quantities=None) -> pd.DataFrame:
+    """Project unknowns onto the RM trend for inspection; apply nothing.
+
+    Positive bias means measured dates are too old: date/(1 + bias/100)
+    gives a negative implied correction. All dates and results stay unchanged.
+    The uncertainty is the 2s uncertainty of the fitted mean, inflated by
+    sqrt(max(1, MSWD)); it is not an individual observation prediction interval.
+    Alpha dose always uses the unknown's preferred date, regardless of date.
+    """
+    if trend is None:
+        return pd.DataFrame(columns=_UNKNOWN_COLUMNS)
+    if date not in BIAS_DATE_SYSTEMS:
+        raise ValueError(f"Unknown bias date system: {date}")
+    _validate_quantity(results, quantity)
+    frame = results.loc[~results["sample"].isin(standard_archive.index)].copy().reset_index(drop=True)
+    out = frame[["spot_name", "sample"]].copy()
+    out["x"] = _quantity_x(frame, quantity, signal_quantities, _numeric(frame, "preferred_age"))
+    base = ("preferred_age" if date == "preferred" else
+            "207Pb_corrected_age" if date == "207Pb-corrected" else date + "_age")
+    out["date"] = _numeric(frame, base)
+    out["date_system"] = (frame.get("preferred_age_method", pd.Series("", index=frame.index))
+                          if date == "preferred" else date)
+    x = out.x.where(out.x > 0) if log_x else out.x
+    x_fit = np.log10(x) if log_x else x
+    out["predicted_offset_percent"] = trend["intercept"] + trend["slope"] * x_fit
+    out["predicted_offset_2s_percent"] = 2 * np.sqrt(max(1., trend["mswd"]) * (
+        1 / trend["sum_weights"] + (x_fit - trend["x_centre"])**2 / trend["weighted_x_spread"]))
+    denominator = 1 + out.predicted_offset_percent / 100
+    out["corrected_date_ma"] = out.date / denominator
+    out["implied_correction_ma"] = out.corrected_date_ma - out.date
+    out["implied_correction_percent"] = out.implied_correction_ma / out.date.replace(0, np.nan) * 100
+    low, high = trend["x_range"]
+    out["extrapolated"] = (x < low) | (x > high)
+    out["plottable"] = np.isfinite(x_fit) & np.isfinite(out.predicted_offset_percent)
+    return out[_UNKNOWN_COLUMNS]
+
+
 __all__ = ["BIAS_DATE_SYSTEMS", "BIAS_QUANTITIES", "accepted_dates",
            "reference_corrected_dates",
            "spot_signal_quantities", "standard_bias_table", "bias_summary",
-           "calibrated_bias_date", "bias_date_description"]
+           "calibrated_bias_date", "bias_date_description", "bias_quantities",
+           "project_unknowns", "trace_bias_quantities"]

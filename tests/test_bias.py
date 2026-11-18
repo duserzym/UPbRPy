@@ -83,8 +83,11 @@ def test_quantities_and_signal_join(results, archive):
     np.testing.assert_allclose(joined.x.iloc[:2], [100., 200.])
     assert not joined.plottable.iloc[2:].any()
     assert not standard_bias_table(results, archive, quantity='session_time').plottable.any()
+    # Measured elements such as Y became x attributes on 2026-11-18; names
+    # that are neither a known quantity nor a measured element still fail.
+    assert (standard_bias_table(results, archive, quantity='Y').x == 1000.).all()
     with pytest.raises(ValueError):
-        standard_bias_table(results, archive, quantity='Y')
+        standard_bias_table(results, archive, quantity='not_a_quantity')
     with pytest.raises(ValueError):
         standard_bias_table(results, archive, date='bad')
     with pytest.raises(ValueError):
