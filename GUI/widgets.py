@@ -491,6 +491,18 @@ def _rounded_legend(plot, **options):
 
 
 class _PillLineLabel(pg.InfLineLabel):
+    def itemChange(self, change, value):
+        # TextItem disconnects its paint slot only on a later paint in a
+        # different scene. Removed labels never paint again, and their cycle
+        # with InfiniteLine delays destruction until GC, possibly during
+        # PySide signal dispatch. Disconnect while the receiver is alive.
+        if change == self.GraphicsItemChange.ItemSceneChange:
+            scene = getattr(self, "_lastScene", None)
+            if scene is not None:
+                scene.sigPrepareForPaint.disconnect(self.updateTransform)
+                self._lastScene = None
+        return super().itemChange(change, value)
+
     def updatePosition(self):
         super().updatePosition()
         if callback := getattr(self, "position_callback", None):
