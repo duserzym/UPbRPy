@@ -407,6 +407,9 @@ def test_repick_all_is_one_compound_undo_and_autosaves(windows, app):
     # Hand-edited spots are kept unless the overwrite box is ticked.
     window.repick_overwrite_manual_check.setChecked(True)
     window.run_autopick_all_spots()
+    assert window.change_guard.pending
+    assert window._selection_snapshot(window.session.spot_names) == before
+    window.pending_change_bar.apply_button.click()
     idle(app, window)
     after = window._selection_snapshot(window.session.spot_names)
     assert after != before
@@ -417,6 +420,28 @@ def test_repick_all_is_one_compound_undo_and_autosaves(windows, app):
     window.redo_selection_edit()
     assert window._selection_snapshot(window.session.spot_names) == after
     wait_for(app, selection_autosave_path(RICH).exists)
+
+
+def test_repick_bar_undo_autosaves_restored_picks(windows, app, tmp_path):
+    window = windows()
+    edit_plateau(window)
+    window.flush_selection_edits()
+    target = tmp_path / "repick-undo.upbr"
+    window.save_project(target)
+    before = window._selection_snapshot(window.session.spot_names)
+    window.repick_overwrite_manual_check.setChecked(True)
+    window.request_autopick_all_spots()
+    window.pending_change_bar.apply_button.click()
+    idle(app, window)
+    wait_for(app, lambda: not window._selection_autosave_pending)
+    assert window._selection_snapshot(window.session.spot_names) != before
+    repicked = windows(target, project=True)
+    assert repicked._selection_snapshot(repicked.session.spot_names) != before
+    window.pending_change_bar.undo_button.click()
+    assert window._selection_snapshot(window.session.spot_names) == before
+    wait_for(app, lambda: not window._selection_autosave_pending)
+    restored = windows(target, project=True)
+    assert restored._selection_snapshot(restored.session.spot_names) == before
 
 
 def test_reload_and_primary_channel_change_do_not_offer_restore(windows, app, monkeypatch):

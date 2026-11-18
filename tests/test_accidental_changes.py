@@ -249,12 +249,46 @@ def test_primary_channel_failed_worker_keeps_session(window, app, monkeypatch):
     assert window.change_guard.record is None
 
 
-def test_repick_button_applies_directly_with_selection_undo(window, app):
+def test_primary_channel_without_results_or_reviews_waits_for_apply(window, app):
+    old = window.session
+    old.reduction_cache.clear()
+    for stage in tuple(old.pipeline.cache.stages()):
+        old.pipeline.cache.invalidate(stage)
+    assert not services.manual_selection_spots(old)
+    before = window._selection_snapshot(old.spot_names)
+    proposed = next(channel for channel in old.channels if channel != old.primary_channel)
+    bar = window.pending_change_bar
+    window.primary_channel_combo.setCurrentText(proposed)
+    assert window.change_guard.pending
+    assert window.session is old
+    assert window._active_worker is None
+    assert window._selection_snapshot(old.spot_names) == before
+    assert bar.message.text() == (
+        f"Primary channel {old.primary_channel} → {proposed}: re-picks all 12 spots "
+        f"from {proposed}. Undo restores the current picks."
+    )
+    bar.cancel_button.click()
+    assert window.primary_channel_combo.currentText() == old.primary_channel
+    assert window._selection_snapshot(old.spot_names) == before
+    window.primary_channel_combo.setCurrentText(proposed)
+    bar.apply_button.click()
+    wait_idle(app, window)
+    assert window.session.primary_channel == proposed
+    bar.undo_button.click()
+    assert window.session is old
+    assert window._selection_snapshot(old.spot_names) == before
+
+
+def test_repick_button_confirms_with_selection_undo(window, app):
     spot = review_window(window)
     regions = services.get_selection_regions(window.session, spot)
     window.repick_overwrite_manual_check.setChecked(True)
     window.repick_all_spots_button.click()
-    assert window.change_guard.pending is None
+    assert window.change_guard.pending
+    assert window._active_worker is None
+    assert services.get_selection_regions(window.session, spot) == regions
+    assert "; replaces 1 reviewed windows" in window.pending_change_bar.message.text()
+    window.pending_change_bar.apply_button.click()
     wait_idle(app, window)
     assert services.get_selection_regions(window.session, spot) != regions
     window.undo_selection_edit()
@@ -268,9 +302,87 @@ def test_repick_still_skips_manual_windows_without_overwrite(window, app):
     regions = services.get_selection_regions(window.session, spot)
     window.repick_overwrite_manual_check.setChecked(False)
     window.repick_all_spots_button.click()
-    assert window.change_guard.pending is None
+    assert window.change_guard.pending
+    assert "reviewed windows" not in window.pending_change_bar.message.text()
+    window.pending_change_bar.apply_button.click()
     wait_idle(app, window)
     assert services.get_selection_regions(window.session, spot) == regions
+
+
+@pytest.mark.parametrize("undo", ["bar", "selection"])
+def test_repick_without_manual_edits_confirms_cancel_apply_and_undo(window, app, undo):
+    window.workflow_step_list.setCurrentRow(1)
+    assert not services.manual_selection_spots(window.session)
+    window.on_peak_duration_spin.setValue(5.0)
+    before = window._selection_snapshot(window.session.spot_names)
+    history = list(window._selection_undo)
+    bar = window.pending_change_bar
+    window.repick_all_action.trigger()
+    assert window.change_guard.pending
+    assert window._active_worker is None
+    assert window._selection_snapshot(window.session.spot_names) == before
+    assert bar.message.text() == (
+        "Re-pick all 12 spots with the auto-pick settings. Undo restores the current picks."
+    )
+    bar.cancel_button.click()
+    assert window._selection_snapshot(window.session.spot_names) == before
+    assert window._selection_undo == history
+    window.repick_all_spots_button.click()
+    bar.apply_button.click()
+    wait_idle(app, window)
+    assert window._selection_snapshot(window.session.spot_names) != before
+    assert len(window._selection_undo) == len(history) + 1
+    # The checkbox affects the next request and keeps the completed change undoable.
+    window.repick_overwrite_manual_check.setChecked(True)
+    assert window.change_guard.record is not None
+    if undo == "bar":
+        bar.undo_button.click()
+    else:
+        window.undo_selection_edit()
+    assert window._selection_snapshot(window.session.spot_names) == before
+
+
+def test_scoped_repick_counts_only_reviewed_targets_and_replaces_pending(window, app):
+    reviewed = review_window(window)
+    other = window.session.spot_names[1]
+    window.repick_overwrite_manual_check.setChecked(True)
+    before = window._selection_snapshot(window.session.spot_names)
+    old_channel = window.session.primary_channel
+    proposed = next(channel for channel in window.session.channels if channel != old_channel)
+    window.primary_channel_combo.setCurrentText(proposed)
+    bar = window.pending_change_bar
+    window.request_autopick_all_spots([other], scope="selected spots")
+    assert window.primary_channel_combo.currentText() == old_channel
+    assert window.pending_change_bar is bar
+    assert bar.message.text() == (
+        "Re-pick all 1 spots (selected spots) with the auto-pick settings. "
+        "Undo restores the current picks."
+    )
+    window.request_autopick_all_spots([reviewed], scope="selected spots")
+    assert "replaces 1 reviewed windows" in bar.message.text()
+    assert window._active_worker is None
+    assert window._selection_snapshot(window.session.spot_names) == before
+    bar.cancel_button.click()
+    assert window._selection_snapshot(window.session.spot_names) == before
+    window.request_autopick_all_spots([reviewed], scope="selected spots")
+    bar.apply_button.click()
+    wait_idle(app, window)
+    assert window._selection_snapshot([other]) == {other: before[other]}
+    assert window._selection_snapshot([reviewed]) != {reviewed: before[reviewed]}
+    bar.undo_button.click()
+    assert window._selection_snapshot(window.session.spot_names) == before
+
+
+def test_overwrite_toggle_cancels_stale_repick_warning(window):
+    review_window(window)
+    before = window._selection_snapshot(window.session.spot_names)
+    window.repick_all_spots_button.click()
+    assert "reviewed windows" not in window.pending_change_bar.message.text()
+    window.repick_overwrite_manual_check.setChecked(True)
+    assert window.change_guard.pending is None
+    window.repick_all_spots_button.click()
+    assert "replaces 1 reviewed windows" in window.pending_change_bar.message.text()
+    assert window._selection_snapshot(window.session.spot_names) == before
 
 
 @pytest.mark.parametrize("name,stage", [
@@ -395,7 +507,8 @@ def test_repick_worker_failure_does_not_install_modified_selections(window, app,
     monkeypatch.setattr(main_window, "autopick_all_selection_regions", fail)
     window.repick_overwrite_manual_check.setChecked(True)
     window.repick_all_spots_button.click()
-    assert window.change_guard.pending is None
+    assert window.change_guard.pending
+    window.pending_change_bar.apply_button.click()
     wait_idle(app, window)
     assert not errors
     assert not window.issue_banner.isHidden()
@@ -450,6 +563,41 @@ def test_menu_change_reveals_inline_confirmation_on_laptop(window, app, size):
     assert window.compact_settings_panel.isVisible()
     rect = QtCore.QRect(bar.mapTo(window, QtCore.QPoint()), bar.size())
     assert window.rect().contains(rect)
+
+
+@pytest.mark.parametrize("size", [(1280, 800), (1440, 900)])
+@pytest.mark.parametrize("control", ["primary", "repick"])
+def test_pick_confirmation_is_visible_near_its_control(window, app, size, control):
+    window.resize(*size)
+    window.show()
+    window.apply_default_layout()
+    window.set_workspace_panel_visible("sidebar", False)
+    window.set_workspace_panel_visible("inspector", False)
+    if control == "primary":
+        widget = window.primary_channel_combo
+        proposed = next(channel for channel in window.session.channels if channel != window.session.primary_channel)
+        widget.setCurrentText(proposed)
+        assert window.inspector_tabs.currentWidget().objectName() == "BrowsePage"
+    else:
+        widget = window.repick_all_spots_button
+        widget.click()
+    app.processEvents()
+    bar = window.pending_change_bar
+    assert bar.isVisible()
+    assert bar.parentWidget() is widget.parentWidget()
+    if control == "repick":
+        layout = widget.parentWidget().layout()
+        assert layout.indexOf(bar) == layout.indexOf(widget) + 1
+        assert window.sidebar_panel.isAncestorOf(bar)
+    rect = QtCore.QRect(bar.mapTo(window, QtCore.QPoint()), bar.size())
+    assert window.rect().contains(rect)
+    window.activateWindow()
+    bar.apply_button.setFocus()
+    app.processEvents()
+    before = window._selection_snapshot(window.session.spot_names)
+    QtTest.QTest.keyClick(bar.apply_button, QtCore.Qt.Key.Key_Escape)
+    assert window.change_guard.pending is None
+    assert window._selection_snapshot(window.session.spot_names) == before
 
 
 @pytest.mark.parametrize("name", [

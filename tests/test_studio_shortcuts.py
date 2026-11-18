@@ -94,6 +94,33 @@ def spot_order(window):
     return names
 
 
+@pytest.mark.parametrize("modifiers", [CTRL | SHIFT, CTRL | ALT])
+def test_repick_keys_confirm_before_changing_picks(window, app, modifiers):
+    window.on_peak_duration_spin.setValue(5.0)
+    before = window._selection_snapshot(window.session.spot_names)
+    window.spot_list.setFocus()
+    press(app, window, Key.Key_R, modifiers)
+    assert window.change_guard.pending
+    assert window._active_worker is None
+    assert window._selection_snapshot(window.session.spot_names) == before
+    bar = window.pending_change_bar
+    if modifiers == CTRL | ALT:
+        assert "(sample " in bar.message.text()
+    press(app, window, Key.Key_Escape)
+    assert window.change_guard.pending is None
+    assert window._selection_snapshot(window.session.spot_names) == before
+    window.spot_list.setFocus()
+    press(app, window, Key.Key_R, modifiers)
+    bar.apply_button.click()
+    idle(app, window)
+    assert window._selection_snapshot(window.session.spot_names) != before
+    window.spot_list.setFocus()
+    app.processEvents()
+    press(app, window, Key.Key_Z, CTRL)
+    idle(app, window)
+    assert window._selection_snapshot(window.session.spot_names) == before
+
+
 def test_next_and_previous_spot_keys(window, app):
     order = spot_order(window)
     start = window.current_spot_name()

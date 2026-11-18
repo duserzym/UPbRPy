@@ -14,7 +14,7 @@ from GUI.widgets import PendingChangeBar
 from UPbRPy.pipeline import PipelineCache, PipelineStage, pipeline_descendants
 
 
-def confirm_change(label, control, *stages, replace_session=False, review=False, immediate=False):
+def confirm_change(label, control, *stages, replace_session=False, review=False, immediate=False, always=False):
     """Guard a MainWindow handler that discards the specified stage products."""
     def decorate(function):
         @wraps(function)
@@ -22,7 +22,11 @@ def confirm_change(label, control, *stages, replace_session=False, review=False,
             guard = getattr(window, "change_guard", None)
             if guard is None or window._is_populating or guard.running:
                 return function(window, *args, **kwargs)
-            return guard.request(function, label, control, stages, replace_session, review, immediate, args, kwargs)
+            if always and not window.session.loaded:
+                result = function(window, *args, **kwargs)
+                guard.sync(control.split())
+                return result
+            return guard.request(function, label, control, stages, replace_session, review, immediate, args, kwargs, always=always)
         guarded.change_control = control
         return guarded
     return decorate
@@ -177,6 +181,8 @@ class ChangeGuard:
             layout.addRow(self.bar)
         elif isinstance(layout, QtWidgets.QGridLayout):
             layout.addWidget(self.bar, layout.rowCount(), 0, 1, layout.columnCount())
+        elif widget is self.window.repick_all_spots_button and isinstance(layout, QtWidgets.QBoxLayout):
+            layout.insertWidget(layout.indexOf(widget) + 1, self.bar)
         else:
             layout.addWidget(self.bar)
 
@@ -204,7 +210,7 @@ class ChangeGuard:
                 parent.ensureWidgetVisible(self.bar, 8, 8)
             parent = parent.parentWidget()
 
-    def request(self, function, label, control, stages, replace_session, review, immediate, args, kwargs):
+    def request(self, function, label, control, stages, replace_session, review, immediate, args, kwargs, *, always=False):
         w = self.window
         if w._active_worker is not None:
             for name in control.split():
@@ -227,7 +233,7 @@ class ChangeGuard:
         if function.__name__ == "on_concentration_standards_changed" and not self._standard_names(proposed[names[0]]):
             return function(w, *args, **kwargs)
         if self.pending is not None:
-            if self.pending["function"] is function and self.pending["proposed"] == proposed and self.pending["args"] == args:
+            if self.pending["function"] is function and self.pending["proposed"] == proposed and self.pending["args"] == args and self.pending["kwargs"] == kwargs:
                 return
             self.cancel()
             for name, value in proposed.items():
@@ -260,13 +266,30 @@ class ChangeGuard:
                             proposed=proposed, old=old, targets=targets, cache_keys=cache_keys,
                             replace_session=replace_session)
         self._place(control)
-        if not immediate and (has_results or (review and reviewed) or (replace_session and w.session.loaded)):
+        if not immediate and ((always and w.session.loaded) or has_results or (review and reviewed) or (replace_session and w.session.loaded)):
             before = self._display(old[names[0]])
             after = self._display(proposed[names[0]])
             change = f"{label} {before} → {after}" if before != after else label
             if function.__name__ == "request_reference_material_library":
                 change += f" → {Path(args[0]).name}"
-            if review:
+            if function.__name__ == "run_autopick_all_spots":
+                requested = args[0] if args else kwargs.get("spot_names")
+                spots = set(w.session.spot_names)
+                if requested is not None:
+                    spots.intersection_update(requested)
+                scope = kwargs.get("scope", "all spots")
+                suffix = f" ({scope})" if scope != "all spots" else ""
+                message = f"Re-pick all {len(spots)} spots{suffix} with the auto-pick settings"
+                reviewed = len(spots & reviewed_spots) if w.repick_overwrite_manual_check.isChecked() else 0
+                if reviewed:
+                    message += f"; replaces {reviewed} reviewed windows"
+                message += ". Undo restores the current picks."
+            elif function.__name__ == "on_primary_channel_changed":
+                message = f"{change}: re-picks all {len(w.session.spot_names)} spots from {after}"
+                if reviewed:
+                    message += f"; replaces {reviewed} reviewed windows"
+                message += ". Undo restores the current picks."
+            elif review:
                 count = len(w.session.spot_names)
                 effect = f"re-picks all {count} spots; replaces {reviewed} reviewed windows"
             else:
@@ -284,7 +307,9 @@ class ChangeGuard:
                     effect = "recomputes final results"
                 if function.__name__ == "request_detector_calibration":
                     effect = "re-imports signals and discards computed results; preserves reviewed windows"
-            self.bar.show_pending(f"{change}: {effect}.")
+            if function.__name__ not in {"on_primary_channel_changed", "run_autopick_all_spots"}:
+                message = f"{change}: {effect}."
+            self.bar.show_pending(message)
             self.escape.setEnabled(True)
             self._reveal()
         else:
@@ -415,6 +440,11 @@ class ChangeGuard:
         self.sync()
         self.bar.hide()
         self._refresh_restored_view()
+        if record["change"]["function"].__name__ == "run_autopick_all_spots":
+            change = record["change"]
+            spots = change["args"][0] if change["args"] else change["kwargs"].get("spot_names")
+            self.window._spots_edited_since_write.update(self.window.session.spot_names if spots is None else spots)
+            self.window._selection_edits_written()
 
     def _refresh_restored_view(self):
         w = self.window

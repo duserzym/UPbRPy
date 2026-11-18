@@ -113,6 +113,9 @@ def test_repick_all_applies_duration_and_skips_hand_edits(window, app):
     window.on_peak_duration_spin.setValue(round(0.6 * median, 1))
     assert not window.repick_overwrite_manual_check.isChecked()
     window.run_autopick_all_spots()
+    assert window.change_guard.pending
+    assert regions(window, other)["plateau"] == other_before
+    window.pending_change_bar.apply_button.click()
     idle(app, window)
     assert regions(window, edited)["plateau"] == hand
     assert regions(window, other)["plateau"][1] < other_before[1]
@@ -126,6 +129,9 @@ def test_repick_all_applies_duration_and_skips_hand_edits(window, app):
     assert services.manual_selection_spots(window.session) == {edited}
     window.repick_overwrite_manual_check.setChecked(True)
     window.run_autopick_all_spots()
+    assert window.change_guard.pending
+    assert regions(window, edited)["plateau"] == hand
+    window.pending_change_bar.apply_button.click()
     idle(app, window)
     assert regions(window, edited)["plateau"] != hand
     assert services.manual_selection_spots(window.session) == set()
@@ -141,6 +147,13 @@ def test_repick_current_sample_only_touches_that_sample(window, app):
     median = services.detected_on_peak_summary(window.session)["median"]
     window.on_peak_duration_spin.setValue(round(0.6 * median, 1))
     window.repick_sample_action.trigger()
+    assert window.change_guard.pending
+    assert window.pending_change_bar.message.text() == (
+        f"Re-pick all {len(in_sample)} spots (sample {sample}) with the auto-pick settings. "
+        "Undo restores the current picks."
+    )
+    assert window._active_worker is None
+    window.pending_change_bar.apply_button.click()
     idle(app, window)
     assert regions(window, outside)["plateau"] == outside_before
     assert f"sample {sample}" in window.statusBar().currentMessage()
@@ -164,6 +177,17 @@ def test_repick_all_open_tabs_uses_each_tabs_settings(app, monkeypatch):
         before_first = regions(first, spot)["plateau"]
         before_second = regions(second, spot)["plateau"]
         second.repick_tabs_action.trigger()
+        for reduction, before in ((first, before_first), (second, before_second)):
+            assert reduction.change_guard.pending
+            assert reduction._active_worker is None
+            assert regions(reduction, spot)["plateau"] == before
+        # Each tab retains its own confirmation; cancelling one does not apply either.
+        first.pending_change_bar.cancel_button.click()
+        assert regions(first, spot)["plateau"] == before_first
+        assert second.change_guard.pending
+        shell.repick_all_tabs()
+        for reduction in (first, second):
+            reduction.pending_change_bar.apply_button.click()
         for reduction in (first, second):
             idle(app, reduction)
         assert regions(first, spot)["plateau"][1] < before_first[1]

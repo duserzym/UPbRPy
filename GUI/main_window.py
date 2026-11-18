@@ -2357,6 +2357,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.repick_all_spots_button)
         self.repick_overwrite_manual_check = QtWidgets.QCheckBox("Also overwrite manual edits")
         self.repick_overwrite_manual_check.setObjectName("RepickOverwriteManual")
+        self.repick_overwrite_manual_check.toggled.connect(self._cancel_pending_repick)
         self.repick_overwrite_manual_check.setToolTip(
             "Unticked, re-picking leaves spots whose windows were edited by hand "
             "unchanged and reports how many were skipped."
@@ -6369,6 +6370,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_populating and getattr(self, "change_guard", None) is not None:
             self.change_guard.clear()
 
+    def _cancel_pending_repick(self, *_args) -> None:
+        """Require a fresh count when the manual-window overwrite choice changes."""
+        guard = getattr(self, "change_guard", None)
+        if guard is not None and guard.pending is not None:
+            if guard.pending["function"].__name__ == "run_autopick_all_spots":
+                guard.cancel()
+
     def run_autopick_current_sample(self) -> None:
         """Re-pick every spot of the current spot's sample."""
         spot = self.current_spot_name()
@@ -6888,7 +6896,7 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._is_populating = False
 
-    @confirm_change('Primary channel', 'primary_channel_combo', 'baseline', replace_session=True, review=True)
+    @confirm_change('Primary channel', 'primary_channel_combo', 'baseline', replace_session=True, review=True, always=True)
     def on_primary_channel_changed(self, channel: str) -> None:
         if self._is_populating or not channel:
             return
@@ -8464,11 +8472,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_view()
 
     def request_autopick_all_spots(self, spot_names=None, *, scope: str = "all spots") -> None:
-        """Re-pick directly from buttons, menus, or shortcuts with selection Undo."""
+        """Confirm a re-pick from buttons, menus, or shortcuts."""
         self.run_autopick_all_spots(spot_names, scope=scope)
 
+    @confirm_change('Re-pick spots', 'repick_all_spots_button', 'baseline', replace_session=True, always=True)
     def run_autopick_all_spots(self, spot_names=None, *, scope: str = "all spots") -> None:
-        """Apply the current selection settings to every (or the given) spot.
+        """Confirm, then apply selection settings to every (or the given) spot.
 
         Spots edited by hand are skipped unless "Also overwrite manual edits"
         is ticked; the status bar reports how many were skipped.
