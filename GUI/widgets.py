@@ -1432,6 +1432,11 @@ class _ConcordiaViewBox(AxisZoomViewBox):
     def __init__(self, review):
         super().__init__()
         self.review = weakref.proxy(review)
+        self._selection_drag_modifiers = None
+        self._selection_box = QtWidgets.QGraphicsRectItem(self)
+        self._selection_box.setZValue(1e9)
+        self._selection_box.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self._selection_box.hide()
 
     def mouseClickEvent(self, event):
         self.review.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
@@ -1450,17 +1455,41 @@ class _ConcordiaViewBox(AxisZoomViewBox):
             super().mouseClickEvent(event)
 
     def mouseDragEvent(self, event, axis=None):
-        if (self.review.interaction_mode() == "select" and axis is None
-                and event.button() == QtCore.Qt.MouseButton.LeftButton):
+        shift = QtCore.Qt.KeyboardModifier.ShiftModifier
+        modifiers = (event.modifiers() if hasattr(event, "modifiers")
+                     else QtCore.Qt.KeyboardModifier.NoModifier)
+        if (axis is None and event.button() == QtCore.Qt.MouseButton.LeftButton
+                and (self._selection_drag_modifiers is not None
+                     or self.review.interaction_mode() == "select" or modifiers & shift)):
             event.accept()
+            if self._selection_drag_modifiers is None:
+                self._selection_drag_modifiers = modifiers
+                self.review.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+                self.review._set_hover(None)
             if event.isFinish():
-                self.rbScaleBox.hide()
+                self._selection_box.hide()
+                modifiers = self._selection_drag_modifiers
+                self._selection_drag_modifiers = None
                 rect = QtCore.QRectF(self.mapToView(event.buttonDownPos()), self.mapToView(event.pos()))
-                extend = bool(event.modifiers() & (QtCore.Qt.KeyboardModifier.ShiftModifier
-                                                   | QtCore.Qt.KeyboardModifier.ControlModifier))
-                self.review.select_rectangle(rect, extend=extend)
+                if isinstance(self.review, ConcordiaReviewWidget):
+                    self.review.select_rectangle(
+                        rect, extend=bool(modifiers & shift),
+                        toggle=bool(modifiers & QtCore.Qt.KeyboardModifier.ControlModifier))
+                else:
+                    # The standard-bias canvas also uses this ViewBox.
+                    self.review.select_rectangle(rect, extend=bool(modifiers & (
+                        shift | QtCore.Qt.KeyboardModifier.ControlModifier)))
             else:
-                self.updateScaleBox(event.buttonDownPos(), event.pos())
+                # ViewBox coordinates keep the pen width constant at any scale.
+                theme = self.review._theme
+                color = QtGui.QColor(theme.accent if theme else "#2468d4")
+                pen = pg.mkPen(color, width=1.5)
+                pen.setCosmetic(True)
+                self._selection_box.setPen(pen)
+                color.setAlphaF(.16)
+                self._selection_box.setBrush(pg.mkBrush(color))
+                self._selection_box.setRect(QtCore.QRectF(event.buttonDownPos(), event.pos()).normalized())
+                self._selection_box.show()
         else:
             super().mouseDragEvent(event, axis=axis)
 
@@ -1576,6 +1605,14 @@ class _ConcordiaEllipseBatch(pg.GraphicsObject):
             painter.drawPath(path)
 
 
+class _ConcordiaMarker(pg.ScatterPlotItem):
+    """Let plot clicks pass through decorative markers and hover rings."""
+
+    def mouseClickEvent(self, event):
+        # pyqtgraph dispatches synthetic clicks regardless of acceptedMouseButtons.
+        event.ignore()
+
+
 class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     """Lightweight native concordia review with two-sigma ratio ellipses.
 
@@ -1606,7 +1643,9 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._include_calibration_uncertainty = True
         self._plot_item: pg.PlotItem | None = None
         self._zoom_mode = "xy"
-        self._interaction_mode = "zoom"
+        self._interaction_mode = "pan"
+        # Diagnostic axis styling historically enables both concordia grids.
+        self._grid_visible = True
         self.selected_spots: set[str] = set()
         self.excluded_spots: set[str] = set()
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
@@ -1684,11 +1723,30 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._update_highlight()
             self.selectionChanged.emit(set(selected))
 
-    def select_rectangle(self, rect: QtCore.QRectF, *, extend: bool = False) -> None:
-        """Select plotted spot centres inside a rectangle in data coordinates."""
+    def select_rectangle(self, rect: QtCore.QRectF, *, extend: bool = False,
+                         toggle: bool = False) -> None:
+        """Select plotted centres inside a data rectangle, adding or toggling keys."""
         rect = rect.normalized()
-        self.select_spots({name for name, x, y, _color in self._points
-                           if rect.contains(QtCore.QPointF(x, y))}, extend=extend)
+        xy = self._point_xy
+        inside = np.flatnonzero((xy[:, 0] >= rect.left()) & (xy[:, 0] <= rect.right())
+                                & (xy[:, 1] >= rect.top()) & (xy[:, 1] <= rect.bottom()))
+        self.select_spots({self._points[i][0] for i in inside}, extend=extend, toggle=toggle)
+
+    def set_grid_visible(self, visible: bool) -> None:
+        """Show or hide both axis grids without changing the plot range."""
+        self._grid_visible = bool(visible)
+        self._apply_grid()
+
+    def grid_visible(self) -> bool:
+        """Return whether both concordia axis grids are enabled."""
+        return self._grid_visible
+
+    def _apply_grid(self) -> None:
+        if self._plot_item is None or self._theme is None:
+            return
+        for name in ("left", "bottom"):
+            self._plot_item.getAxis(name).setTickPen(self._theme.axis_text)
+        self._plot_item.showGrid(x=self._grid_visible, y=self._grid_visible, alpha=.25)
 
     def _ellipse_hit_data(self):
         """Bounding boxes, areas and polygons of the drawn ellipses (cached)."""
@@ -1715,7 +1773,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         """Spots under a scene position, smallest ellipse first.
 
         A drawn centre within 10 px whose ellipse does not contain the point
-        (tiny or missing) is put first; hidden spots are ignored.
+        (tiny or missing) is put first. Calculation-hidden spots still hit;
+        spots removed from the plot are ignored.
         """
         if self._plot_item is None:
             return []
@@ -1806,7 +1865,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         elif event.key() == QtCore.Qt.Key.Key_Escape:
             self.select_spots(set())
         elif event.key() == QtCore.Qt.Key.Key_H:
-            action = "all" if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier else "hide"
+            action = "all" if event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier else "exclude_toggle"
         elif event.key() == QtCore.Qt.Key.Key_E:
             action = "exclude_toggle"
         else:
@@ -2032,7 +2091,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if self._plot_item is None or self._theme is None:
             return
         if self._age_marker is None:
-            self._age_marker = pg.ScatterPlotItem(symbol="d", size=10)
+            self._age_marker = _ConcordiaMarker(symbol="d", size=10)
             self._age_marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             self._age_marker.setZValue(20)
             self._plot_item.addItem(self._age_marker, ignoreBounds=True)
@@ -2254,6 +2313,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.vb.sigResized.connect(self._schedule_labels)
         plot = self._plot_item
         _make_diag_axis(plot, theme)
+        self._apply_grid()
         plot.setAspectLocked(False)
         tick_font = QtGui.QFont()
         tick_font.setPointSizeF(12.0)
@@ -2297,7 +2357,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             concordia_y,
             pen=pg.mkPen(theme.muted, width=1.4),
         )
-        self._hover_ring = pg.ScatterPlotItem(size=16, pen=pg.mkPen(theme.accent, width=2),
+        self._hover_ring = _ConcordiaMarker(size=16, pen=pg.mkPen(theme.accent, width=2),
                                              brush=pg.mkBrush(None))
         self._hover_ring.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         plot.addItem(self._hover_ring, ignoreBounds=True)
@@ -2596,7 +2656,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                     or any(rect.intersects(other) for other in previous)):
                 plot.removeItem(label)
                 continue
-            marker = pg.ScatterPlotItem(x=[px], y=[py], size=4,
+            marker = _ConcordiaMarker(x=[px], y=[py], size=4,
                                         pen=pg.mkPen(theme.muted), brush=pg.mkBrush(theme.muted))
             marker.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             label.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
@@ -2755,6 +2815,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     @QtCore.Slot(object)
     def _on_mouse_moved(self, scene_pos):
+        if self._plot_item is not None and self._plot_item.vb._selection_drag_modifiers is not None:
+            return
         self._set_hover(self.nearest_point(scene_pos))
 
     def _set_hover(self, index):
@@ -3360,7 +3422,7 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.show_signal_button.setToolTip("Show this spot's time-resolved signal and windows")
         self.show_signal_button.clicked.connect(lambda: self.showSignalRequested.emit(self._name))
         self.exclude_button = QtWidgets.QToolButton()
-        self.exclude_button.setToolTip("Exclude this spot from fits and pooled ages, or include it again (E)")
+        self.exclude_button.setToolTip("Hide this spot from calculations or unhide it (H; E also works)")
         self.exclude_button.clicked.connect(lambda: self.excludeToggled.emit(self._name, not self._excluded))
         for button in (self.show_signal_button, self.exclude_button):
             button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -3379,7 +3441,7 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.body.setText(f"<b>{len(names)} spots selected</b><br>{shown}")
         self.show_signal_button.setEnabled(False)
         self.exclude_button.setEnabled(False)
-        self.exclude_button.setText("Exclude")
+        self.exclude_button.setText("Hide")
         self.show()
 
     def show_spot(self, name: str, final_row: dict, spot_row: dict, *, excluded: bool,
@@ -3447,7 +3509,9 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.body.setText(f"{header}<table cellspacing='0' cellpadding='1'>{''.join(rows)}</table>{footnote}")
         self.show_signal_button.setEnabled(True)
         self.exclude_button.setEnabled(True)
-        self.exclude_button.setText("Include" if excluded else "Exclude")
+        self.exclude_button.setText("Unhide" if excluded else "Hide")
+        self.exclude_button.setToolTip(
+            (f"Unhide {name}" if excluded else f"Hide {name} from calculations") + " (H; E also works)")
         self.show()
 
 
@@ -3846,12 +3910,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
     showGlassesChanged = QtCore.Signal(bool)
     appearance_changed = QtCore.Signal()
     excludedSpotsChanged = QtCore.Signal(object)
+    concordiaGridChanged = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, *,
                  settings: QtCore.QSettings | None = None) -> None:
         """Create review views, optionally remembering display preferences."""
         super().__init__(parent)
         self._settings = settings
+        self._concordia_grid = (settings.value("review_concordia_grid_v1", True, type=bool)
+                                if settings is not None else True)
         self.include_flags: dict[str, bool] = {}
         self.excluded_spots: set[str] = set()
         self.fit_panels = {}
@@ -3932,6 +3999,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.depth_concordia.selectionChanged.connect(
             lambda names: self.set_selected_spots(names, origin=self.depth_concordia))
         for kind, canvas in (("spot", self.spot_concordia), ("depth", self.depth_concordia)):
+            canvas.set_grid_visible(self._concordia_grid)
             canvas.reviewAction.connect(lambda action, kind=kind: self._review_action(action, kind))
             canvas.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             canvas.customContextMenuRequested.connect(lambda pos, kind=kind: self._canvas_menu(pos, kind))
@@ -4197,7 +4265,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._set_spot_inclusions({n: n in self.selected_spots for n in self.include_flags})
 
     def hide_selected(self) -> None:
-        """Hide selected spots without excluding them from calculations."""
+        """Remove selected spots from the plot (legacy visibility helper)."""
         self.exclude_selected()
 
     def show_all(self) -> None:
@@ -4209,30 +4277,48 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.show_only_selected()
         elif action == "hide":
             self.hide_selected()
+        elif action == "remove":
+            self.exclude_selected()
         elif action == "all":
             self.show_all()
         elif action == "show":
             self.include_selected()
         elif action in {"exclude", "include", "exclude_toggle"}:
+            if not self.selected_spots:
+                return
             excluded = action == "exclude" or (action == "exclude_toggle" and not self.selected_spots <= self.excluded_spots)
             self.set_spot_excluded(self.selected_spots, excluded)
         elif action == "fit":
             self.fit_panels[kind].fit_button.setChecked(True)
             self.fit_panels[kind].invalidate()
 
+    def _hide_action_text(self):
+        names = self.selected_spots
+        label = next(iter(names)) if len(names) == 1 else f"{len(names)} spots"
+        return (f"Unhide {label}" if names and names <= self.excluded_spots
+                else f"Hide {label} from calculations") + "\tH"
+
     def _action_menu(self, parent, kind):
         menu = QtWidgets.QMenu(parent)
-        for text, action in (("Show only selected", "only"), ("Show selected", "show"),
-                             ("Hide selected\tH", "hide"), ("Show all\tShift+H", "all"),
-                             ("Exclude selected from calculations", "exclude"),
-                             ("Include selected in calculations", "include"),
-                             ("Toggle calculation exclusion\tE", "exclude_toggle"),
-                             ("Fit selected", "fit")):
+        toggle = menu.addAction(self._hide_action_text(),
+                                lambda: self._review_action("exclude_toggle", kind))
+
+        def update_toggle():
+            toggle.setText(self._hide_action_text())
+            toggle.setEnabled(bool(self.selected_spots))
+
+        menu.aboutToShow.connect(update_toggle)
+        toggle.triggered.connect(update_toggle)
+        update_toggle()
+        for text, action in (("Show only selected", "only"),
+                             ("Remove selected from plot", "remove"), ("Show all\tShift+H", "all")):
             menu.addAction(text, lambda checked=False, action=action: self._review_action(action, kind))
+        menu.addSeparator()
+        menu.addAction("Fit selected", lambda: self._review_action("fit", kind))
         menu.addSeparator()
         menu.addAction("Select all shown\tCmd/Ctrl+A", lambda: self.set_selected_spots(
             {p[0] for p in getattr(self, kind + "_concordia")._points}))
-        menu.addAction("Clear selection\tEscape", lambda: self.set_selected_spots(set()))
+        menu.addAction("Clear selection\tEsc", lambda: self.set_selected_spots(set()))
         return menu
 
     def _selection_actions(self, kind):
@@ -4244,6 +4330,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _canvas_menu(self, pos, kind):
         canvas = getattr(self, kind + "_concordia")
+        canvas.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+        hits = canvas.spots_at(canvas.mapToScene(pos))
+        if hits and hits[0] not in self.selected_spots:
+            self.set_selected_spots({hits[0]})
         menu = self._action_menu(canvas, kind)
         menu.exec(canvas.mapToGlobal(pos))
         menu.deleteLater()
@@ -4991,12 +5081,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _show_spot_menu(self, pos):
         view = self.sender()
         menu = QtWidgets.QMenu(view)
-        for text, callback in (("Show selected", self.include_selected),
-                               ("Hide selected", self.exclude_selected),
+        for text, callback in ((self._hide_action_text(), lambda: self._review_action("exclude_toggle", "spot")),
                                ("Show only selected", self.show_only_selected),
-                               ("Show all", self.show_all),
-                               ("Exclude selected from calculations", lambda: self.set_spot_excluded(self.selected_spots, True)),
-                               ("Include selected in calculations", lambda: self.set_spot_excluded(self.selected_spots, False)),
+                               ("Remove selected from plot", self.exclude_selected),
+                               ("Show all\tShift+H", self.show_all),
                                ("Invert selection", lambda: self.invert_selection(view)),
                                ("Select same sample", self.select_same_sample)):
             menu.addAction(text, callback)
@@ -5068,7 +5156,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return line
 
     def set_mouse_mode_buttons(self, mode: str) -> None:
-        """Show the shared drag mode (pan or zoom) on the concordia panel."""
+        """Show the shared select, pan or zoom mode on the concordia panel."""
         for key, button in self.mouse_mode_buttons.items():
             blocker = QtCore.QSignalBlocker(button)
             button.setChecked(key == mode)
@@ -5135,8 +5223,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
             self.spot_colour_buttons[key] = button
         mouse_group = QtWidgets.QButtonGroup(page)
         self.mouse_mode_buttons = {}
-        for key, label, tip in (("pan", "Pan", "Drag to pan; click an ellipse to select it"),
-                                ("zoom", "Box", "Drag a box to zoom; click an ellipse to select it")):
+        for key, label, tip in (
+                ("select", "Select", "Drag a box to select spots; Shift adds, Cmd/Ctrl toggles. Click a spot to select it."),
+                ("pan", "Pan", "Drag to pan; Shift+drag selects"),
+                ("zoom", "Zoom", "Drag a box to zoom; Shift+drag selects")):
             button = QtWidgets.QToolButton()
             button.setText(label)
             button.setToolTip(tip)
@@ -5379,10 +5469,23 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return target.zoom_mode() if target is not None else "xy"
 
     def set_interaction_mode(self, mode: str) -> None:
-        """Forward pan/box selection to the visible concordia canvas."""
-        target = self.active_concordia()
-        if target is not None:
-            target.set_interaction_mode(mode)
+        """Share the select, pan or zoom mode across both concordia canvases."""
+        for canvas in (self.spot_concordia, self.depth_concordia):
+            canvas.set_interaction_mode(mode)
+        self.set_mouse_mode_buttons(self.spot_concordia.interaction_mode())
+
+    def set_concordia_grid(self, visible: bool) -> None:
+        """Apply both concordia grids and remember this viewer preference."""
+        self._concordia_grid = bool(visible)
+        for canvas in (self.spot_concordia, self.depth_concordia):
+            canvas.set_grid_visible(visible)
+        if self._settings is not None:
+            self._settings.setValue("review_concordia_grid_v1", self._concordia_grid)
+        self.concordiaGridChanged.emit(self._concordia_grid)
+
+    def concordia_grid(self) -> bool:
+        """Return the viewer's shared concordia grid preference."""
+        return self._concordia_grid
 
     def interaction_mode(self) -> str:
         """Return the visible concordia interaction mode, or the default."""
@@ -5392,9 +5495,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def supports_select_mode(self) -> bool:
         """Return whether the active result canvas supports spot selection."""
         target = self.active_concordia()
-        # Preserve the toolbar's spot-mean rectangle-selection contract.
-        # Depth acquisitions are selected directly by canvas clicks or its tree.
-        return target is self.spot_concordia
+        return target is not None and target.supports_select_mode()
 
     def restore_default_view(self) -> None:
         """Restore the current concordia view without changing table state."""

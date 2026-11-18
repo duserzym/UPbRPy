@@ -998,9 +998,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("Concordia plots", "Select spots", "Click, Shift-click, " + command + "click"),
             ("Concordia plots", "Select all shown spots", self._shortcut_text([QtGui.QKeySequence.StandardKey.SelectAll])),
             ("Concordia plots", "Clear the selection", "Esc"),
-            ("Concordia plots", "Hide selected spots", "H"),
+            ("Concordia plots", "Hide / unhide selected spots from calculations", "H / E"),
+            ("Concordia plots", "Add / toggle spots in a selection rectangle", "Shift+drag / " + command + "Shift+drag"),
             ("Concordia plots", "Show all spots", "Shift+H"),
-            ("Concordia plots", "Toggle calculation exclusion of the selection", "E"),
         ])
         return rows
 
@@ -2746,7 +2746,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interact_mode_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.interact_mode_group = QtWidgets.QButtonGroup(self)
         self.interact_mode_group.setExclusive(True)
-        for imode, imode_label in [("zoom", "Box"), ("pan", "Pan"), ("select", "Select")]:
+        for imode, imode_label in [("select", "Select"), ("pan", "Pan"), ("zoom", "Zoom")]:
             ibtn = QtWidgets.QToolButton()
             ibtn.setText(imode_label)
             ibtn.setCheckable(True)
@@ -2763,10 +2763,13 @@ class MainWindow(QtWidgets.QMainWindow):
             cb_layout.addWidget(ibtn)
         self.interact_mode_buttons["zoom"].setChecked(True)
         # Drag mode per kind of view for this window: concordia views open in
-        # Pan, trace and diagnostic plots in Box; a choice made in one kind of
+        # Pan, trace and diagnostic plots in Zoom; a choice made in one kind of
         # view is kept for it.
         self._interaction_mode_by_view = {"concordia": "pan", "plots": "zoom"}
         self.interact_mode_buttons["pan"].setToolTip("Drag to pan in x and y")
+        self.interact_mode_buttons["zoom"].setToolTip("Drag a box to zoom")
+        self.interact_mode_buttons["select"].setToolTip(
+            "Drag a box to select spots; Shift adds, Cmd/Ctrl toggles. Click a spot to select it.")
         self.interact_mode_buttons["select"].setEnabled(False)
         self.interact_mode_buttons["select"].hide()
 
@@ -2827,6 +2830,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sigma_toggle_button.clicked.connect(self.on_sigma_toggle_clicked)
         self._update_sigma_button_text()
         cb_layout.addWidget(self.sigma_toggle_button)
+
+        self.concordia_grid_button = QtWidgets.QToolButton()
+        self.concordia_grid_button.setText("Grid")
+        self.concordia_grid_button.setProperty("modeToggle", True)
+        self.concordia_grid_button.setCheckable(True)
+        self.concordia_grid_button.setChecked(self.results_table.concordia_grid())
+        self.concordia_grid_button.setToolTip("Show or hide both concordia axis grids")
+        self.concordia_grid_button.toggled.connect(self.results_table.set_concordia_grid)
+        self.results_table.concordiaGridChanged.connect(self.concordia_grid_button.setChecked)
+        self.concordia_grid_button.hide()
+        cb_layout.addWidget(self.concordia_grid_button)
 
         cb_layout.addStretch(1)
         cb_layout.addWidget(ratio_row_lbl)
@@ -6878,6 +6892,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_interaction_controls_to_current_plot(self) -> None:
         target = self._current_plot_interaction_target()
         supports_select = hasattr(target, "supports_select_mode") and target.supports_select_mode()
+        concordia = self._interaction_view_kind() == "concordia" and self.results_table.active_concordia() is not None
+        grid_visibility_changed = self.concordia_grid_button.isHidden() == concordia
+        self.concordia_grid_button.setVisible(concordia)
+        self.interact_mode_buttons["pan"].setToolTip(
+            "Drag to pan; Shift+drag selects" if concordia else "Drag to pan in x and y")
+        self.interact_mode_buttons["zoom"].setToolTip(
+            "Drag a box to zoom; Shift+drag selects" if concordia else "Drag a box to zoom")
         visibility_changed = self.interact_mode_buttons["select"].isHidden() == supports_select
         self.interact_mode_buttons["select"].setEnabled(supports_select)
         self.interact_mode_buttons["select"].setVisible(supports_select)
@@ -6894,7 +6915,7 @@ class MainWindow(QtWidgets.QMainWindow):
             button.blockSignals(False)
         if hasattr(target, "set_zoom_mode"):
             target.set_zoom_mode(self._selected_zoom_mode())
-        if visibility_changed:
+        if visibility_changed or grid_visibility_changed:
             self._sync_toolbar_strips()
 
     def set_interaction_mode(self, mode: str) -> None:
