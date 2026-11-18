@@ -267,6 +267,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setAcceptDrops(True)
         self._companion_choices: dict[str, bool] = {}
         self.session = ReductionSession()
+        self._calibration_seen_cached: set[PipelineStage] = set()
+        self._calibration_target_row: int | None = None
         self.export_settings = ExportSettings()
         self.project_path: Path | None = None
         self._saved_project_fingerprint: str | None = None
@@ -4301,6 +4303,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_calibration_state(self) -> None:
         if not hasattr(self, "calibration_state_button"):
             return
+        # These are the calibration products shown by the panel, in rail order.
+        calibration_stages = {PipelineStage.NORMALIZATION, PipelineStage.RATIOS,
+                              PipelineStage.DOWNHOLE, PipelineStage.SESSION, PipelineStage.FINALIZE}
+        if self.session.concentration_standards:
+            calibration_stages.add(PipelineStage.CONCENTRATION)
+        missing = []
+        for row, stage in enumerate(self.workflow_preset.stage_sequence):
+            if stage in calibration_stages:
+                if self._calibration_stage_cached(stage):
+                    self._calibration_seen_cached.add(stage)
+                else:
+                    missing.append((row, stage))
+        dropped = [(row, stage) for row, stage in missing if stage in self._calibration_seen_cached]
+        self._calibration_target_row = None
         pipeline = self.session.pipeline
         notices = [notice for notice in pipeline.notices if notice.level == "attention"] if pipeline else []
         banner = hasattr(self, "issue_banner") and not self.issue_banner.isHidden()
@@ -4319,20 +4335,28 @@ class MainWindow(QtWidgets.QMainWindow):
         elif not self.session.loaded:
             icon = QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton
             text = "Open a session"
-        elif all(self._calibration_stage_cached(stage) for stage in
-                 self._calibration_required_stages(self.current_workflow_stage())):
+        elif missing:
+            row, stage = (dropped or missing)[0]
+            self._calibration_target_row = row
+            label = WORKFLOW_STAGE_LABELS.get(stage, self.workflow_preset.steps[row].title)
+            if dropped:
+                icon = QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
+                text = f"Out of date: re-run {row + 1} {label}"
+            else:
+                icon = QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation
+                text = f"Not computed yet: run {row + 1} {label}"
+        else:
             icon = QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
             text = "Up to date"
-        else:
-            icon = QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation
-            text = "Not computed yet"
         if self.calibration_state_button.text() != text:
             self.calibration_state_button.setText(text)
             self.calibration_state_button.setIcon(self.style().standardIcon(icon))
             self.calibration_state_button.setToolTip(text)
 
     def _reveal_calibration_cause(self) -> None:
-        if not self.issue_banner.isHidden():
+        if self._calibration_target_row is not None:
+            self.workflow_step_list.setCurrentRow(self._calibration_target_row)
+        elif not self.issue_banner.isHidden():
             self.issue_banner.setFocus()
             self.issue_banner.details_button.setFocus()
         elif self.reduction_notices.notices:
@@ -5789,6 +5813,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
+        self._calibration_seen_cached.clear()
+        self._calibration_target_row = None
         self._position_empty_state()
         self.results_table.set_selected_spots(set())
         self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)

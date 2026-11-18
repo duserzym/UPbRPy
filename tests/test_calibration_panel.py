@@ -145,7 +145,11 @@ def test_state_line_reads_notices_banner_and_cache_without_computation(window, m
 
     monkeypatch.setattr(window, "run_background", forbidden)
     window._refresh_calibration_state()
-    assert window.calibration_state_button.text() == "Up to date"
+    assert window.calibration_state_button.text() == "Not computed yet: run 4 Normalize"
+    assert window.calibration_state_button.toolTip() == window.calibration_state_button.text()
+    window.calibration_state_button.click()
+    assert window.current_workflow_stage() == PipelineStage.NORMALIZATION
+    assert window._active_worker is None
     notice = ReductionNotice("concentration", "missing_reference_value", "No P value for S513.",
                             "S513", "31P", ("choose_standard", "enter_value"))
     window.session.pipeline.notices.append(notice)
@@ -163,7 +167,70 @@ def test_state_line_reads_notices_banner_and_cache_without_computation(window, m
     # Avoid workflow navigation: this also checks an uncached current stage.
     monkeypatch.setattr(window, "current_workflow_stage", lambda: PipelineStage.DOWNHOLE)
     window._refresh_calibration_state()
-    assert window.calibration_state_button.text() == "Not computed yet"
+    assert window.calibration_state_button.text() == "Not computed yet: run 4 Normalize"
+
+
+@pytest.mark.parametrize("cache_source", ["pipeline", "reduction"])
+@pytest.mark.parametrize("with_concentrations", [False, True])
+def test_state_line_requires_all_calibration_products(window, monkeypatch, cache_source, with_concentrations):
+    monkeypatch.setattr(window, "run_background", lambda *a, **k: pytest.fail("State line started reduction"))
+    window.session.concentration_standards = ("NIST612",) if with_concentrations else ()
+    stages = (PipelineStage.NORMALIZATION, PipelineStage.RATIOS, PipelineStage.DOWNHOLE,
+              PipelineStage.SESSION, PipelineStage.FINALIZE)
+    for stage in stages:
+        if cache_source == "pipeline":
+            window.session.pipeline.cache.set(stage, object())
+        else:
+            key = next(key for key, value in services._REDUCTION_CACHE_STAGES.items() if value == stage)
+            window.session.reduction_cache[key] = object()
+    window._refresh_calibration_state()
+    if with_concentrations:
+        assert window.calibration_state_button.text() == "Not computed yet: run 5 Concentrations"
+        window.session.pipeline.cache.set(PipelineStage.CONCENTRATION, object())
+        window._refresh_calibration_state()
+    assert window.calibration_state_button.text() == "Up to date"
+
+
+def test_state_line_dropped_downhole_click_and_undo(window, monkeypatch):
+    monkeypatch.setattr(window, "run_background", lambda *a, **k: pytest.fail("State line started reduction"))
+    cache_downhole(window)
+    for stage in (PipelineStage.NORMALIZATION, PipelineStage.CONCENTRATION, PipelineStage.RATIOS):
+        window.session.pipeline.cache.set(stage, object())
+    window._refresh_calibration_state()
+    assert window.calibration_state_button.text() == "Up to date"
+    original = primaries(window)[0]
+    window.primary_standard_combo.setCurrentText("91500" if original != "91500" else "S513")
+    assert window.change_guard.pending
+    window.change_guard.apply()
+    assert window.calibration_state_button.text() == "Out of date: re-run 7 Downhole"
+    assert window.calibration_state_button.toolTip() == window.calibration_state_button.text()
+    window.calibration_state_button.click()
+    assert window.workflow_step_list.currentRow() == 6
+    assert window._active_worker is None
+    window.change_guard.undo()
+    assert window.calibration_state_button.text() == "Up to date"
+
+
+def test_state_line_remembers_dropped_products_with_other_stages_never_computed(window):
+    cache_downhole(window)
+    window._refresh_calibration_state()
+    assert window.calibration_state_button.text() == "Not computed yet: run 4 Normalize"
+    original = primaries(window)[0]
+    window.primary_standard_combo.setCurrentText("91500" if original != "91500" else "S513")
+    window.change_guard.apply()
+    assert window.calibration_state_button.text() == "Out of date: re-run 7 Downhole"
+
+
+def test_installing_session_resets_calibration_history(window):
+    from GUI.change_guard import copy_session
+
+    cache_downhole(window)
+    window._refresh_calibration_state()
+    replacement = copy_session(window.session)
+    replacement.reduction_cache.clear()
+    replacement.pipeline.cache.clear()
+    window.install_loaded_session(replacement, replacement.directory)
+    assert window.calibration_state_button.text() == "Not computed yet: run 4 Normalize"
 
 
 def test_state_line_tracks_background_stage_progress(window, app):
@@ -311,7 +378,7 @@ def test_informational_omissions_are_muted_without_attention(window):
                              "NIST610", "202Hg", ("choose_standard", "enter_value"), level="info")
     pipeline.notices.append(notice)
     window._refresh_workflow_status()
-    assert window.calibration_state_button.text() == "Up to date"
+    assert window.calibration_state_button.text() == "Not computed yet: run 4 Normalize"
     assert "Needs attention" not in item.text()
     assert item.icon().pixmap(16, 16).toImage() == original_icon
     labels = window.reduction_notices.widget().findChildren(QtWidgets.QLabel)
