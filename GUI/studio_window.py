@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid
 
 from GUI.main_window import MainWindow, _dropped_sources
+from GUI.gc_policy import install as install_gc_policy
 from GUI.theme import WallpaperWidget, active_theme, theme_color, paint_wallpaper
 
 
@@ -125,6 +126,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         reduction_factory: Callable[[], MainWindow] | None = None,
         create_empty: bool = True,
     ) -> None:
+        install_gc_policy(QtWidgets.QApplication.instance())
         super().__init__()
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.settings = QtCore.QSettings("UPbRPy", "Studio")

@@ -73,6 +73,7 @@ from GUI.change_guard import ChangeGuard, confirm_change, copy_session, sync_cha
 from GUI.wheel_guard import install_wheel_guard
 from GUI.database_panel import DatabasePanel, SUBMIT_STEP, is_submit_step
 from GUI.export_dialog import ExportResultsDialog
+from GUI.gc_policy import install as install_gc_policy
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
     SPOT_TREE_COUNT_ROLE,
@@ -257,6 +258,7 @@ class MainWindow(QtWidgets.QMainWindow):
     restore_progress = QtCore.Signal(str)
 
     def __init__(self, theme_mode: str = "light", app_icon: QtGui.QIcon | None = None, updater=None) -> None:
+        install_gc_policy(QtWidgets.QApplication.instance())
         super().__init__()
         install_wheel_guard(QtWidgets.QApplication.instance())
         self.updater = updater if updater is not None else Updater()

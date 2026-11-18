@@ -342,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = QtCore.QSettings("UPbRPy", "Studio")
     theme_mode = args.theme or str(settings.value("theme_mode", "light", type=str) or "light")
     app = build_application(argv, theme_mode=theme_mode)
+    from GUI.gc_policy import install as install_gc_policy
+    install_gc_policy(app)
     install_wheel_guard(app)
 
     interactive = not (args.export or args.verify_reduction)
