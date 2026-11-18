@@ -128,16 +128,16 @@ def test_controls_round_trip_emission_summary_and_narrow_width(app, table):
     controls = StandardBiasControls()
     emissions = []
     controls.changed.connect(emissions.append)
-    assert controls.state() == {'date': '206Pb/238U', 'quantity': 'U',
+    assert controls.state() == {'version': 2, 'date': 'calibrated', 'quantity': 'U',
                                  'log_x': False, 'per_sample_trends': False}
-    state = {'date': 'preferred', 'quantity': 'Pb', 'log_x': True, 'per_sample_trends': True}
+    state = {'version': 2, 'date': 'preferred', 'quantity': 'Pb', 'log_x': True, 'per_sample_trends': True}
     controls.set_state(state)
     assert controls.state() == state and not emissions
     controls.log_x_check.click()
     assert emissions[-1] == dict(state, log_x=False)
     controls.quantity_combo.setCurrentIndex(0)
     assert emissions[-1]['quantity'] == 'U'
-    controls.date_combo.setCurrentIndex(1)
+    controls.date_combo.setCurrentIndex(2)
     assert emissions[-1]['date'] == '207Pb/235U'
     controls.set_summary(bias_summary(table))
     assert 'slope' in controls.summary_label.text() and 'A:' in controls.summary_label.text()

@@ -4,6 +4,9 @@ Pb concentration is calibrated from 208Pb against natural Pb in NIST glass.
 For radiogenic zircon this concentration is not total Pb. REE sums exclude Y.
 Accepted dates are calculated separately for each radiogenic ratio; accepted
 date uncertainties are not included in the reported spot offsets.
+Common-Pb-corrected controls use each material's library initial Pb, falling
+back to the reported Stacey–Kramers dates where no initial Pb is documented.
+The calibrated date selector follows the session's calibration method.
 """
 
 from __future__ import annotations
@@ -17,7 +20,8 @@ from .constants import common_U238_U235, lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
 
 
-BIAS_DATE_SYSTEMS = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "preferred")
+BIAS_DATE_SYSTEMS = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "preferred",
+                     "207Pb-corrected")
 BIAS_QUANTITIES = {
     "U": "U, ug/g", "Th": "Th, ug/g", "Pb": "Pb, ug/g (208Pb-based)",
     "Th/U": "Th/U", "REE": "Total REE, ug/g", "206Pb/204Pb": "206Pb/204Pb",
@@ -25,6 +29,37 @@ BIAS_QUANTITIES = {
     "206Pb_cps": "206Pb, counts per second",
 }
 _REE = "La Ce Pr Nd Sm Eu Gd Tb Dy Ho Er Tm Yb Lu".split()
+
+
+def calibrated_bias_date(common_pb_calibration: str | None) -> str:
+    """Return the date quantity calibrated by the session's primary material."""
+    return "207Pb-corrected" if common_pb_calibration == "tera_wasserburg" else "206Pb/238U"
+
+
+def bias_date_description(date: str, common_pb_calibration: str | None) -> dict:
+    """Describe the selected bias quantity and its common-Pb convention."""
+    if date == "calibrated":
+        date = calibrated_bias_date(common_pb_calibration)
+    if date not in BIAS_DATE_SYSTEMS:
+        raise ValueError(f"Unknown bias date system: {date}")
+    if date == "207Pb-corrected":
+        return {
+            "axis": "Offset from accepted 206Pb/238U date (%), "
+                    "207Pb-corrected with each material's initial Pb",
+            "tooltip": "The 207Pb-corrected 206Pb/238U date uses each material's library "
+                       "initial 207Pb/206Pb, with the Stacey–Kramers model where none is documented. "
+                       "In a Tera–Wasserburg session the primary should sit at 0 %.",
+        }
+    tooltip = ("Offsets compare each spot's date with the accepted date for the same system. "
+               "Accepted-date uncertainties are excluded.")
+    if date == "preferred":
+        tooltip = ("Offsets compare each spot's preferred date with the accepted date for its method. "
+                   "Accepted-date uncertainties are excluded.")
+    if common_pb_calibration == "tera_wasserburg":
+        tooltip += (" The primary is calibrated on its common-Pb-corrected 206Pb/238U date "
+                    "(207Pb-corrected), so uncorrected dates of common-Pb-bearing materials "
+                    "sit above their accepted dates.")
+    return {"axis": f"Offset from accepted {date} date (%)", "tooltip": tooltip}
 
 
 def accepted_dates(standard_archive, names, *, systems=None) -> pd.DataFrame:
@@ -66,6 +101,45 @@ def _numeric(frame, column):
         np.nan, index=frame.index, dtype=float)
 
 
+def _error_column(frame, base, uncertainty):
+    suffix = "no_calibration" if uncertainty == "analytical" else "with_calibration"
+    column = base + "_2e_" + suffix
+    return column if column in frame else base + "_2e"
+
+
+def reference_corrected_dates(group, material, uncertainty="analytical"):
+    """Return reference-initial 207-corrected dates, 2s errors and provenance."""
+    from .isochron import apply_common_pb_corrections
+
+    initial = pd.to_numeric(material.get("207Pb/206Pb_i"), errors="coerce")
+    if not np.isfinite(initial):
+        base = "207Pb_corrected_age"
+        return (_numeric(group, base), _numeric(group, _error_column(group, base, uncertainty)),
+                "Stacey–Kramers model")
+    inputs = pd.DataFrame(index=group.index)
+    suffix = "no_calibration" if uncertainty == "analytical" else "with_calibration"
+    for ratio in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
+        corrected = ratio + "_fractionation_corrected"
+        column = corrected if corrected in group else ratio
+        errors = (column + "_2e_" + suffix, ratio + "_2e_" + suffix,
+                  column + "_2e", ratio + "_2e")
+        error = next((key for key in errors if key in group), ratio + "_2e")
+        inputs[ratio], inputs[ratio + "_2e"] = _numeric(group, column), _numeric(group, error)
+    inputs["Th/U"] = (_numeric(group, "Th/U") if "Th/U" in group else
+                      _numeric(group, "Th") / _numeric(group, "U").replace(0, np.nan))
+    initial_68 = pd.to_numeric(material.get("206Pb/208Pb_i"), errors="coerce")
+    corrected = apply_common_pb_corrections(
+        inputs, common_pb_model=None, common_pb207_pb206=float(initial),
+        common_pb206_pb208=float(initial_68) if np.isfinite(initial_68) else 1.,
+        include_204_method=False,
+        ratio_68_column="206Pb/238U", ratio_68_2s_column="206Pb/238U_2e",
+        ratio_76_column="207Pb/206Pb", ratio_76_2s_column="207Pb/206Pb_2e",
+        ratio_82_column="208Pb/232Th", ratio_82_2s_column="208Pb/232Th_2e",
+    )
+    return (corrected["207Pb_corrected_age"], corrected["207Pb_corrected_age_2e"],
+            f"initial 207Pb/206Pb {initial:.3f} (reference)")
+
+
 def spot_signal_quantities(experiment, baseline_subtracted,
                            channels=("206Pb", "238U")) -> pd.DataFrame:
     """Return session minutes and mean plateau cps for every selected spot.
@@ -102,6 +176,8 @@ def standard_bias_table(results, standard_archive, *, date="206Pb/238U",
     date. Analytical errors prefer age_2e_no_calibration; with_calibration
     prefers age_2e_with_calibration. Both fall back to age_2e when absent.
     Preferred dates always use preferred_age_2e and their per-spot method.
+    207Pb-corrected dates use library initial Pb per material and the selected
+    ratio-error branch; undocumented initial Pb uses reported corrected dates.
     Nonfinite x or offsets remain in the table with plottable=False. Invalid
     errors remain visible but cannot contribute to weighted statistics.
     """
@@ -121,19 +197,28 @@ def standard_bias_table(results, standard_archive, *, date="206Pb/238U",
                if "material" in materials else pd.Series(False, index=accepted.index))
     accepted = accepted.loc[~glasses & ~accepted.index.isin(["NIST610", "NIST612"])]
     frame = results.loc[results["sample"].isin(accepted.index)].copy().reset_index(drop=True)
+    common_pb_source = pd.Series("", index=frame.index)
     if date == "preferred":
         methods = frame.get("preferred_age_method", pd.Series("", index=frame.index))
         systems = methods.map(_preferred_system)
         values, errors = _numeric(frame, "preferred_age"), _numeric(frame, "preferred_age_2e")
+    elif date == "207Pb-corrected":
+        systems = pd.Series(date, index=frame.index)
+        values = pd.Series(np.nan, index=frame.index)
+        errors = pd.Series(np.nan, index=frame.index)
+        for sample, group in frame.groupby("sample", sort=False):
+            dates, date_errors, source = reference_corrected_dates(
+                group, standard_archive.loc[sample], uncertainty)
+            values.loc[group.index], errors.loc[group.index] = dates, date_errors
+            common_pb_source.loc[group.index] = source
     else:
         systems = pd.Series(date, index=frame.index)
         base = date + "_age"
-        suffix = "no_calibration" if uncertainty == "analytical" else "with_calibration"
-        error_column = base + "_2e_" + suffix
         values = _numeric(frame, base)
-        errors = _numeric(frame, error_column if error_column in frame else base + "_2e")
+        errors = _numeric(frame, _error_column(frame, base, uncertainty))
+    reference_systems = systems.replace("207Pb-corrected", "206Pb/238U")
     reference = pd.Series([accepted.loc[sample, system] if system in accepted else np.nan
-                           for sample, system in zip(frame["sample"], systems)],
+                           for sample, system in zip(frame["sample"], reference_systems)],
                           index=frame.index, dtype=float)
     if quantity in {"session_time", "206Pb_cps", "238U_cps"}:
         if signal_quantities is None:
@@ -157,6 +242,7 @@ def standard_bias_table(results, standard_archive, *, date="206Pb/238U",
     output["offset_2s_percent"] = errors / reference * 100
     output["date_system"], output["quantity"] = systems, quantity
     output["plottable"] = np.isfinite(output["x"]) & np.isfinite(output["offset_percent"])
+    output["common_pb_source"] = common_pb_source
     return output
 
 
@@ -235,4 +321,6 @@ def bias_summary(table, *, log_x=False) -> dict:
 
 
 __all__ = ["BIAS_DATE_SYSTEMS", "BIAS_QUANTITIES", "accepted_dates",
-           "spot_signal_quantities", "standard_bias_table", "bias_summary"]
+           "reference_corrected_dates",
+           "spot_signal_quantities", "standard_bias_table", "bias_summary",
+           "calibrated_bias_date", "bias_date_description"]

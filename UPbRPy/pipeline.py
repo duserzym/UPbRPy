@@ -1177,6 +1177,7 @@ class ReductionPipeline:
             result.parallel_results, self.standard_archive,
             (self.config.primary_68_standard, self.config.primary_76_standard,
              self.config.primary_82_standard, *self.config.secondary_standards),
+            common_pb_calibration=self.config.common_pb_calibration,
         )
         return self.cache.set(PipelineStage.FINALIZE, result)
 

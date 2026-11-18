@@ -8760,7 +8760,8 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         self._plot_item.vb.sigResized.connect(self._position_labels)
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
-    def show_bias(self, table, summary, *, theme, log_x=False, x_label, y_label) -> None:
+    def show_bias(self, table, summary, *, theme, log_x=False, x_label, y_label,
+                  y_tooltip: str | None = None) -> None:
         """Draw a bias table and matching summary; labels describe original units."""
         self._table = table.copy()
         self._summary = summary
@@ -8768,6 +8769,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
         self._log_x = bool(log_x)
         self._x_label, self._y_label = x_label, y_label
         self._draw()
+        self._plot_item.getAxis("left").setToolTip(y_tooltip or "")
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         """Redraw using the supplied Studio palette."""
@@ -9018,8 +9020,11 @@ class StandardBiasControls(QtWidgets.QWidget):
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.date_combo = StyledComboBox()
         self.quantity_combo = StyledComboBox()
+        self.date_combo.addItem("As calibrated", "calibrated")
         for system in BIAS_DATE_SYSTEMS:
-            self.date_combo.addItem("Preferred" if system == "preferred" else system, system)
+            label = ("Preferred" if system == "preferred" else
+                     "207Pb-corrected 206Pb/238U" if system == "207Pb-corrected" else system)
+            self.date_combo.addItem(label, system)
         for key, label in BIAS_QUANTITIES.items():
             self.quantity_combo.addItem(label, key)
         for combo in (self.date_combo, self.quantity_combo):
@@ -9047,7 +9052,7 @@ class StandardBiasControls(QtWidgets.QWidget):
 
     def state(self) -> dict:
         """Return date, quantity, log_x and per_sample_trends settings."""
-        return {"date": self.date_combo.currentData(), "quantity": self.quantity_combo.currentData(),
+        return {"version": 2, "date": self.date_combo.currentData(), "quantity": self.quantity_combo.currentData(),
                 "log_x": self.log_x_check.isChecked(),
                 "per_sample_trends": self.per_sample_trends_check.isChecked()}
 
@@ -9055,6 +9060,9 @@ class StandardBiasControls(QtWidgets.QWidget):
         """Apply known settings without emitting changed; ignore unknown keys."""
         widgets = (self.date_combo, self.quantity_combo, self.log_x_check, self.per_sample_trends_check)
         blockers = [QtCore.QSignalBlocker(widget) for widget in widgets]
+        state = dict(state)
+        if "version" not in state and state.get("date") == "206Pb/238U":
+            state["date"] = "calibrated"
         for key, combo in (("date", self.date_combo), ("quantity", self.quantity_combo)):
             if key in state:
                 index = combo.findData(state[key])
@@ -9064,6 +9072,10 @@ class StandardBiasControls(QtWidgets.QWidget):
             if key in state:
                 check.setChecked(bool(state[key]))
         del blockers
+
+    def set_date_tooltip(self, text: str) -> None:
+        """Explain the selected date quantity and its initial-Pb convention."""
+        self.date_combo.setToolTip(text)
 
     def set_summary(self, summary: dict) -> None:
         """Show the pooled slope and sample weighted means in percent (2s)."""

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from .bias import accepted_dates, spot_signal_quantities
+from .bias import reference_corrected_dates, accepted_dates, spot_signal_quantities
 from .concentration import calc_concentration, element_from_channel
 from .constants import lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
@@ -150,11 +150,13 @@ def _numeric(frame, key):
 def summarize_reference_materials_by_system(
     results: pd.DataFrame, standard_archive: pd.DataFrame, names: Iterable[str], *,
     excluded_spots: Iterable[str] = (),
+    common_pb_calibration: str | None = None,
 ) -> pd.DataFrame:
     """Summarize analytical dates against the same system's accepted date.
 
     Flags do not exclude analyses. Glasses are omitted even if explicitly named.
     ``n`` counts observations with finite dates and positive analytical errors.
+    Tera–Wasserburg sessions also include reference-initial 207-corrected dates.
     """
     columns = ("sample", "system", "n", "weighted_mean", "weighted_mean_2e",
                "mswd", "probability", "accepted_date", "offset_ma", "offset_percent")
@@ -170,10 +172,16 @@ def summarize_reference_materials_by_system(
         group = frame.loc[frame["sample"].eq(name)]
         if not results["sample"].eq(name).any():
             continue
-        for system in SYSTEMS:
-            stats = weighted_mean_and_mswd(_numeric(group, system + "_age"),
-                                          _numeric(group, system + "_age_2e_no_calibration"))
-            reference = accepted.loc[name, system]
+        systems = (*SYSTEMS, "207Pb-corrected 206Pb/238U") if common_pb_calibration == "tera_wasserburg" else SYSTEMS
+        for system in systems:
+            if system == "207Pb-corrected 206Pb/238U":
+                values, errors, _ = reference_corrected_dates(group, standard_archive.loc[name])
+                reference = accepted.loc[name, "206Pb/238U"]
+            else:
+                values = _numeric(group, system + "_age")
+                errors = _numeric(group, system + "_age_2e_no_calibration")
+                reference = accepted.loc[name, system]
+            stats = weighted_mean_and_mswd(values, errors)
             offset = stats["weighted_mean"] - reference
             records.append(dict(sample=name, system=system, **stats, accepted_date=reference,
                                 offset_ma=offset, offset_percent=100 * offset / reference
@@ -188,6 +196,7 @@ def secondary_summary_wide(summary: pd.DataFrame) -> pd.DataFrame:
     columns += [f"{suffix}_{metric}" for suffix in ("68", "76") for metric in metrics]
     if summary.empty:
         return pd.DataFrame(columns=columns)
+    summary = summary.loc[summary.system.isin(SYSTEMS)]
     records = []
     for name, group in summary.groupby("sample", sort=False):
         record = {"sample": name, "n": int(group["n"].max())}
@@ -658,7 +667,8 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     for key in blank:
         rows.loc[rows.role.eq("glass"), key] = "" if key == "preferred_date_method" else np.nan
     secondary = summarize_reference_materials_by_system(rows, pipeline.standard_archive,
-        (*primary, *config.secondary_standards), excluded_spots=excluded)
+        (*primary, *config.secondary_standards), excluded_spots=excluded,
+        common_pb_calibration=config.common_pb_calibration)
     first = rows.groupby("sample").run_order.min()
     rows["_role_order"] = rows.role.map({"unknown": 0, "primary": 1, "secondary": 2, "glass": 3})
     rows["_sample_order"] = rows["sample"].map(first)
@@ -666,6 +676,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     summaries = _sample_summaries(rows, preferred_parts, secondary, config.uncertainty, reference, long_term)
     rows = rows[[c.key for c in columns] + ["sample", "role", "excluded", "run_order"]].reset_index(drop=True)
     context = dict(material=config.material, channels=tuple(pipeline.channels),
+        common_pb_calibration=config.common_pb_calibration,
         reference_library_path=pipeline.reference_library_path,
         session_name=Path(pipeline.source_directory).stem if pipeline.source_directory else "session",
         primary_standards=dict(zip(SYSTEMS, (config.primary_68_standard, config.primary_68_standard, config.primary_76_standard, config.primary_82_standard))),
@@ -1360,6 +1371,11 @@ def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
                         style = None if isinstance(value, str) else reference_format(frame.columns[i])
                         reference.write(r, i, value, style)
             offset += len(frame) + 4
+        if table.context.get("common_pb_calibration") == "tera_wasserburg":
+            reference.write_string(offset, 0,
+                "207Pb-corrected 206Pb/238U rows use each material's library initial "
+                "207Pb/206Pb, or the Stacey–Kramers model where none is documented. "
+                "Uncorrected rows include common Pb.")
         reference.freeze_panes(2, 1)
     return target
 

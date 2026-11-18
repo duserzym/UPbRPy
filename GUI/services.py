@@ -1882,7 +1882,9 @@ def get_standard_bias_data(
     """
     from UPbRPy.bias import (
         BIAS_QUANTITIES,
+        bias_date_description,
         bias_summary,
+        calibrated_bias_date,
         spot_signal_quantities,
         standard_bias_table,
     )
@@ -1890,10 +1892,13 @@ def get_standard_bias_data(
     if not session.loaded or "finalized_results" not in session.reduction_cache:
         return None
     state = dict(state or {})
-    date = str(state.get("date", "206Pb/238U"))
+    date = str(state.get("date", "calibrated"))
     quantity = str(state.get("quantity", "U"))
     log_x = bool(state.get("log_x", False))
     pipeline = ensure_shared_pipeline(session, preset)
+    if date == "calibrated":
+        date = calibrated_bias_date(pipeline.config.common_pb_calibration)
+    description = bias_date_description(date, pipeline.config.common_pb_calibration)
     finalized = pipeline.run_finalize()
     signals = spot_signal_quantities(pipeline.experiment, pipeline.run_baseline())
     table = standard_bias_table(
@@ -1913,7 +1918,9 @@ def get_standard_bias_data(
         "summary": bias_summary(table, log_x=log_x),
         "log_x": log_x,
         "x_label": str(BIAS_QUANTITIES.get(quantity, quantity)),
-        "y_label": f"Offset from accepted {date} date (%)",
+        "y_label": description["axis"],
+        "date": date,
+        "date_tooltip": description["tooltip"],
     }
 
 

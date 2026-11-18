@@ -7356,7 +7356,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bias_plot.show_bias(
             data["table"], data["summary"], theme=theme, log_x=data["log_x"],
             x_label=data["x_label"], y_label=data["y_label"],
+            y_tooltip=data.get("date_tooltip"),
         )
+        self.bias_controls.set_date_tooltip(data.get("date_tooltip", ""))
         self.bias_controls.set_summary(data["summary"])
         self.bias_plot.set_selected_spots(self.results_table.selected_spots)
 
