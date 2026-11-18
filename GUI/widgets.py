@@ -499,7 +499,10 @@ class _PillLineLabel(pg.InfLineLabel):
         if change == self.GraphicsItemChange.ItemSceneChange:
             scene = getattr(self, "_lastScene", None)
             if scene is not None:
-                scene.sigPrepareForPaint.disconnect(self.updateTransform)
+                try:
+                    scene.sigPrepareForPaint.disconnect(self.updateTransform)
+                except (RuntimeError, TypeError):
+                    pass  # pyqtgraph already disconnected it
                 self._lastScene = None
         return super().itemChange(change, value)
 
