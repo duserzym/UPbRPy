@@ -71,6 +71,8 @@ def load_public_api() -> list[str]:
 
 def __getattr__(name: str):
     """Resolve legacy top-level names on first use."""
+    if name.startswith("__") and name.endswith("__") and name != "__all__":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     if name in FOCUSED_SUBMODULES:
         module = import_module(f".{name}", __name__)
         globals()[name] = module

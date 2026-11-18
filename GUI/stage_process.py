@@ -107,7 +107,8 @@ def _dump(value, references=None, *, copy_buffers=False):
         def persistent_id(self, obj):
             return references.get(id(obj)) if references else None
 
-    Pickler(stream, protocol=5, buffer_callback=buffers.append).dump(value)
+    pickler = Pickler if references else pickle.Pickler
+    pickler(stream, protocol=5, buffer_callback=buffers.append).dump(value)
     if copy_buffers:
         buffers = [buffer.raw().tobytes() for buffer in buffers]
     return stream.getvalue(), buffers
@@ -373,6 +374,7 @@ class StageReply:
     result: object
     pipeline: object
     reduction_cache: dict
+    _experiment_token: tuple | None = None
 
     def merge(self, session, preset):
         """Install results, then invalidate anything edited during this request."""
@@ -385,7 +387,11 @@ class StageReply:
         if self.pipeline._override_archive_key is not None:
             self.pipeline._override_archive_key = (
                 id(self.pipeline.base_standard_archive), self.pipeline._override_archive_key[1])
-        ensure_shared_pipeline(session, preset)
+        token = self._experiment_token
+        unchanged = (token is not None and session.experiment is token[0]
+                     and pickle.dumps(session.experiment, protocol=5) == token[1])
+        ensure_shared_pipeline(session, preset, source_experiment_unchanged=unchanged)
+        self._experiment_token = None
         return self.result
 
 
@@ -401,6 +407,7 @@ class StageTask:
         self._references = {}
         self._kind = None
         self.in_thread = False
+        self._experiment_token = None
 
     @property
     def cancelled(self):
@@ -424,6 +431,11 @@ class StageTask:
         """Snapshot live state synchronously on its owning GUI thread."""
         from GUI.services import current_standard_archive, current_standard_archive_path
 
+        try:
+            self._experiment_token = (session.experiment, pickle.dumps(session.experiment, protocol=5))
+        except Exception:
+            # The normal snapshot path below owns infrastructure fallback.
+            self._experiment_token = None
         references = {name: getattr(session, name)
                       for name in ("total_data", "experiment", "qtegra", "channels")}
         references["archive"] = current_standard_archive()
@@ -472,6 +484,8 @@ class StageTask:
             elif message[0] == "result":
                 result = _load(_receive(worker.connection), self._references)
                 reusable = True
+                if isinstance(result, StageReply):
+                    result._experiment_token = self._experiment_token
                 return result
             else:
                 raise RuntimeError(f"Stage transport failed: {message}")
@@ -488,6 +502,7 @@ class StageTask:
                 self.pool.release(worker, reusable=reusable and not self.cancelled)
             self._packet = None
             self._references = {}
+            self._experiment_token = None
         if remote_error is not None:
             raise remote_error
         if self.cancelled:

@@ -276,6 +276,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_path: Path | None = None
         self._saved_project_fingerprint: str | None = None
         self.channel_colors: dict[str, str] = {}
+        self._workflow_icons: dict[tuple, QtGui.QIcon] = {}
+        self._workflow_status_timer = QtCore.QTimer(self)
+        self._workflow_status_timer.setSingleShot(True)
+        self._workflow_status_timer.timeout.connect(self._flush_view_status)
+        self._overview_refresh_timer = QtCore.QTimer(self)
+        self._view_details_timer = QtCore.QTimer(self)
+        for timer, callback in (
+            (self._overview_refresh_timer, self._refresh_session_overview),
+            (self._view_details_timer, self._refresh_view_details),
+        ):
+            timer.setSingleShot(True)
+            timer.timeout.connect(callback)
+        self._defer_result_details = False
         self._is_populating = False
         self._spot_folder_overrides: dict[str, str] = {}  # {spot_name: folder_name}
         self._review_flags: dict[str, str] = {}
@@ -6173,7 +6186,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 stage = self.workflow_preset.stage_sequence[index]
                 label = WORKFLOW_STAGE_LABELS.get(stage, step.title)
                 item = QtWidgets.QListWidgetItem(
-                    build_workflow_stage_icon(
+                    self._workflow_stage_icon(
                         stage.value,
                         state="ready",
                         accent=theme.accent,
@@ -6191,7 +6204,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if database_availability()[0]:
                 item = QtWidgets.QListWidgetItem(
-                    build_workflow_stage_icon(
+                    self._workflow_stage_icon(
                         PipelineStage.FINALIZE.value, state="ready", accent=theme.accent,
                         muted=theme.muted, success=theme.success,
                     ),
@@ -7676,10 +7689,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flush_selection_edits()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
+            # Deferred details belong to a loaded view; drop them with it.
+            self._overview_refresh_timer.stop()
+            self._view_details_timer.stop()
             if not _same_view(self._view_key(), self._rendered_view_key):
                 self._show_placeholder_state()
             self.notes_body.setText(self._compose_notes(None))
-            self._refresh_workflow_status()
+            self._refresh_view_status()
             return
 
         selected_spot = self.current_spot_name()
@@ -7736,15 +7752,26 @@ class MainWindow(QtWidgets.QMainWindow):
         elif preserve_main_view and visible_channels:
             self.trace_plot.set_x_window(previous_x_range)
             self.trace_plot.set_y_window(previous_y_range)
-        self._refresh_session_overview()
+        if self._active_worker is not None or self._defer_result_details:
+            self._overview_refresh_timer.start(0)
+        else:
+            self._overview_refresh_timer.stop()
+            self._refresh_session_overview()
         if should_focus_spot:
             self._focused_spot_name = selected_spot
         self._last_plot_mode = self.session.plot_mode
         self._rendered_view_key = self._view_key()
 
+        if self._active_worker is not None or self._defer_result_details:
+            self._view_details_timer.start(0)
+        else:
+            self._view_details_timer.stop()
+            self._refresh_view_details()
+        self._refresh_view_status()
+
+    def _refresh_view_details(self) -> None:
         self._apply_project_summary(project_summary(self.session))
-        self.notes_body.setText(self._compose_notes(selected_spot))
-        self._refresh_workflow_status()
+        self.notes_body.setText(self._compose_notes(self.session.selected_spot))
 
     def _refresh_session_overview(self) -> None:
         overview_channel = self.current_stats_channel()
@@ -8120,7 +8147,27 @@ class MainWindow(QtWidgets.QMainWindow):
             PipelineStage.SELECTION,
         }
 
+    def _workflow_stage_icon(self, stage, **options):
+        key = (stage, tuple(sorted(options.items())))
+        if key not in self._workflow_icons:
+            self._workflow_icons[key] = build_workflow_stage_icon(stage, **options)
+        return self._workflow_icons[key]
+
+    def _refresh_view_status(self) -> None:
+        if self._active_worker is not None or self._defer_result_details:
+            # Result display and finish arrive together. Finish cancels this
+            # request and updates status once with the settled worker state.
+            self._workflow_status_timer.start(0)
+        else:
+            self._refresh_workflow_status()
+
+    def _flush_view_status(self) -> None:
+        if self._active_worker is None:
+            self._refresh_workflow_status()
+        # An active worker's finish slot will refresh the settled state.
+
     def _refresh_workflow_status(self) -> None:
+        self._workflow_status_timer.stop()
         self._refresh_reduction_notices()
         self._refresh_calibration_summary()
         self._refresh_calibration_state()
@@ -8234,7 +8281,7 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setText(f"{index + 1}  {label}" + (" · Needs attention" if attention else ""))
             item.setToolTip(self.issue_banner.message.text() if has_issue else "\n".join(notices) or label)
             item.setIcon(
-                self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning) if attention else build_workflow_stage_icon(
+                self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning) if attention else self._workflow_stage_icon(
                     stage.value,
                     state=icon_state,
                     accent=theme.accent if theme else "#2468d4",
@@ -8525,7 +8572,11 @@ class MainWindow(QtWidgets.QMainWindow):
             had_queued_edits = bool(self.pending_region_updates)
             self.flush_selection_edits()
             if succeeded and (quiet or label == "Updating reduction stages"):
-                self.refresh_view()
+                self._defer_result_details = True
+                try:
+                    self.refresh_view()
+                finally:
+                    self._defer_result_details = False
             self._refresh_workflow_status()
             if self._selection_recompute_stages and (succeeded or had_queued_edits) and not self._selection_recompute_timer.isActive():
                 self._selection_recompute_timer.start(self.selection_recompute_debounce_ms)

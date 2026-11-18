@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import weakref
 from copy import deepcopy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -332,8 +333,14 @@ _REDUCTION_CACHE_STAGES = {
 def ensure_shared_pipeline(
     session: ReductionSession,
     preset: WorkflowPreset,
+    *,
+    source_experiment_unchanged: bool = False,
 ) -> ReductionPipeline:
-    """Return the session's core pipeline, synchronizing current GUI choices."""
+    """Synchronize GUI choices; skip source hashing only for a verified snapshot.
+
+    ``source_experiment_unchanged`` requires identity and exact contents to
+    have been checked against the source synchronized by a stage worker.
+    """
     config = pipeline_config_from_session(session, preset)
     if session.pipeline is None:
         input_files = (
@@ -366,7 +373,9 @@ def ensure_shared_pipeline(
                     config,
                 ),
             )
-        if not pipeline.matches_source_experiment(session.experiment):
+        verified_source = (source_experiment_unchanged
+                           and pipeline._source_experiment is session.experiment)
+        if not verified_source and not pipeline.matches_source_experiment(session.experiment):
             pipeline.update_experiment(session.experiment)
         if pipeline.base_standard_archive is not current_standard_archive():
             pipeline.standard_archive = current_standard_archive()
@@ -1325,10 +1334,30 @@ def autopick_all_selection_regions(
     return {"selected_count": selected_count, "failures": failures, "skipped_manual": skipped}
 
 
+_spot_row_positions: dict[int, tuple[weakref.ReferenceType, dict]] = {}
+
+
+def _rows_by_spot(frame: pd.DataFrame) -> dict:
+    key = id(frame)
+    cached = _spot_row_positions.get(key)
+    if cached is not None and cached[0]() is frame:
+        return cached[1]
+
+    def release(reference):
+        current = _spot_row_positions.get(key)
+        if current is not None and current[0] is reference:
+            _spot_row_positions.pop(key, None)
+
+    positions = frame.groupby("spot_name", sort=False, observed=True).indices
+    _spot_row_positions[key] = (weakref.ref(frame, release), positions)
+    return positions
+
+
 def get_spot_data(session: ReductionSession, spot_name: str | None) -> pd.DataFrame:
     if not session.loaded or not spot_name:
         return pd.DataFrame()
-    return session.total_data[session.total_data["spot_name"] == spot_name].reset_index(drop=True)
+    positions = _rows_by_spot(session.total_data).get(spot_name, [])
+    return session.total_data.iloc[positions].reset_index(drop=True)
 
 
 def extract_spot_frame(frame: pd.DataFrame, spot_name: str | None) -> pd.DataFrame:

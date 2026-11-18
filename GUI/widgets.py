@@ -3467,6 +3467,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         self.setObjectName("DetectorCalibrationPanel")
         self._session = None
         self._preview_key = None
+        self._preview_qtegra = None
         self._preview_task = None
         self._preview_worker = None
         self._preview_generation = 0
@@ -3578,6 +3579,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         else:
             self.cancel_preview()
             self._preview_key = None
+            self._preview_qtegra = None
             self._constant = self._drift = None
             self.channel_combo.clear()
             self.table.setRowCount(0)
@@ -3612,7 +3614,10 @@ class DetectorCalibrationPanel(NeumorphicFrame):
             window=options.get("window", (1e5, 2.4e6)),
             smoothing_s=options.get("smoothing_s", 1800.0), sep=sep,
         )
-        key = (id(self._session.qtegra), repr(fit_options))
+        # Retain the cached/pending input so its id cannot be reused by a
+        # different session while the preview key is still valid.
+        self._preview_qtegra = self._session.qtegra
+        key = (id(self._preview_qtegra), repr(fit_options))
         if self._preview_pending and key == self._preview_requested_key:
             return
         if key != self._preview_key:
@@ -8202,6 +8207,8 @@ class TracePlotWidget(RoundedPlotWidget):
             self._positioning_signal_labels = False
 
     def apply_theme(self, theme: ThemeSpec) -> None:
+        if theme == self._theme:
+            return
         self._theme = theme
         self.setBackground(theme.plot_background)
         self._configure_plot()
@@ -8210,6 +8217,9 @@ class TracePlotWidget(RoundedPlotWidget):
         self._position_signal_labels()
 
     def _configure_plot(self) -> None:
+        if getattr(self, "_configured_theme", None) == self._theme:
+            return
+        self._configured_theme = self._theme
         self.setBackground(self._theme.plot_background)
         self.showGrid(x=True, y=True, alpha=self._theme.grid_alpha)
         self.setMenuEnabled(False)
@@ -8551,7 +8561,10 @@ class TracePlotWidget(RoundedPlotWidget):
         return self._zoom_mode
 
     def set_interaction_mode(self, mode: str) -> None:
-        self._interaction_mode = mode if mode in {"pan", "zoom"} else "zoom"
+        mode = mode if mode in {"pan", "zoom"} else "zoom"
+        if mode == self._interaction_mode:
+            return
+        self._interaction_mode = mode
         self._apply_interaction_mode()
 
     def interaction_mode(self) -> str:
