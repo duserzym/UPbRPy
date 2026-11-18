@@ -1,0 +1,578 @@
+[
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.861789102723038,
+      "slope": -0.12533833372780803,
+      "lower_age_ma": 948.0991490899828,
+      "upper_age_ma": 4827.732984745866,
+      "intercept_1s": 0.020709016878009585,
+      "slope_1s": 0.005761386392562227,
+      "lower_age_1s": 23.23325874377998,
+      "upper_age_1s": 33.09196056103629,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "common",
+    "expected": {
+      "intercept": 0.88,
+      "slope": -0.1298783188713366,
+      "lower_age_ma": 959.9183103774149,
+      "upper_age_ma": 4856.27073918937,
+      "intercept_1s": 0.0,
+      "slope_1s": 0.002592958693626828,
+      "lower_age_1s": 18.516304891035915,
+      "upper_age_1s": 4.601799801214572,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "common±",
+    "expected": {
+      "intercept": 0.876607466251317,
+      "slope": -0.12903245770510519,
+      "lower_age_ma": 957.7583620589833,
+      "upper_age_ma": 4850.994994742381,
+      "intercept_1s": 0.009050058457293057,
+      "slope_1s": 0.0034287388724274946,
+      "lower_age_1s": 19.40140313288935,
+      "upper_age_1s": 14.831963733850987,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "age",
+    "expected": {
+      "intercept": 0.8882404139687635,
+      "slope": -0.13687903144693217,
+      "lower_age_ma": 1000.0,
+      "upper_age_ma": 4860.293130166606,
+      "intercept_1s": 0.018797469652465065,
+      "slope_1s": 0.0031542892342601536,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 31.91757183490625,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "age±",
+    "expected": {
+      "intercept": 0.8843537672898961,
+      "slope": -0.13511193158788468,
+      "lower_age_ma": 992.0956115746794,
+      "upper_age_ma": 4855.666030023598,
+      "intercept_1s": 0.018852227980165885,
+      "slope_1s": 0.0036846905899018956,
+      "lower_age_1s": 9.310762519990892,
+      "upper_age_1s": 31.65370387986702,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "SK",
+    "expected": {
+      "intercept": 0.9064857524454921,
+      "slope": -0.13607598079978053,
+      "lower_age_ma": 973.3455025830342,
+      "upper_age_ma": 4897.530163071031,
+      "intercept_1s": 0.0016440701576159328,
+      "slope_1s": 0.0031568699940031407,
+      "lower_age_1s": 19.937236957314195,
+      "upper_age_1s": 2.186985498467161,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.8885159840655219,
+      "slope": -0.13945302533692755,
+      "lower_age_ma": 1017.816052320879,
+      "upper_age_ma": 4856.266751371018,
+      "intercept_1s": 0.012772700255200352,
+      "slope_1s": 0.0068990337094313086,
+      "lower_age_1s": 37.643534561768206,
+      "upper_age_1s": 17.58140510585918,
+      "dispersion": 142.82846267901596,
+      "dispersion_1s": 25.87679949483705
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "common",
+    "expected": {
+      "intercept": 0.88,
+      "slope": -0.12776981527573983,
+      "lower_age_ma": 944.8562051876463,
+      "upper_age_ma": 4860.002916967331,
+      "intercept_1s": 0.0,
+      "slope_1s": 0.001564045670785292,
+      "lower_age_1s": 11.176737496912265,
+      "upper_age_1s": 2.7611805407515053,
+      "dispersion": 0.090803023583341,
+      "dispersion_1s": 0.015054153510451198
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "common±",
+    "expected": {
+      "intercept": 0.88,
+      "slope": -0.1308471143349894,
+      "lower_age_ma": 966.8353753782017,
+      "upper_age_ma": 4854.5492988563155,
+      "intercept_1s": 0.0,
+      "slope_1s": 0.0010137820629645311,
+      "lower_age_1s": 7.237119732261462,
+      "upper_age_1s": 1.8035681808625001,
+      "dispersion": 0.01,
+      "dispersion_1s": 0.0
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "age",
+    "expected": {
+      "intercept": 0.8848096154622113,
+      "slope": -0.1363033299831643,
+      "lower_age_ma": 1000.0,
+      "upper_age_ma": 4854.455359885622,
+      "intercept_1s": 0.010025069348643594,
+      "slope_1s": 0.001682246009907774,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 17.094685332518534,
+      "dispersion": 142.46821843845376,
+      "dispersion_1s": 26.019370888810933
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "age±",
+    "expected": {
+      "intercept": 0.8926487033646849,
+      "slope": -0.13761875972100523,
+      "lower_age_ma": 999.9999999999999,
+      "upper_age_ma": 4867.7579841779625,
+      "intercept_1s": 0.005947685395199562,
+      "slope_1s": 0.0009980449687230807,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 10.044329705066412,
+      "dispersion": 10.0,
+      "dispersion_1s": 0.0
+    },
+    "n": 30
+  },
+  {
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "SK",
+    "expected": {
+      "intercept": 0.9130142964379615,
+      "slope": -0.1486117795553314,
+      "lower_age_ma": 1051.7336735968954,
+      "upper_age_ma": 4888.759470252675,
+      "intercept_1s": 0.0031977893920887616,
+      "slope_1s": 0.0061402329786517966,
+      "lower_age_1s": 38.01936883111082,
+      "upper_age_1s": 4.338872284522683,
+      "dispersion": 155.03292758238885,
+      "dispersion_1s": 27.328020592030693
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.1454396824764744,
+      "slope": 0.008419631007642394,
+      "lower_age_ma": 948.0991471815502,
+      "upper_age_ma": 4827.732984519958,
+      "intercept_1s": 0.003878178424766655,
+      "slope_1s": 0.00020232592861602327,
+      "lower_age_1s": 23.23325875746509,
+      "upper_age_1s": 33.0919605204283,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "common",
+    "expected": {
+      "intercept": 0.14758899852300636,
+      "slope": 0.008245393463579767,
+      "lower_age_ma": 959.9183091556546,
+      "upper_age_ma": 4856.270739493009,
+      "intercept_1s": 0.0029465439691730632,
+      "slope_1s": 0.0,
+      "lower_age_1s": 18.516304886691806,
+      "upper_age_1s": 4.601799797902762,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "common±",
+    "expected": {
+      "intercept": 0.14719525277868037,
+      "slope": 0.008277303728340795,
+      "lower_age_ma": 957.7583611881936,
+      "upper_age_ma": 4850.994994804852,
+      "intercept_1s": 0.0031281086953181647,
+      "slope_1s": 8.545453406873655e-05,
+      "lower_age_1s": 19.401403124818028,
+      "upper_age_1s": 14.831963732081112,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "age",
+    "expected": {
+      "intercept": 0.15410133255676717,
+      "slope": 0.008168899036671734,
+      "lower_age_ma": 999.9999999999999,
+      "upper_age_ma": 4860.293127245755,
+      "intercept_1s": 0.0002899824289335972,
+      "slope_1s": 0.00017287507937329286,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 31.917571909712102,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "age±",
+    "expected": {
+      "intercept": 0.15278041048446528,
+      "slope": 0.008204800523985081,
+      "lower_age_ma": 992.0956115812462,
+      "upper_age_ma": 4855.666028920921,
+      "intercept_1s": 0.001580814317634662,
+      "slope_1s": 0.00017490598864920094,
+      "lower_age_1s": 9.310762518002317,
+      "upper_age_1s": 31.65370388338871,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "SK",
+    "expected": {
+      "intercept": 0.1501137557104965,
+      "slope": 0.008004479086830595,
+      "lower_age_ma": 973.3455025684253,
+      "upper_age_ma": 4897.530163072633,
+      "intercept_1s": 0.0032102793022533004,
+      "slope_1s": 1.4517520173215311e-05,
+      "lower_age_1s": 19.937236962958583,
+      "upper_age_1s": 2.186985499111232,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.1533232803614309,
+      "slope": 0.008129195334016258,
+      "lower_age_ma": 994.7110627484531,
+      "upper_age_ma": 4868.964801267576,
+      "intercept_1s": 0.005698469563470509,
+      "slope_1s": 0.00011377268256201381,
+      "lower_age_1s": 34.98272131765084,
+      "upper_age_1s": 17.50132620908275,
+      "dispersion": 142.0973849284268,
+      "dispersion_1s": 26.198587002722675
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "common",
+    "expected": {
+      "intercept": 0.1447179086622145,
+      "slope": 0.008245393463579767,
+      "lower_age_ma": 941.8685483195912,
+      "upper_age_ma": 4860.7405725779145,
+      "intercept_1s": 0.001694039358758871,
+      "slope_1s": 0.0,
+      "lower_age_1s": 10.654518987101529,
+      "upper_age_1s": 2.6290567108082032,
+      "dispersion": 0.08743865031869957,
+      "dispersion_1s": 0.015118907512081881
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "common±",
+    "expected": {
+      "intercept": 0.14573121535559594,
+      "slope": 0.008245393463579767,
+      "lower_age_ma": 948.2406862631514,
+      "upper_age_ma": 4859.166230114303,
+      "intercept_1s": 0.0011291553173228574,
+      "slope_1s": 0.0,
+      "lower_age_1s": 7.099571656209936,
+      "upper_age_1s": 1.756281377383278,
+      "dispersion": 0.01,
+      "dispersion_1s": 0.0
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "age",
+    "expected": {
+      "intercept": 0.15418474037653704,
+      "slope": 0.008119174874005056,
+      "lower_age_ma": 999.9999999999999,
+      "upper_age_ma": 4869.498939947744,
+      "intercept_1s": 0.00015535430975637532,
+      "slope_1s": 9.261557237763279e-05,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 17.194017586466003,
+      "dispersion": 142.58901080650472,
+      "dispersion_1s": 26.007632705367794
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "age±",
+    "expected": {
+      "intercept": 0.15440793596256147,
+      "slope": 0.007986115244145576,
+      "lower_age_ma": 999.9999999999998,
+      "upper_age_ma": 4894.386288872129,
+      "intercept_1s": 9.115914649661936e-05,
+      "slope_1s": 5.43451710139151e-05,
+      "lower_age_1s": 0.0,
+      "upper_age_1s": 10.24101922119943,
+      "dispersion": 10.0,
+      "dispersion_1s": 0.0
+    },
+    "n": 30
+  },
+  {
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "SK",
+    "expected": {
+      "intercept": 0.1568371326647932,
+      "slope": 0.007974074614879815,
+      "lower_age_ma": 1015.0389381669119,
+      "upper_age_ma": 4892.908413951689,
+      "intercept_1s": 0.005421246528620192,
+      "slope_1s": 2.4515996463544824e-05,
+      "lower_age_1s": 33.56960065144951,
+      "upper_age_1s": 3.7604404744277344,
+      "dispersion": 149.22618724416185,
+      "dispersion_1s": 26.96527423206871
+    },
+    "n": 30
+  },
+  {
+    "n": 60,
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.869414057430038,
+      "slope": -0.13153177301890662,
+      "lower_age_ma": 984.1809061489862,
+      "upper_age_ma": 4831.954725781449,
+      "intercept_1s": 0.015487359707455765,
+      "slope_1s": 0.0046283085394755044,
+      "lower_age_1s": 18.532296724949255,
+      "upper_age_1s": 24.183186847564667,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    }
+  },
+  {
+    "n": 60,
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.8910678658365521,
+      "slope": -0.14355369758730838,
+      "lower_age_ma": 1043.5348884603989,
+      "upper_age_ma": 4854.0622073307695,
+      "intercept_1s": 0.009219275661741291,
+      "slope_1s": 0.0046387850809941275,
+      "lower_age_1s": 24.07900204778087,
+      "upper_age_1s": 12.638280007371163,
+      "dispersion": 125.77682015502583,
+      "dispersion_1s": 15.60184874593812
+    }
+  },
+  {
+    "n": 60,
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.15128783791817602,
+      "slope": 0.008345788963403053,
+      "lower_age_ma": 984.1809060096566,
+      "upper_age_ma": 4831.954726403896,
+      "intercept_1s": 0.0031078761466275875,
+      "slope_1s": 0.0001486682145647986,
+      "lower_age_1s": 18.53229671154732,
+      "upper_age_1s": 24.18318683235695,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    }
+  },
+  {
+    "n": 60,
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.15711103239685587,
+      "slope": 0.008127806074656579,
+      "lower_age_ma": 1018.4042869747001,
+      "upper_age_ma": 4863.26475910646,
+      "intercept_1s": 0.003656236560356763,
+      "slope_1s": 8.1017174211093e-05,
+      "lower_age_1s": 22.311599316422196,
+      "upper_age_1s": 12.302363596593684,
+      "dispersion": 120.03240808424644,
+      "dispersion_1s": 15.025241928299508
+    }
+  },
+  {
+    "n": 200,
+    "space": "tera_wasserburg",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.8616026717378217,
+      "slope": -0.13026928691143008,
+      "lower_age_ma": 984.3704162542468,
+      "upper_age_ma": 4818.27779371565,
+      "intercept_1s": 0.008212209920614867,
+      "slope_1s": 0.0023532631445514207,
+      "lower_age_1s": 9.183990180363418,
+      "upper_age_1s": 13.076186929264606,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    }
+  },
+  {
+    "n": 200,
+    "space": "tera_wasserburg",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.8775006740627425,
+      "slope": -0.1389656217545182,
+      "lower_age_ma": 1027.7946829836083,
+      "upper_age_ma": 4834.867550945109,
+      "intercept_1s": 0.005361242016308503,
+      "slope_1s": 0.002459167449478757,
+      "lower_age_1s": 12.607233154938001,
+      "upper_age_1s": 7.621467443309408,
+      "dispersion": 122.8901867365259,
+      "dispersion_1s": 8.75146802596023
+    }
+  },
+  {
+    "n": 200,
+    "space": "wetherill",
+    "model": 2,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.15119415415351428,
+      "slope": 0.008421452802187637,
+      "lower_age_ma": 984.3704179785992,
+      "upper_age_ma": 4818.277796125018,
+      "intercept_1s": 0.0015441520542997735,
+      "slope_1s": 8.026755300800713e-05,
+      "lower_age_1s": 9.183990150356996,
+      "upper_age_1s": 13.076186910319704,
+      "dispersion": NaN,
+      "dispersion_1s": NaN
+    }
+  },
+  {
+    "n": 200,
+    "space": "wetherill",
+    "model": 3,
+    "anchor": "none",
+    "expected": {
+      "intercept": 0.15564416246050114,
+      "slope": 0.008218397827925017,
+      "lower_age_ma": 1010.1922583902792,
+      "upper_age_ma": 4848.604172562474,
+      "intercept_1s": 0.0019374803880837354,
+      "slope_1s": 4.8759113896391564e-05,
+      "lower_age_1s": 11.804938029118905,
+      "upper_age_1s": 7.424842857465156,
+      "dispersion": 115.63793777039729,
+      "dispersion_1s": 8.465930664992998
+    }
+  }
+]

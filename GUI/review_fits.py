@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import importlib
 import threading
+import time
+import hashlib
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -13,12 +16,79 @@ import pyqtgraph as pg
 
 from UPbRPy.regression import (
     Anchor, BootstrapResult, bootstrap_discordia, concordia_xy, fit_discordia,
-    fit_record, write_isochron_fits,
+    fit_record, model_name, write_isochron_fits,
 )
 from UPbRPy.results import format_mswd, format_value_with_uncertainty
 
 
-_BOOT_CHUNK = 125
+_BOOT_CHUNK = 500
+_PARTIAL_INTERVAL = .2
+_MODEL_TOOLTIPS = (
+    "Maximum-likelihood (York) fit weighted by each analysis's analytical uncertainties "
+    "and error correlations. Reports MSWD and p; reported uncertainties are expanded "
+    "by sqrt(MSWD) when p < alpha (default 0.05). Isoplot/IsoplotR model 1.",
+    "Total-least-squares (orthogonal) line in Tera-Wasserburg coordinates, ignoring "
+    "analytical uncertainties. Parameter uncertainties come from point scatter about "
+    "the line. Wetherill results are transformed back. Isoplot/IsoplotR model 2.",
+    "Maximum likelihood with extra dispersion fitted with the line: in radiogenic "
+    "end-member age (Ma), or in common 207Pb/206Pb for a common-Pb anchor. An anchor "
+    "uncertainty fixes that dispersion instead of fitting it. Reports dispersion. "
+    "Isoplot/IsoplotR model 3.",
+)
+
+
+def _chunk_size(resamples):
+    # Retain finer previews for short, explicitly requested bootstraps.
+    return _BOOT_CHUNK if resamples > 500 else 125
+
+
+def _scope_key(scope):
+    """Hash numerical content, including acquisition groups and their order."""
+    digest = hashlib.blake2b(digest_size=24)
+    def add(value):
+        if isinstance(value, np.ndarray):
+            digest.update(str((value.dtype.str, value.shape)).encode())
+            if value.dtype.kind in "OUS":
+                add(value.tolist())
+            else:
+                digest.update(np.ascontiguousarray(value).tobytes())
+        elif isinstance(value, dict):
+            for key in sorted(value):
+                add(key)
+                add(value[key])
+        elif isinstance(value, (list, tuple)):
+            digest.update(str(len(value)).encode())
+            for item in value:
+                add(item)
+        else:
+            data = repr(value).encode()
+            digest.update(str(len(data)).encode()+b":"+data)
+    add((scope["points"], scope["kwargs"], scope["depth"]))
+    return digest.digest()
+
+
+class _FitCache:
+    """Bounded LRU shared by a panel and its snapshot workers."""
+
+    def __init__(self, capacity=32):
+        self.capacity = capacity
+        self.entries = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, key):
+        with self.lock:
+            if key not in self.entries:
+                return None
+            self.entries.move_to_end(key)
+            return self.entries[key]
+
+    def put(self, key, value):
+        with self.lock:
+            self.entries[key] = value
+            self.entries.move_to_end(key)
+            while len(self.entries) > self.capacity:
+                self.entries.popitem(last=False)
+
 
 
 def _export_svg(scene, path):
@@ -62,10 +132,13 @@ class _FitSignals(QtCore.QObject):
 class _FitWorker(QtCore.QRunnable):
     """Compute fits and deterministic bootstrap chunks without accessing widgets."""
 
-    def __init__(self, generation, scopes, options, cancelled):
+    def __init__(self, generation, scopes, options, cancelled, cache=None):
         super().__init__()
         self.generation, self.scopes, self.options = generation, scopes, options
         self.cancelled = cancelled
+        self.cache = cache if cache is not None else _FitCache()
+        self.chunk_size = _chunk_size(options["resamples"])
+        self._last_emit = -float("inf")
         self.signals = _FitSignals()
 
     def run(self):
@@ -75,7 +148,11 @@ class _FitWorker(QtCore.QRunnable):
                 if self.cancelled.is_set():
                     return
                 try:
-                    fit = fit_discordia(*scope["points"], **scope["kwargs"])
+                    key = ("fit", _scope_key(scope))
+                    fit = self.cache.get(key)
+                    if fit is None:
+                        fit = fit_discordia(*scope["points"], **scope["kwargs"])
+                        self.cache.put(key, fit)
                     results.append((scope, fit, None))
                 except (ValueError, RuntimeError, ArithmeticError, np.linalg.LinAlgError) as exc:
                     errors.append(f"{scope['label']} · {scope['n_valid']} of {scope['n_total']} "
@@ -84,39 +161,50 @@ class _FitWorker(QtCore.QRunnable):
             for index, (scope, fit, _) in enumerate(results):
                 chunks = []
                 target = self.options["resamples"]
-                for offset in range(0, target, _BOOT_CHUNK):
+                key = ("bootstrap", _scope_key(scope), target, self.options["seed"], self.chunk_size)
+                cached = self.cache.get(key)
+                if cached is not None:
+                    results[index] = scope, fit, cached
+                    self._emit(results, errors)
+                    continue
+                for offset in range(0, target, self.chunk_size):
                     if self.cancelled.is_set():
                         return
-                    # Each chunk has an explicit seed. The preview is a prefix
-                    # of the final distribution; changing the target preserves it.
+                    # Each chunk has an explicit seed. At the recorded chunk
+                    # size, the preview is a prefix of the final distribution.
                     chunk = bootstrap_discordia(
                         *scope["points"], **scope["kwargs"], fit=fit,
                         method="resample" if scope["depth"] else "parametric",
-                        n_resamples=min(_BOOT_CHUNK, target-offset),
-                        seed=self.options["seed"] + offset // _BOOT_CHUNK,
-                        chunk=_BOOT_CHUNK,
+                        n_resamples=min(self.chunk_size, target-offset),
+                        seed=self.options["seed"] + offset // self.chunk_size,
+                        chunk=self.chunk_size,
                     )
                     chunks.append(chunk)
                     count = sum(c.n_resamples for c in chunks)
-                    if count % 250 == 0 or count == target:
+                    if count == target or time.monotonic()-self._last_emit >= _PARTIAL_INTERVAL:
                         boot = BootstrapResult(
                             chunk.method, count, self.options["seed"], chunk.confidence,
                             *(np.concatenate([getattr(c, name) for c in chunks]) for name in
                               ("intercept", "slope", "lower_ma", "upper_ma", "common_pb_76", "converged")),
                             elapsed_s=sum(c.elapsed_s for c in chunks),
                             notes=list(chunk.notes) + [
-                                f"Studio bootstrap chunks: {_BOOT_CHUNK} resamples; chunk k uses seed + k (k starts at 0)."],
+                                f"Studio bootstrap chunks: {self.chunk_size} resamples; chunk k uses seed + k (k starts at 0)."],
                         )
                         results[index] = scope, fit, boot
+                        if count == target:
+                            self.cache.put(key, boot)
                         self._emit(results, errors)
         except Exception as exc:
             errors.append(str(exc))
             self._emit(results, errors)
         finally:
+            self._emit(results, errors, force=True)
             self.signals.finished.emit(self.generation)
 
-    def _emit(self, results, errors):
-        if not self.cancelled.is_set():
+    def _emit(self, results, errors, *, force=False):
+        now = time.monotonic()
+        if not self.cancelled.is_set() and (force or now-self._last_emit >= _PARTIAL_INTERVAL):
+            self._last_emit = now
             self.signals.partial.emit((self.generation, list(results), list(errors)))
 
 
@@ -130,9 +218,14 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self.review, self.kind = review, kind
         self.view_name = "spot means" if kind == "spot" else "depth-profile intervals"
         self.records = []
+        self._live_records = self.records
+        self._errors = []
         self._generation = 0
         self._cancelled = threading.Event()
         self._workers = {}
+        self._cache = _FitCache()
+        self._request_key = None
+        self._pending_scopes = []
         self._overlays = []
         self._restoring = False
         self._was_enabled = False
@@ -162,7 +255,12 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self.together = QtWidgets.QCheckBox("One fit through all selected")
         form.addRow(self.together)
         self.model_combo = QtWidgets.QComboBox()
-        self.model_combo.addItems(["Model 1", "Model 2", "Model 3"])
+        for model, tooltip in enumerate(_MODEL_TOOLTIPS, 1):
+            self.model_combo.addItem(model_name(model), model)
+            self.model_combo.setItemData(model-1, tooltip, QtCore.Qt.ItemDataRole.ToolTipRole)
+        self.model_combo.setToolTip(_MODEL_TOOLTIPS[0])
+        self.model_combo.currentIndexChanged.connect(
+            lambda index: self.model_combo.setToolTip(_MODEL_TOOLTIPS[index]))
         form.addRow("Model", self.model_combo)
         self.anchor_combo = QtWidgets.QComboBox()
         for label, key in (("None", "none"), ("Common 207Pb/206Pb", "common_pb"),
@@ -258,6 +356,10 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self.readout.setVisible(self.fit_button.isChecked())
         self._was_enabled = self.fit_button.isChecked()
         self._fit_view_pending = self._was_enabled
+        # Restoring a project may next install saved records with a different
+        # recorded scope/chunk size. Stop any current job even when the controls
+        # happen to match; the caller can stop the new coalescing timer.
+        self._request_key = None
         self.invalidate()
 
     def set_enabled_default(self, enabled: bool) -> None:
@@ -303,12 +405,42 @@ class ReviewFitPanel(QtWidgets.QWidget):
 
     def invalidate(self):
         """Cancel stale work immediately and coalesce the next fit update."""
+        enabled = self.fit_button.isChecked()
+        scopes = self._scopes() if enabled else []
+        options = self.settings()
+        key = (enabled, tuple((scope["label"], _scope_key(scope)) for scope in scopes),
+               options["resamples"], options["seed"], _chunk_size(options["resamples"]))
+        def metadata_key(values):
+            return [(v["label"], v["n_total"], v["excluded_count"], v["items"], v["excluded"], v["branch"])
+                    for v in values]
+        metadata_changed = metadata_key(scopes) != metadata_key(self._pending_scopes)
+        self._pending_scopes = scopes
+        live = self.records is self._live_records
+        if key == self._request_key and (live or not metadata_changed):
+            # Counts and exclusions can change while the fitted arrays stay
+            # identical (for example, selecting an already-excluded spot).
+            current = {scope["label"]: scope for scope in scopes}
+            update_records = False
+            if live and metadata_changed:
+                for record in self.records:
+                    if record.get("label") in current:
+                        update_records |= self._record_scope_metadata(record, current[record["label"]])
+            if enabled:
+                if update_records:
+                    self.show_records(self._errors)
+                self._draw_records()
+                if update_records:
+                    self.recordsChanged.emit()
+            return
+        self._request_key = key
         self._cancelled.set()
         self._generation += 1
         self._timer.stop()
         self._clear_overlays()
-        if self.fit_button.isChecked():
+        if enabled:
             self.records = []
+            self._live_records = self.records
+            self._errors = []
             self.readout.setPlainText("Fitting…")
             self._timer.start(60)
 
@@ -320,7 +452,11 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self._overlays.clear()
 
     def _scopes(self):
-        canvas = self.canvas
+        # User defaults are restored while the owner is still constructing
+        # this page, before its canvas has been assigned.
+        canvas = getattr(self.review, self.kind + "_concordia", None)
+        if canvas is None:
+            return []
         frame = canvas._frame
         if "spot_name" not in frame or frame.empty:
             return []
@@ -344,7 +480,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
             excluded = sorted(set(scope.spot_name.astype(str)) & self.review.excluded_spots)
             used = scope.loc[~scope.spot_name.astype(str).isin(excluded)]
             def numeric(column):
-                return pd.to_numeric(used[column], errors="coerce").to_numpy(dtype=float)
+                return pd.to_numeric(used[column], errors="coerce").to_numpy(dtype=float, copy=True)
             x, y, sx, sy = (numeric(c) for c in (xcol, ycol, sxcol, sycol))
             rho = numeric(rho_column) if rho_column else np.zeros(len(used))
             rho = np.clip(np.nan_to_num(rho, nan=0., posinf=np.inf, neginf=-np.inf), -.999, .999)
@@ -366,7 +502,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
     def _start(self):
         if not self.fit_button.isChecked():
             return
-        scopes = self._scopes()
+        scopes = self._pending_scopes
         if not scopes:
             self.readout.setPlainText("No compatible shown points to fit")
             return
@@ -374,7 +510,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self._analytical_complete = False
         self._cancelled = threading.Event()
         self._lifetime_token[0] = self._cancelled
-        worker = _FitWorker(self._generation, scopes, self.settings(), self._cancelled)
+        worker = _FitWorker(self._generation, scopes, self.settings(), self._cancelled, self._cache)
         self._workers[self._generation] = worker
         worker.signals.partial.connect(self._accept, QtCore.Qt.ConnectionType.QueuedConnection)
         worker.signals.finished.connect(self._finished, QtCore.Qt.ConnectionType.QueuedConnection)
@@ -384,17 +520,26 @@ class ReviewFitPanel(QtWidgets.QWidget):
     def _finished(self, generation):
         self._workers.pop(generation, None)
 
+    def _record_scope_metadata(self, record, scope):
+        metadata = dict(label=scope["label"], view=self.view_name, uncertainty_branch=scope["branch"],
+                        items=scope["items"], excluded=scope["excluded"], n_total=scope["n_total"],
+                        excluded_count=scope["excluded_count"])
+        changed = any(record.get(key) != value for key, value in metadata.items())
+        record.update(metadata)
+        return changed
+
     @QtCore.Slot(object)
     def _accept(self, payload):
         generation, results, errors = payload
         if generation != self._generation or not self.fit_button.isChecked():
             return
         records = []
+        current = {scope["label"]: scope for scope in self._pending_scopes}
         for scope, fit, boot in results:
+            scope = current.get(scope["label"], scope)
             record = fit_record(fit, boot)
-            record.update(label=scope["label"], view=self.view_name, uncertainty_branch=scope["branch"],
-                          items=scope["items"], excluded=scope["excluded"], n_total=scope["n_total"],
-                          excluded_count=scope["excluded_count"], bootstrap_chunk_size=_BOOT_CHUNK,
+            self._record_scope_metadata(record, scope)
+            record.update(bootstrap_chunk_size=_chunk_size(self.resamples.value()),
                           bootstrap_seed_rule="seed + chunk index", requested_resamples=self.resamples.value(),
                           requested_seed=self.seed.value())
             for which in ("lower", "upper"):
@@ -403,6 +548,8 @@ class ReviewFitPanel(QtWidgets.QWidget):
                     record[which + "_note"] = age.note
             records.append(record)
         self.records = records
+        self._live_records = records
+        self._errors = list(errors)
         self._analytical_complete = len(results) + len(errors) >= self._scope_count
         self.show_records(errors)
         self._draw_records()
@@ -412,7 +559,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
         blocks = []
         for r in self.records:
             anchor = "no anchor" if r.get("anchor") == "none" else r.get("anchor", "")
-            lines = [f"{r.get('label')} · {r.get('n')} of {r.get('n_total')} ({r.get('excluded_count', len(r.get('excluded', [])))} excluded) · model {r.get('model')} · {anchor}"]
+            lines = [f"{r.get('label')} · {r.get('n')} of {r.get('n_total')} ({r.get('excluded_count', len(r.get('excluded', [])))} excluded) · {model_name(r.get('model', 1))} (model {r.get('model')}) · {anchor}"]
             suffix = "_1s_with_decay" if r.get("decay_uncertainty_included") else "_1s"
             for which in ("lower", "upper"):
                 age = r.get(which + "_age_ma", np.nan)
@@ -441,7 +588,9 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self.readout.setPlainText("\n\n".join([*blocks, *errors]))
 
     def _draw_records(self):
-        canvas = self.canvas
+        canvas = getattr(self.review, self.kind + "_concordia", None)
+        if canvas is None:
+            return
         plot = canvas._plot_item
         if plot is None:
             return
@@ -458,7 +607,15 @@ class ReviewFitPanel(QtWidgets.QWidget):
                     item.setZValue(5)
                     plot.addItem(item, ignoreBounds=True)
                 self._overlays.append((plot, items))
-            items = self._overlays[index][1]
+            old_plot, items = self._overlays[index]
+            if old_plot is not plot:
+                for item in items:
+                    if item in old_plot.items:
+                        old_plot.removeItem(item)
+                self._overlays[index] = plot, items
+            for item in items:
+                if item not in plot.items:
+                    plot.addItem(item, ignoreBounds=True)
             color = canvas._sample_colors.get(r["label"], canvas._theme.accent)
             for item in items[:3]:
                 item.setPen(pg.mkPen(color, width=1.5 if item is items[0] else .8,

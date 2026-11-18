@@ -8,15 +8,15 @@ concordia-intercept ages and, for Tera-Wasserburg, the common
 
 Methods
 -------
-* Model 1 (default): maximum-likelihood line with the analytical
+* Analytical errors only (model 1, default): maximum-likelihood line with the analytical
   uncertainties only. Unanchored fits use the York et al. (2004) iteration and
   its closed-form parameter covariance. Following IsoplotR (Vermeesch 2018),
   the covariance is multiplied by the MSWD when the chi-square probability is
   below ``alpha`` (0.05 by default); both versions are kept.
-* Model 2: total least squares (orthogonal regression) that ignores the
+* Equal weights, errors ignored (model 2): total least squares (orthogonal regression) that ignores the
   analytical uncertainties; the scatter of the perpendicular residuals sets
   the parameter uncertainties (IsoplotR model 2).
-* Model 3: maximum likelihood with an added dispersion term estimated with
+* Analytical errors + excess scatter (model 3): maximum likelihood with an added dispersion term estimated with
   the line (IsoplotR model 3, after Vermeesch 2018 and Ludwig 2003). For
   unanchored and age-anchored fits the dispersion is in the concordia
   (radiogenic end-member) age, in Ma; for fits anchored to a fixed common
@@ -63,7 +63,7 @@ import warnings
 from typing import Iterable
 
 import numpy as np
-from scipy.optimize import brentq, minimize
+from scipy.optimize import OptimizeResult, brentq, minimize
 from scipy.stats import chi2
 
 from .constants import (
@@ -93,6 +93,7 @@ __all__ = [
     "stacey_kramers_76",
     "isochron_fit_table",
     "isochron_footnotes",
+    "model_name",
     "write_isochron_fits",
 ]
 
@@ -101,6 +102,15 @@ EARTH_AGE_MA = 4567.3
 MAX_AGE_MA = 5000.0
 SPACES = ("tera_wasserburg", "wetherill")
 MODELS = (1, 2, 3)
+
+
+_MODEL_NAMES = {1: "Analytical errors only", 2: "Equal weights, errors ignored",
+                3: "Analytical errors + excess scatter"}
+
+
+def model_name(model: int) -> str:
+    """Return the informative short name of an Isoplot/IsoplotR fit model."""
+    return _MODEL_NAMES[model]
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +647,11 @@ class _Problem:
             else:
                 names.append("logw")
         self.names = tuple(names)
+        self.vx, self.vy, self.cxy = sx*sx, sy*sy, rho*sx*sy
+        det = self.vx*self.vy - self.cxy*self.cxy
+        self.inv_xx, self.inv_yy, self.inv_xy = self.vy/det, self.vx/det, -self.cxy/det
+        self.age_grid = _age_grid(space)
+        self.grid_X, self.grid_Y = concordia_xy(self.age_grid, space, decay)
 
     def line(self, theta):
         p = dict(zip(self.names, theta))
@@ -668,12 +683,18 @@ class _Problem:
         return float(np.exp(p["logw"])) if "logw" in p else self.fixed_w
 
     def lower_age(self, a, b):
-        p_age = None
         if self.anchor.kind == "age":
             return self.anchor.value
-        roots = _roots_batch(a, b, self.space, self.decay.lambda_238, self.decay.lambda_235, self.u)[0]
-        p_age = float(roots[0])
-        return p_age
+        # A scalar Brent solve avoids allocating and iterating a batch of one
+        # for every likelihood evaluation. Use exactly the public root grid.
+        f = a + b*self.grid_X - self.grid_Y
+        brackets = np.flatnonzero(f[:-1]*f[1:] < 0)
+        if not brackets.size:
+            return float("nan")
+        i = brackets[0]
+        return brentq(lambda t: float(_residual(t, a, b, self.space,
+                      self.decay.lambda_238, self.decay.lambda_235, self.u)),
+                      self.age_grid[i], self.age_grid[i+1], xtol=1e-10)
 
     def dispersion_jacobian(self, a, b, theta):
         """Per-point displacement per unit dispersion, shape (n, 2)."""
@@ -708,41 +729,123 @@ class _Problem:
     def residual_variance(self, b):
         return self.sy ** 2 + b * b * self.sx ** 2 - 2.0 * b * self.rho * self.sx * self.sy
 
-    def objective(self, theta):
-        try:
-            a, b = self.line(theta)
-        except (FloatingPointError, ValueError):
-            return np.inf
+    def line_gradient(self, theta):
+        """Line parameters and their analytic derivatives in fit coordinates."""
+        a, b = self.line(theta)
+        k = len(theta)
+        da, db = np.zeros(k), np.zeros(k)
+        p = dict(zip(self.names, theta))
+        for name, derivative in (("a", da), ("b", db)):
+            if name in p:
+                derivative[self.names.index(name)] = 1.
+        if self.anchor.kind == "age":
+            t = p.get("t", self.anchor.value)
+            X, _ = concordia_xy(t, self.space, self.decay)
+            da = -X*db
+            if "t" in p:
+                dX, dY = _concordia_derivatives(t, self.space, self.decay.lambda_238,
+                                               self.decay.lambda_235, self.u)["t"]
+                da[self.names.index("t")] = dY-b*dX
+        elif self.anchor.kind == "stacey_kramers":
+            t = p["t"]
+            dc = self.decay
+            mu, t0 = (7.19, 4570.) if t > 3700 else (9.74, 3700.)
+            r64 = (9.307 if t > 3700 else 11.152) + mu*(np.exp(dc.lambda_238*t0)-np.exp(dc.lambda_238*t))
+            r76 = float(stacey_kramers_76(t, dc))
+            dr = mu*(r76*dc.lambda_238*np.exp(dc.lambda_238*t)
+                     - dc.lambda_235*np.exp(dc.lambda_235*t)/137.88)/r64
+            X, Y = concordia_xy(t, self.space, dc)
+            dX, dY = _concordia_derivatives(t, self.space, dc.lambda_238, dc.lambda_235, self.u)["t"]
+            i = self.names.index("t")
+            if self.space == "tera_wasserburg":
+                da[i], db[i] = dr, (dY-dr-b*dX)/X
+            else:
+                db[i] = -dr/(r76*r76*self.u)
+                da[i] = dY-db[i]*X-b*dX
+        return a, b, da, db
+
+    def value_gradient(self, theta):
+        """Vectorised likelihood and analytic gradient, including dispersion."""
+        a, b, da, db = self.line_gradient(theta)
+        k = len(theta)
+        invalid = (np.inf, np.zeros(k))
         if not (np.isfinite(a) and np.isfinite(b)):
-            return np.inf
-        r = self.y - a - b * self.x
+            return invalid
+        r = self.y-a-b*self.x
+        dr = -da[:, None]-db[:, None]*self.x
         if self.model == 2:
-            d2 = r * r / (1.0 + b * b)
-            value = 0.5 * self.x.size * np.log(np.sum(d2))
+            ss = np.sum(r*r)
+            value = .5*self.x.size*np.log(ss/(1+b*b))
+            grad = self.x.size*(np.sum(r*dr, axis=1)/ss-b*db/(1+b*b))
         else:
-            v = self.residual_variance(b)
-            value = 0.0
+            v = self.vy+b*b*self.vx-2*b*self.cxy
+            dv = db[:, None]*(2*b*self.vx-2*self.cxy)
+            value, grad = 0., np.zeros(k)
             if self.model == 3:
                 w = self.dispersion(theta)
                 if w > self.max_dispersion():
-                    return np.inf
-                J = self.dispersion_jacobian(a, b, theta)
-                if J is None:
-                    return np.inf
-                g = J[:, 1] - b * J[:, 0]
-                v = v + w * w * g * g
-                # log det(Sigma_i + w^2 J J^T) - log det(Sigma_i)
-                det = self.sx ** 2 * self.sy ** 2 * (1.0 - self.rho ** 2)
-                inv_xx = self.sy ** 2 / det
-                inv_yy = self.sx ** 2 / det
-                inv_xy = -self.rho * self.sx * self.sy / det
-                q = J[:, 0] ** 2 * inv_xx + 2 * J[:, 0] * J[:, 1] * inv_xy + J[:, 1] ** 2 * inv_yy
-                value += 0.5 * np.sum(np.log1p(w * w * q))
+                    return invalid
+                p = dict(zip(self.names, theta))
+                t = p.get("t")
+                if t is None:
+                    t = self.lower_age(a, b)
+                if not np.isfinite(t):
+                    return invalid
+                dt = np.zeros(k)
+                if "t" in p:
+                    dt[self.names.index("t")] = 1.
+                elif self.anchor.kind != "age":
+                    gt, _ = _age_gradients(t, a, b, self.space, self.decay)
+                    dt = gt[0]*da+gt[1]*db
+                dc = self.decay
+                d8 = dc.lambda_238*np.exp(dc.lambda_238*t)
+                d5 = dc.lambda_235*np.exp(dc.lambda_235*t)
+                if self.dispersion_kind == "age":
+                    if self.space == "tera_wasserburg":
+                        jx = -d8*self.x**2
+                        jy = self.x*(d5/self.u-self.y*d8)
+                        jxt = dc.lambda_238*jx
+                        jyt = self.x*(dc.lambda_235*d5/self.u-self.y*dc.lambda_238*d8)
+                    else:
+                        jx, jy = np.full_like(self.x, d5), np.full_like(self.x, d8)
+                        jxt, jyt = dc.lambda_235*jx, dc.lambda_238*jy
+                elif self.space == "tera_wasserburg":
+                    jx, jy = np.zeros_like(self.x), 1-self.x*np.expm1(dc.lambda_238*t)
+                    jxt, jyt = np.zeros_like(self.x), -self.x*d8
+                else:
+                    jx, jy = (self.y-np.expm1(dc.lambda_238*t))*self.u, np.zeros_like(self.x)
+                    jxt, jyt = np.full_like(self.x, -d8*self.u), np.zeros_like(self.x)
+                djx, djy = dt[:, None]*jxt, dt[:, None]*jyt
+                g = jy-b*jx
+                dg = djy-b*djx-db[:, None]*jx
+                q = jx*jx*self.inv_xx+2*jx*jy*self.inv_xy+jy*jy*self.inv_yy
+                dq = 2*(jx*self.inv_xx+jy*self.inv_xy)*djx+2*(jy*self.inv_yy+jx*self.inv_xy)*djy
+                dlw = np.zeros(k)
+                if "logw" in p:
+                    dlw[self.names.index("logw")] = 1.
+                w2 = w*w
+                v = v+w2*g*g
+                dv = dv+2*w2*(g*dg+dlw[:, None]*g*g)
+                value = .5*np.sum(np.log1p(w2*q))
+                grad = .5*np.sum(w2*(dq+2*dlw[:, None]*q)/(1+w2*q), axis=1)
             if np.any(v <= 0):
-                return np.inf
-            value += 0.5 * np.sum(r * r / v)
-        value += self.prior(theta, a, b)
-        return float(value) if np.isfinite(value) else np.inf
+                return invalid
+            value += .5*np.sum(r*r/v)
+            grad += np.sum(r*dr/v-.5*r*r*dv/(v*v), axis=1)
+        anchor = self.anchor
+        if anchor.sigma > 0 and self.model != 3:
+            if anchor.kind == "common_pb":
+                c = a if self.space == "tera_wasserburg" else 1/(b*self.u)
+                dc = da if self.space == "tera_wasserburg" else -db/(b*b*self.u)
+                grad += (c-anchor.value)*dc/anchor.sigma**2
+            elif anchor.kind == "age":
+                i = self.names.index("t")
+                grad[i] += (theta[i]-anchor.value)/anchor.sigma**2
+            value += self.prior(theta, a, b)
+        return (float(value), grad) if np.isfinite(value) else invalid
+
+    def objective(self, theta):
+        return self.value_gradient(theta)[0]
 
     def prior(self, theta, a, b):
         anchor = self.anchor
@@ -760,24 +863,6 @@ class _Problem:
         """Model-1 weighted sum of squares at a line (used for the MSWD)."""
         r = self.y - a - b * self.x
         return float(np.sum(r * r / self.residual_variance(b)))
-
-
-def _hessian(fun, theta, scale):
-    """Central-difference Hessian with per-parameter steps."""
-    k = len(theta)
-    H = np.empty((k, k))
-    h = 1e-4 * scale
-    f0 = fun(theta)
-    for i in range(k):
-        ei = np.zeros(k)
-        ei[i] = h[i]
-        H[i, i] = (fun(theta + ei) - 2 * f0 + fun(theta - ei)) / h[i] ** 2
-        for j in range(i + 1, k):
-            ej = np.zeros(k)
-            ej[j] = h[j]
-            H[i, j] = H[j, i] = (fun(theta + ei + ej) - fun(theta + ei - ej)
-                                 - fun(theta - ei + ej) + fun(theta - ei - ej)) / (4 * h[i] * h[j])
-    return H
 
 
 def _initial_theta(problem, start):
@@ -814,15 +899,48 @@ def _initial_theta(problem, start):
 def _fit_likelihood(problem: _Problem, start: LineFit):
     theta0 = _initial_theta(problem, start)
     fun = problem.objective
-    best = None
     with np.errstate(all="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        best = _minimise(fun, theta0)
+        if problem.model == 2 and problem.anchor.kind == "none":
+            # The principal eigenvector is the exact maximum-likelihood TLS
+            # estimate; optimising again only chases floating-point noise.
+            best = OptimizeResult(x=theta0, fun=fun(theta0), success=True)
+        elif problem.model == 2 and problem.anchor.sigma == 0 and problem.anchor.kind in {"common_pb", "age"}:
+            if problem.anchor.kind == "common_pb" and problem.space == "wetherill":
+                # In Wetherill coordinates common Pb fixes the slope.
+                _, b = problem.line(theta0)
+                theta0[0] = np.mean(problem.y-b*problem.x)
+            else:
+                if problem.anchor.kind == "common_pb":
+                    x0, y0 = 0., problem.anchor.value
+                else:
+                    x0, y0 = concordia_xy(problem.anchor.value, problem.space, problem.decay)
+                X, Y = problem.x-x0, problem.y-y0
+                _, vectors = np.linalg.eigh([[X@X, X@Y], [X@Y, Y@Y]])
+                theta0[0] = vectors[1, -1]/vectors[0, -1]
+            best = OptimizeResult(x=theta0, fun=fun(theta0), success=True)
+        else:
+            best = _minimise(problem, theta0)
     theta = best.x
     scale = np.maximum(np.abs(theta), 1e-3)
     if "logw" in problem.names:
         scale[problem.names.index("logw")] = 1.0
-    H = _hessian(fun, theta, scale)
+    if problem.model == 2 and problem.anchor.kind == "none":
+        a, b = theta
+        r = problem.y-a-b*problem.x
+        ss = r@r
+        n = problem.x.size
+        H = n*np.array([[n/ss, np.sum(problem.x)/ss],
+                        [np.sum(problem.x)/ss, problem.x@problem.x/ss-1/(1+b*b)]])
+    else:
+        # Differentiate the analytic gradient: 2k vectorised evaluations
+        # instead of 2k^2 function evaluations for a scalar Hessian.
+        h = 1e-5*scale
+        eye = np.eye(len(theta))
+        H = np.column_stack([(problem.value_gradient(theta+eye[i]*h[i])[1]
+                              -problem.value_gradient(theta-eye[i]*h[i])[1])/(2*h[i])
+                             for i in range(len(theta))])
+        H = (H+H.T)/2
     theta_cov = _inverse(H)
     if "logw" in problem.names:
         i = problem.names.index("logw")
@@ -836,14 +954,39 @@ def _fit_likelihood(problem: _Problem, start: LineFit):
     return theta, theta_cov, bool(best.success or np.isfinite(best.fun))
 
 
-def _minimise(fun, theta0):
-    best = None
-    for method in ("Nelder-Mead", "Powell", "Nelder-Mead"):
-        res = minimize(fun, theta0 if best is None else best.x, method=method,
-                       options={"xatol": 1e-12, "fatol": 1e-14, "maxiter": 20000, "maxfev": 40000}
-                       if method == "Nelder-Mead" else {"xtol": 1e-12, "ftol": 1e-14, "maxiter": 20000})
-        if best is None or res.fun <= best.fun:
-            best = res
+def _minimise(problem, theta0):
+    """Optimise scaled coordinates with analytic gradients, then Newton polish."""
+    scale = np.maximum(np.abs(theta0), 1e-3)
+    if "logw" in problem.names:
+        scale[problem.names.index("logw")] = 1.
+    def fun(z):
+        value, grad = problem.value_gradient(z*scale)
+        return value, grad*scale
+    best = minimize(fun, theta0/scale, jac=True, method="BFGS",
+                    options={"gtol": 1e-8, "maxiter": 200})
+    # Close to the optimum the objective can round to the same float at
+    # adjacent iterates. A Newton step based on the gradient resolves this
+    # without thousands of derivative-free evaluations.
+    z = best.x.copy()
+    for _ in range(4):
+        value, g = fun(z)
+        h = 1e-5*np.maximum(np.abs(z), 1.)
+        H = np.column_stack([(fun(z+np.eye(len(z))[i]*h[i])[1]
+                              -fun(z-np.eye(len(z))[i]*h[i])[1])/(2*h[i]) for i in range(len(z))])
+        try:
+            step = np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:
+            break
+        if not np.all(np.isfinite(step)) or np.linalg.norm(step) > .1:
+            break
+        candidate = z-step
+        if fun(candidate)[0] > value+1e-10*max(1., abs(value)):
+            break
+        z = candidate
+        if np.max(np.abs(step)) < 1e-11:
+            break
+    best.x = z*scale
+    best.fun = problem.objective(best.x)
     return best
 
 
@@ -855,17 +998,9 @@ def _inverse(H):
 
 
 def _line_jacobian(problem, theta):
-    """d(a, b)/d theta by central differences."""
-    k = len(theta)
-    J = np.zeros((2, k))
-    for i in range(k):
-        h = 1e-6 * max(abs(theta[i]), 1e-3)
-        e = np.zeros(k)
-        e[i] = h
-        a1, b1 = problem.line(theta + e)
-        a0, b0 = problem.line(theta - e)
-        J[:, i] = [(a1 - a0) / (2 * h), (b1 - b0) / (2 * h)]
-    return J
+    """d(a, b)/d theta in the problem's fit coordinates."""
+    _, _, da, db = problem.line_gradient(theta)
+    return np.array([da, db])
 
 
 def autocorrelation_inflation(x, y, sx, sy, rho, intercept, slope, groups, order) -> float:
@@ -966,7 +1101,10 @@ def _total_least_squares(x, y):
 
 @dataclass
 class DiscordiaFit:
-    """A discordia (or common-Pb isochron) fit and its concordia intercepts."""
+    """A discordia or common-Pb isochron and its concordia intercepts.
+
+    ``method_text()`` describes the named model, its Isoplot number and anchor.
+    """
 
     line: LineFit
     lower: InterceptAge | None
@@ -987,14 +1125,15 @@ class DiscordiaFit:
 
     def method_text(self) -> str:
         """Describe the method, model and anchor in one sentence."""
-        model = {1: "model 1 (analytical uncertainties"
-                    + (", inflated by sqrt(MSWD) because p < %g)" % self.alpha if self.line.overdispersed else ")"),
-                 2: "model 2 (total least squares, analytical uncertainties ignored)",
-                 3: "model 3 (analytical uncertainties plus a fitted dispersion)"}[self.line.model]
+        model = f"{model_name(self.line.model)} (model {self.line.model})"
+        if self.line.model == 1 and self.line.overdispersed:
+            model += f", uncertainties inflated by sqrt(MSWD) because p < {self.alpha:g}"
+        if self.line.model == 3:
+            model += ", dispersion in " + ("common 207Pb/206Pb" if self.line.anchor.kind == "common_pb"
+                                            else "radiogenic end-member age (Ma)")
         space = "Tera-Wasserburg (238U/206Pb vs 207Pb/206Pb)" if self.space == "tera_wasserburg" \
             else "Wetherill (207Pb/235U vs 206Pb/238U)"
-        return (f"Error-weighted regression in {space} space after York et al. (2004), "
-                f"{model}, anchor: {self.line.anchor.describe()}")
+        return f"{model} in {space} space; anchor: {self.line.anchor.describe()}"
 
     def summary(self) -> dict:
         """Flatten the fit for tables and exports (1 s values, ages in Ma)."""
@@ -1100,11 +1239,13 @@ def fit_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg", mode
         line.theta = np.array([line.intercept, line.slope])
         line.theta_cov = line.cov.copy()
     else:
-        start = york_fit(x, y, sx, sy, rho, space=space) if n >= 2 else LineFit(
-            y[0], 0.0, np.eye(2), np.nan, np.nan, 0, n, space, centroid=(x[0], y[0]))
-        if model == 2 and anchor.kind == "none":
+        if model == 2:
+            # Equal-weight fits need no analytical-error York iteration.
             a, b, cen = _total_least_squares(x, y)
             start = LineFit(a, b, np.eye(2), np.nan, np.nan, n - 2, n, space, centroid=cen)
+        else:
+            start = york_fit(x, y, sx, sy, rho, space=space) if n >= 2 else LineFit(
+                y[0], 0.0, np.eye(2), np.nan, np.nan, 0, n, space, centroid=(x[0], y[0]))
         problem = _Problem(x, y, sx, sy, rho, space, model, anchor, decay)
         theta, theta_cov, ok = _fit_likelihood(problem, start)
         a, b = problem.line(theta)
@@ -1334,7 +1475,7 @@ def bootstrap_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg"
         # Model 2 ignores the analytical uncertainties, so perturbing points
         # by them says nothing about its scatter; resample points instead.
         method = "resample"
-        early_notes.append("Model 2: points resampled with replacement (its fit ignores analytical errors).")
+        early_notes.append("Equal weights, errors ignored (model 2): points resampled with replacement (its fit ignores analytical errors).")
     x, y, sx, sy, rho, mask = _clean(x, y, sx, sy, rho)
     group_labels = None if groups is None else np.asarray(list(groups))[mask]
     x, y, sx, sy, rho = x[mask], y[mask], sx[mask], sy[mask], rho[mask]
@@ -1351,7 +1492,7 @@ def bootstrap_discordia(x, y, sx, sy, rho=0.0, *, space: str = "tera_wasserburg"
         theta = fit.line.theta if fit.line.theta is not None else np.array([])
         extra_J = problem.dispersion_jacobian(fit.line.intercept, fit.line.slope, theta)
         w = fit.line.dispersion
-        notes.append("Model-3 dispersion held at its fitted value in each resample.")
+        notes.append("Analytical errors + excess scatter (model 3): dispersion held at its fitted value in each resample.")
     intercepts = np.empty(B)
     slopes = np.empty(B)
     converged = np.empty(B, dtype=bool)
@@ -1639,6 +1780,8 @@ def isochron_fit_table(records: Iterable[dict]):
     rows = []
     for record in records:
         row = dict(record)
+        if row.get("model") in MODELS:
+            row["model"] = f"{model_name(row['model'])} (model {row['model']})"
         for name in ("lower_age", "upper_age"):
             row[f"{name}_2s"] = 2 * row.get(f"{name}_1s", np.nan)
             row[f"{name}_2s_with_decay"] = 2 * row.get(f"{name}_1s_with_decay", np.nan)
@@ -1660,10 +1803,15 @@ def isochron_footnotes(records: Iterable[dict]) -> list[str]:
         return []
     notes = [
         "Lines were fitted to correlated-error data by maximum likelihood (York et al. 2004; "
-        "Ludwig 1998); model 1 uses the analytical uncertainties only and its uncertainties are "
-        "multiplied by sqrt(MSWD) when p < 0.05; model 2 is total least squares in "
-        "238U/206Pb-207Pb/206Pb coordinates ignoring analytical uncertainties; model 3 adds a "
-        "dispersion term estimated with the line (Vermeesch 2018). Line-parameter uncertainties "
+        "Ludwig 1998); Analytical errors only (model 1) uses analytical uncertainties and reports MSWD "
+        "and p. Its uncertainties are "
+        "multiplied by sqrt(MSWD) when p < alpha (default 0.05); Equal weights, errors ignored "
+        "(model 2) is total least squares in "
+        "238U/206Pb-207Pb/206Pb coordinates ignoring analytical uncertainties; Analytical errors + "
+        "excess scatter (model 3) adds a "
+        "dispersion term in radiogenic end-member age (Ma), or common 207Pb/206Pb for common-Pb "
+        "anchors, estimated with the line (or fixed at the anchor uncertainty; Vermeesch 2018). "
+        "Line-parameter uncertainties "
         "are from the curvature of the likelihood; intercept-age uncertainties are propagated to "
         "first order.",
         "Intercepts are where the fitted line meets concordia computed with "
