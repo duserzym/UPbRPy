@@ -1,7 +1,7 @@
 """Final-review database buttons share menu actions and confirmation flows."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 from urllib.parse import urlsplit
@@ -158,9 +158,12 @@ def test_confirmation_cancel_then_yes(window, dialogs, monkeypatch, panel, use_k
         assert upload.call_args.kwargs["supersedes"] == origin["run_id"]
         prefer.assert_not_called()
     else:
-        prefer.assert_called_once_with(origin["server"], origin["session_id"], origin["run_id"])
+        prefer.assert_called_once_with(
+            origin["server"], origin["session_id"], origin["run_id"], idempotency_key=ANY,
+        )
         export.assert_not_called()
         upload.assert_not_called()
+    assert not dialogs
 
 
 @pytest.mark.parametrize("use_key", [True, False])
@@ -177,9 +180,11 @@ def test_submitted_and_preferred_status_name_session(window, dialogs, tmp_path, 
     assert window.statusBar().currentMessage() == f"Submitted to {label} as a new run."
     assert window.session.origin["run_id"] == "run-created"
     assert not scratch.exists()
-    assert any(kind == "box" and "id run-crea" in text for kind, title, text in dialogs)
+    assert window.database_panel.submit.status.text().startswith("done · run run-crea at ")
+    assert not dialogs
     window.database()._preferred(window, "run-created")
     assert window.statusBar().currentMessage() == f"The submitted run is now preferred for session {label}."
+    assert not dialogs
 
 
 def test_submit_shortcut_is_unique_and_routes_to_active_tab(window, app, monkeypatch):

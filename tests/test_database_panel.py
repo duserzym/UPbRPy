@@ -1,7 +1,7 @@
 """Explicit database navigation, cached checks and submission outcomes."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pandas as pd
 import pytest
@@ -365,16 +365,23 @@ def test_submit_cancel_failure_retry_and_prefer_use_unchanged_flows(window, dial
     assert panel.submit.status.text() == "failed"
     assert panel.submit.detail.text() == "Upload refused"
     assert upload.call_args.kwargs["supersedes"] == "run-previous"
+    first_key = upload.call_args.kwargs["idempotency_key"]
+    assert first_key
     upload.side_effect = None
     upload.return_value = SimpleNamespace(run_id="new-run-123", counts={"windows": 4, "results": 12},
                                           quarantine_items=[])
     panel.submit.primary.click()
+    assert upload.call_count == 2
+    assert upload.call_args.kwargs["idempotency_key"] == first_key
     assert panel.submit.status.text().startswith("done · run new-run- at ")
     assert "results: 12" in panel.submit.detail.text()
     assert window.session.origin["run_id"] == "new-run-123"
     panel.prefer.primary.click()
-    prefer.assert_called_once_with(ORIGIN["server"], ORIGIN["session_id"], "new-run-123")
+    prefer.assert_called_once_with(
+        ORIGIN["server"], ORIGIN["session_id"], "new-run-123", idempotency_key=ANY,
+    )
     assert panel.prefer.status.text() == "preferred"
+    assert not dialogs
 
 
 def test_other_session_outcomes_are_ignored_and_replacement_resets(window):

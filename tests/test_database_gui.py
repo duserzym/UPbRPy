@@ -165,7 +165,8 @@ def test_link_open_submit_prefer_round_trip(controller, dialogs, tmp_path, monke
             assert window.session.origin["run_id"] == "run-1"
             saved = json.loads(project.read_text())
             assert saved["origin"]["run_id"] == "run-1"
-            assert any(kind == "box" and "(id run-1)" in text for kind, _t, text in dialogs)
+            assert window.database_panel.submit.status.text().startswith("done · run run-1 at ")
+            assert all(kind == "question" for kind, _title, _text in dialogs)
             assert window.prefer_run_action.isEnabled()
 
             window.prefer_run_action.trigger()
@@ -610,7 +611,8 @@ def test_link_refuses_differences_without_changing_project(
     assert not window.submit_to_database_action.isEnabled()
     assert window.link_database_session_action.isEnabled()
     assert case.directories and all(not path.exists() for path in case.directories)
-    message = "\n".join(text for kind, _title, text in dialogs if kind == "warning")
+    message = window.database_panel.link.detail.text()
+    assert not dialogs
     if mismatch == "label":
         assert "labels" in message and "NIST612_1" in message and "Other_1" in message
     elif mismatch == "count":
@@ -677,7 +679,8 @@ def test_link_reports_label_only_fallback_and_server_hash_rejection(
     ))
     controller.database.link_session(case.window)
     assert case.window.session.origin
-    message = "\n".join(text for _kind, _title, text in dialogs)
+    message = case.window.database_panel.link.detail.text()
+    assert not dialogs
     assert "labels and counts only" in message
     assert "different export layouts" in message
     assert "Submission will be rejected because no input hash belongs" in message
@@ -698,7 +701,8 @@ def test_link_cleans_temporary_directory_when_fetch_fails(
     controller.database.link_session(case.window)
     assert not case.window.session.origin
     assert all(not path.exists() for path in case.directories)
-    assert any("Export could not be downloaded" in message for _kind, _title, message in dialogs)
+    assert "Export could not be downloaded" in case.window.database_panel.link.detail.text()
+    assert not dialogs
 
 
 def test_link_accepts_renamed_identical_inputs(controller, dialogs, local_link_project):
@@ -710,7 +714,8 @@ def test_link_accepts_renamed_identical_inputs(controller, dialogs, local_link_p
         path.rename(path.with_name(name))
     controller.database.link_session(case.window)
     assert case.window.session.origin
-    assert "Verified SHA-256 for 4 raw file(s)" in dialogs[-1][2]
+    assert "Verified SHA-256 for 4 raw file(s)" in case.window.database_panel.link.detail.text()
+    assert not dialogs
 
 
 def test_link_unnamed_reduction_stays_modified_until_save_as(controller, dialogs, local_link_project):
@@ -725,7 +730,8 @@ def test_link_unnamed_reduction_stays_modified_until_save_as(controller, dialogs
     assert case.window.session.origin
     assert case.window.has_unsaved_changes()
     assert case.project.read_bytes() == before
-    assert "Save the project to keep this link" in dialogs[-1][2]
+    assert "Save the project to keep this link" in case.window.database_panel.link.detail.text()
+    assert not dialogs
     target = case.project.with_name("linked.upbr")
     case.window.save_project(target)
     assert json.loads(target.read_text())["origin"] == case.window.session.origin

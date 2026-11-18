@@ -103,11 +103,13 @@ class DatabasePanel(QtWidgets.QWidget):
         for row in (self.link, self.check, self.submit, self.prefer):
             layout.addWidget(row)
         layout.addStretch()
-        self.link.primary.clicked.connect(lambda: window.database().link_session(window))
+        self.link.primary.clicked.connect(lambda: self._primary("link"))
+        self.link.secondary.clicked.connect(lambda: window.database().stop_operation(window, "link"))
         self.check.primary.clicked.connect(lambda: window.run_final_review())
-        self.submit.primary.clicked.connect(lambda: window.database().submit(window))
-        self.submit.secondary.clicked.connect(self.open_run)
-        self.prefer.primary.clicked.connect(lambda: window.database().prefer(window))
+        self.submit.primary.clicked.connect(lambda: self._primary("submit"))
+        self.submit.secondary.clicked.connect(lambda: self._secondary("submit"))
+        self.prefer.primary.clicked.connect(lambda: self._primary("prefer"))
+        self.prefer.secondary.clicked.connect(lambda: self._secondary("prefer"))
 
         self.strip = QtWidgets.QWidget()
         strip = QtWidgets.QHBoxLayout(self.strip)
@@ -125,6 +127,19 @@ class DatabasePanel(QtWidgets.QWidget):
         strip.addWidget(self.strip_button)
         self.hide()
         self.strip.hide()
+
+    def _primary(self, operation):
+        bridge = self.window.database()
+        if (id(self.window), operation) in getattr(bridge, "_actions", {}):
+            bridge.retry_operation(self.window, operation)
+        else:
+            getattr(bridge, {"link": "link_session", "submit": "submit", "prefer": "prefer"}[operation])(self.window)
+
+    def _secondary(self, operation):
+        if (id(self.window), operation) in getattr(self.window.database(), "_actions", {}):
+            self.window.database().stop_operation(self.window, operation)
+        elif operation == "submit":
+            self.open_run()
 
     def select_step(self) -> None:
         """Navigate only; linking and submitting require a separate page action."""
@@ -258,14 +273,26 @@ class DatabasePanel(QtWidgets.QWidget):
             "Mark as preferred" if run_id and not preferred else "",
         )
         busy = window._active_worker is not None or any(state == "working" for state, _ in self._operations.values())
+        pending = getattr(bridge, "_actions", {})
         for name, row in (("link", self.link), ("submit", self.submit), ("prefer", self.prefer)):
             state, result = self._operations.get(name, ("", None))
-            if state in {"working", "error"}:
-                row.show_state("working…" if state == "working" else "failed",
+            retained = (id(window), name) in pending
+            if state == "stopped" and retained:
+                row.show_state("stopped", str(result), theme.muted)
+            elif state == "waiting":
+                row.show_state("waiting for sign-in", str(result), theme.accent, "Retry now", "Stop")
+            elif state == "queued":
+                row.show_state("Server unreachable, will retry" if "Server unreachable:" in str(result)
+                               else "Server processing, will retry", str(result), theme.accent, "Retry now", "Stop")
+            elif state in {"working", "error", "stopped"}:
+                row.show_state("working…" if state == "working" else "failed" if state == "error" else "stopped",
                                "Please wait…" if state == "working" else str(result),
-                               theme.accent if state == "working" else theme.danger,
+                               theme.danger if state == "error" else theme.accent,
+                               "Retry now" if retained and state == "error" else
                                row.primary.text() if not row.primary.isHidden() else "",
-                               row.secondary.text() if not row.secondary.isHidden() else "")
-        for row in (self.link, self.check, self.submit, self.prefer):
-            row.primary.setEnabled(not busy)
-            row.secondary.setEnabled(not busy)
+                               "Stop" if retained else row.secondary.text() if not row.secondary.isHidden() else "")
+        for name, row in (("link", self.link), ("check", self.check), ("submit", self.submit), ("prefer", self.prefer)):
+            retained = (id(window), name) in pending
+            any_pending = any(key[0] == id(window) for key in pending)
+            row.primary.setEnabled(not busy and (retained or not any_pending))
+            row.secondary.setEnabled(retained or not busy)

@@ -382,6 +382,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         reduction = self.tabs.widget(index)
         if reduction is None or not reduction.request_close():
             return False
+        if reduction.database_links is not None:
+            reduction.database_links.stop_window(reduction)
         self.take_tab(reduction).deleteLater()
         if not self.tabs.count():
             self.add_tab()
@@ -417,7 +419,10 @@ class StudioWindow(QtWidgets.QMainWindow):
             return
         self.persist_layout_state()
         while self.tabs.count():
-            self.take_tab(self.tabs.widget(0)).deleteLater()
+            reduction = self.tabs.widget(0)
+            if reduction.database_links is not None:
+                reduction.database_links.stop_window(reduction)
+            self.take_tab(reduction).deleteLater()
         event.accept()
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt API

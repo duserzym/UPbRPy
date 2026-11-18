@@ -15,17 +15,23 @@ from collections import Counter
 from collections.abc import Callable
 import functools
 import json
+import math
+import random
 from pathlib import Path
 import secrets
 import shutil
 import tempfile
+import time
+import uuid
 from typing import Any
 from urllib.parse import urlsplit
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from shiboken6 import isValid
 
 from GUI.launch import LaunchTarget
 from GUI.workers import FunctionWorker
+from GUI.widgets import IssueBanner
 from UPbRPy.session_bundle import (
     SessionBundle, find_project_for_run, holds_reduced_work,
     install_run_project, pick_session_run,
@@ -50,6 +56,159 @@ def client():
     from UPbRPy.integration import upbdb
 
     return upbdb
+
+
+class _PendingAction(QtCore.QObject):
+    """One tab's prepared call, retried only by a GUI-thread timer."""
+
+    export_failed = QtCore.Signal(object)
+
+    def __init__(self, links, window, operation, server):
+        super().__init__(links)
+        self.links = links
+        self.window = window
+        self.session = window.session
+        self.operation = operation
+        self.server = server
+        self.key = str(uuid.uuid4())
+        self.scratch = None
+        self.function = None
+        self.on_success = None
+        self.in_flight = False
+        self.stopped = False
+        self.failures = 0
+        self.deadline = 0.0
+        self.connection_failed = False
+        self.authorization = None
+        self.runner = links.run
+        self.export_failed.connect(self._failed, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(250)
+        self.timer.timeout.connect(self._tick)
+        window.destroyed.connect(self.stop)
+
+    def valid(self):
+        return (not self.stopped and isValid(self.window)
+                and self.window.session is self.session)
+
+    def execute(self, function, on_success):
+        self.function, self.on_success = function, on_success
+        self.failures = 0
+        self.retry_now()
+
+    def retry_now(self):
+        if self.in_flight or not self.valid() or self.function is None:
+            return
+        self.timer.stop()
+        self.deadline = 0.0
+        self.in_flight = True
+        self.links.operation_changed.emit(self.session, self.operation, "working", None)
+        self.runner(self.function, self._done, title=self.operation, on_failure=self._failed)
+
+    def _done(self, result):
+        self.in_flight = False
+        if not self.valid():
+            self.stop()
+            return
+        self.on_success(result)
+
+    def _failed(self, error):
+        self.in_flight = False
+        if not self.valid():
+            self.stop()
+            return
+        from UPbRPy.integration import upbdb
+
+        self.connection_failed = isinstance(error, upbdb.ConnectionFailed)
+        pending = (getattr(error, "status", None) == 409
+                   and getattr(error, "code", None) == "idempotency_in_progress")
+        if self.connection_failed or pending:
+            delay = (getattr(error, "retry_after", None) if pending else None)
+            if delay is None:
+                delay = min(300, 5 * 2 ** min(self.failures, 6))
+                delay = min(300, delay * random.uniform(1, 1.15))
+            self.failures += 1
+            self.deadline = time.monotonic() + max(0.1, delay)
+            self.timer.start()
+            self._show_waiting()
+        else:
+            self.timer.stop()
+            self.links.operation_changed.emit(
+                self.session, self.operation, "error", _answered_error(self.server, error)
+            )
+
+    def _show_waiting(self):
+        seconds = max(1, math.ceil(self.deadline - time.monotonic()))
+        host = urlsplit(self.server).netloc or self.server
+        if self.connection_failed:
+            message = f"Server unreachable: {host}. Will retry in {seconds} s."
+            queue = f"Queued: will {self.operation} when {host} answers."
+        else:
+            message = f"{host} answered: 409 idempotency_in_progress. Will retry in {seconds} s."
+            queue = "The server is still processing this action."
+        self.links.operation_changed.emit(
+            self.session, self.operation, "queued",
+            f"{message}\n{queue} This queue lives in this open tab only; it is lost on app restart.",
+        )
+
+    @QtCore.Slot()
+    def _tick(self):
+        if not self.valid():
+            self.stop()
+        elif time.monotonic() >= self.deadline:
+            self.retry_now()
+        else:
+            self._show_waiting()
+
+    def complete(self):
+        self.stop(announce=False)
+
+    def stop(self, *_args, announce=True):
+        was_stopped = self.stopped
+        self.stopped = True
+        pending = self.links.pending_sign_in
+        if pending and self.authorization is not None and pending[1] is self.authorization:
+            self.links.pending_sign_in = (pending[0], None, pending[2])
+        self.authorization = None
+        self.timer.stop()
+        # An in-flight upload may still be reading the bundle. Its callback
+        # performs cleanup, without touching a closed tab, when it settles.
+        if self.in_flight:
+            if announce and not was_stopped:
+                self.links.operation_changed.emit(self.session, self.operation, "stopped",
+                                                  "Stopped. An in-flight request may already have reached the server.")
+            return
+        if self.scratch is not None:
+            shutil.rmtree(self.scratch, ignore_errors=True)
+            self.scratch = None
+        identity = (id(self.window), self.operation)
+        if self.links._actions.get(identity) is self:
+            self.links._actions.pop(identity)
+        if announce and isValid(self.window) and self.window.session is self.session:
+            self.links.operation_changed.emit(self.session, self.operation, "stopped", "Stopped.")
+        self.function = self.on_success = None
+        self.deleteLater()
+
+
+def _answered_error(server, error):
+    """Short server evidence followed by an actionable next step."""
+    from UPbRPy.integration import upbdb
+
+    if not isinstance(error, upbdb.DatabaseError):
+        return str(error)
+    host = urlsplit(server).netloc or server
+    if isinstance(error, upbdb.AuthenticationRequired) and error.status is None:
+        return f"Sign in to {host}, then press Retry now."
+    if isinstance(error, upbdb.AuthenticationRequired):
+        next_step = "Sign in again, then press Retry now."
+    elif isinstance(error, (upbdb.PermissionDenied, upbdb.NotFound)):
+        next_step = "Ask an administrator to check your access and the session."
+    elif isinstance(error, upbdb.RequestRejected):
+        next_step = "Check the bundle and session; stop this action before preparing a corrected submission."
+    else:
+        next_step = "Retry now, or ask the database administrator if this continues."
+    excerpt = " ".join((error.details or str(error)).split())[:240]
+    return f"{host} answered: {error.status or 'unexpected response'} {excerpt}. {next_step}"
 
 
 class DatabaseLinks(QtCore.QObject):
@@ -88,6 +247,9 @@ class DatabaseLinks(QtCore.QObject):
         self.sign_in: Callable[[str, Callable[[], None]], None] | None = None
         self.cache_root: Path | None = None
         self._signals: set[QtCore.QObject] = set()
+        self._workers = {}
+        self._actions = {}
+        self._flow_dialogs = set()
         self._open_contexts: dict[QtCore.QObject, list[Callable[[], None]]] = {}
         self.sign_in = self.prompt_sign_in
 
@@ -100,18 +262,98 @@ class DatabaseLinks(QtCore.QObject):
         title: str,
         on_failure: Callable[[Exception | str], None] | None = None,
     ) -> None:
-        """Run ``function`` on the worker pool; report errors in a dialog."""
+        """Run off-thread; pass the original exception to a supplied failure handler.
+
+        The worker's legacy ``failed(message, trace)`` signal stays unchanged.
+        """
         worker = FunctionWorker(function)
         signals = worker.signals
         self._signals.add(signals)
         failure_box = on_failure or (lambda message: self.show_error(title, message))
-        signals.succeeded.connect(on_success)
-        signals.failed.connect(lambda message, _trace: failure_box(message))
-        signals.finished.connect(lambda: self._signals.discard(signals))
+        self._workers[signals] = (worker, on_success, failure_box)
+        signals.succeeded.connect(self._worker_done, QtCore.Qt.ConnectionType.QueuedConnection)
+        signals.failed.connect(self._worker_failed, QtCore.Qt.ConnectionType.QueuedConnection)
+        signals.finished.connect(self._worker_finished, QtCore.Qt.ConnectionType.QueuedConnection)
         QtCore.QThreadPool.globalInstance().start(worker)
 
+    @QtCore.Slot(object)
+    def _worker_done(self, result):
+        self._workers[self.sender()][1](result)
+
+    @QtCore.Slot(str, str)
+    def _worker_failed(self, message, _trace):
+        worker, _done, failed = self._workers[self.sender()]
+        failed(worker.error if worker.error is not None else message)
+
+    @QtCore.Slot()
+    def _worker_finished(self):
+        signals = self.sender()
+        self._signals.discard(signals)
+        self._workers.pop(signals, None)
+
+    def _flow_dialog(self, parent, show):
+        """Permit only one database flow dialog per shell, including nested events."""
+        parent = parent or self.parent_widget()
+        identity = id(parent.window()) if parent is not None else None
+        if identity in self._flow_dialogs:
+            return None
+        self._flow_dialogs.add(identity)
+        try:
+            return show()
+        finally:
+            self._flow_dialogs.discard(identity)
+
+    def _busy(self, window):
+        identity = id(window.window())
+        return (identity in self._flow_dialogs or getattr(window, "_active_worker", None) is not None
+                or any(action.window is window for action in self._actions.values()))
+
+    def _new_action(self, window, operation, server):
+        action = _PendingAction(self, window, operation, server)
+        self._actions[id(window), operation] = action
+        self.operation_changed.emit(window.session, operation, "waiting", "Waiting for sign-in. You can stop this action.")
+        return action
+
+    def _authorize_action(self, action, start, title):
+        def resume():
+            if action.valid():
+                start()
+        action.authorization = resume
+        self._authorize(action.server, "", resume, title)
+
+    def retry_operation(self, window, operation: str) -> None:
+        """Retry the prepared call immediately, preserving its identity and inputs."""
+        action = self._actions.get((id(window), operation))
+        if action is not None:
+            action.retry_now()
+
+    def stop_operation(self, window, operation: str) -> None:
+        """Cancel a tab's queued action and discard its temporary export."""
+        action = self._actions.get((id(window), operation))
+        if action is not None:
+            action.stop()
+
+    def stop_window(self, window) -> None:
+        """Stop all database retries when this tab is actually closed."""
+        for action in list(self._actions.values()):
+            if action.window is window:
+                action.stop()
+
+    def _status(self, message):
+        parent = self.parent_widget()
+        if parent is not None and hasattr(parent, "statusBar"):
+            parent.statusBar().showMessage(message)
+
+    def _available_inline(self, window, operation):
+        ok, reason = database_availability()
+        if not ok:
+            self.operation_changed.emit(window.session, operation, "error", reason)
+        return ok
+
     def show_error(self, title: str, message: object) -> None:
-        QtWidgets.QMessageBox.warning(self.parent_widget(), title, str(message))
+        self._flow_dialog(self.parent_widget(), lambda: QtWidgets.QMessageBox.warning(
+            self.parent_widget(), title, str(message)
+        ))
 
     def _operation_run(self, session, operation, function, on_success, *, title, on_failure):
         """Observe a worker without changing its callbacks or retry policy."""
@@ -198,12 +440,9 @@ class DatabaseLinks(QtCore.QObject):
             name = str(account.get("display_name") or account.get("username") or "")
             self._set_account_name(server, name or None)
             self.signed_in_changed.emit()
-            QtWidgets.QMessageBox.information(
-                self.parent_widget(), "Signed in",
-                f"Studio is signed in to {server}" + (f" as {name}." if name else "."),
-            )
+            self._status(f"Studio is signed in to {server}" + (f" as {name}." if name else "."))
 
-        self.run(lambda: db.whoami(server), shown, title="Sign in")
+        self.run(lambda: db.whoami(server), shown, title="Sign in", on_failure=lambda error: self._status(str(error)))
 
     def require_available(self, title: str) -> bool:
         ok, reason = database_availability()
@@ -371,7 +610,7 @@ class DatabaseLinks(QtCore.QObject):
             self.open_run(server, run_id, acquisition=acquisition, via=via, _messages=(message,))
 
         def listing():
-            # Keep the failure typed inside the worker: worker signals carry text.
+            # A listing failure may fall back to opening the raw session data.
             try:
                 return pick_session_run(db.list_session_runs(server, session_id)), ""
             except Exception as exc:
@@ -530,7 +769,7 @@ class DatabaseLinks(QtCore.QObject):
     def prompt_sign_in(self, server: str, then: Callable[[], None] | None = None) -> None:
         """Open UPbDB's sign-in page in the browser; call ``then`` once signed in."""
         dialog = SignInDialog(self, server, self.parent_widget())
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and dialog.signed_in:
+        if self._flow_dialog(self.parent_widget(), dialog.exec) == QtWidgets.QDialog.DialogCode.Accepted and dialog.signed_in:
             self.remember_server(server)
             if then is not None:
                 then()
@@ -549,9 +788,9 @@ class DatabaseLinks(QtCore.QObject):
         def done(_r) -> None:
             self._set_account_name(server, None)
             self.signed_in_changed.emit()
-            QtWidgets.QMessageBox.information(self.parent_widget(), title, f"Signed out of {server}.")
+            self._status(f"Signed out of {server}.")
 
-        self.run(lambda: db.sign_out(server), done, title=title)
+        self.run(lambda: db.sign_out(server), done, title=title, on_failure=lambda error: self._status(str(error)))
 
     # ----------------------------------------------------- open from menu
     def choose_server(self, title: str = "Open from database",
@@ -560,7 +799,7 @@ class DatabaseLinks(QtCore.QObject):
         dialog = ServerPickerDialog(
             self.known_servers(), self.current_server(), title, label, self.parent_widget()
         )
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dialog.server:
+        if self._flow_dialog(self.parent_widget(), dialog.exec) != QtWidgets.QDialog.DialogCode.Accepted or not dialog.server:
             return None
         if dialog.forgotten:
             self.forget_servers(dialog.forgotten)
@@ -604,44 +843,114 @@ class DatabaseLinks(QtCore.QObject):
             self.show_error("Open from database", f"No sessions on {server} are visible to you.")
             return
         dialog = SessionPickerDialog(sessions, server, self.parent_widget())
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and dialog.session_id:
+        dialog.set_next_cursor(getattr(sessions, "next_cursor", None))
+        active = True
+
+        def more():
+            cursor = dialog.next_cursor
+            if not cursor:
+                return
+            dialog.more_button.setEnabled(False)
+            dialog.table.setEnabled(False)
+
+            def done(page):
+                if active:
+                    dialog.append_sessions(page)
+                    dialog.set_next_cursor(getattr(page, "next_cursor", None))
+                    dialog.table.setEnabled(True)
+
+            def failed(error):
+                if active:
+                    dialog.table.setEnabled(True)
+                    dialog.more_button.setEnabled(True)
+                    dialog.issue.show_issue(str(error), stage="Database")
+
+            self.run(lambda: client().list_sessions(server, cursor=cursor), done,
+                     title="List sessions", on_failure=failed)
+
+        dialog.more_button.clicked.connect(more)
+        selected = self._flow_dialog(self.parent_widget(), dialog.exec)
+        active = False
+        if selected == QtWidgets.QDialog.DialogCode.Accepted and dialog.session_id:
             self.open_session(server, dialog.session_id)
 
     def link_session(self, window) -> None:
-        """Verify a local project's inputs against a temporary session export."""
+        """Verify local inputs; keep the chosen session across unreachable retries."""
         title = "Link to database session"
-        if not window.session.loaded or window.session.origin or not self.require_available(title):
+        session = window.session
+        if (not session.loaded or session.origin or self._busy(window)
+                or not self._available_inline(window, "link")):
             return
         server = self.choose_server()
         if not server:
             return
         db = client()
-        session = window.session
+        action = self._new_action(window, "link", server)
 
         def pick(sessions) -> None:
-            if window.session is not session or session.origin:
+            if not action.valid():
+                action.stop()
+                return
+            if id(window.window()) in self._flow_dialogs:
+                # Keep the received page while an explicit flow dialog is open.
+                # The QObject context cancels this callback on Stop/close.
+                QtCore.QTimer.singleShot(250, action, lambda: pick(sessions))
                 return
             self.remember_server(server)
             if not sessions:
-                message = f"No sessions on {server} are visible to you."
-                self.operation_changed.emit(session, "link", "error", message)
-                self.show_error(title, message)
+                action.complete()
+                self.operation_changed.emit(session, "link", "error", f"No sessions on {server} are visible to you.")
                 return
             dialog = SessionPickerDialog(sessions, server, window)
             keys = _session_key_candidates(window)
             for key in keys:
-                row = next((i for i, item in enumerate(sessions)
-                            if item.get("session_key") == key), None)
+                row = next((i for i, item in enumerate(sessions) if item.get("session_key") == key), None)
                 if row is not None:
                     dialog.table.selectRow(row)
                     break
-            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted or not dialog.session_id:
+            cursor = getattr(sessions, "next_cursor", None)
+            dialog.set_next_cursor(cursor)
+
+            def more():
+                cursor = dialog.next_cursor
+                if not cursor:
+                    return
+                if action.timer.isActive() or (dialog.more_button.text() == "Retry now"):
+                    action.retry_now()
+                    return
+                dialog.more_button.setEnabled(False)
+
+                def appended(page):
+                    dialog.append_sessions(page)
+                    dialog.set_next_cursor(getattr(page, "next_cursor", None))
+
+                action.execute(lambda: db.list_sessions(server, cursor=cursor), appended)
+
+            def page_status(changed_session, operation, state, result):
+                if changed_session is session and operation == "link":
+                    dialog.table.setEnabled(state != "working")
+                    if state in {"queued", "error"}:
+                        dialog.issue.show_issue(str(result), stage="Database", details=str(result))
+                        dialog.more_button.setText("Retry now")
+                        dialog.more_button.setEnabled(True)
+            dialog.more_button.clicked.connect(more)
+            self.operation_changed.connect(page_status)
+            try:
+                selected = self._flow_dialog(window, dialog.exec)
+            finally:
+                self.operation_changed.disconnect(page_status)
+            if selected != QtWidgets.QDialog.DialogCode.Accepted or not dialog.session_id:
+                action.stop()
+                return
+            # Cancel any pending list-page retry before starting verification.
+            action.timer.stop()
+            if action.in_flight:
+                # Selection stays disabled while a page is loading.
+                action.stop()
                 return
             session_id = dialog.session_id
 
             def verify():
-                # fetch_session_bundle normally uses a persistent project cache.
-                # This export is evidence only and must never become a project.
                 with tempfile.TemporaryDirectory(prefix="upbrpy-link-") as scratch:
                     bundle = db.fetch_session_bundle(server, session_id, Path(scratch))
                     if bundle.session_id != session_id:
@@ -649,52 +958,40 @@ class DatabaseLinks(QtCore.QObject):
                     return _verified_session_origin(session, bundle)
 
             def linked(result) -> None:
-                if window.session is not session or session.origin:
-                    return
                 origin, verification = result
                 session.origin = dict(origin)
                 if session.pipeline is not None:
                     session.pipeline.origin = dict(origin)
-                self.operation_changed.emit(session, "link", "done", verification)
-                # Use Studio's normal save path, including pending user edits.
-                # An unnamed project stays modified until Save As is chosen.
+                action.complete()
                 window.update_project_window_title()
                 if window.project_path is not None:
                     window.save_project()
                 label = origin.get("session_key") or origin["session_id"]
+                if window.has_unsaved_changes():
+                    verification += " Save the project to keep this link."
                 message = f"Linked to database session {label} on {origin['server']}. {verification}"
                 window.append_log(message)
                 window.statusBar().showMessage(message)
-                QtWidgets.QMessageBox.information(
-                    window, title, message + (
-                        "\n\nSave the project to keep this link."
-                        if window.has_unsaved_changes() else "\n\nThe project has been saved."
-                    )
-                )
+                self.operation_changed.emit(session, "link", "done", verification)
 
-            def fetch() -> None:
-                self._operation_run(session, "link", verify, linked, title=title, on_failure=lambda message:
-                         self._retry_after_sign_in(server, fetch, title, message))
+            action.execute(verify, linked)
 
-            fetch()
+        def listing():
+            if action.valid():
+                action.execute(lambda: db.list_sessions(server), pick)
 
-        def listing() -> None:
-            self._operation_run(session, "link", lambda: db.list_sessions(server), pick, title=title,
-                     on_failure=lambda message:
-                     self._retry_after_sign_in(server, listing, title, message))
-
-        self._authorize(server, "", listing, title)
+        action.function, action.on_success = lambda: db.list_sessions(server), pick
+        self._authorize_action(action, listing, title)
 
     # ----------------------------------------------------- submit, prefer
     def submit(self, window) -> None:
         """Export the reduction bundle, post it to the origin server, record the run."""
         title = "Submit to database"
-        if not self.require_available(title):
+        if self._busy(window) or not self._available_inline(window, "submit"):
             return
         origin = dict(window.session.origin or {})
         if not window.session.loaded or not origin:
             self.operation_changed.emit(window.session, "submit", "error", ORIGIN_REQUIRED)
-            self.show_error(title, ORIGIN_REQUIRED)
             return
         label = origin.get("session_key") or origin["session_id"]
         question = (
@@ -705,11 +1002,14 @@ class DatabaseLinks(QtCore.QObject):
                 "\n\nIt will supersede the run this reduction submitted earlier "
                 f"({short_id(origin['run_id'])})."
             )
-        if QtWidgets.QMessageBox.question(
+        if self._flow_dialog(window, lambda: QtWidgets.QMessageBox.question(
             window, title, question,
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
             QtWidgets.QMessageBox.StandardButton.Cancel,
-        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+        )) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        if getattr(window, "_active_worker", None) is not None:
+            self.operation_changed.emit(window.session, "submit", "error", "Wait for the running reduction before submitting.")
             return
         from GUI.services import ensure_shared_pipeline
         from UPbRPy.pipeline import PipelineStage
@@ -721,7 +1021,6 @@ class DatabaseLinks(QtCore.QObject):
             pipeline = ensure_shared_pipeline(window.session, window.workflow_preset)
         except Exception as exc:
             self.operation_changed.emit(window.session, "submit", "error", str(exc))
-            self.show_error(title, exc)
             return
         workspace = window.project_workspace_state()
         resume = window.current_workflow_stage() or PipelineStage.IMPORT
@@ -747,28 +1046,45 @@ class DatabaseLinks(QtCore.QObject):
         db = client()
         server, session_id = origin["server"], origin["session_id"]
 
-        def upload(_folder=None) -> None:
-            self._operation_run(
-                session, "submit",
-                lambda: db.submit_reduction(
-                    server, session_id, folder, supersedes=origin.get("run_id")
-                ),
-                lambda result: self._submitted(window, result, scratch),
-                title=title,
-                on_failure=lambda message: self._retry_after_sign_in(
-                    server, upload, title, message
-                ),
-            )
+        action = self._new_action(window, "submit", server)
+        action.scratch = scratch
 
-        def exported(_folder) -> None:
-            self.operation_changed.emit(session, "submit", "idle", None)
+        def upload():
+            if action.valid():
+                action.execute(
+                    lambda: db.submit_reduction(
+                        server, session_id, folder, supersedes=origin.get("run_id"),
+                        idempotency_key=action.key,
+                    ),
+                    submitted,
+                )
+
+        def submitted(result):
+            action.complete()
+            self._submitted(window, result, scratch)
+
+        def exported(_folder):
+            action.runner = self.run
             window.append_log(f"Reduction bundle for the database written to {folder}.")
-            self._authorize(server, "", upload, title)
+            self.operation_changed.emit(session, "submit", "waiting", "Bundle prepared. Waiting for sign-in; Retry now continues without exporting again.")
+            action.function, action.on_success = (
+                lambda: db.submit_reduction(server, session_id, folder, supersedes=origin.get("run_id"),
+                                             idempotency_key=action.key), submitted)
+            self._authorize_action(action, upload, title)
 
-        if getattr(window, "_active_worker", None) is None:
-            self.operation_changed.emit(session, "submit", "working", None)
-        window.run_background("Exporting the reduction bundle for the database",
-                              lambda: self._submit_export(session, export), exported)
+        if hasattr(window, "run_background"):
+            # Keep the scientific worker's edit guards while preparing the
+            # bundle. Its Brief 2 issue banner and our row both report errors.
+            def export_runner(function, done, *, title, on_failure):
+                def guarded_export():
+                    try:
+                        return function()
+                    except Exception as exc:
+                        action.export_failed.emit(exc)
+                        raise
+                window.run_background("Exporting the reduction bundle for the database", guarded_export, done)
+            action.runner = export_runner
+        action.execute(export, exported)
 
     def _submitted(self, window, result, scratch: Path) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -781,24 +1097,8 @@ class DatabaseLinks(QtCore.QObject):
         origin = window.session.origin
         label = origin.get("session_key") or origin["session_id"]
         window.statusBar().showMessage(f"Submitted to {label} as a new run.")
-        box = QtWidgets.QMessageBox(window)
-        box.setIcon(
-            QtWidgets.QMessageBox.Icon.Warning if held else QtWidgets.QMessageBox.Icon.Information
-        )
-        box.setWindowTitle("Submitted to database")
-        box.setText(
-            f"A new run of {label} was created ({short_id(result.run_id)}).\n\nCounts: {counts}.\n"
-            + (
-                f"{len(held)} item(s) were held in quarantine (see details)."
-                if held
-                else "Nothing was quarantined."
-            )
-        )
-        if held:
-            box.setDetailedText(format_quarantine(held))
-            for item in held:
-                window.append_log(f"Quarantine: {quarantine_line(item)}")
-        box.exec()
+        for item in held:
+            window.append_log(f"Quarantine: {quarantine_line(item)}")
         if origin.get("opened_via") == "upblab":
             try:
                 opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl(f"upbdb://run/{result.run_id}"))
@@ -811,36 +1111,39 @@ class DatabaseLinks(QtCore.QObject):
     def prefer(self, window) -> None:
         """Mark the window's last submitted run as the session's preferred run."""
         title = "Mark as preferred"
-        if not self.require_available(title):
+        if self._busy(window) or not self._available_inline(window, "prefer"):
             return
         origin = dict(window.session.origin or {})
         if not origin.get("run_id"):
             self.operation_changed.emit(window.session, "prefer", "error", RUN_REQUIRED)
-            self.show_error(title, RUN_REQUIRED)
             return
         server, session_id, run_id = origin["server"], origin["session_id"], origin["run_id"]
         label = origin.get("session_key") or session_id
-        if QtWidgets.QMessageBox.question(
+        if self._flow_dialog(window, lambda: QtWidgets.QMessageBox.question(
             window, title,
             f"Make the run this reduction submitted ({short_id(run_id)}) the preferred run "
             f"of session {label} on {urlsplit(server).netloc or server}?",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
             QtWidgets.QMessageBox.StandardButton.Cancel,
-        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+        )) != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         db = client()
         session = window.session
 
-        def call() -> None:
-            self._operation_run(
-                session, "prefer",
-                lambda: db.prefer_run(server, session_id, run_id),
-                lambda _r: self._preferred(window, run_id),
-                title=title,
-                on_failure=lambda message: self._retry_after_sign_in(server, call, title, message),
-            )
+        action = self._new_action(window, "prefer", server)
 
-        self._authorize(server, "", call, title)
+        def done(_result):
+            action.complete()
+            self._preferred(window, run_id)
+
+        def call():
+            if action.valid():
+                action.execute(lambda: db.prefer_run(server, session_id, run_id,
+                                                     idempotency_key=action.key), done)
+
+        action.function = lambda: db.prefer_run(server, session_id, run_id, idempotency_key=action.key)
+        action.on_success = done
+        self._authorize_action(action, call, title)
 
     def _preferred(self, window, run_id: str) -> None:
         self.operation_changed.emit(window.session, "prefer", "done", run_id)
@@ -848,11 +1151,7 @@ class DatabaseLinks(QtCore.QObject):
         origin = window.session.origin
         label = origin.get("session_key") or origin["session_id"]
         window.statusBar().showMessage(f"The submitted run is now preferred for session {label}.")
-        QtWidgets.QMessageBox.information(
-            window, "Mark as preferred",
-            f"The run this reduction submitted ({short_id(run_id)}) is now the preferred run "
-            f"of session {label}.",
-        )
+
 
 
 ORIGIN_REQUIRED = (
@@ -1319,6 +1618,7 @@ class SessionPickerDialog(QtWidgets.QDialog):
 
     def __init__(self, sessions: list[dict], server: str, parent=None) -> None:
         super().__init__(parent)
+        self.next_cursor = None
         self.session_id: str | None = None
         self.setWindowTitle(f"Sessions on {server}")
         self.resize(640, 420)
@@ -1333,21 +1633,19 @@ class SessionPickerDialog(QtWidgets.QDialog):
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        for row, session in enumerate(sessions):
-            for column, (key, _label) in enumerate(self.COLUMNS):
-                value = session.get(key)
-                text = "" if value is None else str(value)
-                if key == "started_at":
-                    text = text.replace("T", " ")[:16]
-                item = QtWidgets.QTableWidgetItem(text)
-                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(session.get("id", "")))
-                self.table.setItem(row, column, item)
+        self.table.setRowCount(0)
+        self.append_sessions(sessions)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.doubleClicked.connect(lambda _index: self.accept())
         if sessions:
             self.table.selectRow(0)
         layout.addWidget(self.table, 1)
+        self.issue = IssueBanner(self)
+        layout.addWidget(self.issue)
+        self.more_button = QtWidgets.QPushButton("Load more sessions")
+        self.more_button.hide()
+        layout.addWidget(self.more_button)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Open
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -1356,6 +1654,27 @@ class SessionPickerDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def set_next_cursor(self, cursor):
+        self.next_cursor = cursor
+        self.more_button.setVisible(bool(cursor))
+        self.more_button.setText("Load more sessions")
+        self.more_button.setEnabled(True)
+        self.issue.hide()
+
+    def append_sessions(self, sessions):
+        start = self.table.rowCount()
+        self.table.setRowCount(start + len(sessions))
+        for row, session in enumerate(sessions, start):
+            for column, (key, _label) in enumerate(self.COLUMNS):
+                value = session.get(key)
+                text = "" if value is None else str(value)
+                if key == "started_at":
+                    text = text.replace("T", " ")[:16]
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(session.get("id", "")))
+                self.table.setItem(row, column, item)
+        self._apply_filter(self.filter_edit.text())
+
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().casefold()
         for row in range(self.table.rowCount()):
@@ -1363,6 +1682,8 @@ class SessionPickerDialog(QtWidgets.QDialog):
             self.table.setRowHidden(row, bool(needle) and not any(needle in c for c in cells))
 
     def accept(self) -> None:
+        if not self.table.isEnabled():
+            return
         rows = [
             index.row()
             for index in self.table.selectionModel().selectedRows()

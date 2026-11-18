@@ -31,12 +31,17 @@ Requires the ``[database]`` extra (``requests`` and ``keyring``).
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import hashlib
 import importlib
 import os
+import shutil
 from pathlib import Path
 import tempfile
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from urllib.parse import quote, urlencode, urlsplit
 import zipfile
@@ -61,7 +66,7 @@ class DatabaseError(Exception):
 
     def __init__(
         self, message: str, *, status: int | None = None, code: str | None = None,
-        details: str = "",
+        details: str = "", retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -70,6 +75,7 @@ class DatabaseError(Exception):
         # ``details`` keeps the raw reply for logs, never for the message.
         self.code = code
         self.details = details
+        self.retry_after = retry_after
 
     def __str__(self) -> str:
         return self.message
@@ -259,7 +265,11 @@ def store_token(server: str, token: str) -> None:
 
 
 def forget_token(server: str) -> None:
-    _token_store.delete(normalize_server(server))
+    base = normalize_server(server)
+    _token_store.delete(base)
+    for key in list(_session_pages):
+        if key[0] == base:
+            del _session_pages[key]
 
 
 def is_signed_in(server: str) -> bool:
@@ -323,12 +333,25 @@ def _host(server: str) -> str:
     return urlsplit(server).netloc or server
 
 
+def _retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+
 def _raise_for(response, server: str, action: str) -> None:
     status = response.status_code
     if status < 400:
         return
     detail, code, raw = _reply(response)
-    extra = {"status": status, "code": code, "details": raw}
+    extra = {"status": status, "code": code, "details": raw,
+             "retry_after": _retry_after(getattr(response, "headers", {}).get("Retry-After"))}
     host = _host(server)
     suffix = f": {detail}" if detail else "."
     if status == 401:
@@ -362,7 +385,8 @@ def _request(
 ):
     requests = _requests()
     base = normalize_server(server)
-    headers = {"User-Agent": user_agent(), "Accept": "application/json"}
+    headers = {"User-Agent": user_agent(), "Accept": "application/json",
+               "Accept-Encoding": "gzip"}
     headers.update(kwargs.pop("headers", {}) or {})
     if auth:
         token = token or stored_token(base)
@@ -488,18 +512,48 @@ def sign_out(server: str) -> None:
 
 
 # --------------------------------------------------------------- sessions
-def list_sessions(server: str, query: str | None = None) -> list[dict]:
-    """``GET /v1/sessions``: sessions visible to the account, newest first."""
-    params = {"q": query} if query else None
-    response = _request(
-        "GET", server, "sessions", action="list sessions", params=params
-    )
-    payload = _json(response, server, "list sessions")
+class SessionPage(list):
+    """One bounded session list page, compatible with existing list callers."""
+
+    def __init__(self, items=(), *, next_cursor: str | None = None):
+        super().__init__(items)
+        self.next_cursor = next_cursor
+
+
+# Bounded, per-account/server cache. Sign-out clears the server's entries.
+_session_pages: OrderedDict[tuple, tuple[str | None, SessionPage]] = OrderedDict()
+
+
+def list_sessions(server: str, query: str | None = None, *, limit: int = 100,
+                  cursor: str | None = None) -> SessionPage:
+    """GET one session page; follow ``next_cursor`` only on user demand."""
+    base = normalize_server(server)
+    limit = max(1, min(int(limit), 500))
+    account = hashlib.sha256((stored_token(base) or "").encode()).hexdigest()
+    key = (base, account, query, limit, cursor)
+    cached = _session_pages.get(key)
+    headers = {"If-None-Match": cached[0]} if cached and cached[0] else {}
+    params = {"limit": limit}
+    if query:
+        params["q"] = query
+    if cursor:
+        params["cursor"] = cursor
+    response = _request("GET", base, "sessions", action="list sessions",
+                        params=params, headers=headers)
+    if response.status_code == 304 and cached:
+        return SessionPage(cached[1], next_cursor=cached[1].next_cursor)
+    payload = _json(response, base, "list sessions")
     if isinstance(payload, Mapping) and isinstance(payload.get("items"), list):
         payload = payload["items"]
     if not isinstance(payload, list):
-        raise ServerError(f"{normalize_server(server)} sent no session list.")
-    return [dict(item) for item in payload if isinstance(item, Mapping)]
+        raise ServerError(f"{base} sent no session list.")
+    page = SessionPage((dict(item) for item in payload if isinstance(item, Mapping)),
+                       next_cursor=response.headers.get("X-Next-Cursor") or None)
+    _session_pages[key] = (response.headers.get("ETag"), page)
+    _session_pages.move_to_end(key)
+    while len(_session_pages) > 64:
+        _session_pages.popitem(last=False)
+    return SessionPage(page, next_cursor=page.next_cursor)
 
 
 def fetch_session_bundle(
@@ -593,6 +647,7 @@ def submit_reduction(
     bundle_dir: str | Path,
     *,
     supersedes: str | None = None,
+    idempotency_key: str | None = None,
 ) -> ImportResult:
     """Zip a reduction bundle and post it as a new run of the session.
 
@@ -605,13 +660,34 @@ def submit_reduction(
         archive = zip_reduction_bundle(
             bundle_dir, Path(scratch) / f"{Path(bundle_dir).name or 'reduction'}.zip"
         )
-        with archive.open("rb") as stream:
-            response = _request(
-                "POST", server, f"sessions/{quote(str(session_id))}/runs/import",
-                action=action,
-                files={"bundle": (archive.name, stream, "application/zip")},
-                data={"supersedes": supersedes} if supersedes else None,
-            )
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+        if idempotency_key:
+            # Stable multipart bytes matter: the server hashes the request body.
+            # Stream via disk so large bundles never need a second copy in RAM.
+            boundary = "upbrpy-" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+            multipart = Path(scratch) / "request.multipart"
+            with multipart.open("wb") as out:
+                if supersedes:
+                    out.write((f'--{boundary}\r\nContent-Disposition: form-data; name="supersedes"'
+                               f'\r\n\r\n{supersedes}\r\n').encode())
+                out.write((f'--{boundary}\r\nContent-Disposition: form-data; name="bundle"; '
+                           f'filename="reduction.zip"\r\nContent-Type: application/zip\r\n\r\n').encode())
+                with archive.open("rb") as source:
+                    shutil.copyfileobj(source, out)
+                out.write(f"\r\n--{boundary}--\r\n".encode())
+            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+            with multipart.open("rb") as stream:
+                response = _request(
+                    "POST", server, f"sessions/{quote(str(session_id))}/runs/import",
+                    action=action, headers=headers, data=stream,
+                )
+        else:
+            with archive.open("rb") as stream:
+                response = _request(
+                    "POST", server, f"sessions/{quote(str(session_id))}/runs/import",
+                    action=action, files={"bundle": (archive.name, stream, "application/zip")},
+                    data={"supersedes": supersedes} if supersedes else None,
+                )
     payload = _json(response, server, action)
     if not isinstance(payload, Mapping):
         raise ServerError(f"{normalize_server(server)} sent no run.")
@@ -629,13 +705,14 @@ def submit_reduction(
     )
 
 
-def prefer_run(server: str, session_id: str, run_id: str) -> dict:
+def prefer_run(server: str, session_id: str, run_id: str, *,
+               idempotency_key: str | None = None) -> dict:
     """Mark a run as the session's preferred run."""
     action = "mark the run as preferred"
     response = _request(
         "POST", server,
         f"sessions/{quote(str(session_id))}/runs/{quote(str(run_id))}/prefer",
-        action=action,
+        action=action, headers={"Idempotency-Key": idempotency_key} if idempotency_key else {},
     )
     if not response.content:
         return {}
@@ -690,6 +767,7 @@ __all__ = [
     "ServerError",
     "BundleError",
     "ImportResult",
+    "SessionPage",
     "TokenStore",
     "MemoryTokenStore",
     "KeyringTokenStore",
