@@ -7169,84 +7169,91 @@ class ResultsTableWidget(QtWidgets.QWidget):
         include_calibration_uncertainty: bool = True,
     ) -> None:
         """Review the useful sweep-wise columns for one selected spot."""
-        self._include_calibration_uncertainty = bool(
-            include_calibration_uncertainty
-        )
-        self._depth_sample_order = self._sample_order(depth_profile)
-        selected = depth_profile
-        if spot_name and "spot_name" in selected:
-            selected = selected[selected["spot_name"].eq(spot_name)]
-        review_columns = [
-            column
-            for column in ("sample", "spot_name", "signal_relative_time")
-            if column in selected.columns
-        ]
-        for ratio in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
-            ratio_column = f"{ratio}_fractionation_corrected"
-            if ratio_column in selected.columns:
-                review_columns.append(ratio_column)
-                uncertainty_column = ConcordiaReviewWidget.uncertainty_column(
-                    selected,
-                    ratio_column,
-                    self._include_calibration_uncertainty,
-                )
-                if uncertainty_column:
-                    review_columns.append(uncertainty_column)
-        for ratio in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
-            age_column = f"{ratio}_age"
-            if age_column in selected.columns:
-                review_columns.append(age_column)
-                uncertainty_column = ConcordiaReviewWidget.uncertainty_column(
-                    selected,
-                    age_column,
-                    self._include_calibration_uncertainty,
-                )
-                if uncertainty_column:
-                    review_columns.append(uncertainty_column)
-        review_frame = selected.loc[:, review_columns].copy()
-        review_frame = review_frame.rename(
-            columns={
-                column: str(column).replace("_age", "_date")
-                for column in review_frame.columns
-                if "_age" in str(column)
-            }
-        )
-        self.depth_model.set_frame(review_frame)
-        self._depth_frame = depth_profile.copy()
-        self._depth_sample_choices = False
-        glasses = self._glass_spot_names()
-        for name in self._sample_names(self._depth_frame):
-            self.include_flags.setdefault(name, self._show_glasses if name in glasses else True)
-        self._build_depth_choices()
-        self._rebuild_sample_chips()
-        self._update_glass_buttons()
-        existing_spot = self.depth_spot_combo.currentText()
-        spot_names = (
-            depth_profile["spot_name"].dropna().astype(str).drop_duplicates().tolist()
-            if "spot_name" in depth_profile.columns
-            else []
-        )
-        self.depth_spot_combo.blockSignals(True)
-        self.depth_spot_combo.clear()
-        self.depth_spot_combo.addItems(spot_names)
-        for index, name in enumerate(spot_names):
-            self.depth_spot_combo.setItemData(index, name, QtCore.Qt.ItemDataRole.ToolTipRole)
-        preferred = spot_name or existing_spot
-        preferred_index = self.depth_spot_combo.findText(preferred)
-        if preferred_index >= 0:
-            self.depth_spot_combo.setCurrentIndex(preferred_index)
-        self.depth_spot_combo.blockSignals(False)
-        self.depth_spot_combo.setToolTip(self.depth_spot_combo.currentText())
-        self.refresh_depth_concordia()
-        target = spot_name or "all spots"
-        self.summary_label.setText(
-            f"{len(selected):,} corrected signal sweeps · {target}"
-        )
-        if self.tabs.currentWidget() not in (
-            self.depth_table,
-            self.depth_concordia_page,
-        ):
-            self.tabs.setCurrentWidget(self.depth_table)
+        header = self.depth_table.horizontalHeader()
+        # Avoid sizing every column once on reset and again on tab exposure.
+        # Restore the same automatic sizing policy after the table is installed.
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        try:
+            self._include_calibration_uncertainty = bool(
+                include_calibration_uncertainty
+            )
+            self._depth_sample_order = self._sample_order(depth_profile)
+            selected = pd.DataFrame(depth_profile, copy=False)
+            if spot_name and "spot_name" in selected:
+                selected = selected[selected["spot_name"].eq(spot_name)]
+            review_columns = [
+                column
+                for column in ("sample", "spot_name", "signal_relative_time")
+                if column in selected.columns
+            ]
+            for ratio in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
+                ratio_column = f"{ratio}_fractionation_corrected"
+                if ratio_column in selected.columns:
+                    review_columns.append(ratio_column)
+                    uncertainty_column = ConcordiaReviewWidget.uncertainty_column(
+                        selected,
+                        ratio_column,
+                        self._include_calibration_uncertainty,
+                    )
+                    if uncertainty_column:
+                        review_columns.append(uncertainty_column)
+            for ratio in ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th"):
+                age_column = f"{ratio}_age"
+                if age_column in selected.columns:
+                    review_columns.append(age_column)
+                    uncertainty_column = ConcordiaReviewWidget.uncertainty_column(
+                        selected,
+                        age_column,
+                        self._include_calibration_uncertainty,
+                    )
+                    if uncertainty_column:
+                        review_columns.append(uncertainty_column)
+            review_frame = selected.loc[:, review_columns].copy()
+            review_frame = review_frame.rename(
+                columns={
+                    column: str(column).replace("_age", "_date")
+                    for column in review_frame.columns
+                    if "_age" in str(column)
+                }
+            )
+            self.depth_model.set_frame(review_frame)
+            self._depth_frame = pd.DataFrame(depth_profile, copy=False)
+            self._depth_sample_choices = False
+            glasses = self._glass_spot_names()
+            for name in self._sample_names(self._depth_frame):
+                self.include_flags.setdefault(name, self._show_glasses if name in glasses else True)
+            self._build_depth_choices()
+            self._rebuild_sample_chips()
+            self._update_glass_buttons()
+            existing_spot = self.depth_spot_combo.currentText()
+            spot_names = (
+                depth_profile["spot_name"].dropna().astype(str).drop_duplicates().tolist()
+                if "spot_name" in depth_profile.columns
+                else []
+            )
+            self.depth_spot_combo.blockSignals(True)
+            self.depth_spot_combo.clear()
+            self.depth_spot_combo.addItems(spot_names)
+            for index, name in enumerate(spot_names):
+                self.depth_spot_combo.setItemData(index, name, QtCore.Qt.ItemDataRole.ToolTipRole)
+            preferred = spot_name or existing_spot
+            preferred_index = self.depth_spot_combo.findText(preferred)
+            if preferred_index >= 0:
+                self.depth_spot_combo.setCurrentIndex(preferred_index)
+            self.depth_spot_combo.blockSignals(False)
+            self.depth_spot_combo.setToolTip(self.depth_spot_combo.currentText())
+            self.refresh_depth_concordia()
+            target = spot_name or "all spots"
+            self.summary_label.setText(
+                f"{len(selected):,} corrected signal sweeps · {target}"
+            )
+            if self.tabs.currentWidget() not in (
+                self.depth_table,
+                self.depth_concordia_page,
+            ):
+                self.tabs.setCurrentWidget(self.depth_table)
+        finally:
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
 
 
 class MetricCard(NeumorphicFrame):
@@ -7302,6 +7309,44 @@ def _make_diag_axis(plot_item: pg.PlotItem, theme: ThemeSpec) -> None:
     plot_item.setContentsMargins(4, 4, 4, 4)
 
 
+class _DiagnosticPlotItem(pg.PlotItem):
+    """Retain diagnostic axes and curves between result installations."""
+
+    def __init__(self):
+        super().__init__(viewBox=AxisZoomViewBox())
+        self._curves = []
+        self._curve_count = 0
+
+    def begin_update(self):
+        self._curve_count = 0
+        for item in list(self.items):
+            if item not in self._curves:
+                self.removeItem(item)
+
+    def plot(self, *args, **kwargs):
+        index = self._curve_count
+        self._curve_count += 1
+        if index == len(self._curves):
+            self._curves.append(super().plot(*args, **kwargs))
+        else:
+            self._curves[index].setData(*args, **kwargs)
+        return self._curves[index]
+
+    def end_update(self):
+        for item in self._curves[self._curve_count:]:
+            self.removeItem(item)
+        del self._curves[self._curve_count:]
+        self.enableAutoRange()
+
+
+def _diagnostic_plot(widget):
+    if widget._plot_item is None:
+        widget._plot_item = _DiagnosticPlotItem()
+        widget.addItem(widget._plot_item, row=0, col=0)
+    widget._plot_item.begin_update()
+    return widget._plot_item
+
+
 class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
     """Primary-RM downhole factors with an adjustable uncertainty envelope.
 
@@ -7325,6 +7370,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                   QtWidgets.QSizePolicy.Policy.Expanding)
         )
+        _diagnostic_plot(self)
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -7339,21 +7385,22 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         self._draw()
 
     def _draw(self) -> None:
-        self.clear()
         self._spot_segments.clear()
-        self._plot_item = None
         theme = self._theme
         data = self._data
         if theme is None:
             return
+        p = _diagnostic_plot(self)
         if data is None:
-            p = self.addPlot(0, 0, viewBox=AxisZoomViewBox())
-            self._plot_item = p
+            self.clear()
+            self._plot_item = None
+            p = _diagnostic_plot(self)
             lbl = pg.TextItem("No downhole correction data available.\nRun the downhole correction step first.",
                               color=theme.muted, anchor=(0.5, 0.5))
             lbl.setFont(QtGui.QFont("", 11))
             p.addItem(lbl)
             lbl.setPos(0.5, 0.5)
+            p.end_update()
             return
 
         ratio_name = data["ratio_name"]
@@ -7363,8 +7410,6 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         primary_standard = data["primary_standard"]
         fit_label = str(data.get("fit_label", "Interpolated"))
 
-        p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
-        self._plot_item = p
         _make_diag_axis(p, theme)
         p.setLabel("bottom", "Relative time (s)", color=theme.axis_text, size="9px")
         p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
@@ -7431,6 +7476,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         # Reference line at 1.0
         p.addLine(y=1.0, pen=pg.mkPen(theme.muted, width=1,
                                        style=QtCore.Qt.PenStyle.DotLine))
+        p.end_update()
         self._apply_zoom_mode()
         self._apply_interaction_mode()
 
@@ -7523,6 +7569,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
             QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                   QtWidgets.QSizePolicy.Policy.Expanding)
         )
+        _diagnostic_plot(self)
 
     def apply_theme(self, theme: ThemeSpec) -> None:
         self._theme = theme
@@ -7537,20 +7584,21 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         self._draw()
 
     def _draw(self) -> None:
-        self.clear()
-        self._plot_item = None
         theme = self._theme
         data = self._data
         if theme is None:
             return
+        p = _diagnostic_plot(self)
         if data is None:
-            p = self.addPlot(0, 0, viewBox=AxisZoomViewBox())
-            self._plot_item = p
+            self.clear()
+            self._plot_item = None
+            p = _diagnostic_plot(self)
             lbl = pg.TextItem("No session fractionation data available.\nRun the session correction step first.",
                               color=theme.muted, anchor=(0.5, 0.5))
             lbl.setFont(QtGui.QFont("", 11))
             p.addItem(lbl)
             lbl.setPos(0.5, 0.5)
+            p.end_update()
             return
 
         ratio_name = data["ratio_name"]
@@ -7564,8 +7612,6 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         show_uncertainty = bool(data.get("show_uncertainty", False))
         fit_label = str(data.get("fit_label", "Polynomial"))
 
-        p = self.addPlot(row=0, col=0, viewBox=AxisZoomViewBox())
-        self._plot_item = p
         _make_diag_axis(p, theme)
         p.setLabel("bottom", "Session time (s)", color=theme.axis_text, size="9px")
         p.setLabel("left", "Fractionation factor", color=theme.axis_text, size="9px")
@@ -7622,6 +7668,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         # Reference line at 1.0
         p.addLine(y=1.0, pen=pg.mkPen(theme.muted, width=1,
                                        style=QtCore.Qt.PenStyle.DotLine))
+        p.end_update()
         self._apply_zoom_mode()
         self._apply_interaction_mode()
 
@@ -7982,6 +8029,45 @@ def _spot_at_time(spans: tuple[np.ndarray, np.ndarray, list[str]], time: float) 
     return names[index] if index >= 0 and time <= ends[index] else ""
 
 
+class _UniformScatterItem(pg.ScatterPlotItem):
+    """Build one symbol-atlas entry for a uniformly styled trace series."""
+
+    def updateSpots(self, dataSet=None):
+        data = self.data if dataSet is None else dataSet
+        # Fall back to pyqtgraph for individual styles, hover styles or other
+        # rendering modes. This fast path changes only atlas lookup batching.
+        try:
+            if (not len(data) or not self.opts["pxMode"] or not self.opts["useCache"]
+                    or np.any(data["size"] != -1) or np.any(data["symbol"] != None)
+                    or np.any(data["pen"] != None) or np.any(data["brush"] != None)
+                    or np.any(data["hovered"])):
+                return super().updateSpots(dataSet)
+            mask = data["sourceRect"]["w"] == 0
+            if np.any(mask):
+                style = tuple(values[0] for values in self._style(
+                    ["symbol", "size", "pen", "brush"], data=data[:1]))
+                data["sourceRect"][mask] = self.fragmentAtlas[[style]][0]
+                self._maybeRebuildAtlas()
+            self._updateMaxSpotSizes(data=data)
+        except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+            # These are pyqtgraph internals (tested on 0.14); if a newer
+            # release changes them, draw through pyqtgraph's own path.
+            return super().updateSpots(dataSet)
+        if np.any(mask):
+            self.invalidate()
+
+
+class _TraceSeriesItem(pg.PlotDataItem):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        old = self.scatter
+        old.setParentItem(None)
+        self.scatter = _UniformScatterItem()
+        self.scatter.setParentItem(self)
+        self.scatter.sigClicked.connect(self.scatterClicked)
+        self.scatter.sigHovered.connect(self.sigPointsHovered)
+
+
 class TracePlotWidget(RoundedPlotWidget):
     regionChanged = QtCore.Signal(str, tuple)
     xWindowChanged = QtCore.Signal(tuple)
@@ -8255,6 +8341,7 @@ class TracePlotWidget(RoundedPlotWidget):
             legend.scene().removeItem(legend)
             self.plot_item.legend = None
         self.plot_item.clear()
+        self._series_items = {}
         self._region_overlays = {}
         self._signal_boundaries = {}
         self._signal_markers = {}
@@ -8421,7 +8508,18 @@ class TracePlotWidget(RoundedPlotWidget):
             self.show_empty("Check one or more channels to display traces.", y_label=y_label)
             return
 
-        self._reset_items()
+        order = [name for name in series_names if name in frame]
+        retained = [name for name in self._series_items if name in order]
+        appended = [name for name in order if name not in self._series_items]
+        if not self._series_items or retained + appended != order:
+            self._reset_items()
+        wanted = set(series_names)
+        for name in list(self._series_items):
+            if name not in wanted or name not in frame:
+                self.plot_item.removeItem(self._series_items.pop(name))
+                if self.plot_item.legend is not None:
+                    self.plot_item.legend.removeItem(name)
+        self._hover_series = {}
         self._hover_spans = _spot_time_spans(frame)
         label_style = {"color": self._theme.axis_text, "font-size": "15px", "font-weight": "600"}
         self.plot_item.setLabel("left", y_label, **label_style)
@@ -8435,24 +8533,31 @@ class TracePlotWidget(RoundedPlotWidget):
             y_values = frame[name].to_numpy(dtype=float)
             finite_values = y_values[np.isfinite(y_values)]
             if not finite_values.size:
+                if name in self._series_items:
+                    self.plot_item.removeItem(self._series_items.pop(name))
+                    if self.plot_item.legend is not None:
+                        self.plot_item.legend.removeItem(name)
                 continue
             color = series_colors.get(name, "#1f63cf")
             symbol = None if line_style == "line" else "o"
             # Configure clipping before the first data assignment. Creating a
             # populated item first builds the full-session symbol atlas even
             # though the attached view will immediately downsample it.
-            curve = pg.PlotDataItem(
+            curve = self._series_items.get(name)
+            if curve is None:
+                curve = _TraceSeriesItem(name=name)
+                curve.setDownsampling(auto=True, method="peak")
+                curve.setClipToView(True)
+                self.plot_item.addItem(curve)
+                self._series_items[name] = curve
+            curve.setData(
+                x_values, y_values,
                 pen=pg.mkPen(color, width=2.0),
-                name=name,
                 symbol=symbol,
                 symbolSize=5 if symbol else None,
-                symbolBrush=color if symbol else None,
+                symbolBrush=pg.mkBrush(color) if symbol else None,
                 symbolPen=pg.mkPen(color, width=1) if symbol else None,
             )
-            curve.setDownsampling(auto=True, method="peak")
-            curve.setClipToView(True)
-            self.plot_item.addItem(curve)
-            curve.setData(x_values, y_values)
             self._hover_series[name] = (x_values, y_values)
             current_min = float(np.min(finite_values))
             current_max = float(np.max(finite_values))

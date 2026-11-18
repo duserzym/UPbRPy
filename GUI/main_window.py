@@ -8475,7 +8475,9 @@ class MainWindow(QtWidgets.QMainWindow):
         task = None
         if isinstance(calculation, StageCall) and stage_process_enabled():
             task = StageTask()
-            task.prepare(self.session, self.workflow_preset.key, self.export_settings, calculation.stage, calculation.stages)
+            task.prepare(self.session, self.workflow_preset.key, self.export_settings,
+                         calculation.stage, calculation.stages,
+                         plot_ratio=self.current_ratio_name())
         self._stage_task = self._stage_lifetime[0] = task
         worker = FunctionWorker(calculation if task is None else lambda: task.run(calculation))
         self._quiet_worker = quiet

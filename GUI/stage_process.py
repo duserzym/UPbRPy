@@ -10,9 +10,11 @@ the workflow key, and ExportSettings; engine module constants are immutable.
 from __future__ import annotations
 
 import atexit
+import copyreg
 from dataclasses import dataclass
 import io
 import logging
+import mmap
 import multiprocessing
 import os
 import pickle
@@ -20,6 +22,8 @@ import sys
 import threading
 import time
 import traceback
+
+import numpy as np
 
 from GUI.process_support import _RestoreUnpickler, _remote_exception, start_process
 
@@ -99,19 +103,85 @@ def calibration_preview(qtegra, options):
             fit_cross_calibration(qtegra, **options, mode="drift"))
 
 
-def _dump(value, references=None, *, copy_buffers=False):
+class _SnapshotArena:
+    """Reusable, privately leased storage for one prepared request."""
+
+    def __init__(self):
+        self.storage = None
+        self.capacity = 0
+
+    def copy(self, buffers):
+        views = [buffer.raw() for buffer in buffers]
+        if not views:
+            return []
+        size = sum((view.nbytes + 63) & ~63 for view in views)
+        if size > self.capacity or self.storage is None:
+            if self.storage is not None:
+                self.storage.close()
+            # Anonymous pages are committed only as they are copied into.
+            # Spare capacity avoids allocating again as the pipeline grows.
+            self.capacity = max(1 << 20, 1 << max(0, size - 1).bit_length())
+            self.storage = mmap.mmap(-1, self.capacity)
+        destination = memoryview(self.storage)
+        copied = []
+        offset = 0
+        for view in views:
+            end = offset + view.nbytes
+            part = destination[offset:end]
+            part[:] = view
+            copied.append(part)
+            offset = (end + 63) & ~63
+        return copied
+
+
+_numpy_scalar = np.float64(0).__reduce__()[0]
+_numpy_frombuffer = np.empty(0).__reduce_ex__(5)[0]
+
+
+def _reduce_numpy_scalar(value):
+    # NumPy's default scalar reducer repeatedly imports its reconstruction
+    # module. Qt's feature import hook makes thousands of these imports costly.
+    # Retain exactly the same constructor, dtype and bytes without the imports.
+    if value.dtype.hasobject:
+        return value.__reduce__()
+    return _numpy_scalar, (value.dtype, value.tobytes())
+
+
+_numpy_reducers = {kind: _reduce_numpy_scalar for kind in set(np.sctypeDict.values())
+                   if issubclass(kind, np.generic)}
+
+
+def _reduce_numpy_array(value):
+    if (value.dtype.hasobject or not value.dtype.itemsize
+            or not (value.flags.c_contiguous or value.flags.f_contiguous)):
+        return value.__reduce_ex__(5)
+    order = "C" if value.flags.c_contiguous else "F"
+    return _numpy_frombuffer, (pickle.PickleBuffer(value), value.dtype, value.shape, order)
+
+
+_numpy_reducers[np.ndarray] = _reduce_numpy_array
+
+
+def _dump(value, references=None, *, copy_buffers=False, arena=None):
     buffers = []
     stream = io.BytesIO()
 
-    class Pickler(pickle.Pickler):
+    class ReferencePickler(pickle.Pickler):
         def persistent_id(self, obj):
-            return references.get(id(obj)) if references else None
+            return references.get(id(obj))
 
-    pickler = Pickler if references else pickle.Pickler
-    pickler(stream, protocol=5, buffer_callback=buffers.append).dump(value)
+    pickler_type = ReferencePickler if references else pickle.Pickler
+    pickler = pickler_type(stream, protocol=5, buffer_callback=buffers.append)
+    pickler.dispatch_table = {**copyreg.dispatch_table, **_numpy_reducers}
+    pickler.dump(value)
     if copy_buffers:
-        buffers = [buffer.raw().tobytes() for buffer in buffers]
+        buffers = (arena or _SnapshotArena()).copy(buffers)
     return stream.getvalue(), buffers
+
+
+def _experiment_signature(experiment):
+    payload, buffers = _dump(experiment)
+    return payload, tuple(buffer.raw().tobytes() for buffer in buffers)
 
 
 def _load(packet, references=None):
@@ -160,6 +230,17 @@ def _child(connection):
                         pipeline._override_archive_key = None
                     result = run_stage(session, key, settings, stage, stages)
                     value = StageReply(result, session.pipeline, session.reduction_cache)
+                    ratio = references.get("plot_ratio")
+                    if ratio is not None and stage in {"downhole", "session"}:
+                        from GUI.workflows import get_workflow_preset
+
+                        getter = (services.get_downhole_plot_data if stage == "downhole"
+                                  else services.get_session_plot_data)
+                        data = getter(session, get_workflow_preset(key), ratio)
+                        cache = (services._downhole_plot_cache if stage == "downhole"
+                                 else services._session_plot_cache)
+                        if data is not None:
+                            value._plot_data = (stage, *cache[id(session)][1:])
             except Exception as exc:
                 try:
                     serialized = pickle.dumps(exc, protocol=5)
@@ -177,6 +258,7 @@ def _child(connection):
                     _send(connection, packet)
             # An idle child must not retain a project's data or buffers.
             request = arguments = references = value = result = session = pipeline = packet = archive = None
+            data = cache = getter = ratio = None
             services._active_standard_archive = None
     except (EOFError, BrokenPipeError, OSError):
         pass
@@ -240,11 +322,24 @@ class StagePool:
         self._warming = False
         self._warm_task = None
         self._windows = set()
+        self._arenas = []
+        self._retain_arenas = True
+
+    def _snapshot_arena(self):
+        """Lease storage independently of worker acquisition and startup."""
+        with self._condition:
+            return self._arenas.pop() if self._arenas else _SnapshotArena()
+
+    def _release_arena(self, arena):
+        with self._condition:
+            if not self._closed and self._retain_arenas and len(self._arenas) < 2:
+                self._arenas.append(arena)
 
     def register_window(self):
         """Retain the shared pool until the last reduction window closes."""
         token = object()
         with self._condition:
+            self._retain_arenas = True
             self._windows.add(token)
         return token
 
@@ -256,6 +351,8 @@ class StagePool:
             self._windows.remove(token)
             if self._windows:
                 return
+            self._retain_arenas = False
+            self._arenas.clear()
             if self._warm_task is not None:
                 self._warm_task.cancel()
             for task in self._owners.values():
@@ -356,6 +453,7 @@ class StagePool:
         """Terminate children at application exit, including outstanding calls."""
         with self._condition:
             self._closed = True
+            self._arenas.clear()
             if self._warm_task is not None:
                 self._warm_task.cancel()
             for task in self._owners.values():
@@ -375,10 +473,11 @@ class StageReply:
     pipeline: object
     reduction_cache: dict
     _experiment_token: tuple | None = None
+    _plot_data: tuple | None = None
 
     def merge(self, session, preset):
         """Install results, then invalidate anything edited during this request."""
-        from GUI.services import ensure_shared_pipeline
+        from GUI.services import ensure_shared_pipeline, _remember_diagnostic_plot
 
         session.pipeline = self.pipeline
         session.reduction_cache = self.reduction_cache
@@ -389,8 +488,11 @@ class StageReply:
                 id(self.pipeline.base_standard_archive), self.pipeline._override_archive_key[1])
         token = self._experiment_token
         unchanged = (token is not None and session.experiment is token[0]
-                     and pickle.dumps(session.experiment, protocol=5) == token[1])
+                     and _experiment_signature(session.experiment) == token[1])
         ensure_shared_pipeline(session, preset, source_experiment_unchanged=unchanged)
+        if self._plot_data is not None:
+            _remember_diagnostic_plot(session, *self._plot_data)
+            self._plot_data = None
         self._experiment_token = None
         return self.result
 
@@ -408,6 +510,17 @@ class StageTask:
         self._kind = None
         self.in_thread = False
         self._experiment_token = None
+        self._arena = None
+
+    def _release_snapshot(self):
+        # Drop every exported view before making the arena available again.
+        self._packet = None
+        if self._arena is not None:
+            arena, self._arena = self._arena, None
+            self.pool._release_arena(arena)
+
+    def __del__(self):
+        self._release_snapshot()
 
     @property
     def cancelled(self):
@@ -427,18 +540,20 @@ class StageTask:
             if self._worker is not None:
                 self._worker.stop()
 
-    def prepare(self, session, preset_key, settings, stage, stages=()):
+    def prepare(self, session, preset_key, settings, stage, stages=(), *, plot_ratio=None):
         """Snapshot live state synchronously on its owning GUI thread."""
         from GUI.services import current_standard_archive, current_standard_archive_path
 
         try:
-            self._experiment_token = (session.experiment, pickle.dumps(session.experiment, protocol=5))
+            self._experiment_token = (session.experiment, _experiment_signature(session.experiment))
         except Exception:
             # The normal snapshot path below owns infrastructure fallback.
             self._experiment_token = None
         references = {name: getattr(session, name)
                       for name in ("total_data", "experiment", "qtegra", "channels")}
         references["archive"] = current_standard_archive()
+        if plot_ratio is not None:
+            references["plot_ratio"] = plot_ratio
         if session.pipeline is not None:
             for name in ("experiment", "total_data", "channels", "base_standard_archive"):
                 references[f"pipeline.{name}"] = getattr(session.pipeline, name)
@@ -450,20 +565,24 @@ class StageTask:
 
     def _prepare(self, kind, arguments, references):
         self._kind = kind
-        self._packet = None
+        self._release_snapshot()
         self._references = {}
         try:
-            self._packet = _dump((kind, arguments, references), copy_buffers=True)
+            self._arena = self.pool._snapshot_arena()
+            self._packet = _dump((kind, arguments, references), copy_buffers=True, arena=self._arena)
             self._references = references
         except Exception as exc:
+            self._release_snapshot()
             self.in_thread = True
             _warn(exc)
 
     def run(self, fallback):
         """Send the prepared snapshot; use the old thread callable on failure."""
         if self.cancelled:
+            self._release_snapshot()
             raise StageCancelled()
         if not enabled() or self._packet is None:
+            self._release_snapshot()
             self.in_thread = True
             return fallback()
         worker = None
@@ -472,6 +591,7 @@ class StageTask:
         try:
             worker = self.pool.acquire(self)
             _send(worker.connection, self._packet)
+            self._release_snapshot()
             while not worker.connection.poll(0.1):
                 if self.cancelled:
                     raise StageCancelled()
@@ -500,7 +620,7 @@ class StageTask:
                 self._worker = None
             if worker is not None:
                 self.pool.release(worker, reusable=reusable and not self.cancelled)
-            self._packet = None
+            self._release_snapshot()
             self._references = {}
             self._experiment_token = None
         if remote_error is not None:

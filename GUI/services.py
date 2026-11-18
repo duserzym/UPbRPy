@@ -1010,6 +1010,8 @@ def unlocked_workflow_rows(stage_sequence, completed, loaded) -> list[bool]:
 def clear_reduction_cache(session: ReductionSession) -> None:
     """Discard calculated products while preserving import and selections."""
     session.reduction_cache.clear()
+    _downhole_plot_cache.pop(id(session), None)
+    _session_plot_cache.pop(id(session), None)
     if session.pipeline is not None:
         if not session.pipeline.matches_source_experiment(session.experiment):
             session.pipeline.update_experiment(session.experiment)
@@ -1709,6 +1711,28 @@ def _fractionation_standard(session: ReductionSession, preset: WorkflowPreset, r
     return session.primary_68_standard or preset.primary_standard
 
 
+# Kept outside ReductionSession so view caches never enter stage snapshots.
+_downhole_plot_cache = {}
+_session_plot_cache = {}
+
+
+def _remember_diagnostic_plot(session, kind, key, sources, data):
+    cache = _downhole_plot_cache if kind == "downhole" else _session_plot_cache
+    names = ("signal_data_with_raw_ratios", "downhole_results") if kind == "downhole" else (
+        "session_correction_results", "downhole_results")
+    if any(session.reduction_cache.get(name) is not source
+           for name, source in zip(names, sources)):
+        return
+    identity = id(session)
+
+    def release(reference):
+        cached = cache.get(identity)
+        if cached is not None and cached[0] is reference:
+            cache.pop(identity, None)
+
+    cache[identity] = (weakref.ref(session, release), key, sources, data)
+
+
 def get_downhole_plot_data(
     session: ReductionSession,
     preset: WorkflowPreset,
@@ -1735,15 +1759,23 @@ def get_downhole_plot_data(
     except Exception:
         return None
 
-    ps_rows = raw_ratios[raw_ratios["sample"] == primary_standard]
+    key = (ratio_name, primary_standard, known_ratio, session.downhole_fit_method)
+    sources = (raw_ratios, downhole_results)
+    cached = _downhole_plot_cache.get(id(session))
+    if cached is not None and cached[0]() is session and cached[1] == key and all(
+        old is new for old, new in zip(cached[2], sources)
+    ):
+        return cached[3]
+    # Plotting consumes columns only, not deep-copied reduction provenance.
+    rows = pd.DataFrame(raw_ratios, copy=False)
+    ps_rows = rows[rows["sample"] == primary_standard]
     if ps_rows.empty:
         return None
 
     spot_times: list[np.ndarray] = []
     spot_ratios: list[np.ndarray] = []
     spot_names: list[str] = []
-    for spot_name in ps_rows["spot_name"].unique():
-        this_spot = ps_rows[ps_rows["spot_name"] == spot_name]
+    for spot_name, this_spot in ps_rows.groupby("spot_name", sort=False, observed=True):
         t = this_spot["Time"].values.astype(float)
         r = this_spot[ratio_name].values.astype(float)
         valid = np.isfinite(r) & (r > 0)
@@ -1806,7 +1838,7 @@ def get_downhole_plot_data(
             )
             fit_label = str(ratio_result.get("model", fit_label))
 
-    return {
+    data = {
         "ratio_name": ratio_name,
         "known_ratio": known_ratio,
         "primary_standard": primary_standard,
@@ -1818,6 +1850,8 @@ def get_downhole_plot_data(
         "fit_label": fit_label,
         "std_frac": std_frac,
     }
+    _remember_diagnostic_plot(session, "downhole", key, sources, data)
+    return data
 
 
 def get_session_plot_data(
@@ -1845,6 +1879,13 @@ def get_session_plot_data(
     ratio_results = session_results.get("correction_results", {}).get(ratio_name)
     if not ratio_results:
         return None
+    key = (ratio_name, primary_standard, known_ratio)
+    sources = (session_results, downhole_results)
+    cached = _session_plot_cache.get(id(session))
+    if cached is not None and cached[0]() is session and cached[1] == key and all(
+        old is new for old, new in zip(cached[2], sources)
+    ):
+        return cached[3]
     observations = ratio_results.get("fit_observations", {})
     t_arr = np.asarray(observations.get("time", []), dtype=float)
     f_arr = np.asarray(observations.get("fractionation", []), dtype=float)
@@ -1871,7 +1912,8 @@ def get_session_plot_data(
     dh_corrected = downhole_results.get("plateau_corrected")
     spot_names_out: list[str] = []
     if isinstance(dh_corrected, pd.DataFrame):
-        selected = dh_corrected[dh_corrected["sample"].eq(primary_standard)]
+        rows = pd.DataFrame(dh_corrected, copy=False)
+        selected = rows[rows["sample"].eq(primary_standard)]
         spot_names_out = [
             str(name)
             for name in selected.groupby("spot_name", sort=False).groups
@@ -1879,7 +1921,7 @@ def get_session_plot_data(
     if len(spot_names_out) != len(t_arr):
         spot_names_out = [f"standard {index + 1}" for index in range(len(t_arr))]
 
-    return {
+    data = {
         "ratio_name": ratio_name,
         "known_ratio": known_ratio,
         "primary_standard": primary_standard,
@@ -1900,6 +1942,8 @@ def get_session_plot_data(
         # standard-spot factors.  The GUI chooses whether to show ±1σ or ±2σ.
         "show_uncertainty": True,
     }
+    _remember_diagnostic_plot(session, "session", key, sources, data)
+    return data
 
 
 def get_standard_bias_data(

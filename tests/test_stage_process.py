@@ -355,3 +355,127 @@ def test_shutdown_terminates_workers(session, pool):
     pool.shutdown()
     assert not process.is_alive()
     assert not pool._workers
+
+
+def test_snapshot_arena_reused_only_after_send(session, pool, monkeypatch):
+    first = prepare(session, "baseline")
+    second = prepare(session, "baseline")
+    assert first._arena is not second._arena
+    arena = first._arena
+    original_send = stage_process._send
+    concurrent = []
+
+    def send(connection, packet):
+        # A request prepared while transport holds the buffers must not share
+        # them, even when another warm child could be available.
+        other = prepare(session, "baseline")
+        assert other._arena is not arena
+        concurrent.append(other)
+        return original_send(connection, packet)
+
+    monkeypatch.setattr(stage_process, "_send", send)
+    first.run(no_fallback)
+    assert first._packet is None and first._arena is None
+    third = prepare(session, "baseline")
+    assert third._arena is arena
+    # Reuse does not overwrite a concurrently prepared snapshot.
+    expected = stage_process._load(second._packet)[1][0].total_data.copy()
+    session.total_data.loc[:, "238U"] = -999.
+    pd.testing.assert_frame_equal(stage_process._load(second._packet)[1][0].total_data,
+                                  expected, check_exact=True)
+
+
+def test_cancelled_unsent_snapshot_returns_arena(session, pool):
+    task = prepare(session, "baseline")
+    arena = task._arena
+    task.cancel()
+    with pytest.raises(stage_process.StageCancelled):
+        task.run(no_fallback)
+    assert task._packet is None
+    assert prepare(session, "baseline")._arena is arena
+
+
+def test_snapshot_arena_preserves_empty_and_readonly_buffers():
+    import numpy as np
+    empty = np.array([])
+    readonly = np.arange(4.)
+    readonly.flags.writeable = False
+    arena = stage_process._SnapshotArena()
+    packet = stage_process._dump((empty, readonly), copy_buffers=True, arena=arena)
+    actual_empty, actual_readonly = stage_process._load(packet)
+    assert actual_empty.flags.writeable
+    assert not actual_readonly.flags.writeable
+    np.testing.assert_array_equal(actual_readonly, readonly)
+
+
+def test_last_window_does_not_retain_unsent_snapshot(session, pool):
+    token = pool.register_window()
+    task = prepare(session, "baseline")
+    pool.release_window(token)
+    task.cancel()
+    with pytest.raises(stage_process.StageCancelled):
+        task.run(no_fallback)
+    assert pool._arenas == []
+
+
+def test_numpy_scalar_reducer_is_byte_identical():
+    import pickle
+    import numpy as np
+    values = [np.float64(-0.), np.float64(np.nan), np.float32(1.5),
+              np.int64(-7), np.uint64(2**63), np.bool_(True),
+              np.complex128(1 + 2j), np.str_("zircon"), np.bytes_(b"sample"),
+              np.datetime64("2026-11-18"), np.timedelta64(3, "s"),
+              np.array((1, 2.), dtype=[("a", "i4"), ("b", "f8")])[()]]
+    payload, buffers = stage_process._dump(values)
+    assert not buffers
+    assert payload == pickle.dumps(values, protocol=5)
+
+
+def test_numpy_array_reducer_is_byte_identical():
+    import pickle
+    import numpy as np
+    readonly = np.arange(8.)
+    readonly.flags.writeable = False
+    arrays = [np.arange(8.), readonly, np.array(2.), np.array([]),
+              np.asfortranarray(np.arange(12.).reshape(3, 4)),
+              np.arange(8.)[::2], np.array([np.float64(2.), "spot"], dtype=object),
+              np.empty(3, dtype="V0"),
+              np.array([(1, 2.)], dtype=[("a", "i4"), ("b", "f8")])]
+    for array in arrays:
+        original = []
+        expected = pickle.dumps(array, protocol=5, buffer_callback=original.append)
+        payload, buffers = stage_process._dump(array)
+        assert payload == expected
+        assert [buffer.raw().tobytes() for buffer in buffers] == [
+            buffer.raw().tobytes() for buffer in original]
+
+
+@pytest.mark.parametrize("stage", ["downhole", "session"])
+def test_precomputed_diagnostic_uses_exact_view_and_result_objects(session, pool, stage):
+    task = stage_process.StageTask()
+    task.prepare(session, PRESET.key, ExportSettings(), stage, plot_ratio="206Pb/238U")
+    reply = task.run(no_fallback)
+    assert reply._plot_data is not None
+    data = reply._plot_data[-1]
+    reply.merge(session, PRESET)
+    getter = (services.get_downhole_plot_data if stage == "downhole"
+              else services.get_session_plot_data)
+    assert getter(session, PRESET, "206Pb/238U") is data
+    # A view changed while transport ran may not consume the prepared ratio.
+    assert getter(session, PRESET, "207Pb/206Pb") is not data
+    # Compare the child product with the synchronous fallback, exactly.
+    cache = services._downhole_plot_cache if stage == "downhole" else services._session_plot_cache
+    cache.pop(id(session), None)
+    assert_exact(getter(session, PRESET, "206Pb/238U"), data)
+
+
+@pytest.mark.parametrize("stage", ["downhole", "session"])
+def test_precomputed_diagnostic_rejects_edits_during_request(session, pool, stage):
+    task = stage_process.StageTask()
+    task.prepare(session, PRESET.key, ExportSettings(), stage, plot_ratio="206Pb/238U")
+    session.experiment.loc[0, "baseline_start_times"] += .1
+    reply = task.run(no_fallback)
+    assert reply._plot_data is not None
+    reply.merge(session, PRESET)
+    cache = services._downhole_plot_cache if stage == "downhole" else services._session_plot_cache
+    assert id(session) not in cache
