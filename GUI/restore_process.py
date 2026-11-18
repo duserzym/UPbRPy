@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
-import io
-from importlib.machinery import ModuleSpec
 import logging
 import multiprocessing
 import os
@@ -12,7 +9,6 @@ import pickle
 import sys
 import threading
 import traceback
-from types import ModuleType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,25 +17,8 @@ if TYPE_CHECKING:
     from GUI.services import RestoredProject
 
 
-_start_lock = threading.Lock()
+from GUI.process_support import _unpickle, _remote_exception, start_process
 _logger = logging.getLogger(__name__)
-
-
-class _RestoreUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        # PySide's __import__ hook inspects imported packages for Qt feature
-        # use. On the lazy UPbRPy package that probes __wrapped__ and loads
-        # the notebook plotting facade. Resolve these trusted child globals
-        # directly, avoiding that hook (and unavailable frozen plotting libs).
-        sys.audit("pickle.find_class", module, name)
-        value = importlib.import_module(module)
-        for part in name.split("."):
-            value = getattr(value, part)
-        return value
-
-
-def _unpickle(payload):
-    return _RestoreUnpickler(io.BytesIO(payload)).load()
 
 
 class RestoreCancelled(Exception):
@@ -116,24 +95,6 @@ def _finish_payload(payload):
     return restored
 
 
-def _remote_exception(module, name, message, details, serialized=None):
-    try:
-        cls = importlib.import_module(module)
-        for part in name.split("."):
-            cls = getattr(cls, part)
-        if not isinstance(cls, type) or not issubclass(cls, Exception):
-            raise TypeError(name)
-        try:
-            error = _unpickle(serialized) if serialized is not None else cls(message)
-        except Exception:
-            error = cls.__new__(cls)
-            Exception.__init__(error, message)
-        if str(error) != message:
-            raise ValueError("Exception constructor changed message")
-    except Exception:
-        error = RuntimeError(message)
-    error.add_note(details)
-    return error
 
 
 class RestoreTask:
@@ -197,19 +158,7 @@ class RestoreTask:
             with self._lock:
                 if self.cancelled:
                     raise RestoreCancelled()
-                # Spawn normally replays __main__, which may import Qt or run
-                # an unguarded embedding script. Our target has no __main__
-                # objects, so give spawn this importable, Qt-free bootstrap.
-                # Restore the parent module immediately, even if start fails.
-                with _start_lock:
-                    original_main = sys.modules["__main__"]
-                    bootstrap = ModuleType("__main__")
-                    bootstrap.__spec__ = ModuleSpec(__name__, loader=None)
-                    try:
-                        sys.modules["__main__"] = bootstrap
-                        process.start()
-                    finally:
-                        sys.modules["__main__"] = original_main
+                start_process(process)
                 self._process = process
             sender.close()
             while True:

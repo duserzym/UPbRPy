@@ -22,7 +22,8 @@ from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard
 from GUI.state import ReductionSession
 from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
-from UPbRPy.calibration import fit_cross_calibration
+from GUI.workers import FunctionWorker
+from GUI.stage_process import StageTask, calibration_preview, enabled as stage_process_enabled
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
 from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
 from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
@@ -3466,6 +3467,13 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         self.setObjectName("DetectorCalibrationPanel")
         self._session = None
         self._preview_key = None
+        self._preview_task = None
+        self._preview_worker = None
+        self._preview_generation = 0
+        self._preview_pending = False
+        self._preview_requested_key = None
+        lifetime = self._preview_lifetime = [None]
+        self.destroyed.connect(lambda: lifetime[0].cancel() if lifetime[0] is not None else None)
         self._constant = None
         self._drift = None
         self._options = {}
@@ -3552,7 +3560,6 @@ class DetectorCalibrationPanel(NeumorphicFrame):
     def set_session(self, session: ReductionSession | None) -> None:
         """Show the retained raw session and its saved detector choices."""
         self._session = session
-        self._preview_key = None
         options = {} if session is None else session.import_settings.get("detector_calibration", {})
         self._options = dict(options) if isinstance(options, dict) else {"mode": options}
         qtegra = None if session is None else session.qtegra
@@ -3569,6 +3576,8 @@ class DetectorCalibrationPanel(NeumorphicFrame):
         if capable:
             self._refresh_preview()
         else:
+            self.cancel_preview()
+            self._preview_key = None
             self._constant = self._drift = None
             self.channel_combo.clear()
             self.table.setRowCount(0)
@@ -3604,21 +3613,87 @@ class DetectorCalibrationPanel(NeumorphicFrame):
             smoothing_s=options.get("smoothing_s", 1800.0), sep=sep,
         )
         key = (id(self._session.qtegra), repr(fit_options))
+        if self._preview_pending and key == self._preview_requested_key:
+            return
         if key != self._preview_key:
-            try:
-                self._constant = fit_cross_calibration(self._session.qtegra, **fit_options, mode="constant")
-                self._drift = fit_cross_calibration(self._session.qtegra, **fit_options, mode="drift")
-            except ValueError as exc:
-                self._constant = self._drift = None
-                self.channel_combo.clear()
-                self.table.setRowCount(0)
-                self.plot.clear()
-                self.reason_label.setText(str(exc))
-                self.reason_label.show()
-                self._update_apply_button()
+            previous = self.channel_combo.currentText()
+            self.cancel_preview()
+            self._preview_requested_key = key
+            generation = self._preview_generation
+            if not stage_process_enabled():
+                # Preserve the synchronous display path in explicit thread
+                # mode: no transient widget/stylesheet changes while fitting.
+                try:
+                    result = calibration_preview(self._session.qtegra, fit_options)
+                except Exception as exc:
+                    self._reject_preview(generation, str(exc))
+                else:
+                    self._accept_preview(generation, key, previous, result)
                 return
-            self._preview_key = key
-        previous = self.channel_combo.currentText()
+            self._constant = self._drift = None
+            self.channel_combo.setEnabled(False)
+            self.table.setRowCount(0)
+            self.plot.clear()
+            self._preview_pending = True
+            self.reason_label.setText("Computing detector calibration…")
+            self.reason_label.show()
+            self._update_apply_button()
+            task = self._preview_task = self._preview_lifetime[0] = StageTask()
+            task.prepare_preview(self._session.qtegra, fit_options)
+            qtegra = self._session.qtegra
+            worker = self._preview_worker = FunctionWorker(
+                lambda: task.run(lambda: calibration_preview(qtegra, fit_options)))
+            worker.signals.preview_context = (generation, key, previous)
+            worker.signals.succeeded.connect(self._preview_succeeded)
+            worker.signals.failed.connect(self._preview_failed)
+            QtCore.QThreadPool.globalInstance().start(worker)
+            return
+        self._fill_preview()
+
+    def cancel_preview(self):
+        """Discard stale results and terminate this panel's in-flight child."""
+        self._preview_generation += 1
+        self._preview_pending = False
+        if self._preview_task is not None:
+            self._preview_task.cancel()
+            self._preview_task = None
+        self._preview_lifetime[0] = None
+
+    @QtCore.Slot(object)
+    def _preview_succeeded(self, result):
+        self._accept_preview(*self.sender().preview_context, result)
+
+    @QtCore.Slot(str, str)
+    def _preview_failed(self, message, _details):
+        self._reject_preview(self.sender().preview_context[0], message)
+
+    def _accept_preview(self, generation, key, previous, result):
+        if generation != self._preview_generation:
+            return
+        self._preview_pending = False
+        self._preview_key = key
+        self._constant, self._drift = result
+        self._preview_task = self._preview_lifetime[0] = None
+        self._fill_preview(previous)
+
+    def _reject_preview(self, generation, message):
+        if generation != self._preview_generation:
+            return
+        self._preview_pending = False
+        self._preview_task = self._preview_lifetime[0] = None
+        self._constant = self._drift = None
+        self.table.setRowCount(0)
+        self.plot.clear()
+        self.channel_combo.clear()
+        self.channel_combo.setEnabled(True)
+        self.reason_label.setText(message)
+        self.reason_label.show()
+        self._update_apply_button()
+
+    def _fill_preview(self, previous=None):
+        self.channel_combo.setEnabled(True)
+        if previous is None:
+            previous = self.channel_combo.currentText()
         self.channel_combo.blockSignals(True)
         self.channel_combo.clear()
         self.channel_combo.addItems(list(self._constant.channels))
@@ -3632,7 +3707,7 @@ class DetectorCalibrationPanel(NeumorphicFrame):
 
     def _update_apply_button(self, *_args) -> None:
         self.apply_button.setEnabled(
-            self.isEnabled() and (self.mode_combo.currentData() == "qtegra"
+            self.isEnabled() and not self._preview_pending and (self.mode_combo.currentData() == "qtegra"
                                   or bool(self._constant and self._constant.channels))
         )
 

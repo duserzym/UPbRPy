@@ -105,6 +105,7 @@ from GUI.widgets import (
 from GUI.workers import FunctionWorker
 from GUI.busy_indicator import BusyIndicator
 from GUI.restore_process import results_cache_warmer, RestoreTask
+from GUI.stage_process import StageTask, StageReply, StageCall, enabled as stage_process_enabled, stage_pool
 from GUI.updater import Updater
 from GUI.update_widgets import CheckUpdatesButton, VersionChip
 from GUI.workflows import WORKFLOW_PRESETS, format_import_defaults, get_workflow_preset, infer_workflow_preset
@@ -316,6 +317,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._active_worker: FunctionWorker | None = None
         self._restore_task: RestoreTask | None = None
+        self._stage_task: StageTask | None = None
+        self._stage_closing = False
+        owned_pool = self._stage_pool = stage_pool
+        owner_token = self._stage_pool_owner = owned_pool.register_window()
+        lifetime = self._stage_lifetime = [None]
+
+        def release_stage_worker():
+            if lifetime[0] is not None:
+                lifetime[0].cancel()
+            owned_pool.release_window(owner_token)
+
+        self.destroyed.connect(release_stage_worker)
+        QtWidgets.QApplication.instance().aboutToQuit.connect(stage_pool.shutdown)
         self._busy_label = ""
         # Database-mode flows; the window controller shares one instance
         # between reductions; a standalone reduction creates one on first use.
@@ -336,7 +350,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._initialize_concordia_layout()
         self.restore_progress.connect(
             self.busy_progress.set_progress, QtCore.Qt.ConnectionType.QueuedConnection)
-        QtWidgets.QApplication.instance().aboutToQuit.connect(self._cancel_restore)
+        QtWidgets.QApplication.instance().aboutToQuit.connect(self._cancel_background_processes)
         self._initialize_reference_library()
         self._connect_system_theme_updates()
         self.apply_theme_mode(self.theme_mode, persist=False)
@@ -1248,14 +1262,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def request_close(self) -> bool:
         """Run the close guard without hiding or deleting this reduction."""
         event = QtGui.QCloseEvent()
-        self.closeEvent(event)
+        self._probing_close = True
+        try:
+            self.closeEvent(event)
+        finally:
+            self._probing_close = False
         return event.isAccepted()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Prevent accidental loss of an imported or edited reduction."""
         self.flush_selection_edits()
         restoring = self._restore_task is not None
-        if self._active_worker is not None and not restoring:
+        if (self._active_worker is not None and not restoring
+                and (self._stage_task is None or self._stage_task.in_thread)):
             QtWidgets.QMessageBox.information(
                 self,
                 "Reduction still running",
@@ -1266,7 +1285,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self.has_unsaved_changes():
             self.persist_layout_state()
-            self._cancel_restore()
+            self._cancel_background_processes()
             event.accept()
             return
         dialog = QtWidgets.QMessageBox(self)
@@ -1288,17 +1307,32 @@ class MainWindow(QtWidgets.QMainWindow):
         choice = dialog.exec()
         if choice == QtWidgets.QMessageBox.StandardButton.Discard:
             self.persist_layout_state()
-            self._cancel_restore()
+            self._cancel_background_processes()
             event.accept()
             return
         if choice == QtWidgets.QMessageBox.StandardButton.Save:
             self.save_project()
             if not self.has_unsaved_changes():
                 self.persist_layout_state()
-                self._cancel_restore()
+                self._cancel_background_processes()
                 event.accept()
                 return
         event.ignore()
+
+    def _cancel_background_processes(self) -> None:
+        if getattr(self, "_probing_close", False):
+            # Studio probes all tabs before closing any. A later Cancel
+            # leaves earlier tabs open and their stage calculations usable.
+            self._cancel_restore()
+            return
+        self._stage_closing = True
+        self.busy_progress.stop()
+        self._calibration_state_timer.stop()
+        if self._stage_task is not None:
+            self._stage_task.cancel()
+        self.detector_calibration_panel.cancel_preview()
+        self._stage_pool.release_window(self._stage_pool_owner)
+        self._cancel_restore()
 
     @QtCore.Slot()
     def _cancel_restore(self) -> None:
@@ -5826,6 +5860,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = loaded_session
         self._calibration_seen_cached.clear()
         self._calibration_target_row = None
+        stage_pool.warm()
         self._position_empty_state()
         self.results_table.set_selected_spots(set())
         self.results_table.set_spot_excluded(set(self.results_table.excluded_spots), False)
@@ -7253,7 +7288,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Updating reduction stages",
-            lambda: self._recalculate_cache(stages),
+            StageCall("selection", lambda: self._recalculate_cache(stages), tuple(stages)),
             show_result,
             quiet=quiet,
         )
@@ -8355,7 +8390,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reference_value_editor.hide()
         # The guard completes the snapshot before work is queued.
         self.run_background(
-            "Concentration calibration", lambda: ensure_concentration_results(self.session, self.workflow_preset),
+            "Concentration calibration", StageCall("concentration", lambda: ensure_concentration_results(self.session, self.workflow_preset)),
             lambda _result: self._refresh_reduction_notices(),
         )
 
@@ -8388,7 +8423,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.flush_selection_edits()
-        worker = FunctionWorker(calculation)
+        task = None
+        if isinstance(calculation, StageCall) and stage_process_enabled():
+            task = StageTask()
+            task.prepare(self.session, self.workflow_preset.key, self.export_settings, calculation.stage, calculation.stages)
+        self._stage_task = self._stage_lifetime[0] = task
+        worker = FunctionWorker(calculation if task is None else lambda: task.run(calculation))
         self._quiet_worker = quiet
         self._active_worker = worker
         self._busy_label = label
@@ -8430,9 +8470,11 @@ class MainWindow(QtWidgets.QMainWindow):
             nonlocal succeeded
             if not shiboken6.isValid(self):
                 return
-            if self._restore_task is not None and self._restore_task.cancelled:
+            if self._stage_closing or (self._restore_task is not None and self._restore_task.cancelled):
                 return
             try:
+                if isinstance(result, StageReply):
+                    result = result.merge(self.session, self.workflow_preset)
                 on_success(result)
                 self.change_guard.complete()
                 succeeded = True
@@ -8440,12 +8482,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._issue_stage = None
                 self._reduction_failed = False
             except Exception as exc:
+                self.change_guard.fail()
                 self._handle_action_error(f"{label} display failed", exc)
 
         def report_failure(message: str, details: str) -> None:
             if not shiboken6.isValid(self):
                 return
-            if self._restore_task is not None and self._restore_task.cancelled:
+            if self._stage_closing or (self._restore_task is not None and self._restore_task.cancelled):
                 return
             self.change_guard.fail()
             self._show_reduction_issue(label, worker.error or RuntimeError(message), details)
@@ -8454,10 +8497,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def finish() -> None:
             self._active_worker = None
+            self._stage_task = None
+            self._stage_lifetime[0] = None
             self._restore_task = None
             self._quiet_worker = False
             self._busy_label = ""
-            if not shiboken6.isValid(self):
+            if not shiboken6.isValid(self) or self._stage_closing:
                 return
             self.busy_progress.stop()
             self._calibration_state_timer.stop()
@@ -8621,7 +8666,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Subtracting baselines",
-            lambda: ensure_baseline_subtracted(self.session),
+            StageCall("baseline", lambda: ensure_baseline_subtracted(self.session)),
             show_result,
         )
 
@@ -8639,10 +8684,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Applying internal normalization",
-            lambda: ensure_normalized_plateau(
+            StageCall("normalization", lambda: ensure_normalized_plateau(
                 self.session,
                 self.workflow_preset,
-            ),
+            )),
             show_result,
         )
 
@@ -8661,10 +8706,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Calibrating concentrations",
-            lambda: ensure_concentration_results(
+            StageCall("concentration", lambda: ensure_concentration_results(
                 self.session,
                 self.workflow_preset,
-            ),
+            )),
             show_result,
         )
 
@@ -8681,7 +8726,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Building isotope ratios",
-            lambda: ensure_raw_ratios(self.session),
+            StageCall("ratios", lambda: ensure_raw_ratios(self.session)),
             show_result,
         )
 
@@ -8701,10 +8746,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Fitting downhole fractionation",
-            lambda: ensure_downhole_results(
+            StageCall("downhole", lambda: ensure_downhole_results(
                 self.session,
                 self.workflow_preset,
-            ),
+            )),
             show_result,
         )
 
@@ -8723,10 +8768,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Fitting session fractionation",
-            lambda: ensure_session_corrected(
+            StageCall("session", lambda: ensure_session_corrected(
                 self.session,
                 self.workflow_preset,
-            ),
+            )),
             show_result,
         )
 
@@ -8758,7 +8803,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Finalizing reduction",
-            calculate_final,
+            StageCall("final_review", calculate_final),
             show_result,
         )
 
@@ -8777,10 +8822,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.run_background(
             "Calculating depth profiles",
-            lambda: ensure_depth_profile(
+            StageCall("depth_profile", lambda: ensure_depth_profile(
                 self.session,
                 self.workflow_preset,
-            ),
+            )),
             show_result,
         )
 

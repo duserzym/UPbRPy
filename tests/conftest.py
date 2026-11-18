@@ -127,6 +127,12 @@ _qt_settings_folder = _isolate_qt_settings()
 
 
 @pytest.fixture(autouse=True)
+def stages_in_thread(monkeypatch):
+    """Existing service monkeypatches must remain visible to worker calls."""
+    monkeypatch.setenv("UPBRPY_STAGE_PROCESS", "0")
+
+
+@pytest.fixture(autouse=True)
 def isolate_selection_autosaves(tmp_path, monkeypatch):
     """Keep recoverable projects local to each test, including its windows."""
     monkeypatch.setenv("UPBRPY_AUTOSAVE_DIR", str(tmp_path / "autosave"))
