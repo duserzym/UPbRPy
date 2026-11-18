@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 import traceback
@@ -115,7 +116,7 @@ from UPbRPy.project import write_reduction_project
 from UPbRPy.qtegra import companion_folder, detect_format, UnsupportedQtegraFormat
 from UPbRPy.reproducibility import (
     export_reduction_bundle,
-    selection_export_frame,
+    SELECTION_EXPORT_COLUMNS,
     write_reproducibility_notebook,
 )
 
@@ -1135,6 +1136,22 @@ class MainWindow(QtWidgets.QMainWindow):
             "open Python calculation pipeline.",
         )
 
+    @staticmethod
+    def _selection_fingerprint(experiment: pd.DataFrame) -> str:
+        """Hash scalar window decisions without constructing per-spot records.
+
+        This is only the in-memory dirty check; project/export serialization
+        continues to write the complete reviewed selection records.
+        """
+        columns = [name for name in SELECTION_EXPORT_COLUMNS if name in experiment]
+        columns.extend(name for name in experiment if name not in columns and str(name).startswith("selection_"))
+        # Construct from arrays to avoid copying the experiment's large attrs.
+        frame = pd.DataFrame({name: experiment[name].array for name in columns})
+        digest = hashlib.blake2b(digest_size=24)
+        digest.update(repr(columns).encode())
+        digest.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
+        return digest.hexdigest()
+
     def scientific_project_fingerprint(self) -> str:
         """Serialize user decisions that materially define a reduction."""
         if not self.session.loaded:
@@ -1196,9 +1213,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "review_show_glasses": self.results_table.show_glasses(),
                 "bias_controls": self.bias_controls.state(),
             },
-            "selections": selection_export_frame(
-                self.session.experiment
-            ).to_dict(orient="records"),
+            "selections": self._selection_fingerprint(self.session.experiment),
         }
         return json.dumps(
             payload,
@@ -6900,6 +6915,10 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 self._syncing_spot_selection = False
         self._sync_plateau_filter_control()
+        if self.session.plot_mode in _VIEWS_WITHOUT_SPOT:
+            # Results own their selection/readout. Focusing a tree row does
+            # not change their data, traces, overview, or workflow state.
+            return
         self.refresh_view()
 
     def on_channel_toggled(self, _item: QtWidgets.QListWidgetItem) -> None:

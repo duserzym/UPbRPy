@@ -1367,6 +1367,10 @@ class DataFrameTableModel(QtCore.QAbstractTableModel):
         # column arrays so each lookup avoids pandas slicing and attrs copies.
         self._columns = tuple(column.array for _name, column in self.frame.items())
         self._spot_names = self.frame["spot_name"].array if "spot_name" in self.frame else None
+        self._spot_rows = {}
+        if self._spot_names is not None:
+            for row, name in enumerate(self._spot_names):
+                self._spot_rows.setdefault(str(name), []).append(row)
 
     def spot_name(self, row: int) -> str:
         """Return the stable spot key for a source-model row."""
@@ -1802,12 +1806,51 @@ class _ConcordiaRows:
         return self.rows[index]
 
 
+class _ConcordiaMetadata:
+    """Merge tooltip metadata only for spots actually inspected."""
+
+    def __init__(self, sources):
+        self.sources = []
+        self.rows = {}
+        for frame in sources:
+            positions = {}
+            if "spot_name" in frame:
+                for row, name in enumerate(frame["spot_name"].astype(str)):
+                    positions.setdefault(name, []).append(row)
+            self.sources.append((frame, positions))
+
+    def get(self, name, default=None):
+        if name not in self.rows:
+            merged = {}
+            for frame, positions in self.sources:
+                for row in positions.get(name, ()):
+                    merged.update({key: value for key, value in frame.iloc[row].items()
+                                   if ConcordiaReviewWidget._has_value(value)})
+            self.rows[name] = merged
+        return self.rows[name] or default
+
+
 class _ConcordiaEllipse:
     """A per-row ellipse handle; the canvas owns the single graphics item."""
 
-    def __init__(self, owner, x, y, pen, outline_color=None):
+    def __init__(self, owner, x, y, pen, outline_color=None, *, center=None, matrix=None):
         self.owner = weakref.ref(owner)
         self.x, self.y = x, y
+        # The quarter-turn vertices retain the original eigensystem exactly.
+        # Keep getData() for consumers of the diagnostic coordinates; painting
+        # and picking use the affine circle, never this polygon.
+        quarter = (len(x) - 1) // 4
+        self.center = np.array([(x[0] + x[2*quarter])/2, (y[0] + y[2*quarter])/2])
+        self.matrix = np.column_stack((np.array([x[0], y[0]]) - self.center,
+                                       np.array([x[quarter], y[quarter]]) - self.center))
+        if center is not None:
+            self.center = np.asarray(center, dtype=float)
+            self.matrix = np.asarray(matrix, dtype=float)
+        a, b = self.matrix[:, 0], self.matrix[:, 1]
+        unit = QtGui.QPainterPath()
+        unit.addEllipse(QtCore.QRectF(-1, -1, 2, 2))
+        transform = QtGui.QTransform(a[0], a[1], b[0], b[1], *self.center)
+        self.path = transform.map(unit)
         self.opts = {"pen": pen}
         self.outline_color = outline_color
         self._style_key = None
@@ -1855,6 +1898,8 @@ class _ConcordiaEllipseBatch(pg.GraphicsObject):
         super().__init__()
         self.handles = []
         self.paths = []
+        self._paint_chunks = []
+        self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
         self.dirty = True
         self._bounds = QtCore.QRectF()
         self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
@@ -1867,33 +1912,52 @@ class _ConcordiaEllipseBatch(pg.GraphicsObject):
             if not handle.visible:
                 continue
             groups.setdefault(handle.style_key(), []).append(handle)
-        paths = []
+        paths, chunks = [], []
         bounds = QtCore.QRectF()
         for (rgba, width, style), handles in groups.items():
-            # Finite connections close each ellipse and skip its NaN separator.
-            x = np.full((len(handles), len(handles[0].x) + 1), np.nan)
-            y = np.full_like(x, np.nan)
-            x[:, :-1] = [handle.x for handle in handles]
-            y[:, :-1] = [handle.y for handle in handles]
-            path = pg.arrayToQPath(x.ravel(), y.ravel(), connect="finite")
             pen = pg.mkPen(QtGui.QColor.fromRgba(rgba), width=width, style=style)
+            pen.setCosmetic(True)
+            path = QtGui.QPainterPath()
+            # Retain one style path for vector export and bounded spatial
+            # chunks for painting. Zoomed views need not tessellate every
+            # offscreen ellipse just to discard its pixels at the clip edge.
+            ordered = sorted(handles, key=lambda handle: handle.center[0])
+            # Small groups cost less as one draw call; spatial clipping pays
+            # for the extra calls only on larger groups.
+            chunk_size = len(ordered) if len(ordered) <= 512 else 128
+            for start in range(0, len(ordered), chunk_size):
+                chunk = QtGui.QPainterPath()
+                for handle in ordered[start:start+chunk_size]:
+                    chunk.addPath(handle.path)
+                path.addPath(chunk)
+                chunks.append((pen, chunk, chunk.boundingRect()))
             paths.append((pen, path))
             bounds = bounds.united(path.boundingRect())
         self.prepareGeometryChange()
         self._bounds = bounds
         self.paths = paths
+        self._paint_chunks = chunks
         self.dirty = False
         self.update()
 
     def boundingRect(self):
         return self._bounds
 
-    def paint(self, painter, *_args):
+    def paint(self, painter, option=None, *_args):
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        for pen, path in self.paths:
-            painter.setPen(pen)
-            painter.drawPath(path)
+        exposed = option.exposedRect if option is not None else self._bounds
+        # Include cosmetic stroke pixels just outside each data-space bound.
+        transform = painter.worldTransform()
+        inverse, invertible = transform.inverted()
+        if invertible:
+            origin = inverse.map(QtCore.QPointF(0, 0))
+            pixel = inverse.map(QtCore.QPointF(3, 3)) - origin
+            exposed = exposed.adjusted(-abs(pixel.x()), -abs(pixel.y()), abs(pixel.x()), abs(pixel.y()))
+        for pen, path, bounds in self._paint_chunks:
+            if exposed.intersects(bounds):
+                painter.setPen(pen)
+                painter.drawPath(path)
 
 
 class _ConcordiaMarker(pg.ScatterPlotItem):
@@ -1916,6 +1980,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     selectionChanged = QtCore.Signal(object)
     spotHovered = QtCore.Signal(str)
     reviewAction = QtCore.Signal(str)
+    rangeSettled = QtCore.Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -1984,17 +2049,13 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                          include_flags: dict[str, bool]) -> None:
         """Retain whole-result metadata and stable palettes for spot review."""
         self._include_flags = include_flags
-        self._metadata_by_spot = {}
-        for source in (frame, selected_frame):
-            for row in source.to_dict("records"):
-                name = str(row.get("spot_name", ""))
-                self._metadata_by_spot.setdefault(name, {}).update(
-                    {key: value for key, value in row.items() if self._has_value(value)})
-        names = list(self._metadata_by_spot)
+        self._metadata_by_spot = _ConcordiaMetadata((frame, selected_frame))
+        names = list(dict.fromkeys(name for source in (frame, selected_frame)
+                                  if "spot_name" in source for name in source["spot_name"].astype(str)))
         self._spot_colors = {name: _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]
                              for i, name in enumerate(names)}
-        samples = sorted({str(row["sample"]) for row in self._metadata_by_spot.values()
-                          if self._has_value(row.get("sample"))})
+        samples = sorted({str(value) for source in (frame, selected_frame) if "sample" in source
+                          for value in source["sample"].dropna().unique() if self._has_value(value)})
         self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
                                for i, name in enumerate(samples)}
 
@@ -2015,7 +2076,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
 
     def select_rectangle(self, rect: QtCore.QRectF, *, extend: bool = False,
                          toggle: bool = False) -> None:
-        """Select plotted centres inside a data rectangle, adding or toggling keys."""
+        """Select spots whose centres lie inside a data rectangle, adding or toggling keys.
+
+        Centres, not ellipse outlines: a large two-sigma ellipse touching the
+        box must not join a selection drawn around a cluster of small ones.
+        """
         rect = rect.normalized()
         xy = self._point_xy
         inside = np.flatnonzero((xy[:, 0] >= rect.left()) & (xy[:, 0] <= rect.right())
@@ -2039,25 +2104,50 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._plot_item.showGrid(x=self._grid_visible, y=self._grid_visible, alpha=.25)
 
     def _ellipse_hit_data(self):
-        """Bounding boxes, areas and polygons of the drawn ellipses (cached)."""
+        """Cache exact ellipse bounds, areas and affine handles for picking."""
         ellipses = self._ellipses
         if self._hit_cache is not None and self._hit_cache[0] is ellipses:
             return self._hit_cache[1]
-        names, boxes, areas, polygons = [], [], [], []
-        for name, handle, _color in ellipses:
-            x = np.asarray(handle.x, dtype=float)
-            y = np.asarray(handle.y, dtype=float)
-            finite = np.isfinite(x) & np.isfinite(y)
-            if finite.sum() < 3:
-                continue
-            x, y = x[finite], y[finite]
-            names.append(name)
-            boxes.append((x.min(), x.max(), y.min(), y.max()))
-            areas.append(0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
-            polygons.append((x, y))
-        data = (names, np.array(boxes, dtype=float).reshape(-1, 4), np.array(areas, dtype=float), polygons)
-        self._hit_cache = (ellipses, data)
+        names = [name for name, _handle, _color in ellipses]
+        handles = [handle for _name, handle, _color in ellipses]
+        centers = np.asarray([h.center for h in handles]).reshape(-1, 2)
+        matrices = np.asarray([h.matrix for h in handles]).reshape(-1, 2, 2)
+        radii = np.sqrt(np.sum(matrices**2, axis=2))
+        boxes = np.column_stack((centers[:, 0]-radii[:, 0], centers[:, 0]+radii[:, 0],
+                                 centers[:, 1]-radii[:, 1], centers[:, 1]+radii[:, 1]))
+        areas = np.pi * np.abs(np.linalg.det(matrices))
+        self._hit_centers = centers
+        self._hit_inverse = np.linalg.inv(matrices)
+        data = names, boxes, areas, handles
+        self._hit_cache = ellipses, data
         return data
+
+    def _ellipse_contains(self, point):
+        """Vectorised true conic test, independent of zoom and paint tessellation."""
+        self._ellipse_hit_data()
+        offsets = np.asarray(point) - self._hit_centers
+        unit = np.einsum("nij,nj->ni", self._hit_inverse, offsets)
+        return np.einsum("ni,ni->n", unit, unit) <= 1 + 1e-12
+
+    def _ellipse_intersects_rectangle(self, rect):
+        """Minimise each conic on four rectangle edges, without polygon tests."""
+        self._ellipse_hit_data()
+        center = self._hit_centers
+        inverse = self._hit_inverse
+        metric = np.einsum("nji,njk->nik", inverse, inverse)
+        qxx, qxy, qyy = metric[:, 0, 0], metric[:, 0, 1], metric[:, 1, 1]
+        cx, cy = center.T
+        inside = ((cx >= rect.left()) & (cx <= rect.right()) &
+                  (cy >= rect.top()) & (cy <= rect.bottom()))
+        for x in (rect.left(), rect.right()):
+            dx = x-cx
+            dy = np.clip(cy-qxy/qyy*dx, rect.top(), rect.bottom())-cy
+            inside |= qxx*dx*dx + 2*qxy*dx*dy + qyy*dy*dy <= 1+1e-12
+        for y in (rect.top(), rect.bottom()):
+            dy = y-cy
+            dx = np.clip(cx-qxy/qxx*dy, rect.left(), rect.right())-cx
+            inside |= qxx*dx*dx + 2*qxy*dx*dy + qyy*dy*dy <= 1+1e-12
+        return inside
 
     def spots_at(self, scene_pos) -> list[str]:
         """Spots under a scene position, smallest ellipse first.
@@ -2077,16 +2167,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         names, boxes, areas, polygons = self._ellipse_hit_data()
         hits = []
         if len(names):
-            inside = np.flatnonzero((boxes[:, 0] <= px) & (px <= boxes[:, 1])
-                                    & (boxes[:, 2] <= py) & (py <= boxes[:, 3]))
-            point = QtCore.QPointF(px, py)
-            for index in inside:
-                if names[index] not in visible:
-                    continue
-                x, y = polygons[index]
-                polygon = QtGui.QPolygonF([QtCore.QPointF(a, b) for a, b in zip(x, y)])
-                if polygon.containsPoint(point, QtCore.Qt.FillRule.OddEvenFill):
-                    hits.append((areas[index], names[index]))
+            inside = np.flatnonzero(self._ellipse_contains((px, py)))
+            hits = [(areas[i], names[i]) for i in inside if names[i] in visible]
         ordered = [name for _area, name in sorted(hits)]
         index = self.nearest_point(scene_pos, radius=10)
         if index is not None and self._points[index][0] not in ordered:
@@ -2123,12 +2205,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.addItem(self._highlight, ignoreBounds=True)
         path = QtGui.QPainterPath()
         if self.selected_spots:
-            names, _boxes, _areas, polygons = self._ellipse_hit_data()
+            names, _boxes, _areas, handles = self._ellipse_hit_data()
             visible = {point[0] for point in self._points}
-            for name, (x, y) in zip(names, polygons):
+            for name, handle in zip(names, handles):
                 if name in self.selected_spots and name in visible:
-                    path.addPolygon(QtGui.QPolygonF([QtCore.QPointF(a, b) for a, b in zip(x, y)]))
-                    path.closeSubpath()
+                    path.addPath(handle.path)
         theme = self._theme
         pen = pg.mkPen(theme.accent if theme is not None else "#2468d4", width=3.0)
         pen.setCosmetic(True)
@@ -2802,7 +2883,10 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
                         line = QtGui.QColor(color)
                         line.setAlpha(155)
                         pens[rgba] = pg.mkPen(line, width=1.0)
-                    handle = _ConcordiaEllipse(self._ellipse_batch, ex[p], ey[p], pens[rgba], outlines[i])
+                    correlation = float(np.clip(0. if np.isnan(_rho[p]) else _rho[p], -.999, .999))
+                    matrix = ((sx[p], 0.), (correlation*sy[p], sy[p]*np.sqrt(1-correlation**2)))
+                    handle = _ConcordiaEllipse(self._ellipse_batch, ex[p], ey[p], pens[rgba], outlines[i],
+                                              center=(x[p], y[p]), matrix=matrix)
                     ellipses.append((names[i], handle, color))
             errors = np.column_stack((sx[point_positions], sy[point_positions]))
             cached = points, rows, ellipses, errors
@@ -2827,8 +2911,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._plot_item.addItem(self._scatter)
             self._scatter.sigClicked.connect(self._spot_clicked)
         self._update_selection_style(positions_changed=True)
-        if self._kind == "spot":
-            self._update_selection_style()
         self._ellipse_batch.rebuild()
 
     def set_zoom_mode(self, mode: str) -> None:
@@ -2937,14 +3019,20 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         point = wetherill_point if self._diagram == "wetherill" else tera_wasserburg_point
         if hi <= lo:
             self._curve.setData([], [])
+            self.rangeSettled.emit()
             return
-        margin = max((hi - lo) * 0.15, 0.001)
-        ages = np.linspace(max(.001, lo - margin), min(4567.3, hi + margin), 1200)
-        x, y = point(ages)
+        from GUI.concordia_geometry import sample_curve
+        # Keep the established 1200-point density on ordinary viewports,
+        # refining further when screen-space length/curvature requires it.
+        x, y = sample_curve(point, lo, hi, plot.vb, min_points=1200)
+        # Labels use age values, not the sampled path's vertex indices.
+        ages = np.linspace(lo, hi, 1200)
+        label_x, label_y = point(ages)
         self._curve.setData(x, y)
+        self.rangeSettled.emit()
         candidates = visible_concordia_age_labels(
             "Wetherill" if self._diagram == "wetherill" else "TW",
-            ages, x, y, ranges[0], ranges[1], maximum=12,
+            ages, label_x, label_y, ranges[0], ranges[1], maximum=12,
         )
         step = (nice_step(round(float(np.ptp(candidates)) / (len(candidates) - 1), 10))
                 if len(candidates) > 1 else nice_step(max(hi - lo, 1) / 10))
@@ -4074,7 +4162,10 @@ class FrozenColumnsView(QtWidgets.QTableView):
         # frozen columns are passed to it.
         table.verticalScrollBar().valueChanged.connect(self._follow_table_scroll)
         table.verticalScrollBar().rangeChanged.connect(lambda *_args: self._follow_table_scroll())
-        table.horizontalHeader().sectionResized.connect(self._refresh)
+        self._refresh_timer = QtCore.QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh)
+        table.horizontalHeader().sectionResized.connect(lambda *_: self._refresh_timer.start(0))
         table.horizontalHeader().sortIndicatorChanged.connect(
             lambda column, order: self.horizontalHeader().setSortIndicator(column, order))
         model = table.model()
@@ -4559,6 +4650,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._blank_empty_readout = False
         self._syncing_selection = False
         self._pending_group_views = set()
+        self._pending_concordia_refresh = {}
+        self._lazy_concordia = False
+        self._pending_column_sizes = []
+        self._column_resize_timer = QtCore.QTimer(self)
+        self._column_resize_timer.setSingleShot(True)
+        self._column_resize_timer.timeout.connect(self._resize_column_slice)
         self._readout_timer = QtCore.QTimer(self)
         self._readout_timer.setSingleShot(True)
         self._readout_timer.timeout.connect(self._update_age_readout)
@@ -4732,6 +4829,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return panel
 
     def _schedule_fits(self):
+        if getattr(self, "_preparing_fit_canvas", False):
+            return
         for panel in self.fit_panels.values():
             panel.invalidate()
 
@@ -4782,12 +4881,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def set_spot_excluded(self, names, excluded: bool) -> None:
         """Set calculation exclusions independently of spot visibility."""
         names = {names} if isinstance(names, str) else set(names)
+        changed = names - self.excluded_spots if excluded else names & self.excluded_spots
+        if not changed:
+            return
         if excluded:
             self.excluded_spots.update(names)
         else:
             self.excluded_spots.difference_update(names)
-        self._update_group_inclusion()
-        self._update_exclusion_styles()
+        self._update_group_inclusion(changed_names=changed)
+        self._update_exclusion_styles(changed_names=changed)
         for canvas in (self.spot_concordia, self.depth_concordia):
             canvas.set_excluded_spots(self.excluded_spots)
         self._readout_timer.start(0)
@@ -4836,15 +4938,21 @@ class ResultsTableWidget(QtWidgets.QWidget):
         order = {name: index for index, name in enumerate(self._spot_acquisition)}
         return sorted(map(str, names), key=lambda name: (order.get(name, len(order)), name))
 
-    def _update_exclusion_styles(self, *, group_models=None, flat=True):
+    def _update_exclusion_styles(self, *, group_models=None, flat=True, changed_names=None):
         for model in (self.results_model, self.depth_model) if flat else ():
             model.excluded_spots = self.excluded_spots
-            if model.rowCount():
-                model.dataChanged.emit(model.index(0, 0), model.index(model.rowCount()-1, model.columnCount()-1),
-                    [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole])
+            rows = (range(model.rowCount()) if changed_names is None else
+                    sorted({row for name in changed_names for row in model._spot_rows.get(name, ())}))
+            roles = [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole]
+            if changed_names is None and model.rowCount():
+                model.dataChanged.emit(model.index(0, 0), model.index(model.rowCount()-1, model.columnCount()-1), roles)
+            elif changed_names is not None:
+                for row in rows:
+                    model.dataChanged.emit(model.index(row, 0), model.index(row, model.columnCount()-1), roles)
         blocker = QtCore.QSignalBlocker(self.spot_choice_list)
-        for i in range(self.spot_choice_list.count() if flat else 0):
-            item = self.spot_choice_list.item(i)
+        choices = (getattr(self, "_choice_items", {}).values() if changed_names is None else
+                   (self._choice_items[n] for n in changed_names if n in getattr(self, "_choice_items", {})))
+        for item in choices if flat else ():
             excluded = item.text() in self.excluded_spots
             font = item.font()
             font.setItalic(excluded)
@@ -4860,19 +4968,19 @@ class ResultsTableWidget(QtWidgets.QWidget):
             for model in models if group_models is None else group_models:
                 blocker = QtCore.QSignalBlocker(model)
                 try:
-                    for row in range(model.rowCount(QtCore.QModelIndex())):
-                        parent = model.item(row)
+                    parents, children = self._group_changed_items(model, changed_names)
+                    for parent in parents:
                         names = parent.data(_SPOT_NAMES_ROLE) or []
                         excluded = bool(names) and all(n in self.excluded_spots for n in names)
                         font = parent.font()
                         font.setItalic(excluded)
                         parent.setFont(font)
                         parent.setForeground(QtGui.QBrush(QtGui.QColor((self._theme or active_theme()).muted)) if excluded else QtGui.QBrush())
-                        for child_row in range(parent.rowCount()):
-                            names = parent.child(child_row).data(_SPOT_NAMES_ROLE) or []
+                        for first in children.get(parent.row(), ()):
+                            names = first.data(_SPOT_NAMES_ROLE) or []
                             excluded = bool(names) and all(n in self.excluded_spots for n in names)
                             for column in range(parent.columnCount()):
-                                child = parent.child(child_row, column)
+                                child = parent.child(first.row(), column)
                                 if child is None:
                                     continue
                                 font = child.font()
@@ -4882,7 +4990,11 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                 child.setToolTip(" · ".join(names) + (" · Excluded from calculations" if excluded else ""))
                 finally:
                     del blocker
-                self._notify_group_data_changed(model, [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole])
+                roles = [QtCore.Qt.ItemDataRole.FontRole, QtCore.Qt.ItemDataRole.ForegroundRole, QtCore.Qt.ItemDataRole.ToolTipRole]
+                if changed_names is None:
+                    self._notify_group_data_changed(model, roles)
+                else:
+                    self._notify_changed_group_items(model, parents, children, roles)
         finally:
             self._updating_groups = updating
 
@@ -5350,7 +5462,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self._syncing_selection = True
         try:
             self._pending_group_views.add(view)
+            view._population_pending = True
             view.model().sourceModel().clear()
+            view.model().sourceModel()._review_items = None
         finally:
             self._syncing_selection = syncing
 
@@ -5368,6 +5482,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if view not in self._pending_group_views:
             return
         self._pending_group_views.remove(view)
+        view._population_pending = False
         syncing = self._syncing_selection
         updating = getattr(self, "_updating_groups", False)
         updates_enabled = view.updatesEnabled()
@@ -5396,6 +5511,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _fill_grouped_view(self, view, model):
         """Attach each sample only after its child rows have been filled."""
+        model._review_items = None
         final = self.results_model.frame
         if view is self.results_tree:
             columns = list(final.columns)
@@ -5458,7 +5574,43 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 model.dataChanged.emit(model.index(0, 0, parent),
                                        model.index(children - 1, last_column, parent), roles)
 
-    def _update_group_inclusion(self, *, models=None):
+    @staticmethod
+    def _group_changed_items(model, changed_names):
+        """Index a newly built tree once; resolve later edits by stable spot key."""
+        if getattr(model.parent(), "_population_pending", False):
+            return [], {}
+        cache = getattr(model, "_review_items", None)
+        if cache is None:
+            cache = {}
+            for row in range(model.rowCount(QtCore.QModelIndex())):
+                parent = model.item(row)
+                for child_row in range(parent.rowCount()):
+                    child = parent.child(child_row)
+                    for name in child.data(_SPOT_NAMES_ROLE) or ():
+                        cache.setdefault(name, []).append(child)
+            model._review_items = cache
+        children = {}
+        seen = set()
+        for name in cache if changed_names is None else changed_names:
+            for child in cache.get(name, ()):
+                key = (child.parent().row(), child.row())
+                if key not in seen:
+                    seen.add(key)
+                    children.setdefault(key[0], []).append(child)
+        # Summary-only models have no child rows.
+        parent_rows = range(model.rowCount(QtCore.QModelIndex())) if changed_names is None else children
+        parents = [model.item(row) for row in parent_rows]
+        return parents, children
+
+    @staticmethod
+    def _notify_changed_group_items(model, parents, children, roles):
+        for parent in parents:
+            model.dataChanged.emit(parent.index(), parent.index().siblingAtColumn(model.columnCount()-1), roles)
+            for child in children.get(parent.row(), ()):
+                index = child.index()
+                model.dataChanged.emit(index, index.siblingAtColumn(model.columnCount()-1), roles)
+
+    def _update_group_inclusion(self, *, models=None, changed_names=None):
         updating = getattr(self, "_updating_groups", False)
         self._updating_groups = True
         try:
@@ -5467,8 +5619,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
             for model in group_models if models is None else models:
                 blocker = QtCore.QSignalBlocker(model)
                 try:
-                    for row in range(model.rowCount(QtCore.QModelIndex())):
-                        parent = model.item(row)
+                    parents, children = self._group_changed_items(model, changed_names)
+                    for parent in parents:
                         names = parent.data(_SPOT_NAMES_ROLE) or []
                         count = sum(self.include_flags.get(name, True) for name in names)
                         state = (QtCore.Qt.CheckState.PartiallyChecked if 0 < count < len(names)
@@ -5484,14 +5636,17 @@ class ResultsTableWidget(QtWidgets.QWidget):
                                    if model in (self.spot_choice_group_model, self.depth_choice_group_model) else parent.text())
                         excluded_count = len(set(names) & self.excluded_spots)
                         parent.setToolTip(tooltip + (f" · {excluded_count} excluded from calculations" if excluded_count else ""))
-                        for child_row in range(parent.rowCount()):
-                            child = parent.child(child_row)
+                        for child in children.get(parent.row(), ()):
                             included = self.include_flags.get(child.data(_SPOT_NAMES_ROLE)[0], True)
                             child.setCheckState(QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked)
                             child.setData(included, QtCore.Qt.ItemDataRole.UserRole)
                 finally:
                     del blocker
-                self._notify_group_data_changed(model, [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole, QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole])
+                roles = [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole, QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole]
+                if changed_names is None:
+                    self._notify_group_data_changed(model, roles)
+                else:
+                    self._notify_changed_group_items(model, parents, children, roles)
         finally:
             self._updating_groups = updating
 
@@ -5530,7 +5685,19 @@ class ResultsTableWidget(QtWidgets.QWidget):
         del blocker
 
     def _results_tab_changed(self, _index):
+        for kind in ("spot", "depth"):
+            if self.tabs.currentWidget() is getattr(self, kind + "_concordia_page", None):
+                pending = self._pending_concordia_refresh.pop(kind, None)
+                if pending is not None:
+                    getattr(self, "refresh_" + kind + "_concordia")(**pending)
+                canvas = getattr(self, kind + "_concordia")
+                if getattr(canvas, "_review_style_dirty", False):
+                    canvas._review_style_dirty = False
+                    canvas._update_selection_style()
+                    canvas._update_highlight()
         if self.tabs.currentWidget() is self.results_page:
+            if self._pending_column_sizes:
+                self._column_resize_timer.start(0)
             view = self.results_tree if self.results_group_toggle.isChecked() else self.results_table
             rows = view.selectionModel().selectedRows()
             if view is self.results_tree:
@@ -5555,18 +5722,22 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _set_spot_inclusions(self, changes):
         """Apply mixed inclusion changes before notifying views or fitting."""
         self._blank_empty_readout = False
+        # The table model writes its shared flag before emitting includeChanged.
+        # Always propagate requested keys, even when their flag already matches.
+        changes = {name: bool(value) for name, value in changes.items()}
         self.include_flags.update(changes)
         blocker = QtCore.QSignalBlocker(self.spot_choice_list)
-        for index in range(self.spot_choice_list.count()):
-            item = self.spot_choice_list.item(index)
-            item.setCheckState(QtCore.Qt.CheckState.Checked if self.include_flags.get(item.text(), True)
-                               else QtCore.Qt.CheckState.Unchecked)
+        for name, included in changes.items():
+            item = getattr(self, "_choice_items", {}).get(name)
+            if item is not None:
+                item.setCheckState(QtCore.Qt.CheckState.Checked if included else QtCore.Qt.CheckState.Unchecked)
         del blocker
-        if self.results_model.rowCount():
-            self.results_model.dataChanged.emit(self.results_model.index(0, 0),
-                                               self.results_model.index(self.results_model.rowCount()-1, 0),
-                                               [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
-        self._update_group_inclusion()
+        for name in changes:
+            for row in self.results_model._spot_rows.get(name, ()):
+                index = self.results_model.index(row, 0)
+                self.results_model.dataChanged.emit(index, index,
+                    [QtCore.Qt.ItemDataRole.CheckStateRole, QtCore.Qt.ItemDataRole.UserRole])
+        self._update_group_inclusion(changed_names=changes.keys())
         self._update_sample_chips()
         self.refresh_spot_concordia(inclusions_only=True)
         self.refresh_depth_concordia(reset_view=False, inclusions_only=True)
@@ -5604,25 +5775,30 @@ class ResultsTableWidget(QtWidgets.QWidget):
         """Share spot selection, keeping the origin view's scroll position."""
         if self._syncing_selection:
             return
+        previous_selection = self.selected_spots
         self.selected_spots = set(spot_names) & self.include_flags.keys()
         self._syncing_selection = True
         try:
             selection = QtCore.QItemSelection()
             proxy = self.results_table.model()
             table_rows = []
-            for row in range(proxy.rowCount()):
-                source = proxy.mapToSource(proxy.index(row, 0))
-                if self.results_model.spot_name(source.row()) in self.selected_spots:
-                    selection.select(proxy.index(row, 0), proxy.index(row, proxy.columnCount()-1))
-                    if not self.results_table.isRowHidden(row):
-                        table_rows.append(proxy.index(row, 0))
+            for name in self.selected_spots:
+                for source_row in self.results_model._spot_rows.get(name, ()):
+                    index = proxy.mapFromSource(self.results_model.index(source_row, 0))
+                    if index.isValid():
+                        selection.select(index, index.siblingAtColumn(proxy.columnCount()-1))
+                        if not self.results_table.isRowHidden(index.row()):
+                            table_rows.append(index)
             self.results_table.selectionModel().select(selection, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
             chooser_rows = []
-            for index in range(self.spot_choice_list.count()):
-                item = self.spot_choice_list.item(index)
-                item.setSelected(item.text() in self.selected_spots)
-                if item.isSelected() and not item.isHidden():
-                    chooser_rows.append(self.spot_choice_list.indexFromItem(item))
+            choices = getattr(self, "_choice_items", {})
+            for name in previous_selection ^ self.selected_spots:
+                if name in choices:
+                    choices[name].setSelected(name in self.selected_spots)
+            chooser_rows = [self.spot_choice_list.indexFromItem(choices[name])
+                            for name in self.selected_spots if name in choices and not choices[name].isHidden()]
+            table_rows.sort(key=lambda index: index.row())
+            chooser_rows.sort(key=lambda index: index.row())
             for view, rows in ((self.results_table, table_rows),
                                (self.spot_choice_list, chooser_rows)):
                 if view is not origin:
@@ -5630,13 +5806,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
             for view in (self.results_tree, self.secondary_tree, self.spot_choice_tree, self.depth_choice_tree):
                 selection = QtCore.QItemSelection()
                 rows = []
-                for index in self._tree_rows(view):
-                    if not index.parent().isValid():
-                        continue  # A header is a selection action for its spots.
-                    names = set(index.data(_SPOT_NAMES_ROLE) or [])
-                    if names and names <= self.selected_spots:
-                        selection.select(index, index.siblingAtColumn(view.model().columnCount()-1))
-                        if index.parent().isValid():
+                proxy = view.model()
+                model = proxy.sourceModel()
+                _parents, children = self._group_changed_items(model, self.selected_spots)
+                for items in children.values():
+                    for child in items:
+                        names = set(child.data(_SPOT_NAMES_ROLE) or ())
+                        index = proxy.mapFromSource(child.index())
+                        if index.isValid() and names and names <= self.selected_spots:
+                            selection.select(index, index.siblingAtColumn(proxy.columnCount()-1))
                             rows.append(index)
                 view.selectionModel().select(selection, QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 if view is not origin and view.isVisible():
@@ -6153,6 +6331,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         toolbar.add_control(self.spot_fit_button, "Fit")
         self._focus_control(toolbar)
         self.spot_concordia = ConcordiaReviewWidget()
+        self.spot_concordia.rangeSettled.connect(self.fit_panels["spot"]._draw_records)
         self.spot_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                          QtWidgets.QSizePolicy.Policy.Ignored)
         layout.addWidget(self.spot_concordia, 1)
@@ -6279,6 +6458,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         toolbar.add_control(self.depth_fit_button, "Fit")
         self._focus_control(toolbar)
         self.depth_concordia = ConcordiaReviewWidget()
+        self.depth_concordia.rangeSettled.connect(self.fit_panels["depth"]._draw_records)
         self.depth_concordia.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                           QtWidgets.QSizePolicy.Policy.Ignored)
         layout.addWidget(self.depth_concordia, 1)
@@ -6407,10 +6587,35 @@ class ResultsTableWidget(QtWidgets.QWidget):
             view = self.spot_choice_tree if self.spot_group_toggle.isChecked() else self.spot_choice_list
             self.set_spot_included(self._visible_spot_names(view), False)
 
+    def _ensure_fit_canvas(self, kind):
+        """Materialise a deferred page when a fit explicitly needs its ratios."""
+        pending = self._pending_concordia_refresh.pop(kind, None)
+        if pending is None:
+            return
+        lazy, preparing = self._lazy_concordia, getattr(self, "_preparing_fit_canvas", False)
+        self._lazy_concordia, self._preparing_fit_canvas = False, True
+        try:
+            getattr(self, "refresh_" + kind + "_concordia")(**pending)
+        finally:
+            self._lazy_concordia, self._preparing_fit_canvas = lazy, preparing
+
+    def _defer_concordia_refresh(self, kind, reset_view, inclusions_only):
+        if not self._lazy_concordia or self.tabs.currentWidget() is getattr(self, kind + "_concordia_page"):
+            return False
+        previous = self._pending_concordia_refresh.get(kind)
+        self._pending_concordia_refresh[kind] = dict(
+            reset_view=reset_view or bool(previous and previous["reset_view"]),
+            inclusions_only=inclusions_only and (previous is None or previous["inclusions_only"]))
+        return True
+
     def refresh_spot_concordia(
         self, *, reset_view: bool = False, inclusions_only: bool = False,
     ) -> None:
         """Refresh the checked spot means, reusing geometry for inclusion changes."""
+        # Visibility edits update retained items immediately, including their
+        # logical point list used by linked tables. Full hidden redraws wait.
+        if not inclusions_only and self._defer_concordia_refresh("spot", reset_view, inclusions_only):
+            return
         if self._theme is None:
             return
         selected_names = {name for name, included in self.include_flags.items() if included}
@@ -6517,7 +6722,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def showEvent(self, event):
         """Refresh the readout when returning to the review views."""
+        self._lazy_concordia = True
         super().showEvent(event)
+        self._results_tab_changed(self.tabs.currentIndex())
         self._readout_timer.start(0)
 
     def _depth_spot_changed(self, _index):
@@ -6528,6 +6735,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self, *, reset_view: bool = True, inclusions_only: bool = False,
     ) -> None:
         """Redraw corrected sweeps for the chosen depth-profile spot."""
+        if self._defer_concordia_refresh("depth", reset_view, inclusions_only):
+            return
         if self._theme is None:
             return
         spot_name = self.depth_spot_combo.currentText()
@@ -6585,12 +6794,24 @@ class ResultsTableWidget(QtWidgets.QWidget):
         view.horizontalHeader().setStretchLastSection(False)
         # A fixed sample bounds sizing work even for wide saved reductions.
         # Qt also measures the header, so long labels retain their full width.
-        view.horizontalHeader().setResizeContentsPrecision(64)
+        view.horizontalHeader().setResizeContentsPrecision(16)
         if include_flags is None:
             view.horizontalHeader().setSectionResizeMode(
                 QtWidgets.QHeaderView.ResizeMode.ResizeToContents
             )
         return view, model
+
+    def _resize_column_slice(self):
+        """Measure a bounded column batch, yielding to paints between batches."""
+        if self._lazy_concordia and not self.results_table.isVisible():
+            return
+        # Each column samples at most 16 rows. A fixed batch also bounds Qt
+        # header/geometry work independently of the width of the results frame.
+        columns, self._pending_column_sizes = self._pending_column_sizes[:4], self._pending_column_sizes[4:]
+        for column in columns:
+            self.results_table.resizeColumnToContents(column)
+        if self._pending_column_sizes:
+            self._column_resize_timer.start(0)
 
     def show_results(
         self, finalized: object, *, review_flags: dict[str, str] | None = None,
@@ -6638,7 +6859,15 @@ class ResultsTableWidget(QtWidgets.QWidget):
                             for name in ("sample", "spot_name") if name in display), -1)
         self.results_table.sortByColumn(sort_column, QtCore.Qt.SortOrder.AscendingOrder)
         # Data replacement can change column widths. Review checkboxes cannot.
-        self.results_table.resizeColumnsToContents()
+        # Header text must fit immediately, including before the first event
+        # turn. Row sampling remains deferred and bounded below.
+        header = self.results_table.horizontalHeader()
+        metrics = header.fontMetrics()
+        for column in range(self.results_model.columnCount()):
+            label = str(self.results_model.headerData(column, QtCore.Qt.Orientation.Horizontal) or "")
+            header.resizeSection(column, max(header.sectionSize(column), metrics.horizontalAdvance(label)+28))
+        self._pending_column_sizes = list(range(self.results_model.columnCount()))
+        self._column_resize_timer.start(0)
         self.secondary_model.set_frame(secondary)
         self._spot_frame = parallel_frame.copy()
         decision = getattr(finalized, "decision", None)
@@ -6667,6 +6896,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.spot_concordia.set_spot_context(self._spot_frame, final_frame, self.include_flags)
         self.spot_choice_list.blockSignals(True)
         self.spot_choice_list.clear()
+        self._choice_items = {}
         for spot_name in dict.fromkeys(spot_names):
             item = QtWidgets.QListWidgetItem(spot_name)
             item.setToolTip(spot_name)
@@ -6675,6 +6905,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 QtCore.Qt.CheckState.Checked if self.include_flags[spot_name] else QtCore.Qt.CheckState.Unchecked
             )
             self.spot_choice_list.addItem(item)
+            self._choice_items[spot_name] = item
         self.spot_choice_list.blockSignals(False)
         self._build_grouped_views()
         self._update_exclusion_styles()
@@ -7965,9 +8196,10 @@ class TracePlotWidget(RoundedPlotWidget):
                 continue
             color = series_colors.get(name, "#1f63cf")
             symbol = None if line_style == "line" else "o"
-            curve = self.plot_item.plot(
-                x_values,
-                y_values,
+            # Configure clipping before the first data assignment. Creating a
+            # populated item first builds the full-session symbol atlas even
+            # though the attached view will immediately downsample it.
+            curve = pg.PlotDataItem(
                 pen=pg.mkPen(color, width=2.0),
                 name=name,
                 symbol=symbol,
@@ -7977,17 +8209,20 @@ class TracePlotWidget(RoundedPlotWidget):
             )
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
+            self.plot_item.addItem(curve)
+            curve.setData(x_values, y_values)
             self._hover_series[name] = (x_values, y_values)
             current_min = float(np.min(finite_values))
             current_max = float(np.max(finite_values))
             y_min = current_min if y_min is None else min(y_min, current_min)
             y_max = current_max if y_max is None else max(y_max, current_max)
 
-        self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.02)
+        ranges = dict(xRange=(float(np.min(x_values)), float(np.max(x_values))))
         if y_min is not None and y_max is not None:
             lower = y_min - abs(y_min) * 0.08 if y_min < 0 else y_min * 0.92
             upper = y_max * 1.08 if y_max > 0 else 1.0
-            self.setYRange(lower, upper, padding=0.02)
+            ranges["yRange"] = (lower, upper)
+        self.plot_item.vb.setRange(**ranges, padding=0.02)
 
     def current_regions(self) -> dict[str, tuple[float, float] | None]:
         regions = {

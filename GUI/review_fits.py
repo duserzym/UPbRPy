@@ -452,6 +452,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self._overlays.clear()
 
     def _scopes(self):
+        self.review._ensure_fit_canvas(self.kind)
         # User defaults are restored while the owner is still constructing
         # this page, before its canvas has been assigned.
         canvas = getattr(self.review, self.kind + "_concordia", None)
@@ -629,14 +630,27 @@ class ReviewFitPanel(QtWidgets.QWidget):
                 bounds.append(0.)
             if not bounds:
                 continue
-            xs = np.linspace(min(bounds), max(bounds), 200)
-            ys = r["intercept"] + r["slope"]*xs
-            fit_x.extend([xs[0], xs[-1]])
-            fit_y.extend([ys[0], ys[-1]])
-            variance = r["intercept_1s"]**2 + 2*xs*r["cov_intercept_slope"] + xs**2*r["slope_1s"]**2
-            delta = 1.96*np.sqrt(np.maximum(variance, 0))
-            for item, values in zip(items[:3], (ys, ys-delta, ys+delta)):
-                item.setData(xs, values)
+            from GUI.concordia_geometry import sample_curve
+            low, high = min(bounds), max(bounds)
+            fit_x.extend([low, high])
+            fit_y.extend([r["intercept"]+r["slope"]*low, r["intercept"]+r["slope"]*high])
+            visible = plot.vb.viewRange()[0]
+            left, right = max(low, visible[0]), min(high, visible[1])
+            if left >= right:
+                left, right = low, high
+            # A straight fitted line is exact with two endpoints. Retain its
+            # complete extent (including the T-W intercept at x=0) while only
+            # the curved confidence envelopes need visible-range refinement.
+            items[0].setData([low, high], [r["intercept"]+r["slope"]*low,
+                                         r["intercept"]+r["slope"]*high])
+            for item, sign in zip(items[1:3], (-1, 1)):
+                def curve(xs, sign=sign):
+                    ys = r["intercept"] + r["slope"]*xs
+                    variance = (r["intercept_1s"]**2 + 2*xs*r["cov_intercept_slope"]
+                                + xs**2*r["slope_1s"]**2)
+                    return xs, ys + sign*1.96*np.sqrt(np.maximum(variance, 0))
+                xs, ys = sample_curve(curve, left, right, plot.vb)
+                item.setData(xs, ys)
             items[3].setData(cx, cy, pen=pg.mkPen(color), brush=pg.mkBrush(color))
         if self._fit_view_pending and self._analytical_complete and fit_x:
             current_x, current_y = plot.vb.viewRange()
