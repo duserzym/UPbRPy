@@ -2279,6 +2279,17 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self.viewport().unsetCursor()
         super().focusOutEvent(event)
 
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        # Scene dispatch emits selection signals synchronously. Linked views
+        # and newly shown card controls must finish before we retain focus.
+        if self.isVisible() and QtWidgets.QApplication.activePopupWidget() is None:
+            self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+
     def event(self, event):
         if (event.type() == QtCore.QEvent.Type.ShortcutOverride
                 and event.key() == QtCore.Qt.Key.Key_Space):
@@ -2982,6 +2993,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         if (event.button() == QtCore.Qt.MouseButton.LeftButton and self._plot_item is not None
                 and self._plot_item.vb.sceneBoundingRect().contains(scene_pos)):
             self._reset_from_double_click(scene_pos)
+            self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
@@ -3868,6 +3880,7 @@ class SpotInfoCard(QtWidgets.QFrame):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("SpotInfoCard")
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self._name = ""
         self._excluded = False
         layout = QtWidgets.QVBoxLayout(self)
@@ -3895,6 +3908,8 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setWidget(self.body)
+        self.scroll.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.body.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.scroll.setMinimumHeight(24)
         self.compact_body = QtWidgets.QLabel()
         self.compact_body.setTextFormat(QtCore.Qt.TextFormat.RichText)
@@ -3919,6 +3934,8 @@ class SpotInfoCard(QtWidgets.QFrame):
         self.more_button.setCheckable(True)
         self.more_button.setStyleSheet("padding: 0px; min-width: 0px; min-height: 0px;")
         self.more_button.toggled.connect(self.set_expanded)
+        for button in (self.show_signal_button, self.exclude_button, self.close_button, self.more_button):
+            button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         layout.addWidget(self.more_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
         self.set_expanded(False)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Ignored)
@@ -5094,8 +5111,12 @@ class ResultsTableWidget(QtWidgets.QWidget):
         if hits and hits[0] not in self.selected_spots:
             self.set_selected_spots({hits[0]})
         menu = self._action_menu(canvas, kind)
-        menu.exec(canvas.mapToGlobal(pos))
-        menu.deleteLater()
+        try:
+            menu.exec(canvas.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
+            if canvas.isVisible():
+                canvas.setFocus(QtCore.Qt.FocusReason.PopupFocusReason)
 
     _sample_names_cache = {}
 

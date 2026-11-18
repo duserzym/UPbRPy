@@ -7543,12 +7543,18 @@ class MainWindow(QtWidgets.QMainWindow):
         visibility_changed = self.interact_mode_buttons["select"].isHidden() == supports_select
         self.interact_mode_buttons["select"].setEnabled(supports_select)
         self.interact_mode_buttons["select"].setVisible(supports_select)
-        mode = self._interaction_mode_by_view[self._interaction_view_kind()]
+        if concordia:
+            # The review owns its mode. Refreshes only mirror that choice;
+            # a stale toolbar cache must not change the canvas interaction.
+            mode = target.interaction_mode()
+            self._interaction_mode_by_view["concordia"] = mode
+        else:
+            mode = self._interaction_mode_by_view[self._interaction_view_kind()]
         if mode == "select" and not supports_select:
             mode = "zoom"
         if self._interaction_view_kind() == "concordia":
             self.results_table.set_mouse_mode_buttons(mode)
-        if hasattr(target, "set_interaction_mode"):
+        if not concordia and hasattr(target, "set_interaction_mode"):
             target.set_interaction_mode(mode)
         for key, button in self.interact_mode_buttons.items():
             button.blockSignals(True)
