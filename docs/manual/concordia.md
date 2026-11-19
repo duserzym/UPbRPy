@@ -22,6 +22,34 @@ fit are available in **⋯**. **Sample** colours are the default; **Spot** and
 **Single** are alternatives. Age-label spacing and precision adapt to zoom.
 Hover reveals spot details, ratios and dates.
 
+Click a sample folder's colour dot in the Spots tree, or right-click the folder
+and choose **Set sample colour…**. The compact picker has palette swatches,
+**Custom colour…**, and **Reset to default**. For individual spots, right-click
+and choose **Set colour…** or **Reset to sample colour**. Command/Ctrl-click or
+Shift-click selects several tree rows; a colour action applies to the selected
+spots when the clicked row belongs to that selection. Spot overrides appear as
+colour dots beside the rows, alongside any review-flag icon or material badge.
+Custom display folders do not change a spot's sample/material colour identity.
+
+In the concordia legend, **right-click the sample swatch** to open the same
+sample picker. Left-click the label or swatch to hide/show the entire sample,
+including its ellipses. A label click also clears the point selection. Hidden
+samples stay hidden after a colour change.
+
+In **Sample** mode a spot override wins over the assigned sample colour. In
+**Spot** mode it wins over the spot palette. **Single** uses the theme accent
+and ignores all overrides. **Colour → Reset all colours** clears both sample
+colours and spot overrides. Every colour action, including a multi-spot change
+or reset, is one selection undo/redo step. Colours are saved in the project;
+renames carry spot overrides, and removing a spot drops its override with undo.
+Colour edits repaint existing results and fits without recalculating reductions.
+
+Assigned colours also appear in the bias graph and reference-material diagnostic
+points/traces. Calibration fit lines and unassigned calibration points retain
+isotope colours; the session overview retains its channel colour. Depth points
+retain their time colour map, while depth sample chips and sample fits share the
+assigned sample colours.
+
 **Samples** opens sample chips, All, None and Glasses. Click a chip to show or
 hide that sample; a partial sample becomes fully shown. Option-click on macOS
 (Alt-click elsewhere) shows only that sample. Shift-click adds a range in

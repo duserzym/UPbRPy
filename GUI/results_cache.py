@@ -29,7 +29,7 @@ VIEW_ONLY = frozenset({
     "selected_spot", "plot_mode", "visible_channels", "selected_stats_channel",
     "ratio_name", "workflow_stage", "sigma_level", "channel_colors",
     "selection_colors", "review_spot_colour", "review_depth_colormap",
-    "review_show_glasses",
+    "review_show_glasses", "sample_colours", "spot_colours",
 })
 _logger = logging.getLogger(__name__)
 

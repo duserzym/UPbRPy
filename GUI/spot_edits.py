@@ -9,6 +9,7 @@ from PySide6 import QtCore, QtWidgets
 
 from GUI.services import ensure_shared_pipeline
 from GUI.theme import active_theme
+from GUI.spot_colours import normalise_colour
 from UPbRPy.io import sample_from_label
 from UPbRPy.pipeline import PipelineStage
 from UPbRPy.spot_edits import original_spot_label
@@ -28,6 +29,8 @@ class SpotEditState:
     fits: dict
     acquisition: dict
     edited: set
+    sample_colours: dict
+    spot_colours: dict
     invalidate_from: PipelineStage | None = PipelineStage.BASELINE
 
 
@@ -37,6 +40,48 @@ def group_key(name):
 
 class SpotEditing:
     """MainWindow operations, sharing its selection undo and redo history."""
+
+    def request_sample_colour(self, sample: str, colour: str | None) -> bool:
+        """Set/reset one sample's display colour as a single undo step."""
+        self._set_colour_order()
+        if sample not in self.spot_colours._samples:
+            return False
+        return self._request_colours(self.spot_colours.sample_colours, [sample], colour)
+
+    def request_spot_colour(self, spots, colour: str | None) -> bool:
+        """Set/reset the overrides for known spots as a single undo step."""
+        if isinstance(spots, str):
+            spots = [spots]
+        names = set(spots) & set(self.session.spot_names)
+        return self._request_colours(self.spot_colours.spot_colours, names, colour)
+
+    def _request_colours(self, target, names, colour):
+        colour = normalise_colour(colour) if colour is not None else None
+        names = [name for name in names if target.get(name) != colour]
+        if not names:
+            return False
+        before = self._begin_spot_edit()
+        if before is None:
+            return False
+        for name in names:
+            if colour is None:
+                target.pop(name, None)
+            else:
+                target[name] = colour
+        self._finish_spot_edit(before, calculations=False)
+        return True
+
+    def request_reset_colours(self) -> bool:
+        """Reset all sample colours and spot overrides in one undo step."""
+        if not (self.spot_colours.sample_colours or self.spot_colours.spot_colours):
+            return False
+        before = self._begin_spot_edit()
+        if before is None:
+            return False
+        self.spot_colours.sample_colours.clear()
+        self.spot_colours.spot_colours.clear()
+        self._finish_spot_edit(before, calculations=False)
+        return True
 
     def _request_new_folder_move(self, spot_name):
         count = len(self._selection_undo)
@@ -54,6 +99,7 @@ class SpotEditing:
             set(table.excluded_spots), dict(table.include_flags), set(table.selected_spots),
             {key: deepcopy(panel.records) for key, panel in table.fit_panels.items()},
             dict(table._spot_acquisition), set(self._spots_edited_since_write),
+            dict(self.spot_colours.sample_colours), dict(self.spot_colours.spot_colours),
         )
 
     def _begin_spot_edit(self):
@@ -100,12 +146,22 @@ class SpotEditing:
         self._selection_recompute_stages.clear()
         if calculations:
             self._invalidate_spot_results_view()
+        selected_rows = ({str(item.data(0, QtCore.Qt.ItemDataRole.UserRole))
+                          for item in self.spot_list.selectedItems()} if not calculations else None)
         populating = self._is_populating
         self._is_populating = True
         try:
             self._populate_spot_tree()
         finally:
             self._is_populating = populating
+        if not calculations:
+            with QtCore.QSignalBlocker(self.spot_list):
+                self.spot_list.clearSelection()
+                for name in selected_rows:
+                    item = self._spot_tree_item(name)
+                    if item is not None:
+                        item.setSelected(True)
+            self._refresh_spot_colours()
         self._sync_workflow_step_locks()
         self.refresh_view()
         self._sync_selection_history_actions()
@@ -161,6 +217,8 @@ class SpotEditing:
         self.session.selected_spot = state.selected_spot
         self._spot_folder_overrides = dict(state.folders)
         self._review_flags = dict(state.review_flags)
+        self.spot_colours.sample_colours = dict(state.sample_colours)
+        self.spot_colours.spot_colours = dict(state.spot_colours)
         self._spots_edited_since_write = set(state.edited)
         table = self.results_table
         with QtCore.QSignalBlocker(table):
@@ -169,9 +227,10 @@ class SpotEditing:
             table.include_flags.update(state.included)
             table.selected_spots = set(state.selected)
             table._spot_acquisition = dict(state.acquisition)
-            for key, records in state.fits.items():
-                table.fit_panels[key].records = deepcopy(records)
-                table.fit_panels[key].invalidate()
+            if state.invalidate_from is not None:
+                for key, records in state.fits.items():
+                    table.fit_panels[key].records = deepcopy(records)
+                    table.fit_panels[key].invalidate()
         self.pending_region_updates.clear()
         calculations = state.invalidate_from is not None
         material_only = state.invalidate_from == PipelineStage.NORMALIZATION
@@ -271,7 +330,7 @@ class SpotEditing:
         experiment.attrs["spot_renames"] = renames
         mapping = {old_name: new_name}
         self._remap_window_history(mapping)
-        for values in (self._spot_folder_overrides, self._review_flags,
+        for values in (self.spot_colours.spot_colours, self._spot_folder_overrides, self._review_flags,
                        self.results_table.include_flags, self.results_table._spot_acquisition):
             if old_name in values:
                 values[new_name] = values.pop(old_name)
@@ -371,7 +430,7 @@ class SpotEditing:
         if self.session.selected_spot == spot_name:
             self.session.selected_spot = next(iter(self.session.spot_names), None)
         table = self.results_table
-        for values in (self._spot_folder_overrides, self._review_flags, table.include_flags, table._spot_acquisition):
+        for values in (self.spot_colours.spot_colours, self._spot_folder_overrides, self._review_flags, table.include_flags, table._spot_acquisition):
             values.pop(spot_name, None)
         for values in (table.excluded_spots, table.selected_spots, self._spots_edited_since_write):
             values.discard(spot_name)

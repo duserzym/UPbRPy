@@ -23,6 +23,8 @@ from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard
 from GUI.state import ReductionSession
 from GUI.selection_windows import EDGE_NAMES, EDGE_LABELS, constrain_window_edit
 from GUI.legend_series import LegendSeries
+from GUI.spot_colours import (SpotColours, SAMPLE_PALETTE as _REVIEW_SAMPLE_COLORS,
+                              SPOT_PALETTE as _DIAG_SPOT_COLORS)
 from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from GUI.workers import FunctionWorker
@@ -703,6 +705,7 @@ class SegmentedBar(QtWidgets.QFrame):
 # -- SpotTree --------------------------------------------------------------
 
 SPOT_TREE_COUNT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 9
+SPOT_TREE_COLOUR_ROLE = QtCore.Qt.ItemDataRole.UserRole + 10
 
 
 class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
@@ -739,6 +742,16 @@ class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
         editor.setGeometry(rect)
 
     def paint(self, painter, option, index):
+        colour = index.data(SPOT_TREE_COLOUR_ROLE)
+        if colour:
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(pg.mkPen(colour, width=1))
+            painter.setBrush(QtGui.QColor(colour))
+            painter.drawEllipse(QtCore.QPointF(option.rect.right() - 8, option.rect.center().y()), 4, 4)
+            painter.restore()
+            option = QtWidgets.QStyleOptionViewItem(option)
+            option.rect = option.rect.adjusted(0, 0, -18, 0)
         count = index.data(SPOT_TREE_COUNT_ROLE)
         if not count:
             return super().paint(painter, option, index)
@@ -757,6 +770,7 @@ class SpotTree(QtWidgets.QTreeWidget):
     """QTreeWidget with F2-rename and Delete-key support for spot management."""
 
     deleteRequested = QtCore.Signal()
+    colourRequested = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -786,6 +800,13 @@ class SpotTree(QtWidgets.QTreeWidget):
         return index if self.check_rect(index).adjusted(-3, -3, 3, 3).contains(pos) else None
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        index = self.indexAt(event.position().toPoint())
+        if (index.isValid() and index.data(SPOT_TREE_COLOUR_ROLE)
+                and event.button() == QtCore.Qt.MouseButton.LeftButton
+                and event.position().x() >= self.visualRect(index).right() - 18):
+            self.colourRequested.emit(self.itemFromIndex(index))
+            event.accept()
+            return
         # The check box shows or hides a spot; it never changes the browsed spot.
         index = self._check_index_at(event.position().toPoint())
         if index is not None and event.button() == QtCore.Qt.MouseButton.LeftButton:
@@ -1654,6 +1675,13 @@ class _ConcordiaLegendSample(ItemSample):
         self.setFixedWidth(12)
         self.setFixedHeight(14)
 
+    def mouseClickEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.RightButton and hasattr(self.item, "choose_colour"):
+            event.accept()
+            self.item.choose_colour()
+            return
+        super().mouseClickEvent(event)
+
     def boundingRect(self):
         return QtCore.QRectF(0, 0, 12, 14)
 
@@ -2095,6 +2123,7 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
     spotHovered = QtCore.Signal(str)
     reviewAction = QtCore.Signal(str)
     rangeSettled = QtCore.Signal()
+    sampleColourRequested = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -2134,6 +2163,8 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._visible_spot_names = set()
         self._metadata_by_spot = {}
         self._include_flags = {}
+        self.colours = SpotColours()
+        self._owns_colours = True
         self._spot_colors = {}
         self._sample_colors = {}
         self._colour_mode = "sample"
@@ -2168,12 +2199,26 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._metadata_by_spot = _ConcordiaMetadata((frame, selected_frame))
         names = list(dict.fromkeys(name for source in (frame, selected_frame)
                                   if "spot_name" in source for name in source["spot_name"].astype(str)))
-        self._spot_colors = {name: _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]
-                             for i, name in enumerate(names)}
-        samples = sorted({str(value) for source in (frame, selected_frame) if "sample" in source
-                          for value in source["sample"].dropna().unique() if self._has_value(value)})
-        self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
-                               for i, name in enumerate(samples)}
+        samples = {str(value) for source in (frame, selected_frame) if "sample" in source
+                   for value in source["sample"].dropna().unique() if self._has_value(value)}
+        if self._owns_colours:
+            self.colours.set_order(samples, names)
+        elif not samples.issubset(self.colours._samples):
+            # Also support reduced frames installed independently of a session.
+            self.colours.set_order(samples | self.colours._samples.keys(), [*self.colours._spots, *names])
+        self._sync_colours()
+
+    def _sync_colours(self):
+        self._sample_colors = {name: self.colours.sample_colour(name) for name in self.colours._samples}
+        self._spot_colors = {name: self.colours.spot_colour(name, "", "spot") for name in self.colours._spots}
+
+    def refresh_colours(self):
+        """Repaint retained geometry and legends without refitting data."""
+        self._sync_colours()
+        self._render_key = None
+        self._row_draw_cache.clear()
+        self._scatter_brush_cache.clear()
+        self._draw(preserve_view=True)
 
     def supports_select_mode(self) -> bool:
         """Return whether this canvas shows selectable spot means."""
@@ -2539,6 +2584,11 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             self._scatter_brush_cache.clear()
             self._render_key = None
         self._source_frame = source
+        if self._owns_colours and kind == "spot" and "sample" in frame:
+            samples = set(frame["sample"].dropna().astype(str)) | self.colours._samples.keys()
+            names = list(self.colours._spots) + (frame["spot_name"].astype(str).tolist() if "spot_name" in frame else [])
+            self.colours.set_order(samples, names)
+        self._sync_colours()
         render_key = (id(source), diagram, kind, bool(include_calibration_uncertainty),
                       id(theme), colour_mode, depth_colormap,
                       tuple(self._sample_colors.items()), tuple(self._spot_colors.items()))
@@ -2561,13 +2611,6 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         self._theme = theme
         self._colour_mode = colour_mode
         self._depth_colormap = depth_colormap
-        if self._kind == "spot" and "sample" in frame:
-            # Standalone canvases can also colour their complete input frame.
-            samples = set(frame["sample"].dropna().astype(str))
-            if not samples.issubset(self._sample_colors):
-                samples = sorted(samples | self._sample_colors.keys())
-                self._sample_colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
-                                       for i, name in enumerate(samples)}
         self.setBackground(theme.plot_background)
         self._render_key = render_key
         if same_render:
@@ -3003,13 +3046,9 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
             else:
                 samples = frame["sample"].astype(str) if "sample" in frame else [""] * len(frame)
                 names = frame["spot_name"].astype(str) if "spot_name" in frame else [""] * len(frame)
-                brushes = [
-                    pg.mkColor(self._sample_colors.get(sample, theme.muted)
-                               if self._colour_mode == "sample" else theme.accent
-                               if self._colour_mode == "single" else
-                               self._spot_colors.get(name, _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]))
-                    for i, (sample, name) in enumerate(zip(samples, names))
-                ]
+                brushes = [pg.mkColor(self.colours.spot_colour(name, sample, self._colour_mode,
+                                                               accent=theme.accent))
+                           for sample, name in zip(samples, names)]
                 outlines = [None] * len(frame)
             names = frame["spot_name"].astype(str).to_numpy() if "spot_name" in frame else [""] * len(frame)
             finite = np.isfinite(x[positions]) & np.isfinite(y[positions])
@@ -3252,9 +3291,22 @@ class ConcordiaReviewWidget(RoundedGraphicsLayoutWidget):
         for sample in samples:
             swatch = pg.ScatterPlotItem(size=7, pen=pg.mkPen(None),
                                         brush=pg.mkBrush(self._sample_colors[sample]))
+            swatch.choose_colour = lambda sample=sample: self.sampleColourRequested.emit(sample)
             self._legend.addItem(swatch, escape(sample))
+            self._legend.items[-1][0].setToolTip("Left-click: hide/show sample. Right-click: set sample colour.")
             self._legend_series.bind(sample, swatch, legend=self._legend, changed=self._sample_visibility_changed)
             label = self._legend.items[-1][1]
+            def toggle_label(label, event, primary=swatch):
+                if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                    primary.setVisible(not primary.isVisible())
+                    self.select_spots(())
+                    self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+                    event.accept()
+                else:
+                    event.ignore()
+            label.mouseClickEvent = MethodType(toggle_label, label)
+            label.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+            label.setToolTip("Click: hide/show sample. Right-click its swatch to set colour.")
             label.item.document().setDocumentMargin(0)
             label.updateMin()
         self._legend.layout.activate()
@@ -4922,6 +4974,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
     includedSpotsChanged = QtCore.Signal()
     showGlassesChanged = QtCore.Signal(bool)
     appearance_changed = QtCore.Signal()
+    resetColoursRequested = QtCore.Signal()
     excludedSpotsChanged = QtCore.Signal(object)
     concordiaGridChanged = QtCore.Signal(bool)
     focusRequested = QtCore.Signal(bool)
@@ -5517,10 +5570,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
     def _rebuild_sample_chips(self):
         samples = self._sample_spots()
         names = self.sample_chip_names()
-        fallback = {sample: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
-                    for i, sample in enumerate(sorted(names))}
-        colors = {**fallback, **self.spot_concordia._sample_colors}
-        self.depth_concordia._sample_colors = colors.copy()
+        colours = self.spot_concordia.colours
+        colors = {sample: colours.sample_colour(sample) for sample in names}
+        self.depth_concordia.colours = colours
+        self.depth_concordia._sync_colours()
         for area in self._chip_areas:
             while area.flow.count():
                 chip = area.flow.takeAt(0).widget()
@@ -6574,6 +6627,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         box = QtWidgets.QVBoxLayout(colours)
         for button in self.spot_colour_buttons.values():
             box.addWidget(button)
+        self.reset_colours_button = QtWidgets.QPushButton("Reset all colours")
+        self.reset_colours_button.clicked.connect(self.resetColoursRequested)
+        box.addWidget(self.reset_colours_button)
         self.spot_colour_menu = self._popover("Colour: " + saved_colour.title(), colours)
         toolbar.add_control(self.spot_colour_menu, "Colour", priority=2)
         toolbar.add_separator()
@@ -6964,6 +7020,14 @@ class ResultsTableWidget(QtWidgets.QWidget):
             )
         self._readout_timer.start(0)
         self._schedule_fits()
+
+    def refresh_colours(self):
+        """Repaint sample chips, concordias and existing fitted overlays."""
+        self._rebuild_sample_chips()
+        for canvas in (self.spot_concordia, self.depth_concordia):
+            canvas.refresh_colours()
+        for panel in self.fit_panels.values():
+            panel._draw_records()
 
     def spot_colour_mode(self) -> str:
         """Return the spot ellipse and point colour mode."""
@@ -7372,22 +7436,6 @@ class MetricCard(NeumorphicFrame):
         self.value_widget.setText(value)
 
 
-# ── Diagnostic plot palette ────────────────────────────────────────────────
-
-_DIAG_SPOT_COLORS = [
-    "#5590f5", "#f5c040", "#f07840", "#b864f0", "#40c870",
-    "#d04848", "#40c8d8", "#f060a8", "#b8d840", "#f0a040",
-    "#7090d8", "#d090f0",
-]
-
-_REVIEW_SAMPLE_COLORS = [
-    "#4477aa", "#ee7733", "#228833", "#cc6677", "#aa4499", "#66aabb",
-    "#aa8833", "#44aa99", "#dd6699", "#8888cc", "#999933", "#bb5566",
-    "#3366cc", "#cc4422", "#7f55aa", "#669944", "#008899", "#b07850",
-    "#6f7d8c", "#bb55bb",
-]
-
-
 def _make_diag_axis(plot_item: pg.PlotItem, theme: ThemeSpec) -> None:
     """Apply consistent axis styling to a diagnostic sub-plot."""
     tick_font = QtGui.QFont()
@@ -7448,6 +7496,7 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.colours = SpotColours()
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._plot_item: pg.PlotItem | None = None
@@ -7515,7 +7564,11 @@ class DownholeFractionationWidget(RoundedGraphicsLayoutWidget):
         for i, (rel_t, r) in enumerate(zip(data["spot_times"], data["spot_ratios"])):
             with np.errstate(divide="ignore", invalid="ignore"):
                 frac = np.where(r > 0, data["known_ratio"] / r, np.nan)
-            color = _DIAG_SPOT_COLORS[i % len(_DIAG_SPOT_COLORS)]
+            name = str(spot_names[i]) if i < len(spot_names) else str(i)
+            if not self.colours._spots:
+                self.colours.set_order([primary_standard], spot_names or map(str, range(len(data["spot_times"]))))
+            mode = "sample" if primary_standard in self.colours.sample_colours else "spot"
+            color = self.colours.spot_colour(name, primary_standard, mode)
             c = pg.mkColor(color)
             c.setAlpha(120)
             p.plot(rel_t, frac, pen=pg.mkPen(c, width=1.2))
@@ -7651,6 +7704,7 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.colours = SpotColours()
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._plot_item: pg.PlotItem | None = None
@@ -7733,23 +7787,24 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         # Polynomial fit follows the same weighted notebook fit stored by the core.
         p.plot(fit_times, fit_vals, pen=pg.mkPen("#e05050", width=2))
 
-        point_color = theme.text
+        if not self.colours._samples:
+            self.colours.set_order([primary_standard], data.get("spot_names", []))
+        point_colors = [self.colours.spot_colour(str(name), primary_standard, "sample")
+                        if str(name) in self.colours.spot_colours or primary_standard in self.colours.sample_colours
+                        else theme.text for name in data.get("spot_names", [primary_standard] * len(t_arr))]
         if show_uncertainty:
-            err = pg.ErrorBarItem(
-                x=t_arr,
-                y=f_arr,
-                height=2 * self._sigma_level * e_arr,
-                beam=0,
-                pen=pg.mkPen(point_color, width=1.2),
-            )
-            p.addItem(err)
+            for color in dict.fromkeys(point_colors):
+                mask = np.asarray(point_colors) == color
+                p.addItem(pg.ErrorBarItem(x=np.asarray(t_arr)[mask], y=np.asarray(f_arr)[mask],
+                          height=2 * self._sigma_level * np.asarray(e_arr)[mask], beam=0,
+                          pen=pg.mkPen(color, width=1.2)))
         scatter = pg.ScatterPlotItem(
             x=t_arr,
             y=f_arr,
             symbol="o",
             size=8,
-            pen=pg.mkPen(point_color, width=1.2),
-            brush=pg.mkBrush(point_color),
+            pen=[pg.mkPen(color, width=1.2) for color in point_colors],
+            brush=[pg.mkBrush(color) for color in point_colors],
             hoverable=True,
             hoverSize=12,
             data=data.get("spot_names", [primary_standard] * len(t_arr)),
@@ -7835,6 +7890,7 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.colours = SpotColours()
         self._grid_items: dict[str, pg.PlotItem] = {}
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
@@ -7948,7 +8004,9 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
             spot_names = ch_data.get("spot_names", labels)
             scatter = pg.ScatterPlotItem(
                 x=ppm, y=cps, size=6,
-                pen=pg.mkPen(theme.axis_text, width=0.6), brush=pg.mkBrush(color),
+                pen=pg.mkPen(theme.axis_text, width=0.6), brush=[pg.mkBrush(self.colours.spot_colour(str(name), str(sample), "sample"))
+                       if str(name) in self.colours.spot_colours or str(sample) in self.colours.sample_colours
+                       else pg.mkBrush(color) for name, sample in zip(spot_names, labels)],
                 hoverable=True, hoverSize=9,
                 data=list(zip(spot_names, labels, [channel] * len(ppm))),
                 tip=lambda x, y, spot: (
@@ -8027,7 +8085,9 @@ class CalibrationSlopesWidget(RoundedGraphicsLayoutWidget):
                 symbol=[sample_symbols.get(label, "o") for label in labels],
                 size=9,
                 pen=pg.mkPen(theme.axis_text, width=0.9),
-                brush=pg.mkBrush(color),
+                brush=[pg.mkBrush(self.colours.spot_colour(str(name), str(sample), "sample"))
+                       if str(name) in self.colours.spot_colours or str(sample) in self.colours.sample_colours
+                       else pg.mkBrush(color) for name, sample in zip(spot_names, labels)],
                 hoverable=True,
                 hoverSize=13,
                 data=list(zip(spot_names, labels, [channel] * len(ppm))),
@@ -9687,6 +9747,7 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent=parent)
+        self.colours = SpotColours()
         self._theme = active_theme()
         self._table = pd.DataFrame()
         self._unknowns = pd.DataFrame()
@@ -9764,8 +9825,9 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
                 finite &= table.x > 0
             visible = table.loc[finite]
             samples = sorted(table["sample"].astype(str).unique())
-            colors = {name: _REVIEW_SAMPLE_COLORS[i % len(_REVIEW_SAMPLE_COLORS)]
-                      for i, name in enumerate(samples)}
+            if not self.colours._samples:
+                self.colours.set_order(samples, table.spot_name.astype(str))
+            colors = {name: self.colours.sample_colour(name) for name in samples}
             self._legend = _rounded_legend(plot, offset=(-10, 32), labelTextColor=theme.axis_text,
                                            labelTextSize="9pt", verSpacing=0)
             self._legend.anchor((1, 0), (1, 0), offset=(-10, 32))
@@ -9774,27 +9836,36 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
                 x = group.x.to_numpy(dtype=float)
                 y = group.offset_percent.to_numpy(dtype=float)
                 display_x = np.log10(x) if self._log_x else x
-                scatter = pg.ScatterPlotItem(x=display_x, y=y, size=8, brush=color,
-                                             pen=pg.mkPen(color, width=0.8))
+                point_colors = [self.colours.spot_colour(str(name), str(sample), "sample")
+                                for name in group.spot_name]
+                scatter = pg.ScatterPlotItem(x=display_x, y=y, size=8,
+                                             brush=[pg.mkBrush(c) for c in point_colors],
+                                             pen=[pg.mkPen(c, width=0.8) for c in point_colors])
                 # ScatterPlotItem and ErrorBarItem have no pyqtgraph log transform;
                 # only their coordinates are mapped, while the axis uses log mode.
                 scatter.sigClicked.connect(self._spot_clicked)
                 scatter._bias_rows = group.to_dict("records")
                 scatter._bias_color = color
+                scatter._bias_colors = point_colors
+                # Legend uses the sample colour; point brushes retain overrides.
+                scatter.setBrush(color, update=False)
+                scatter.setPen(pg.mkPen(color, width=.8), update=False)
                 self._scatters[sample] = scatter
                 plot.addItem(scatter)
                 self._point_rows.extend(scatter._bias_rows)
                 errors = group.offset_2s_percent.to_numpy(dtype=float)
                 valid_error = np.isfinite(errors) & (errors >= 0)
-                bars = pg.ErrorBarItem(x=display_x[valid_error], y=y[valid_error],
-                                      top=errors[valid_error], bottom=errors[valid_error],
-                                      pen=pg.mkPen(color, width=1))
-                plot.addItem(bars)
-                self._error_bars.append(bars)
+                companions = []
+                for bar_color in dict.fromkeys(point_colors):
+                    mask = valid_error & (np.asarray(point_colors) == bar_color)
+                    bars = pg.ErrorBarItem(x=display_x[mask], y=y[mask], top=errors[mask], bottom=errors[mask],
+                                          pen=pg.mkPen(bar_color, width=1))
+                    plot.addItem(bars)
+                    self._error_bars.append(bars)
+                    companions.append(bars)
                 stats = self._summary.get("samples", {}).get(sample, {})
                 mean, error = stats.get("weighted_mean", np.nan), stats.get("weighted_mean_2e", np.nan)
                 self._legend.addItem(scatter, f"{sample}  {mean:+.1f} ± {error:.1f} %  n {stats.get('n', 0)}")
-                companions = [bars]
                 if np.isfinite(mean):
                     self._mean_lines.append(plot.plot([x.min(), x.max()], [mean, mean],
                         pen=pg.mkPen(color, width=1.5, style=QtCore.Qt.PenStyle.DashLine)))
@@ -9916,8 +9987,9 @@ class StandardBiasWidget(RoundedGraphicsLayoutWidget):
     def _update_selection_style(self):
         for scatter in self._scatters.values():
             chosen = [str(row["spot_name"]) in self.selected_spots for row in scatter._bias_rows]
-            scatter.setPen([pg.mkPen(scatter._bias_color, width=2.5 if selected else 0.8)
-                            for selected in chosen])
+            colors = getattr(scatter, "_bias_colors", [scatter._bias_color] * len(chosen))
+            scatter.setPen([pg.mkPen(color, width=2.5 if selected else 0.8)
+                            for color, selected in zip(colors, chosen)])
             scatter.setSize([11 if selected else 8 for selected in chosen])
 
     def supports_select_mode(self) -> bool:

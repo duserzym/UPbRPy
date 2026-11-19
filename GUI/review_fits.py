@@ -617,7 +617,8 @@ class ReviewFitPanel(QtWidgets.QWidget):
             for item in items:
                 if item not in plot.items:
                     plot.addItem(item, ignoreBounds=True)
-            color = canvas._sample_colors.get(r["label"], canvas._theme.accent)
+            color = (canvas.colours.sample_colour(r["label"]) if r["label"] in canvas.colours._samples
+                     else canvas._theme.accent)
             for item in items[:3]:
                 item.setPen(pg.mkPen(color, width=1.5 if item is items[0] else .8,
                     style=QtCore.Qt.PenStyle.SolidLine if item is items[0] else QtCore.Qt.PenStyle.DashLine))

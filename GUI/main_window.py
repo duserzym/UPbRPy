@@ -74,6 +74,8 @@ from GUI.services import (
 from GUI.state import ReductionSession
 from GUI.selection_windows import EDGE_NAMES, EDGE_LABELS, constrain_window_edit
 from GUI.spot_edits import SpotEditing, SpotEditState
+from GUI.spot_colours import SpotColours
+from GUI.colour_picker import ColourPicker
 from GUI.change_guard import ChangeGuard, confirm_change, copy_session, sync_change_controls
 from GUI.wheel_guard import install_wheel_guard
 from GUI.database_panel import DatabasePanel, SUBMIT_STEP, is_submit_step
@@ -82,6 +84,7 @@ from GUI.gc_policy import install as install_gc_policy
 from GUI.theme import NeumorphicFrame, WallpaperWidget, active_theme, apply_theme, paint_wallpaper
 from GUI.widgets import (
     SPOT_TREE_COUNT_ROLE,
+    SPOT_TREE_COLOUR_ROLE,
     CALIBRATION_GRID,
     CalibrationSlopesWidget,
     CalibrationMaterialList,
@@ -299,6 +302,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.setAcceptDrops(True)
         self._companion_choices: dict[str, bool] = {}
         self.session = ReductionSession()
+        self.spot_colours = SpotColours()
         self._calibration_seen_cached: set[PipelineStage] = set()
         self._calibration_target_row: int | None = None
         self.export_settings = ExportSettings()
@@ -3043,6 +3047,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.plots_stack.addWidget(self.results_table)        # index 4
         # Reference-material bias graph; selection is shared with the table.
         self.bias_plot = StandardBiasWidget()
+        for canvas in (self.results_table.spot_concordia, self.results_table.depth_concordia):
+            canvas.colours = self.spot_colours
+            canvas._owns_colours = False
+            canvas.sampleColourRequested.connect(self._choose_sample_colour)
+        for view in (self.bias_plot, self.downhole_frac_plot, self.session_frac_plot, self.calibration_slopes_plot):
+            view.colours = self.spot_colours
+        self.results_table.resetColoursRequested.connect(self.request_reset_colours)
         self.bias_plot.selectionChanged.connect(
             lambda names: self.results_table.set_selected_spots(
                 names, origin=self.bias_plot
@@ -3474,9 +3485,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.spot_list.setHeaderHidden(True)
         self.spot_list.setIndentation(14)
         self.spot_list.setRootIsDecorated(True)
-        self.spot_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.spot_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.spot_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.spot_list.customContextMenuRequested.connect(self._on_spot_tree_context_menu)
+        self.spot_list.colourRequested.connect(self._choose_tree_colour)
         self.spot_list.currentItemChanged.connect(self._on_spot_tree_item_changed)
         self.spot_list.setToolTip(
             "Analyses in this session. Previous / next spot: "
@@ -5332,6 +5344,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             "sigma_level": self.sigma_level,
             "channel_colors": dict(self.channel_colors),
             "selection_colors": dict(self.selection_colors),
+            "sample_colours": dict(self.spot_colours.sample_colours),
+            "spot_colours": dict(self.spot_colours.spot_colours),
             "review_spot_colour": self.results_table.spot_colour_mode(),
             "review_depth_colormap": self.results_table.depth_colormap_combo.currentText(),
             "bias_controls": self.bias_controls.state(),
@@ -5674,6 +5688,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             restored.session.directory,
             project_path=restored.project_path,
         )
+        self.spot_colours.restore(workspace.get("sample_colours", {}), workspace.get("spot_colours", {}))
+        self._refresh_spot_colours()
         self.session.include_export_concentrations = bool(
             workspace.get("include_export_concentrations", True)
         )
@@ -6072,6 +6088,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
+        self.spot_colours.sample_colours.clear()
+        self.spot_colours.spot_colours.clear()
+        self._set_colour_order()
         self._spot_rerun_stage = None
         self._calibration_seen_cached.clear()
         self._calibration_target_row = None
@@ -6893,6 +6912,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             self.spot_list.blockSignals(False)
             self._update_spot_tree_expand_button()
             return
+        self._set_colour_order()
         sample_map = self._spot_sample_map()  # {spot_name: sample_name}
         sample_overrides = self.session.experiment.attrs.get("sample_overrides", {})
 
@@ -6925,6 +6945,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         ) -> QtWidgets.QTreeWidgetItem:
             folder_item = QtWidgets.QTreeWidgetItem(root, [folder_name])
             folder_item.setToolTip(0, folder_name)
+            if folder_name in sample_map.values() or not spots:
+                folder_item.setToolTip(0, folder_name + "\nClick the colour dot to set sample colour.")
+                folder_item.setData(0, SPOT_TREE_COLOUR_ROLE, self.spot_colours.sample_colour(folder_name))
             folder_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__{folder_name}")
             folder_item.setFlags(folder_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
                                  & ~QtCore.Qt.ItemFlag.ItemIsEditable)
@@ -6934,6 +6957,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             for sn in sorted(spots, key=natural_sort_key):
                 spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
                 spot_item.setToolTip(0, sn)
+                if sn in self.spot_colours.spot_colours:
+                    spot_item.setData(0, SPOT_TREE_COLOUR_ROLE, self.spot_colours.spot_colours[sn])
                 if override := sample_overrides.get(sn):
                     source = "Studio" if override.get("source") == "studio" else "UPbDB"
                     badge = "Studio" if source == "Studio" else "DB"
@@ -7025,6 +7050,56 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if spot_name and not str(spot_name).startswith("__"):
             self.on_spot_changed(spot_name)
 
+    def _set_colour_order(self):
+        samples = set(self._spot_sample_map().values())
+        samples.update(self.session.experiment.attrs.get("studio_empty_spot_folders", []))
+        self.spot_colours.set_order(samples, self.session.spot_names)
+
+    def _refresh_spot_colours(self):
+        # Retained plot data only: never call a reduction service on this path.
+        self.results_table.refresh_colours()
+        for view in (self.bias_plot, self.downhole_frac_plot, self.session_frac_plot, self.calibration_slopes_plot):
+            if view._theme is not None:
+                plot = view._plot_item
+                bounds = plot.vb.viewRange() if plot is not None else None
+                view._draw()
+                if bounds is not None and view._plot_item is not None:
+                    view._plot_item.vb.setRange(xRange=bounds[0], yRange=bounds[1], padding=0)
+
+    def _colour_targets(self, clicked):
+        selected = [str(item.data(0, QtCore.Qt.ItemDataRole.UserRole)) for item in self.spot_list.selectedItems()]
+        return [name for name in selected if name in self.session.spot_names] if clicked in selected else [clicked]
+
+    def _choose_tree_colour(self, item):
+        name = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole))
+        if name.startswith("__folder__"):
+            self._choose_sample_colour(name.removeprefix("__folder__"))
+        else:
+            self._choose_spot_colour(self._colour_targets(name))
+
+    def _show_colour_picker(self, picker):
+        # Retain one picker until replacement. Custom colour opens a nested
+        # native dialog after the menu hides, so hiding must not delete it.
+        previous = getattr(self, "_colour_picker", None)
+        if previous is not None:
+            previous.close()
+            previous.deleteLater()
+        self._colour_picker = picker
+        picker.popup(QtGui.QCursor.pos())
+
+    def _choose_sample_colour(self, sample):
+        picker = ColourPicker(self.spot_colours.sample_colour(sample), self)
+        picker.colourChosen.connect(lambda colour: self.request_sample_colour(sample, colour))
+        self._show_colour_picker(picker)
+
+    def _choose_spot_colour(self, names):
+        if not names:
+            return
+        sample = self._spot_sample_map().get(names[0], "")
+        picker = ColourPicker(self.spot_colours.spot_colour(names[0], sample, "sample"), self, spots=True)
+        picker.colourChosen.connect(lambda colour: self.request_spot_colour(names, colour))
+        self._show_colour_picker(picker)
+
     def _on_spot_tree_context_menu(self, pos: QtCore.QPoint) -> None:
         item = self.spot_list.itemAt(pos)
         menu = QtWidgets.QMenu(self)
@@ -7048,6 +7123,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if is_spot:
             rename_act = menu.addAction("Rename spot…\tF2")
             name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            targets = self._colour_targets(name)
+            menu.addAction("Set colour…").setData(("spot_colour", targets))
+            menu.addAction("Reset to sample colour").setData(("reset_spot_colour", targets))
+            menu.addSeparator()
             menu.addAction("Edit review flag…").setData(("edit_review_flag", name))
             clear_flag = menu.addAction("Clear review flag")
             clear_flag.setData(("clear_review_flag", name))
@@ -7081,6 +7160,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             menu.addSeparator()
             del_act = menu.addAction("Remove spot from session…")
         elif is_folder:
+            folder = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole)).removeprefix("__folder__")
+            if folder in self._spot_sample_map().values() or not item.childCount():
+                menu.addAction("Set sample colour…").setData(("sample_colour", folder))
             menu.addAction("New folder…").setData(("new_folder",))
             menu.addSeparator()
             del_folder_act = menu.addAction("Delete folder…")
@@ -7094,7 +7176,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             return
 
         data = chosen.data()
-        if isinstance(data, tuple) and data[0] == "move_spot":
+        if isinstance(data, tuple) and data[0] == "spot_colour":
+            self._choose_spot_colour(data[1])
+        elif isinstance(data, tuple) and data[0] == "reset_spot_colour":
+            self.request_spot_colour(data[1], None)
+        elif isinstance(data, tuple) and data[0] == "sample_colour":
+            self._choose_sample_colour(data[1])
+        elif isinstance(data, tuple) and data[0] == "move_spot":
             self.request_move_spot(data[1], data[2])
         elif isinstance(data, tuple) and data[0] == "calculation_exclusion":
             self.request_calculation_exclusion(data[1], data[2])

@@ -80,6 +80,16 @@ submission recalculates a private pipeline with original labels in result
 tables; the submitted `.upbr` retains edited names for Studio. Regular exports
 use edited names and include original labels in manifest provenance.
 
+### Studio colours
+
+Workspace keys `sample_colours` and `spot_colours` are optional mappings from
+sample or current spot name to opaque `#rrggbb` strings. Restore ignores unknown
+names and invalid colours. Missing mappings use the existing Studio palettes.
+These keys affect display only: they are excluded from the scientific project
+fingerprint and results-cache key, and changing them does not invalidate a
+pipeline stage. They use the spot-edit undo history with `calculations=False`.
+The engine does not interpret them. No project format version change is needed.
+
 ### Local results cache
 
 Studio keeps disposable results in `~/Library/Caches/UPbRPy/results/` on macOS,
