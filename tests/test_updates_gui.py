@@ -38,6 +38,16 @@ def prefs(app):
         settings.setValue(key, value)
 
 
+def test_default_updater_opener_uses_tls(app, prefs):
+    from UPbRPy.integration import tls
+
+    updater = Updater(settings=prefs)
+    try:
+        assert updater._opener is tls.urlopen
+    finally:
+        updater._shutdown()
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("size", [(1440, 900), (1280, 800)])
 def test_updates_fit_canvas_and_laptop(app, prefs, theme, size):

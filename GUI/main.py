@@ -287,6 +287,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
     parser.add_argument("--version-output", metavar="FILE", help="Write Studio's version to a file and exit")
     parser.add_argument(
+        "--check-tls", nargs="?", const="", metavar="URL",
+        help="Report trusted CA certificates, optionally check an HTTPS URL, and exit",
+    )
+    parser.add_argument(
+        "--check-tls-output", metavar="PATH",
+        help="Also write the --check-tls JSON report to a UTF-8 file",
+    )
+    parser.add_argument(
         "--open",
         metavar="TARGET",
         help=(
@@ -325,6 +333,30 @@ def main(argv: list[str] | None = None) -> int:
         # can verify the updater's actual version on every platform.
         Path(args.version_output).write_text(installed_version() + "\n", encoding="utf-8")
         return 0
+    if args.check_tls is not None:
+        from UPbRPy.integration import tls
+
+        report = {
+            "ca_certificates": 0, "ca_bundle": tls.ca_bundle(),
+            "url": args.check_tls or None, "ok": None, "error": None, "detail": None,
+        }
+        try:
+            report["ca_certificates"] = tls.ca_certificate_count()
+            if args.check_tls:
+                with tls.urlopen(args.check_tls, timeout=10):
+                    report["ok"] = True
+        except Exception as exc:
+            if args.check_tls:
+                report["ok"] = False
+            report["error"] = "certificate" if tls.is_certificate_error(exc) else "network"
+            report["detail"] = str(exc)
+        report_json = json.dumps(report) + "\n"
+        if args.check_tls_output:
+            Path(args.check_tls_output).write_text(report_json, encoding="utf-8")
+        if sys.stdout is not None:
+            print(report_json, end="")
+        return int(report["ca_certificates"] < 100 or report["error"] == "certificate")
+
     if args.verify_reduction and not args.verification_output:
         parser.error("--verify-reduction requires --verification-output")
 

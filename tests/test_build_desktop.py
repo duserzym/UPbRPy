@@ -31,6 +31,7 @@ def test_spec_stamps_checkout_version_despite_stale_metadata(tmp_path, monkeypat
     # SPECPATH selects the checkout, not installed code.
     hooks = ModuleType("PyInstaller.utils.hooks")
     hooks.collect_submodules = lambda name: []
+    hooks.collect_data_files = lambda name: []
 
     def copy_metadata(name):
         assert name != "UPbRPy", "Must not look up the venv's UPbRPy metadata"

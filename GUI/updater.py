@@ -22,6 +22,7 @@ import weakref
 from PySide6 import QtCore, QtWidgets
 import shiboken6
 
+from UPbRPy.integration import tls
 from GUI.standards_updates import StandardsCheck, check_standards
 from GUI.updates import (
     CHANNELS, UpdateState, can_replace, compare_versions, find_asset,
@@ -249,7 +250,7 @@ class Updater(QtCore.QObject):
         self.version = version or installed_version()
         self._prefs = settings if settings is not None else QtCore.QSettings("UPbRPy", "Studio")
         self._state = UpdateState()
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or tls.urlopen
         self._runner = runner or _detached_runner
         self._jobs = []
         self._standards_job = None

@@ -38,6 +38,22 @@ def test_friendly_update_fallback():
     assert updates.friendly_update_error("404 public key") == "Updates are not configured for this build yet."
 
 
+@pytest.mark.parametrize("raw", [
+    "URLError: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+    "unable to get local issuer certificate (_ssl.c:1010)>",
+    "SSL: untrusted issuer", "certificate rejected", "CERTIFICATE_VERIFY_FAILED",
+])
+def test_friendly_update_certificate_errors(raw):
+    assert updates.friendly_update_error(raw) == (
+        "Studio could not verify the secure connection to the update server. "
+        "Download the latest version from GitHub.")
+
+
+def test_friendly_update_urlerror_timeout():
+    assert updates.friendly_update_error("URLError: <urlopen error timed out>") == (
+        "Can't reach the update server. Check your internet connection and try again.")
+
+
 @pytest.mark.parametrize("status,text,action,badge,busy", [
     ("idle", "Check for a new version of Studio.", None, False, False),
     ("checking", "Checking for updates…", None, False, True),

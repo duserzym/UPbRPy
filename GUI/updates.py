@@ -24,6 +24,9 @@ def friendly_update_error(raw: str) -> str:
     if any(word in lower for word in ("404", "release json", "could not fetch a valid release",
                                       "not found", "no assets")):
         return "No release has been published yet."
+    if any(word in lower for word in ("certificate", "ssl:", "certificate_verify_failed")):
+        return ("Studio could not verify the secure connection to the update server. "
+                "Download the latest version from GitHub.")
     if any(word in lower for word in ("error sending request", "dns", "connect", "timed out",
                                       "timeout", "offline", "network", "failed to fetch",
                                       "enotfound", "urlerror")):

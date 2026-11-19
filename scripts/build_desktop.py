@@ -88,7 +88,7 @@ def require_build_dependencies() -> None:
     them opens no upbr:// links and cannot submit to upbdb.
     """
     required = (
-        "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring",
+        "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring", "certifi",
     )
     missing = [
         name
@@ -154,7 +154,10 @@ SMOKE_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "qtegra" / "Zircon_demo"
 SMOKE_CSV = SMOKE_FIXTURE / "Zircon_demo_Rich.csv"
 
 
-def _run_frozen(application: Path, arguments: list[str], work_directory: Path) -> subprocess.CompletedProcess:
+def _run_frozen(
+    application: Path, arguments: list[str], work_directory: Path, *,
+    environment_overrides: dict[str, str] | None = None, check: bool = True,
+) -> subprocess.CompletedProcess:
     """Run the frozen app offscreen with isolated settings and autosaves."""
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -162,6 +165,7 @@ def _run_frozen(application: Path, arguments: list[str], work_directory: Path) -
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment["MPLCONFIGDIR"] = str(work_directory / "matplotlib")
     environment["UPBRPY_AUTOSAVE_DIR"] = str(work_directory / "autosave")
+    environment.update(environment_overrides or {})
     result = subprocess.run(
         [str(application_executable(application)), "--theme", "light", *arguments],
         cwd=work_directory,
@@ -170,7 +174,7 @@ def _run_frozen(application: Path, arguments: list[str], work_directory: Path) -
         text=True,
         timeout=300,
     )
-    if result.returncode != 0 or "Traceback" in result.stderr:
+    if check and (result.returncode != 0 or "Traceback" in result.stderr):
         raise RuntimeError(
             f"The frozen app failed on {' '.join(arguments)} "
             f"(exit {result.returncode}):\n{result.stderr[-4000:]}"
@@ -221,6 +225,7 @@ def smoke_test_application(
     3. Open a saved project for that fixture and render it.
     4. Run ``--verify-reduction`` on the fixture through concentrations, and
        through the export bundle on ``$UPBRPY_SMOKE_SESSION`` when it is set.
+    5. Check HTTPS with bundled CA roots and no default certificate paths.
     Load errors make the frozen app exit non-zero (see ``--export`` in
     GUI/main.py), so a module missing from the bundle fails the build.
     """
@@ -263,6 +268,29 @@ def smoke_test_application(
         if through != "export" and through not in report.get("stages", []):
             raise RuntimeError(f"The frozen reduction check did not reach {through}: {report}")
         print(f"Frozen reduction check ({source.name}, through {through}): {report['spots']} spots")
+    tls_output = work_directory / "check-tls.json"
+    tls_output.unlink(missing_ok=True)
+    result = _run_frozen(
+        application,
+        ["--check-tls", "https://api.github.com", "--check-tls-output", str(tls_output)],
+        work_directory,
+        environment_overrides={
+            "SSL_CERT_FILE": str(work_directory / "nonexistent-cert.pem"),
+            "SSL_CERT_DIR": str(work_directory / "nonexistent-certs"),
+        },
+        check=False,
+    )
+    report_json = tls_output.read_text(encoding="utf-8") if tls_output.exists() else result.stdout
+    print(report_json.strip())
+    try:
+        report = json.loads(report_json)
+    except ValueError as exc:
+        raise RuntimeError(f"The frozen TLS check did not return JSON: {result.stderr[-4000:]}") from exc
+    if (report["ca_certificates"] < 100 or report["error"] == "certificate"
+            or result.returncode != 0 or "Traceback" in result.stderr):
+        raise RuntimeError(f"The frozen TLS check failed: {report}")
+    if report["error"] == "network":
+        print(f"Warning: frozen TLS network check unavailable: {report['detail']}")
     return screenshots["empty"][0]
 
 

@@ -61,6 +61,79 @@ def test_normalize_server():
         db.normalize_server("")
 
 
+@pytest.mark.parametrize("bundle", ["/bundled/cacert.pem", None])
+@pytest.mark.parametrize("options", [{}, {"verify": "/custom/ca.pem"}, {"verify": True}, {"verify": False}])
+def test_request_uses_ca_bundle(monkeypatch, bundle, options):
+    from unittest.mock import Mock
+    import requests
+
+    request = Mock(return_value=_Reply(200, {}))
+    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(db, "ca_bundle", lambda: bundle)
+    db._request("GET", "https://lab.example.org", "health", action="check health", auth=False, **options)
+    assert request.call_count == 1
+    if "verify" in options:
+        assert request.call_args.kwargs["verify"] == options["verify"]
+    elif bundle is None:
+        assert "verify" not in request.call_args.kwargs
+    else:
+        assert request.call_args.kwargs["verify"] == bundle
+
+
+def test_request_certificate_error_is_specific(monkeypatch):
+    from unittest.mock import Mock
+    import requests
+
+    error = requests.exceptions.SSLError("certificate verify failed")
+    request = Mock(side_effect=error)
+    monkeypatch.setattr(requests, "request", request)
+    with pytest.raises(db.ConnectionFailed) as failed:
+        db._request("GET", "https://lab.example.org", "health", action="check health", auth=False)
+    assert str(failed.value) == (
+        "Could not verify the secure connection to https://lab.example.org. "
+        "Its certificate is not trusted on this computer.")
+    assert failed.value.__cause__ is error
+    assert request.call_count == 1
+
+
+def test_tls_keeps_large_lists_paged_and_revalidated(monkeypatch, tokens):
+    import requests
+
+    rows = [{"id": f"session-{index}"} for index in range(3000)]
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        start = int(kwargs["params"].get("cursor", 0))
+        limit = kwargs["params"]["limit"]
+        assert limit == 500
+        tag = f'"page-{start}"'
+        cached = kwargs["headers"].get("If-None-Match") == tag
+        reply = _Reply(304 if cached else 200, rows[start:start + limit])
+        reply.headers = {"ETag": tag}
+        if start + limit < len(rows):
+            reply.headers["X-Next-Cursor"] = str(start + limit)
+        return reply
+
+    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(db, "_session_pages", db.OrderedDict())
+    db.store_token("https://lab.example.org", "test-token")
+    collected = []
+    cursor = None
+    while True:
+        page = db.list_sessions("https://lab.example.org", limit=500, cursor=cursor)
+        collected.extend(page)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    assert collected == rows
+    assert len(calls) == 6
+    assert db.list_sessions("https://lab.example.org", limit=500) == rows[:500]
+    assert len(calls) == 7
+    assert calls[-1][2]["headers"]["If-None-Match"] == '"page-0"'
+    assert all(call[2]["verify"] == db.ca_bundle() for call in calls)
+
+
 def test_password_login_whoami_and_user_agent(fake, tokens):
     with pytest.raises(db.AuthenticationRequired):
         db.whoami(fake.url)

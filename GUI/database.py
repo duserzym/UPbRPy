@@ -1481,10 +1481,10 @@ def _heading(text: str) -> QtWidgets.QLabel:
 def _server_answers(server: str, timeout: float = 3.0) -> bool:
     """True when ``<server>/v1/health`` answers (any HTTP reply counts as alive)."""
     import urllib.error
-    import urllib.request
+    from UPbRPy.integration import tls
 
     try:
-        with urllib.request.urlopen(server.rstrip("/") + "/v1/health", timeout=timeout):
+        with tls.urlopen(server.rstrip("/") + "/v1/health", timeout=timeout):
             return True
     except urllib.error.HTTPError:
         return True

@@ -8,7 +8,7 @@ import re
 import sys
 import tomllib
 
-from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 
 PACKAGING_DIRECTORY = Path(SPECPATH).resolve()
@@ -41,8 +41,10 @@ metadata_directory.mkdir(parents=True, exist_ok=True)
     f"Metadata-Version: 2.1\nName: UPbRPy\nVersion: {PROJECT_VERSION}\n\n",
     encoding="utf-8",
 )
+data_files += collect_data_files("certifi")
 
 hidden_imports = [
+    "certifi",
     "PySide6.QtSvg",
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtNetwork",

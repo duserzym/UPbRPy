@@ -52,6 +52,7 @@ from ..session_bundle import (
     SessionBundleError,
     unpack_session_bundle,
 )
+from .tls import ca_bundle
 
 
 KEYRING_SERVICE = "UPbRPy"
@@ -410,6 +411,9 @@ def _request(
         if not token:
             raise AuthenticationRequired(f"Sign in to {base} to {action}.")
         headers["Authorization"] = f"Bearer {token}"
+    bundle = ca_bundle()
+    if bundle is not None:
+        kwargs.setdefault("verify", bundle)
     try:
         response = requests.request(
             method,
@@ -422,6 +426,11 @@ def _request(
         )
     except requests.exceptions.Timeout as exc:
         raise ConnectionFailed(f"{base} did not answer in time.") from exc
+    except requests.exceptions.SSLError as exc:
+        raise ConnectionFailed(
+            f"Could not verify the secure connection to {base}. "
+            "Its certificate is not trusted on this computer."
+        ) from exc
     except requests.exceptions.RequestException as exc:
         raise ConnectionFailed(
             f"Cannot reach {base}. Check the address and your network."
