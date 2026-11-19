@@ -1191,6 +1191,14 @@ def acquisition_summary(session: QtegraSession) -> dict:
     return summary
 
 
+def sample_from_label(label, sep="_", aliases=None):
+    """Derive a sample from an acquisition label using the import alias rule."""
+    prefix = str(label).split(sep)[0]
+    normalized = {str(key).strip().casefold(): str(value).strip()
+                  for key, value in (aliases or {}).items()}
+    return normalized.get(prefix.casefold(), prefix)
+
+
 def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_samples=None):
     """Build experiment and sweep tables from a QtegraSession before selection.
 
@@ -1253,7 +1261,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
         next_start = start + pd.to_timedelta(duration, unit="s")
         starts.append(start)
         prefix = acquisition.label.split(sep)[0]
-        derived = aliases.get(prefix.casefold(), prefix)
+        derived = sample_from_label(acquisition.label, sep, aliases)
         sample = derived
         given = (acquisition_samples or {}).get(acquisition.label)
         if given:
@@ -1313,6 +1321,7 @@ def experiment_from_session(session, sep="_", sample_aliases=None, acquisition_s
     ):
         experiment[column] = None
     experiment.attrs["sample_overrides"] = sample_overrides
+    experiment.attrs["sample_label_rule"] = {"sep": sep, "aliases": dict(sample_aliases or {})}
     # Y is in cps; Poisson variances need the integration time per reading.
     dwell = counting_dwell(session)
     experiment.attrs["counting_dwell"] = {
@@ -1561,6 +1570,7 @@ __all__ = [
     'select_signal_regions',
     'read_experiment_data',
     'experiment_from_session',
+    'sample_from_label',
     'acquisition_summary',
     'resolve_session_manifest',
     'read_spot_data',

@@ -18,6 +18,7 @@ import shiboken6
 
 from UPbRPy.notices import ReductionError
 from UPbRPy.naming import natural_sort_key
+from UPbRPy.spot_edits import spot_edit_metadata
 from UPbRPy.standards import canonicalize_reference_material_samples
 
 from GUI.icon import (
@@ -71,6 +72,7 @@ from GUI.services import (
     unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
+from GUI.spot_edits import SpotEditing, SpotEditState
 from GUI.change_guard import ChangeGuard, confirm_change, copy_session, sync_change_controls
 from GUI.wheel_guard import install_wheel_guard
 from GUI.database_panel import DatabasePanel, SUBMIT_STEP, is_submit_step
@@ -263,18 +265,10 @@ def _dropped_sources(mime: QtCore.QMimeData) -> list[str]:
     )]
 
 
-@dataclass
-class _SpotRemovalState:
-    """Session and annotations retained by spot-removal selection history."""
-
-    experiment: pd.DataFrame
-    total_data: pd.DataFrame
-    selected_spot: str | None
-    folders: dict
-    review_flags: dict
+_SpotRemovalState = SpotEditState
 
 
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     """One reduction, usable alone or embedded in a Studio tab."""
 
     new_window_requested = QtCore.Signal()
@@ -1268,6 +1262,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "channel_colors": self.channel_colors,
                 "selection_colors": self.selection_colors,
                 "spot_folder_overrides": self._spot_folder_overrides,
+                "empty_spot_folders": self.session.experiment.attrs.get("studio_empty_spot_folders", []),
+                "spot_edits": spot_edit_metadata(self.session.experiment),
                 "review_flags": self._review_flags,
                 "review_excluded_spots": sorted(self.results_table.excluded_spots),
                 "review_fit_settings": self.results_table.fit_settings(),
@@ -5258,6 +5254,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "export_settings": self.export_settings.to_dict(),
             "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
+            "empty_spot_folders": list(self.session.experiment.attrs.get("studio_empty_spot_folders", [])),
             "collapsed_spot_folders": self._collapsed_spot_folders(),
             "review_flags": dict(self._review_flags),
             "review_excluded_spots": sorted(self.results_table.excluded_spots),
@@ -5504,6 +5501,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_view()
         restored = result
         self.results_table.restore_review_state(restored.workspace, restored.session.spot_names)
+        self._sync_spot_tree_checks()
         self._saved_project_fingerprint = self.scientific_project_fingerprint()
         self.update_project_window_title()
 
@@ -5555,6 +5553,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if isinstance(folder_overrides, dict)
             else {}
         )
+        restored.session.experiment.attrs["studio_empty_spot_folders"] = list(workspace.get("empty_spot_folders", []))
         saved_flags = workspace.get("review_flags", {})
         self._review_flags = (
             {
@@ -5989,6 +5988,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
+        self._spot_rerun_stage = None
         self._calibration_seen_cached.clear()
         self._calibration_target_row = None
         stage_pool.warm()
@@ -6804,17 +6804,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.blockSignals(True)
         self.spot_list.clear()
         spot_names = self.session.spot_names
-        if not spot_names:
+        empty_folders = self.session.experiment.attrs.get("studio_empty_spot_folders", [])
+        if not spot_names and not empty_folders:
             self.spot_list.blockSignals(False)
             self._update_spot_tree_expand_button()
             return
-
         sample_map = self._spot_sample_map()  # {spot_name: sample_name}
         sample_overrides = self.session.experiment.attrs.get("sample_overrides", {})
 
         # Categorise each spot into RM or unknown folders
-        rm_folders: dict[str, list[str]] = {}    # {folder_label: [spot_names]}
-        unk_folders: dict[str, list[str]] = {}   # {folder_label: [spot_names]}
+        rm_folders: dict[str, list[str]] = {name: [] for name in empty_folders if self._is_reference_material(name)}
+        unk_folders: dict[str, list[str]] = {name: [] for name in empty_folders if not self._is_reference_material(name)}
         reference_samples: dict[str, bool] = {}
 
         for spot_name in spot_names:
@@ -6842,11 +6842,8 @@ class MainWindow(QtWidgets.QMainWindow):
             folder_item = QtWidgets.QTreeWidgetItem(root, [folder_name])
             folder_item.setToolTip(0, folder_name)
             folder_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, f"__folder__{folder_name}")
-            folder_item.setFlags(
-                folder_item.flags()
-                | QtCore.Qt.ItemFlag.ItemIsEditable
-                & ~QtCore.Qt.ItemFlag.ItemIsSelectable
-            )
+            folder_item.setFlags(folder_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
+                                 & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             folder_item.setIcon(
                 0, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirIcon)
             )
@@ -6854,9 +6851,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
                 spot_item.setToolTip(0, sn)
                 if override := sample_overrides.get(sn):
-                    spot_item.setText(0, f"{sn} · DB")
+                    source = "Studio" if override.get("source") == "studio" else "UPbDB"
+                    badge = "Studio" if source == "Studio" else "DB"
+                    spot_item.setText(0, f"{sn} · {badge}")
                     spot_item.setToolTip(
-                        0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from UPbDB "
+                        0, f"{sn}\nSample {sample_map.get(sn, override['sample'])} from {source} "
                         f"(label sample {override['label_sample']})",
                     )
                 if reason := self._review_flags.get(sn):
@@ -6864,6 +6863,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         0, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
                     )
                     spot_item.setToolTip(0, f"{spot_item.toolTip(0)}\nReview flag: {reason}")
+                if sn in self.session.experiment.attrs.get("calculation_excluded_spots", ()):
+                    spot_item.setForeground(0, QtGui.QColor(active_theme().muted))
+                    spot_item.setToolTip(0, spot_item.toolTip(0) + "\nLeft out of every calculation (undo or 'Use in calculations' to restore)")
                 spot_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, sn)
                 spot_item.setFlags(
                     spot_item.flags()
@@ -6936,7 +6938,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if current.childCount() > 0:
             return  # group node – ignore
         spot_name = current.data(0, QtCore.Qt.ItemDataRole.UserRole) or current.text(0)
-        self.on_spot_changed(spot_name)
+        if spot_name and not str(spot_name).startswith("__"):
+            self.on_spot_changed(spot_name)
 
     def _on_spot_tree_context_menu(self, pos: QtCore.QPoint) -> None:
         item = self.spot_list.itemAt(pos)
@@ -6966,16 +6969,35 @@ class MainWindow(QtWidgets.QMainWindow):
             clear_flag.setData(("clear_review_flag", name))
             clear_flag.setEnabled(name in self._review_flags)
             menu.addSeparator()
-            move_menu = menu.addMenu("Move to folder")
-            for folder_name in self._get_all_folder_names():
-                if folder_name != (item.parent().text(0) if item.parent() else ""):
-                    act = move_menu.addAction(folder_name)
-                    act.setData(("move_spot", item, folder_name))
+            excluded = name in self.session.experiment.attrs.get("calculation_excluded_spots", ())
+            exclude = menu.addAction("Use in calculations" if excluded else "Leave out of calculations")
+            exclude.setData(("calculation_exclusion", name, not excluded))
+            move_menu = menu.addMenu("Move to…")
+            for index in range(self.spot_list.topLevelItemCount()):
+                section = self.spot_list.topLevelItem(index)
+                if not section.childCount():
+                    continue
+                if move_menu.actions():
+                    move_menu.addSeparator()
+                # A disabled action, not addSection: the macOS style draws
+                # sections as bare separators and the group names vanish.
+                move_menu.addAction(section.text(0)).setEnabled(False)
+                current = item.parent().text(0) if item.parent() is not None else ""
+                for row in range(section.childCount()):
+                    folder_name = section.child(row).text(0)
+                    act = move_menu.addAction(f"    {folder_name}")
+                    act.setData(("move_spot", name, folder_name))
+                    if section.child(row) is item.parent():
+                        act.setCheckable(True)
+                        act.setChecked(True)
+                        act.setEnabled(False)
+                        act.setToolTip(f"{name} is already in {current}")
+            move_menu.addSeparator()
+            move_menu.addAction("New folder…").setData(("new_folder_move", name))
             menu.addSeparator()
             del_act = menu.addAction("Remove spot from session…")
         elif is_folder:
-            rename_act = menu.addAction("Rename folder…\tF2")
-            add_sub_act = menu.addAction("New subfolder here")
+            menu.addAction("New folder…").setData(("new_folder",))
             menu.addSeparator()
             del_folder_act = menu.addAction("Delete folder…")
         elif is_root or item is None:
@@ -6989,11 +7011,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         data = chosen.data()
         if isinstance(data, tuple) and data[0] == "move_spot":
-            _, leaf_item, folder_name = data
-            spot_name = leaf_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            self._spot_folder_overrides[spot_name] = folder_name
-            self._populate_spot_tree()
-            self.update_project_window_title()
+            self.request_move_spot(data[1], data[2])
+        elif isinstance(data, tuple) and data[0] == "calculation_exclusion":
+            self.request_calculation_exclusion(data[1], data[2])
+        elif isinstance(data, tuple) and data[0] == "new_folder_move":
+            self._request_new_folder_move(data[1])
         elif isinstance(data, tuple) and data[0] == "edit_review_flag":
             _, name = data
             reason, accepted = QtWidgets.QInputDialog.getText(
@@ -7008,10 +7030,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spot_list.editItem(item, 0)
         elif is_spot and chosen.text().startswith("Remove"):
             self._on_spot_tree_delete()
-        elif is_folder and chosen.text().startswith("Rename"):
-            self.spot_list.editItem(item, 0)
-        elif is_folder and chosen.text().startswith("New sub"):
-            self._on_spot_add_folder(parent_folder=item.text(0))
+        elif is_folder and chosen.text().startswith("New folder"):
+            self._on_spot_add_folder()
         elif is_folder and chosen.text().startswith("Delete"):
             self._on_spot_folder_delete(item)
         elif (is_root or item is None) and chosen.text().startswith("New folder"):
@@ -7028,25 +7048,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 names.append(folder.text(0))
         return names
 
-    def _on_spot_add_folder(self, parent_folder: str | None = None) -> None:
+    def _on_spot_add_folder(self, parent_folder: str | None = None) -> str | None:
         name, ok = QtWidgets.QInputDialog.getText(
             self, "New Folder", "Folder name:"
         )
         if not ok or not name.strip():
             return
         name = name.strip()
-        # Add an empty entry so it appears; spots can be moved in later
-        if name not in self._spot_folder_overrides.values():
-            # Ensure the folder appears by adding a sentinel placeholder in
-            # unk_folders – we do this by just refreshing; the folder will
-            # appear when the first spot is moved into it.
-            # For now just note its existence via a dummy entry that won't conflict.
-            pass
-        QtWidgets.QMessageBox.information(
-            self,
-            "Folder created",
-            f"Folder \"{name}\" created.\n\nUse \"Move to folder\" on a spot to populate it.",
-        )
+        existing = self._canonical_group(name)
+        if existing in self._get_all_folder_names():
+            return existing
+        name = existing
+        before = self._begin_spot_edit()
+        if before is None:
+            return None
+        folders = set(self.session.experiment.attrs.get("studio_empty_spot_folders", []))
+        folders.add(name)
+        self.session.experiment.attrs["studio_empty_spot_folders"] = sorted(folders, key=natural_sort_key)
+        self._finish_spot_edit(before, calculations=False)
+        return name
 
     def _on_spot_folder_delete(self, folder_item: QtWidgets.QTreeWidgetItem) -> None:
         folder_name = folder_item.text(0)
@@ -7057,12 +7077,16 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if QtWidgets.QMessageBox.question(self, "Delete folder", msg) != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        # Remove overrides for all spots in this folder
+        before = self._begin_spot_edit()
+        if before is None:
+            return
+        self.session.experiment.attrs["studio_empty_spot_folders"] = [
+            name for name in self.session.experiment.attrs.get("studio_empty_spot_folders", [])
+            if name != folder_name]
         for k, v in list(self._spot_folder_overrides.items()):
             if v == folder_name:
                 del self._spot_folder_overrides[k]
-        self._populate_spot_tree()
-        self.update_project_window_title()
+        self._finish_spot_edit(before, calculations=False)
 
     def _set_spot_review_flag(self, spot_name: str, reason: str) -> None:
         """Set or clear a project annotation without changing the reduction."""
@@ -7083,62 +7107,27 @@ class MainWindow(QtWidgets.QMainWindow):
         spot_name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not spot_name or str(spot_name).startswith("__"):
             return
-        self.request_remove_spot(str(spot_name))
+        if QtWidgets.QMessageBox.question(
+            self, "Remove spot from session", f"Remove {spot_name} from this session? This is undoable with Undo.\n"
+            "Use 'Leave out of calculations' to keep it visible while leaving it out of calculations.",
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        ) == QtWidgets.QMessageBox.StandardButton.Ok:
+            self.request_remove_spot(str(spot_name))
 
-    def request_remove_spot(self, spot_name: str) -> None:
-        """Remove a spot from the working session with one-level undo."""
-        if self._active_worker is not None or spot_name not in self.session.spot_names:
+    def _on_spot_tree_item_renamed(self, item, column):
+        if self._is_populating or column != 0 or item.text(0) == item.data(0, _TREE_TEXT_ROLE):
             return
-        self.change_guard.clear()
-        self.flush_selection_edits()
-        before = _SpotRemovalState(self.session.experiment, self.session.total_data, self.session.selected_spot,
-                                   dict(self._spot_folder_overrides), dict(self._review_flags))
-        self.session = copy_session(self.session)
-        self.session.experiment = self.session.experiment.loc[
-            ~self.session.experiment["spot_names"].astype(str).eq(spot_name)
-        ].copy()
-        self.session.total_data = self.session.total_data.loc[
-            ~self.session.total_data["spot_name"].astype(str).eq(spot_name)
-        ].copy()
-        self.session.selected_spot = next(iter(self.session.spot_names), None)
-        self._spot_folder_overrides.pop(spot_name, None)
-        self._review_flags.pop(spot_name, None)
-        self._clear_reduction_cache()
-        after = _SpotRemovalState(self.session.experiment.copy(deep=True), self.session.total_data,
-                                  self.session.selected_spot, dict(self._spot_folder_overrides), dict(self._review_flags))
-        self._selection_undo.append((before, after))
-        self._selection_redo.clear()
-        self._populate_spot_tree()
-        self.refresh_view()
-        self._sync_selection_history_actions()
-        self.update_project_window_title()
-
-    def _on_spot_tree_item_renamed(
-        self, item: QtWidgets.QTreeWidgetItem, column: int
-    ) -> None:
-        """Handle in-tree rename edits."""
-        if self._is_populating or column != 0:
-            return
-        if item.text(0) == item.data(0, _TREE_TEXT_ROLE):
-            return  # a check toggle, not a rename
-        item.setData(0, _TREE_TEXT_ROLE, item.text(0))
-        role_data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        new_text = item.text(0).strip()
-        if role_data in self.session.experiment.attrs.get("sample_overrides", {}):
-            new_text = new_text.removesuffix(" · DB").strip()
-        if not new_text:
-            return
-        if role_data and not str(role_data).startswith("__"):
-            # Spot renamed – update any folder override key
-            old_name = str(role_data)
-            if old_name in self._spot_folder_overrides:
-                self._spot_folder_overrides[new_text] = self._spot_folder_overrides.pop(old_name)
-                self.update_project_window_title()
-            # Update UserRole so navigation still works
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, new_text)
-            if old_name != new_text:
-                item.setToolTip(0, new_text)
-
+        role = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or "")
+        text = item.text(0).removesuffix(" · DB").removesuffix(" · Studio").strip()
+        # Restore the display immediately: committing may open a confirmation
+        # and rebuild the tree, invalidating this QTreeWidgetItem.
+        with QtCore.QSignalBlocker(self.spot_list):
+            item.setText(0, str(item.data(0, _TREE_TEXT_ROLE) or role))
+        if role and not role.startswith("__"):
+            QtCore.QTimer.singleShot(0, self, lambda: self.request_rename_spot(role, text))
+        elif role.startswith("__folder__"):
+            QtWidgets.QMessageBox.information(self, "Folder names", "Create a new folder and move spots into it to change grouping.")
 
     @sync_change_controls
     def _populate_selectors(self) -> None:
@@ -7410,12 +7399,16 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         for action in self.selection_edit_actions:
             action.setEnabled(bool(enabled))
-        idle = enabled and self._active_worker is None
-        self.undo_selection_action.setEnabled(bool(idle and (self._selection_undo or self.pending_region_updates)))
-        self.redo_selection_action.setEnabled(bool(idle and self._selection_redo))
-        self.reset_spot_action.setEnabled(bool(idle))
-        self.repick_all_action.setEnabled(bool(idle))
-        self.repick_sample_action.setEnabled(bool(idle))
+        idle = not editing and self._active_worker is None
+        window_idle = enabled and idle
+        undo_spot = self._selection_undo and isinstance(self._selection_undo[-1][0], SpotEditState)
+        redo_spot = self._selection_redo and isinstance(self._selection_redo[-1][1], SpotEditState)
+        self.undo_selection_action.setEnabled(bool(idle and (
+            undo_spot or window_idle and (self._selection_undo or self.pending_region_updates))))
+        self.redo_selection_action.setEnabled(bool(idle and (redo_spot or window_idle and self._selection_redo)))
+        self.reset_spot_action.setEnabled(bool(window_idle))
+        self.repick_all_action.setEnabled(bool(window_idle))
+        self.repick_sample_action.setEnabled(bool(window_idle))
         spot = self.current_spot_name() if self.session.loaded else None
         self.exclude_spot_action.setEnabled(bool(spot) and not editing)
         self.exclude_spot_action.setChecked(bool(spot) and spot in self.results_table.excluded_spots)
@@ -7424,29 +7417,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _restore_selection_history(self, *, redo: bool) -> None:
         self.change_guard.clear()
-        if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
+        if self._active_worker is not None:
             return
         self.flush_selection_edits()
         source = self._selection_redo if redo else self._selection_undo
         destination = self._selection_undo if redo else self._selection_redo
         if not source:
             return
+        if not isinstance(source[-1][0], SpotEditState) and not self._workflow_step_allows_region_edits():
+            return
         entry = source.pop()
         values = entry[1] if redo else entry[0]
-        if isinstance(values, _SpotRemovalState):
-            self._remember_completed_selection_stages()
-            self.session.experiment = values.experiment.copy(deep=True)
-            self.session.total_data = values.total_data
-            self.session.selected_spot = values.selected_spot
-            self._clear_reduction_cache()
-            self._spot_folder_overrides = dict(values.folders)
-            self._review_flags = dict(values.review_flags)
+        if isinstance(values, SpotEditState):
+            self._restore_spot_edit(values)
             destination.append(entry)
-            self._populate_spot_tree()
-            self._selection_edits_written()
-            self.refresh_view()
             self._sync_selection_history_actions()
-            self.update_project_window_title()
             return
         self.pending_region_updates.update({spot: dict(regions) for spot, regions in values.items()})
         self.flush_selection_edits(record_history=False)
@@ -7550,9 +7535,8 @@ class MainWindow(QtWidgets.QMainWindow):
         current_item = self.spot_list.currentItem()
         if current_item is not None and current_item.childCount() == 0:
             spot_name = current_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if spot_name:
+            if spot_name and not str(spot_name).startswith("__"):
                 return spot_name
-            return current_item.text(0)
         return self.session.selected_spot
 
     def current_ratio_name(self) -> str:
@@ -8412,6 +8396,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f"P {quality['plateau_points']} · "
             f"{'Review warning' if quality['warnings'] else 'Selections ready'}"
         )
+        rerun = getattr(self, "_spot_rerun_stage", None)
+        if rerun is not None and self.session.pipeline is not None:
+            if self.session.pipeline.cache.has(rerun):
+                self._spot_rerun_stage = None
+            else:
+                compact_status = f"Re-run {rerun.value} after spot edits"
         self.workflow_status_label.setText(compact_status)
         self._workflow_full_status = full_status
         self._update_step_actions_tooltips()

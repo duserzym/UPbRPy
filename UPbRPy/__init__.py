@@ -46,6 +46,7 @@ FOCUSED_SUBMODULES = frozenset(
         "session_bundle",
         "session_manifest",
         "standards",
+        "spot_edits",
         "thermometry",
         "uncertainty",
         "visualization",

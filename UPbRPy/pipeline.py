@@ -652,6 +652,7 @@ class ReductionPipeline:
             experiment,
             standard_archive,
         )
+        self._source_total_data = total_data
         self._source_experiment = experiment
         self._source_experiment_fingerprint = _experiment_fingerprint(experiment)
         self.total_data = canonicalize_reference_material_samples(
@@ -754,6 +755,33 @@ class ReductionPipeline:
         self.cache.invalidate(PipelineStage.SELECTION)
         self.cache.set(PipelineStage.SELECTION, self.experiment)
 
+    def update_inputs(self, experiment, total_data, *, invalidate_from=PipelineStage.BASELINE):
+        """Synchronize selections and sweeps after a session edit.
+
+        Frontends replace sweep frames on edits; keep their source identity so
+        a worker cannot reuse an earlier session's acquisition rows. Passing
+        ``invalidate_from=None`` is reserved for display-only metadata edits.
+        """
+        self.experiment = canonicalize_reference_material_samples(experiment, self.standard_archive)
+        self._source_experiment = experiment
+        self._source_experiment_fingerprint = _experiment_fingerprint(experiment)
+        self.cache.set(PipelineStage.SELECTION, self.experiment)
+        self.total_data = canonicalize_reference_material_samples(total_data, self.standard_archive)
+        self._source_total_data = total_data
+        self.cache.set(PipelineStage.IMPORT, {
+            "spot_count": len(experiment), "sweep_count": len(total_data),
+            "channels": list(self.channels),
+        })
+        if invalidate_from is not None:
+            self.cache.invalidate(invalidate_from)
+
+    def _included_inputs(self):
+        excluded = self.experiment.attrs.get("calculation_excluded_spots", ())
+        if not excluded:
+            return self.experiment, self.total_data
+        return (self.experiment.loc[~self.experiment["spot_names"].isin(excluded)],
+                self.total_data.loc[~self.total_data["spot_name"].isin(excluded)])
+
     def update_config(
         self,
         config: PipelineConfig,
@@ -774,14 +802,13 @@ class ReductionPipeline:
         if "sample" not in self.total_data.columns:
             raise ReductionError("The loaded data has no sample labels.", "import",
                                  "Open a Qtegra export with sample labels.")
-        available = set(
-            self.total_data["sample"].dropna().astype(str).unique().tolist()
-        )
+        _, included = self._included_inputs()
+        available = set(included["sample"].dropna().astype(str).unique())
         missing = [name for name in requested if name not in available]
         if missing:
             raise ReductionError(
                 f"Missing {label} in the loaded session: {', '.join(missing)}.", stage,
-                "Choose a standard measured in this session in Calibration materials.", ("choose_standard",),
+                "Choose another primary in Calibration materials, include excluded spots, or move spots back to this material.", ("choose_standard",),
             )
 
     def run_baseline(self) -> pd.DataFrame:
@@ -792,15 +819,16 @@ class ReductionPipeline:
         if isinstance(cached, pd.DataFrame):
             return cached
         self._clear_notices(PipelineStage.BASELINE)
-        if self.experiment.empty or self.total_data.empty:
+        experiment, total_data = self._included_inputs()
+        if experiment.empty or total_data.empty:
             raise ReductionError(
                 "No analyses are selected for reduction.", "selection",
                 "Open a session and review its baseline and signal selections.",
             )
         result = subtract_baseline(
-            self.experiment,
+            experiment,
             list(self.channels),
-            self.total_data,
+            total_data,
         )
         return self.cache.set(PipelineStage.BASELINE, result)
 
@@ -908,10 +936,11 @@ class ReductionPipeline:
             return cached
         self._clear_notices(PipelineStage.RATIOS)
         baseline = self.run_baseline()
+        experiment, total_data = self._included_inputs()
         result = {
             region: calc_raw_ratios(
-                self.experiment,
-                self.total_data,
+                experiment,
+                total_data,
                 baseline,
                 region=region,
                 dwell_s=self.counting_dwell_s,
@@ -1323,6 +1352,9 @@ class ReductionPipeline:
                 "detector_calibration", {"mode": "qtegra"}
             ),
             "sample_overrides": self.experiment.attrs.get("sample_overrides", {}),
+            "spot_renames": self.experiment.attrs.get("spot_renames", {}),
+            "calculation_excluded_spots": self.experiment.attrs.get("calculation_excluded_spots", []),
+            "removed_spots": self.experiment.attrs.get("removed_spots", []),
             "completed_stages": [stage.value for stage in self.cache.stages()],
             "spot_count": int(len(self.experiment)),
             "sweep_count": int(len(self.total_data)),

@@ -35,6 +35,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .spot_edits import spot_edit_metadata
+
 from .pipeline import PipelineStage, ReductionPipeline
 from .reproducibility import selection_export_frame
 
@@ -258,6 +260,7 @@ def build_reduction_project(
             "resume_stage": resumed.value,
         },
         "selections": selection_records(pipeline.experiment),
+        "spot_edits": spot_edit_metadata(pipeline.experiment),
         "workspace": json_safe_value(dict(workspace or {})),
     }
     if resolved_origin:

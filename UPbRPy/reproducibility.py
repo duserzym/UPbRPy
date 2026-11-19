@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from .pipeline import ReductionPipeline
+from .spot_edits import spot_edit_metadata
 from .results import build_publication_tables, export_publication_tables
 from .export_table import (
     ExportSettings, ExportTable, ExportColumn, build_export_table,
@@ -96,6 +97,7 @@ def build_reproducibility_notebook(
     the original auto-pick settings.
     """
     config_json = json.dumps(pipeline.config.to_dict(), indent=2)
+    edits_json = json.dumps(spot_edit_metadata(pipeline.experiment))
     selections_json = selection_export_frame(pipeline.experiment).to_json(
         orient="records",
         double_precision=15,
@@ -125,6 +127,7 @@ def build_reproducibility_notebook(
             "import json\n"
             "import pandas as pd\n"
             "from IPython.display import display\n"
+            "from UPbRPy.spot_edits import restore_spot_edits\n"
             "from UPbRPy import (\n"
             "    ReductionPipeline,\n"
             "    build_publication_tables,\n"
@@ -159,6 +162,10 @@ def build_reproducibility_notebook(
             "## Restore reviewed selection windows\n\n"
             "The saved coordinates below supersede newly auto-picked values "
             "for matching spot names."
+        ),
+        notebook_code_cell(
+            f"spot_edits = json.loads({edits_json!r})\n"
+            "experiment, total_data = restore_spot_edits(experiment, total_data, spot_edits)\n"
         ),
         notebook_code_cell(
             f"selection_records = json.loads({selections_json!r})\n"

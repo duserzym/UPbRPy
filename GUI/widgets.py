@@ -707,6 +707,36 @@ SPOT_TREE_COUNT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 9
 class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
     """Draw a folder's shown/total count at the right of its name."""
 
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QtWidgets.QLineEdit):
+            theme = active_theme()
+            # Opaque: the row's own text is painted underneath the editor.
+            editor.setAutoFillBackground(True)
+            editor.setStyleSheet(
+                f"QLineEdit {{ padding: 1px 3px; margin: 0; border: 1px solid {theme.accent};"
+                f" background: {theme.surface}; color: {theme.text}; }}")
+            editor.setMinimumHeight(editor.fontMetrics().height() + 8)
+        return editor
+
+    def setEditorData(self, editor, index):
+        super().setEditorData(editor, index)
+        name = index.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(editor, QtWidgets.QLineEdit) and name and not str(name).startswith("__"):
+            editor.setText(str(name))
+            editor.selectAll()
+
+    def updateEditorGeometry(self, editor, option, index):
+        rect = QtCore.QRect(option.rect)
+        rect.setHeight(max(rect.height(), editor.minimumHeight()))
+        rect.setWidth(max(rect.width(), editor.fontMetrics().horizontalAdvance(editor.text()) + 18))
+        # Keep the editor visible even in the narrow rail. Long labels can
+        # extend over the tree's indentation instead of clipping vertically.
+        viewport = editor.parentWidget()
+        if rect.right() > viewport.width():
+            rect.moveRight(viewport.width())
+        editor.setGeometry(rect)
+
     def paint(self, painter, option, index):
         count = index.data(SPOT_TREE_COUNT_ROLE)
         if not count:

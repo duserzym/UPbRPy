@@ -37,6 +37,49 @@ not rejected. Raw sweeps and computed tables are not embedded. Reopening uses
 validated local results when available, otherwise re-imports dependencies and
 recalculates the saved completed stages.
 
+### Studio spot edits
+
+`spot_edits` stores `spot_renames` (current name to original acquisition label),
+`sample_overrides` (current name to `label_sample`, `sample`, `source`),
+`removed_spots` (original labels) and `calculation_excluded_spots` (current names).
+These optional fields are additive to project version 2. Restore removes and
+renames raw acquisitions before strictly matching saved selection records, then
+applies materials to both experiment and sweep tables. A missing original
+acquisition or a duplicate final name fails restore with a message.
+
+Studio material corrections use `source="studio"`; `label_sample` is derived
+from the original label with the imported separator and aliases. Returning to
+that sample removes the override. Rename chains retain one original label;
+renaming back removes the rename entry. A rename with the same canonical label
+prefix preserves the current sample and override source; a changed prefix previews
+and re-derives the material. `original_spot_label(experiment,
+spot_name)` in `UPbRPy.spot_edits` resolves the acquisition identity.
+`spot_edit_metadata(experiment)` extracts these decisions and
+`restore_spot_edits(experiment, total_data, edits)` returns replayed frame copies.
+
+The Spots-tree action "Leave out of calculations" records
+`calculation_excluded_spots` in experiment attrs and filters acquisitions before
+baseline subtraction, ratios and calibration availability checks. It leaves raw
+readings and selection windows accessible. Removal deletes working rows; both
+operations are undoable and invalidate calculations from baseline. Final Review
+exclusions remain separate: the spot stays reduced and its export row is retained
+with `excluded=True` and a footnote, but fits and weighted means leave it out.
+`ReductionPipeline.update_inputs(experiment,
+total_data, *, invalidate_from=PipelineStage.BASELINE)` synchronizes both tables
+after edits. Material changes retain baseline values but refresh their sample
+labels and invalidate normalization (which uses the material's internal reference
+concentration), ratios carrying sample labels, and dependent corrections.
+
+Workspace keys `empty_spot_folders`, `spot_folder_overrides` and
+`review_excluded_spots` preserve grouping and review exclusions. Empty
+folders survive reopening; recognized material names belong under Reference
+Materials and other names under Unknowns. Projects and autosave use the same
+edit records. Raw source files remain untouched.
+Database linking and acquisition navigation use original labels. Database
+submission recalculates a private pipeline with original labels in result
+tables; the submitted `.upbr` retains edited names for Studio. Regular exports
+use edited names and include original labels in manifest provenance.
+
 ### Local results cache
 
 Studio keeps disposable results in `~/Library/Caches/UPbRPy/results/` on macOS,
@@ -69,6 +112,7 @@ entry for the current project.
 | pipeline.config | Required | Object | See configuration tables | Missing rejected; empty object can reconstruct defaults |
 | pipeline.completed_stages | Optional | Array of stage strings | `["import", "selection"]` | Default empty; identifiers validated, deduplicated and ordered by pipeline stage order |
 | pipeline.resume_stage | Optional | Stage string | `selection` | Default `import`; invalid identifier rejected |
+| spot_edits | Optional | Object | `{}` | Studio identity, sample, removal and exclusion decisions; absent preserves imported identities |
 | selections | Required | Array of objects | One record per spot | Missing/non-array rejected; empty array accepted; row content restored separately |
 | selections[].spot_names | Written when column exists | String | `NIST612_896` | Spot identity for selection restore |
 | selections[].baseline_start_times | Written when column exists | Number/null, session s | `0.00732` | Reviewed baseline start |
@@ -195,6 +239,8 @@ optional display keys; absence uses the current/default display state.
 | channel_colors | Object of strings | Channel-to-color mapping |
 | selection_colors | Object of strings | Selection-region colors |
 | spot_folder_overrides | Object of strings | Spot display-folder assignments |
+| empty_spot_folders | Array of strings | Explicitly created empty Unknowns folders |
+| review_excluded_spots | Array of strings | Review exclusions from fits and weighted means; exported rows stay flagged |
 | include_export_concentrations | Bool | Include concentration columns in publication export |
 | include_export_depth_concentrations | Bool | Include depth concentration columns |
 
@@ -359,6 +405,9 @@ may be null. `hash_inputs=True` is the bundle default, while the standalone
 | config | Object | PipelineConfig serialized above |
 | detector_calibration | Object | Applied experiment fit record, default `{"mode": "qtegra"}` |
 | sample_overrides | Object | Per-acquisition sample corrections from experiment attrs, keyed by label with `label_sample`, `sample`, `source`; empty when none |
+| spot_renames | Object | Current spot name to original raw acquisition label; rename chains collapsed |
+| calculation_excluded_spots | Array of strings | Current spot names omitted from every calculation |
+| removed_spots | Array of strings | Original labels removed from the working session |
 | completed_stages | Array of strings | Stages cached at manifest creation |
 | spot_count | Integer | Number of experiment rows |
 | sweep_count | Integer | Number of total-data rows |

@@ -127,6 +127,9 @@ baseline, plateau and signal windows. Samples are the first part of the
 label split at `sep`, with exact case-insensitive aliases applied afterward.
 The optional `acquisition_samples` mapping supplies per-label sample names
 from a session manifest using the [override rule](project-and-bundle.md#session-bundle).
+`UPbRPy.io.sample_from_label(label, sep="_", aliases=None)` exposes the same
+prefix and case-insensitive alias rule used at import. The resolved rule is
+retained in `experiment.attrs["sample_label_rule"]` (`sep`, `aliases`).
 Actual corrections are recorded in `experiment.attrs["sample_overrides"]`;
 this mapping is always present, empty when none apply. Table columns do not change.
 Spot numbers always use a trailing underscore integer, independently of `sep`.
@@ -212,7 +215,8 @@ than serializing experiment attrs. Re-import recreates this summary from the
 source data, and `restore_project_selections` preserves those imported attrs.
 Session bundles (`session_bundle.py`) unpack raw exports and an optional
 project; importing those exports recreates the summary in the same way.
-Neither format persists edits made only to attrs in memory.
+The acquisition summary is recreated from raw data; it is not an editable project field.
+Studio session edits are persisted explicitly as described in [Projects and bundles](project-and-bundle.md#studio-spot-edits).
 
 ## Detector calibration
 

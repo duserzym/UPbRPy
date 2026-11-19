@@ -26,6 +26,7 @@ from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
 from UPbRPy.qtegra import QtegraSession, open_qtegra
+from UPbRPy.spot_edits import restore_spot_edits, spot_edit_metadata
 from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
 from UPbRPy.reproducibility import selection_export_frame
 from UPbRPy.pipeline import (
@@ -375,7 +376,9 @@ def ensure_shared_pipeline(
             )
         verified_source = (source_experiment_unchanged
                            and pipeline._source_experiment is session.experiment)
-        if not verified_source and not pipeline.matches_source_experiment(session.experiment):
+        if getattr(pipeline, "_source_total_data", None) is not session.total_data:
+            pipeline.update_inputs(session.experiment, session.total_data)
+        elif not verified_source and not pipeline.matches_source_experiment(session.experiment):
             pipeline.update_experiment(session.experiment)
         if pipeline.base_standard_archive is not current_standard_archive():
             pipeline.standard_archive = current_standard_archive()
@@ -389,6 +392,33 @@ def ensure_shared_pipeline(
         if not session.pipeline.cache.has(stage):
             session.reduction_cache.pop(key, None)
     return session.pipeline
+
+
+def pipeline_for_database_submission(session, preset):
+    """Use raw acquisition labels in database result tables and keep UI provenance.
+
+    Recalculate a private pipeline only when names differ. This adds no network
+    calls and leaves the session, regular exports and saved project untouched.
+    """
+    pipeline = ensure_shared_pipeline(session, preset)
+    renames = session.experiment.attrs.get("spot_renames", {})
+    if not renames:
+        return pipeline
+    experiment = session.experiment.copy(deep=True)
+    total_data = session.total_data.copy()
+    experiment["spot_names"] = experiment["spot_names"].replace(renames)
+    total_data["spot_name"] = total_data["spot_name"].replace(renames)
+    # The submitted .upbr carries UI renames. This private pipeline already
+    # uses raw identities, so its replay notebook must not rename them again.
+    experiment.attrs["spot_renames"] = {}
+    experiment.attrs["sample_overrides"] = {
+        renames.get(name, name): value for name, value in experiment.attrs.get("sample_overrides", {}).items()}
+    experiment.attrs["calculation_excluded_spots"] = [renames.get(name, name) for name in experiment.attrs.get("calculation_excluded_spots", [])]
+    return ReductionPipeline(
+        experiment, total_data, session.channels, pipeline.base_standard_archive, pipeline.config,
+        source_directory=pipeline.source_directory, reference_library_path=pipeline.reference_library_path,
+        input_files=pipeline.input_files, build_diagnostic_plots=False, origin=pipeline.origin,
+    )
 
 
 # ── Isotope channel parsing ────────────────────────────────────────────────
@@ -785,6 +815,10 @@ def reimport_detector_calibration(
     experiment, channels, total_data = read_experiment_data(
         session.qtegra, primary_channel=session.primary_channel, **read_kwargs,
     )
+    experiment, total_data = restore_spot_edits(experiment, total_data, spot_edit_metadata(session.experiment))
+    for key in ("studio_empty_spot_folders", "studio_collapsed_spot_folders"):
+        if key in session.experiment.attrs:
+            experiment.attrs[key] = deepcopy(session.experiment.attrs[key])
     experiment = restore_project_selections(
         experiment, selection_export_frame(session.experiment).to_dict("records"),
     )
@@ -884,6 +918,9 @@ def restore_session_from_project(
         selection_method=config.selection_method,
         import_settings=restored_import_settings,
         restored_selections=document["selections"],
+    )
+    session.experiment, session.total_data = restore_spot_edits(
+        session.experiment, session.total_data, document.get("spot_edits", {}),
     )
     if document["selections"]:
         auto_picks = session.experiment.copy()
@@ -1013,8 +1050,7 @@ def clear_reduction_cache(session: ReductionSession) -> None:
     _downhole_plot_cache.pop(id(session), None)
     _session_plot_cache.pop(id(session), None)
     if session.pipeline is not None:
-        if not session.pipeline.matches_source_experiment(session.experiment):
-            session.pipeline.update_experiment(session.experiment)
+        session.pipeline.update_inputs(session.experiment, session.total_data)
         session.pipeline.cache.invalidate(PipelineStage.BASELINE)
 
 

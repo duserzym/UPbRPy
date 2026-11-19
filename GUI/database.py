@@ -545,9 +545,12 @@ class DatabaseLinks(QtCore.QObject):
                 manifest = read_session_manifest(manifest_path) if manifest_path else None
                 label = next((row.label for row in manifest.acquisitions
                               if row.acquisition_id == acquisition), "") if manifest else ""
-                if label in window.session.spot_names:
+                from UPbRPy.spot_edits import original_spot_label
+                name = next((name for name in window.session.spot_names
+                             if original_spot_label(window.session.experiment, name) == label), None)
+                if name:
                     window.spot_tree_filter.clear()
-                    window.show_spot_signal(label)
+                    window.show_spot_signal(name)
                     return
                 message = f"Acquisition {acquisition} is not in this project."
             except (OSError, ValueError) as exc:
@@ -1066,8 +1069,10 @@ class DatabaseLinks(QtCore.QObject):
         session = window.session
 
         def export() -> Path:
+            from GUI.services import pipeline_for_database_submission
+            submission_pipeline = pipeline_for_database_submission(session, window.workflow_preset)
             export_reduction_bundle(
-                pipeline,
+                submission_pipeline,
                 folder,
                 include_depth_profile=window.workflow_preset.supports_depth_profiles,
                 hash_inputs=True,
@@ -1260,7 +1265,9 @@ def _verified_session_origin(session, bundle: SessionBundle) -> tuple[dict[str, 
     rows = manifest.get("acquisition", [])
     labels = [row["label"] for row in rows] if rows else remote.labels
     compare_labels(local.labels, labels, "project")
-    compare_labels(session.spot_names, labels, "loaded project")
+    from UPbRPy.spot_edits import original_spot_label
+    compare_labels([original_spot_label(session.experiment, name) for name in session.spot_names]
+                   + list(session.experiment.attrs.get("removed_spots", [])), labels, "loaded project")
     compare_labels(remote.labels, labels, "bundle raw")
     for row in rows:
         for filename_key, hash_key in (("filename", "sha256"), ("spot_filename", "spot_sha256")):
