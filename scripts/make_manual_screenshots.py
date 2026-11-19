@@ -333,8 +333,9 @@ def capture_manual(source: Path, out: Path, scale: float | None = None) -> list[
                 table = build_export_table(window.session.pipeline)
                 dialog = ExportResultsDialog(table, folder="Zircon_demo", file_stem="Zircon_demo_results_table", parent=shell)
                 # Acquisition metadata is present in real exports and appears
-                # in Preview footnotes. Columns contains no metadata.
-                dialog.tabs.setCurrentIndex(0)
+                # in the footnotes on the first preview tab. The Table tab shows
+                # only neutral labels and values.
+                dialog.tabs.setCurrentIndex(1)
                 dialog.show()
                 grab("11-export-results", dialog)
                 dialog.close()

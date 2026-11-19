@@ -37,8 +37,8 @@ The script blocks requests and keyring imports, socket connections and browser
 launches, disables update scheduling and the persistent results cache, and
 redirects autosave/inbox folders. It waits for reduction workers and selection
 and readout timers before capturing. The activity log is hidden, source paths
-are only in tooltips, and the export dialog is captured on Columns because
-Preview footnotes contain acquisition metadata. The sign-in dialog uses a
+are only in tooltips, and the export dialog's preview is captured on its Table
+tab because the footnotes contain acquisition metadata. The sign-in dialog uses a
 placeholder server and is never submitted. Updates shows the actual source
 checkout state, without a simulated release.
 
@@ -63,6 +63,6 @@ each near or below 400 KB. This affects image pixels only, never measurements.
 | `09-spot-concordia` | Primary-reference spot concordia |
 | `10-depth-profile-export` | Corrected full-signal sweep table |
 | `10-depth-concordia` | One reference acquisition's depth concordia |
-| `11-export-results` | Export dialog, Columns tab |
+| `11-export-results` | Export dialog, Table preview tab |
 | `12-sign-in-to-upbdb` | Unsigned-in dialog with placeholder server |
 | `13-updates` | Updates dialog in a source checkout |
