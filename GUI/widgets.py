@@ -8118,6 +8118,10 @@ class _UniformScatterItem(pg.ScatterPlotItem):
 class _TraceSeriesItem(pg.PlotDataItem):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.curve.setParentItem(None)
+        self.curve = _ResizeCachedCurveItem()
+        self.curve.setParentItem(self)
+        self.curve.sigClicked.connect(self.sigClicked)
         old = self.scatter
         old.setParentItem(None)
         self.scatter = _UniformScatterItem()
@@ -8156,6 +8160,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
         self._suspend_x_window_signal = False
+        self._navigation_active = False
         self._snap_guard = False
         self._overlay_label_timer = QtCore.QTimer(self)
         self._overlay_label_timer.setSingleShot(True)
@@ -8190,13 +8195,23 @@ class TracePlotWidget(RoundedPlotWidget):
         super().resizeEvent(event)
         if not hasattr(self, "plot_item"):
             return
+        if self._navigation_active:
+            # Geometry still follows the divider live. Keep legend/label
+            # layout out of the drag, and settle the graphics transform now
+            # so prepareForPaint does not dirty an already painting view.
+            self.plot_item.layout.activate()
+            self.plot_item.vb.updateMatrix()
+            return
+        self._apply_width_layout()
+        self._reposition_spot_label()
+        self._layout_trace_legend()
+        self._position_signal_labels()
+
+    def _apply_width_layout(self) -> None:
         narrow = self.window().width() < 1280
         self.plot_item.layout.setRowFixedHeight(3, 50 if narrow else 62)
         self.plot_item.getAxis("bottom").setHeight(44 if narrow else 54)
         self.plot_item.showAxis("bottom")
-        self._reposition_spot_label()
-        self._layout_trace_legend()
-        self._position_signal_labels()
 
     def _layout_trace_legend(self) -> None:
         """Reserve a row outside the data view for narrow-window legends."""
@@ -8271,6 +8286,8 @@ class TracePlotWidget(RoundedPlotWidget):
 
     def _position_signal_labels(self) -> None:
         """Coalesce label updates after view, content and overlay changes."""
+        if self._navigation_active:
+            return
         if not getattr(self, "_positioning_signal_labels", False) and not self._overlay_label_timer.isActive():
             self._overlay_label_timer.start()
 
@@ -8475,12 +8492,13 @@ class TracePlotWidget(RoundedPlotWidget):
                 continue
             y_values = spot_data[channel].to_numpy(dtype=float)
             color = channel_colors.get(channel, "#69e2ff")
-            curve = self.plot_item.plot(
+            curve = _ResizeCachedSeriesItem(
                 x_values,
                 y_values,
                 pen=pg.mkPen(color, width=1.8),
                 name=channel,
             )
+            self.plot_item.addItem(curve)
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
             curve.setZValue(2)
@@ -8700,9 +8718,54 @@ class TracePlotWidget(RoundedPlotWidget):
         start_value, end_value = sorted(float(value) for value in bounds)
         self._suspend_x_window_signal = True
         try:
+            if self._navigation_active:
+                self._segment_navigation_lines()
             self.setXRange(start_value, end_value, padding=0.0)
+            if self._navigation_active:
+                # Commit the transform before QGraphicsView starts painting.
+                # Doing it in prepareForPaint dirties the scene mid-paint and
+                # otherwise schedules a second paint for the same x window.
+                self.plot_item.vb.updateMatrix()
         finally:
             self._suspend_x_window_signal = False
+
+    def set_navigation_active(self, active: bool) -> None:
+        """Defer labels and sweep glyph rebuilds while navigating or resizing."""
+        if active == self._navigation_active:
+            return
+        self._navigation_active = active
+        if active:
+            self._overlay_label_timer.stop()
+            self._measurement_refresh_timer.stop()
+        else:
+            for series in self._series_items.values():
+                curve = series.curve
+                if hasattr(curve, "_navigation_line_mode"):
+                    curve.setSegmentedLineMode(curve._navigation_line_mode)
+                    del curve._navigation_line_mode
+            # Resizes during the drag skipped the width-dependent layout.
+            self._apply_width_layout()
+            self._layout_trace_legend()
+            self._position_signal_labels()
+            self._measurement_refresh_timer.start()
+
+    def _segment_navigation_lines(self) -> None:
+        # Keep antialiasing, but avoid Qt's expensive joined-path stroker
+        # while moving. Change modes inside the coalesced x update so it does
+        # not request an extra paint before that update arrives.
+        for series in self._series_items.values():
+            curve = series.curve
+            if not hasattr(curve, "_navigation_line_mode"):
+                curve._navigation_line_mode = curve.opts["segmentedLineMode"]
+                curve.setSegmentedLineMode("on")
+
+    def set_resize_active(self, active: bool) -> None:
+        """Scale antialiased curve rasters while a panel divider is held."""
+        self.set_navigation_active(active)
+        if active:
+            self._segment_navigation_lines()
+        for series in self._series_items.values():
+            series.curve.set_resize_active(active)
 
     def set_y_window(self, bounds: tuple[float, float]) -> None:
         lower, upper = sorted(float(value) for value in bounds)
@@ -9135,6 +9198,8 @@ class TracePlotWidget(RoundedPlotWidget):
 
     def _on_x_range_changed(self, _view_box: object, x_range: object) -> None:
         self._position_signal_labels()
+        if self._navigation_active:
+            return
         if self._suspend_x_window_signal:
             self._measurement_refresh_timer.start()
             return
@@ -9248,8 +9313,62 @@ class TracePlotWidget(RoundedPlotWidget):
         QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), "\n".join(tooltip_lines), self)
 
 
+class _ResizeCachedCurveItem(pg.PlotCurveItem):
+    """Reuse an antialiased trace raster for the duration of a live resize."""
+
+    def __init__(self, *, cache_static=False):
+        super().__init__()
+        self._resize_image = None
+        self._normal_cache = (QtWidgets.QGraphicsItem.CacheMode.DeviceCoordinateCache if cache_static
+                              else QtWidgets.QGraphicsItem.CacheMode.NoCache)
+        self.setCacheMode(self._normal_cache)
+
+    def set_resize_active(self, active: bool) -> None:
+        if active and self._resize_image is None and self.xData is not None:
+            vb = self.getViewBox()
+            rect = QtCore.QRectF(vb.viewRect())
+            if rect.width() <= 0 or rect.height() <= 0:
+                return
+            ratio = vb.getViewWidget().devicePixelRatioF()
+            width, height = max(1, round(vb.width() * ratio)), max(1, round(vb.height() * ratio))
+            image = QtGui.QImage(width, height, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(ratio)
+            image.fill(QtCore.Qt.GlobalColor.transparent)
+            painter = QtGui.QPainter(image)
+            sx, sy = width / ratio / rect.width(), height / ratio / rect.height()
+            # Store the raster in increasing data-y order. The view's normal
+            # transform flips it for display, just as it flips the curve.
+            painter.setTransform(QtGui.QTransform(sx, 0, 0, sy, -rect.left() * sx, -rect.top() * sy))
+            super().paint(painter, QtWidgets.QStyleOptionGraphicsItem(), None)
+            painter.end()
+            self._resize_image = (rect, image)
+            self.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.NoCache)
+        elif not active and self._resize_image is not None:
+            self._resize_image = None
+            self.setCacheMode(self._normal_cache)
+        self.update()
+
+    def paint(self, painter, option, widget):
+        if self._resize_image is None:
+            return super().paint(painter, option, widget)
+        rect, image = self._resize_image
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(rect, image)
+
+
+class _ResizeCachedSeriesItem(pg.PlotDataItem):
+    def __init__(self, x, y, *, cache_static=False, **kwargs):
+        super().__init__()
+        self.curve.setParentItem(None)
+        self.curve = _ResizeCachedCurveItem(cache_static=cache_static)
+        self.curve.setParentItem(self)
+        self.curve.sigClicked.connect(self.sigClicked)
+        self.setData(x, y, **kwargs)
+
+
 class SessionOverviewWidget(RoundedPlotWidget):
     windowChanged = QtCore.Signal(tuple)
+    windowChangeFinished = QtCore.Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -9260,6 +9379,7 @@ class SessionOverviewWidget(RoundedPlotWidget):
         self._theme = active_theme()
         self._window_region: pg.LinearRegionItem | None = None
         self._sync_guard = False
+        self._region_dragging = False
         self._hover_proxy = pg.SignalProxy(
             self.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
         )
@@ -9301,6 +9421,7 @@ class SessionOverviewWidget(RoundedPlotWidget):
     def _reset_items(self) -> None:
         self.plot_item.clear()
         self._window_region = None
+        self._region_dragging = False
         self._hover_spans = _spot_time_spans(pd.DataFrame())
         self._configure_plot()
 
@@ -9326,14 +9447,20 @@ class SessionOverviewWidget(RoundedPlotWidget):
         y_values = y_values[finite_mask]
         # show_empty fixes the y range at 0..1, which turns y auto-range off.
         self.plot_item.enableAutoRange(axis=pg.ViewBox.YAxis)
-        curve = self.plot_item.plot(x_values, y_values, pen=pg.mkPen(color, width=1.4))
+        curve = _ResizeCachedSeriesItem(x_values, y_values, cache_static=True, pen=pg.mkPen(color, width=1.4))
+        self.plot_item.addItem(curve)
         curve.setDownsampling(auto=True, method="peak")
         curve.setClipToView(True)
         self._ensure_window_region(current_window)
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
 
+    def set_resize_active(self, active: bool) -> None:
+        """Scale the curve's raster during a divider drag; redraw on release."""
+        for series in self.plot_item.listDataItems():
+            series.curve.set_resize_active(active)
+
     def _on_mouse_moved(self, event: tuple) -> None:
-        if not event:
+        if self._region_dragging or not event:
             return
         vb = self.plot_item.vb
         scene_pos = event[0]
@@ -9348,12 +9475,9 @@ class SessionOverviewWidget(RoundedPlotWidget):
         QtWidgets.QToolTip.hideText()
 
     def set_window(self, bounds: tuple[float, float]) -> None:
-        self._ensure_window_region(bounds)
-        if self._window_region is None:
-            return
         self._sync_guard = True
         try:
-            self._window_region.setRegion(sorted(float(value) for value in bounds))
+            self._ensure_window_region(bounds)
         finally:
             self._sync_guard = False
 
@@ -9369,13 +9493,25 @@ class SessionOverviewWidget(RoundedPlotWidget):
             self._window_region.setZValue(5)
             self.plot_item.addItem(self._window_region)
             self._window_region.sigRegionChanged.connect(self._on_region_changed)
+            self._window_region.sigRegionChangeFinished.connect(self._on_region_finished)
         else:
             self._window_region.setRegion(sorted(float(value) for value in bounds))
 
     def _on_region_changed(self) -> None:
         if self._sync_guard or self._window_region is None:
             return
+        self._region_dragging = True
+        QtWidgets.QToolTip.hideText()
         self.windowChanged.emit(tuple(float(value) for value in self._window_region.getRegion()))
+
+    def _on_region_finished(self) -> None:
+        if self._sync_guard:
+            return
+        # LinearRegionItem's final body-drag event emits only Finished. Read
+        # its final coordinates too, including a release beyond the last move.
+        self._on_region_changed()
+        self._region_dragging = False
+        self.windowChangeFinished.emit()
 
 
 def make_list_item(text: str, checked: bool = False) -> QtWidgets.QListWidgetItem:

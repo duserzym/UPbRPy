@@ -25,6 +25,7 @@ from GUI.icon import (
     build_brand_pixmap,
     build_workflow_stage_icon,
 )
+from GUI.splitters import StudioSplitter
 from GUI.services import (
     DOWNHOLE_FIT_METHODS,
     SESSION_FIT_METHODS,
@@ -1398,7 +1399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
 
-        self.workspace_splitter = QtWidgets.QSplitter(
+        self.workspace_splitter = StudioSplitter(
             QtCore.Qt.Orientation.Horizontal
         )
         self.workspace_splitter.setChildrenCollapsible(False)
@@ -1439,6 +1440,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workspace_splitter.splitterMoved.connect(
             self.persist_workspace_splitter_state
         )
+        self.workspace_splitter.dragStarted.connect(lambda: self._set_plot_resize_active(True))
+        self.workspace_splitter.dragFinished.connect(lambda: self._set_plot_resize_active(False))
         outer.addWidget(self.workspace_splitter, 1)
 
         self.setCentralWidget(central)
@@ -2934,11 +2937,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._overview_y_fit_timer.setSingleShot(True)
         self._overview_y_fit_timer.setInterval(45)
         self._overview_y_fit_timer.timeout.connect(
-            self.trace_plot.fit_y_to_visible_data
+            self._finish_overview_navigation
         )
+        self._pending_overview_window = None
+        self._overview_window_timer = QtCore.QTimer(self)
+        self._overview_window_timer.setSingleShot(True)
+        self._overview_window_timer.timeout.connect(self._apply_overview_window)
         plots_vbox.addWidget(self.trace_plot)
         self.session_overview_plot = SessionOverviewWidget()
         self.session_overview_plot.windowChanged.connect(self.on_overview_window_changed)
+        self.session_overview_plot.windowChangeFinished.connect(self._overview_y_fit_timer.start)
         plots_vbox.addWidget(self.session_overview_plot)
 
         # Diagnostic plots and the final publication-oriented review table.
@@ -3215,7 +3223,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._plot_control_vertical:
             control_bar.layout().setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom)
 
-        content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        content_splitter = StudioSplitter(QtCore.Qt.Orientation.Vertical)
+        content_splitter.dragStarted.connect(lambda: self._set_plot_resize_active(True))
+        content_splitter.dragFinished.connect(lambda: self._set_plot_resize_active(False))
         content_splitter.setChildrenCollapsible(False)
         content_splitter.addWidget(plot_card)
         self.content_splitter = content_splitter
@@ -3327,7 +3337,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # A user-adjustable vertical splitter makes it possible to favor a
         # long spot list or a large isotope grid without hiding either one.
-        self.spot_channel_splitter = QtWidgets.QSplitter(
+        self.spot_channel_splitter = StudioSplitter(
             QtCore.Qt.Orientation.Vertical
         )
         self.spot_channel_splitter.setObjectName("SpotChannelSplitter")
@@ -7961,12 +7971,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_overview_window_changed(self, bounds: tuple[float, float]) -> None:
         """Navigate the complete session without rebuilding trace items."""
-        self.trace_plot.set_x_window(bounds)
+        self._pending_overview_window = bounds
+        self.trace_plot.set_navigation_active(True)
+        self._overview_y_fit_timer.stop()
+        if not self._overview_window_timer.isActive():
+            self._overview_window_timer.start(0)
+
+    def _set_plot_resize_active(self, active: bool) -> None:
+        self.trace_plot.set_resize_active(active)
+        self.session_overview_plot.set_resize_active(active)
+
+    def _apply_overview_window(self) -> None:
+        bounds = self._pending_overview_window
+        self._pending_overview_window = None
+        if bounds is not None:
+            self.trace_plot.set_x_window(bounds)
+
+    def _finish_overview_navigation(self) -> None:
+        self._overview_window_timer.stop()
+        self._apply_overview_window()
         if self.trace_plot.zoom_mode() == "xy":
-            # X navigation remains immediate. Coalescing the more expensive
-            # visible-data y fit prevents dozens of full-array scans during a
-            # single overview drag while still following it interactively.
-            self._overview_y_fit_timer.start()
+            self.trace_plot.fit_y_to_visible_data()
+        self.trace_plot.set_navigation_active(False)
 
     def _focus_selected_spot(self, spot_name: str | None) -> None:
         if not spot_name:
