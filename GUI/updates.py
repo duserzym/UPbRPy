@@ -125,7 +125,15 @@ def parse_sha256sums(text: str) -> dict[str, str]:
 
 
 def installed_version() -> str:
-    """Read installed package metadata, or the source checkout's pyproject.toml."""
+    """Read the frozen build's stamp, or installed/source package metadata."""
+    if is_frozen():
+        # Read the spec-generated metadata directly: sys.path may contain an
+        # unrelated editable install. A missing stamp must fail, not guess.
+        bundled = Path(__file__).resolve().parents[1] / "UPbRPy.egg-info"
+        version = metadata.PathDistribution(bundled).metadata.get("Version")
+        if not version:
+            raise RuntimeError(f"Missing frozen UPbRPy version metadata: {bundled}")
+        return version
     try:
         return metadata.version("UPbRPy")
     except metadata.PackageNotFoundError:

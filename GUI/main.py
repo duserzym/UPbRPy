@@ -285,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="UPbRPy PySide6 + pyqtgraph GUI")
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
+    parser.add_argument("--version-output", metavar="FILE", help="Write Studio's version to a file and exit")
     parser.add_argument(
         "--open",
         metavar="TARGET",
@@ -317,6 +318,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Windows: remove the upbr:// registration and exit",
     )
     args = parser.parse_args(argv)
+    if args.version_output:
+        from GUI.updates import installed_version
+
+        # Windowed Windows executables have no stdout; use a file so the build
+        # can verify the updater's actual version on every platform.
+        Path(args.version_output).write_text(installed_version() + "\n", encoding="utf-8")
+        return 0
     if args.verify_reduction and not args.verification_output:
         parser.error("--verify-reduction requires --verification-output")
 

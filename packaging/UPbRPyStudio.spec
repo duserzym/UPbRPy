@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib.util import find_spec
 from pathlib import Path
+import re
 import sys
 import tomllib
 
@@ -32,7 +33,14 @@ data_files = [
         ".",
     ),
 ]
-data_files += copy_metadata("UPbRPy")
+# The build venv may have an editable install from another checkout. Generate
+# our version metadata here instead of copying that install's stale egg-info.
+metadata_directory = Path(workpath) / "studio-metadata" / "UPbRPy.egg-info"
+metadata_directory.mkdir(parents=True, exist_ok=True)
+(metadata_directory / "PKG-INFO").write_text(
+    f"Metadata-Version: 2.1\nName: UPbRPy\nVersion: {PROJECT_VERSION}\n\n",
+    encoding="utf-8",
+)
 
 hidden_imports = [
     "PySide6.QtSvg",
@@ -88,12 +96,19 @@ analysis = Analysis(
     optimize=1,
 )
 
-# An editable install records the builder's checkout path in
-# direct_url.json; a distributed app must not carry it.
+# Analysis automatically collects metadata referenced by version() calls.
+# Replace every UPbRPy copy it found with the checkout's stamp. Other editable
+# installs can record the builder's path in direct_url.json; strip that too.
 analysis.datas = [
     entry for entry in analysis.datas
     if not (entry[0].endswith("direct_url.json") and ".dist-info" in entry[0])
+    and not re.fullmatch(
+        r"upbrpy(?:-.+)?\.(?:egg|dist)-info", Path(entry[0]).parts[0], re.IGNORECASE,
+    )
 ]
+analysis.datas.append((
+    "UPbRPy.egg-info/PKG-INFO", str(metadata_directory / "PKG-INFO"), "DATA",
+))
 
 python_archive = PYZ(analysis.pure)
 

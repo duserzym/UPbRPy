@@ -196,6 +196,20 @@ def _write_smoke_project(work_directory: Path) -> Path:
     )
 
 
+def verify_application_version(application: Path, work_directory: Path) -> None:
+    """Fail the build unless the frozen updater reports this checkout's version."""
+    version_output = work_directory / "frozen-version.txt"
+    version_output.unlink(missing_ok=True)
+    _run_frozen(application, ["--version-output", str(version_output)], work_directory)
+    expected = project_version()
+    reported = version_output.read_text(encoding="utf-8").strip() if version_output.exists() else ""
+    if reported != expected:
+        raise RuntimeError(
+            f"Frozen app version mismatch: expected {expected} from pyproject.toml, "
+            f"reported {reported!r} ({application})"
+        )
+
+
 def smoke_test_application(
     application: Path,
     work_directory: Path,
@@ -366,6 +380,8 @@ def main(argv: list[str] | None = None) -> int:
         clean=arguments.clean,
     )
     sign_application(application)
+    # Mandatory even with --no-smoke-test, and before creating an archive.
+    verify_application_version(application, work_directory)
     print(f"Application: {application}")
     if arguments.smoke_test:
         screenshot = smoke_test_application(
