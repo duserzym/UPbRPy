@@ -175,14 +175,15 @@ def test_grouped_native_shift_and_control_clicks(review, app, chooser):
     def point(row):
         rect = view.visualRect(view.model().index(row, column, parent))
         return QtCore.QPoint(rect.right() - 5, rect.center().y())  # Away from check indicators.
+    # Natural order: A_2, A_3, A_10.
     QtTest.QTest.mouseClick(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=point(0))
-    assert widget.selected_spots == {"A_10"}
+    assert widget.selected_spots == {"A_2"}
     QtTest.QTest.mouseClick(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
                           QtCore.Qt.KeyboardModifier.ShiftModifier, pos=point(2))
     assert widget.selected_spots == {"A_10", "A_2", "A_3"}
     QtTest.QTest.mouseClick(view.viewport(), QtCore.Qt.MouseButton.LeftButton,
                           QtCore.Qt.KeyboardModifier.ControlModifier, pos=point(1))
-    assert widget.selected_spots == {"A_10", "A_3"}
+    assert widget.selected_spots == {"A_2", "A_10"}
     assert all(widget.include_flags.values())
 
 
@@ -310,7 +311,7 @@ def test_grouped_hover_reveals_child_without_changing_review_state(review, app):
     assert notifications
     parent = view.model().index(0, 0)
     assert view.isExpanded(parent)
-    child = view.model().index(1, 0, parent)
+    child = view.model().index(0, 0, parent)  # Natural order: A_2, A_3, A_10.
     assert child.data() == "A_2"
     assert child.data(QtCore.Qt.ItemDataRole.BackgroundRole).color() == theme_color(THEMES["light"].accent_soft)
     assert widget.include_flags == before and widget.selected_spots == {"B_1"}

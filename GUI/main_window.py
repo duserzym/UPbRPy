@@ -17,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import shiboken6
 
 from UPbRPy.notices import ReductionError
+from UPbRPy.naming import natural_sort_key
 from UPbRPy.standards import canonicalize_reference_material_samples
 
 from GUI.icon import (
@@ -3374,7 +3375,10 @@ class MainWindow(QtWidgets.QMainWindow):
             button.setToolTip(tip)
             button.setObjectName("CompactHeaderButton")
             button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(text) + 28)
+            if row is spots_toolbar:
+                button.setStyleSheet("QToolButton { padding: 2px 6px; border-radius: 7px; }")
+            button.setMinimumWidth(button.fontMetrics().horizontalAdvance(text)
+                                   + (16 if row is spots_toolbar else 28))
             row.addWidget(button)
             return button
 
@@ -3382,6 +3386,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_tree_all_button.clicked.connect(lambda: self.results_table.set_all_spot_choices(True))
         self.spot_tree_none_button = compact("None", "Show no spots in the concordia and results plots")
         self.spot_tree_none_button.clicked.connect(self.results_table.clear_spot_choices)
+        self.spot_tree_expand_button = QtWidgets.QToolButton()
+        self.spot_tree_expand_button.setObjectName("CompactHeaderButton")
+        self.spot_tree_expand_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.spot_tree_expand_button.setStyleSheet("QToolButton { padding: 2px 4px; border-radius: 7px; }")
+        self.spot_tree_expand_button.setIconSize(QtCore.QSize(14, 14))
+        self.spot_tree_expand_button.setFixedWidth(26)
+        self.spot_tree_expand_button.clicked.connect(self._toggle_spot_tree_groups)
+        spots_toolbar.addWidget(self.spot_tree_expand_button)
         _add_folder_btn = compact("+ Folder", "Add a new custom folder under Unknowns", filter_row)
         _add_folder_btn.clicked.connect(self._on_spot_add_folder)
         self.spot_tree_actions_button = compact("⋯", "Selection actions", filter_row)
@@ -3408,6 +3420,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spot_list.deleteRequested.connect(self._on_spot_tree_delete)
         self.spot_list.itemChanged.connect(self._on_spot_tree_check_changed)
         self.spot_list.itemChanged.connect(self._on_spot_tree_item_renamed)
+        self.spot_list.itemExpanded.connect(self._spot_tree_expansion_changed)
+        self.spot_list.itemCollapsed.connect(self._spot_tree_expansion_changed)
+        self._update_spot_tree_expand_button()
         spots_layout.addWidget(self.spot_list, 1)
         # At least six rows of spots.
         spots_section.setMinimumHeight(140)
@@ -5233,6 +5248,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "export_settings": self.export_settings.to_dict(),
             "review_show_glasses": self.results_table.show_glasses(),
             "spot_folder_overrides": dict(self._spot_folder_overrides),
+            "collapsed_spot_folders": self._collapsed_spot_folders(),
             "review_flags": dict(self._review_flags),
             "review_excluded_spots": sorted(self.results_table.excluded_spots),
             "review_fit_settings": self.results_table.fit_settings(),
@@ -5555,6 +5571,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             )
         self.project_path = restored.project_path
+        collapsed = workspace.get("collapsed_spot_folders", [])
+        restored.session.experiment.attrs["studio_collapsed_spot_folders"] = (
+            [name for name in collapsed if isinstance(name, str)]
+            if isinstance(collapsed, list) else []
+        )
         self.install_loaded_session(
             restored.session,
             restored.session.directory,
@@ -6717,12 +6738,65 @@ class MainWindow(QtWidgets.QMainWindow):
             norm_sample == _norm(rm) for rm in rm_names if rm
         )
 
+    def _collapsed_spot_folders(self) -> list[str]:
+        """Return this session's collapsed folder names in a stable order."""
+        return sorted(self.session.experiment.attrs.get("studio_collapsed_spot_folders", []),
+                      key=natural_sort_key)
+
+    def _spot_tree_folders(self):
+        for index in range(self.spot_list.topLevelItemCount()):
+            root = self.spot_list.topLevelItem(index)
+            for row in range(root.childCount()):
+                yield root.child(row)
+
+    def _update_spot_tree_expand_button(self) -> None:
+        expand = any(not folder.isExpanded() for folder in self._spot_tree_folders())
+        action = "Expand" if expand else "Collapse"
+        self.spot_tree_expand_button.setToolTip(f"{action} all groups")
+        self.spot_tree_expand_button.setAccessibleName(f"{action} all groups")
+        icon = (QtWidgets.QStyle.StandardPixmap.SP_TitleBarUnshadeButton if expand
+                else QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton)
+        self.spot_tree_expand_button.setIcon(self.style().standardIcon(icon))
+
+    def _spot_tree_expansion_changed(self, item: QtWidgets.QTreeWidgetItem) -> None:
+        role = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or "")
+        if role.startswith("__folder__"):
+            collapsed = set(self._collapsed_spot_folders())
+            name = role.removeprefix("__folder__")
+            if item.isExpanded():
+                collapsed.discard(name)
+            else:
+                collapsed.add(name)
+            self.session.experiment.attrs["studio_collapsed_spot_folders"] = sorted(
+                collapsed, key=natural_sort_key)
+        self._update_spot_tree_expand_button()
+
+    def _toggle_spot_tree_groups(self) -> None:
+        """Keep roots open and toggle all sample folders together."""
+        expand = any(not folder.isExpanded() for folder in self._spot_tree_folders())
+        with QtCore.QSignalBlocker(self.spot_list):
+            for index in range(self.spot_list.topLevelItemCount()):
+                self.spot_list.topLevelItem(index).setExpanded(True)
+            for folder in self._spot_tree_folders():
+                folder.setExpanded(expand)
+        collapsed = set(self._collapsed_spot_folders())
+        for folder in self._spot_tree_folders():
+            name = str(folder.data(0, QtCore.Qt.ItemDataRole.UserRole)).removeprefix("__folder__")
+            if expand:
+                collapsed.discard(name)
+            else:
+                collapsed.add(name)
+        self.session.experiment.attrs["studio_collapsed_spot_folders"] = sorted(
+            collapsed, key=natural_sort_key)
+        self._update_spot_tree_expand_button()
+
     def _populate_spot_tree(self) -> None:
         self.spot_list.blockSignals(True)
         self.spot_list.clear()
         spot_names = self.session.spot_names
         if not spot_names:
             self.spot_list.blockSignals(False)
+            self._update_spot_tree_expand_button()
             return
 
         sample_map = self._spot_sample_map()  # {spot_name: sample_name}
@@ -6766,7 +6840,7 @@ class MainWindow(QtWidgets.QMainWindow):
             folder_item.setIcon(
                 0, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirIcon)
             )
-            for sn in spots:
+            for sn in sorted(spots, key=natural_sort_key):
                 spot_item = QtWidgets.QTreeWidgetItem(folder_item, [sn])
                 spot_item.setToolTip(0, sn)
                 if override := sample_overrides.get(sn):
@@ -6796,19 +6870,22 @@ class MainWindow(QtWidgets.QMainWindow):
         unk_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, "__root_unk__")
         unk_root.setFlags(unk_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
 
-        for folder_name, spots in sorted(rm_folders.items()):
+        for folder_name, spots in sorted(rm_folders.items(), key=lambda pair: natural_sort_key(pair[0])):
             _add_folder_node(rm_root, folder_name, spots)
 
-        for folder_name, spots in sorted(unk_folders.items()):
+        for folder_name, spots in sorted(unk_folders.items(), key=lambda pair: natural_sort_key(pair[0])):
             _add_folder_node(unk_root, folder_name, spots)
 
+        collapsed = set(self._collapsed_spot_folders())
         for root in (rm_root, unk_root):
+            root.setExpanded(True)
             if root.childCount() == 0:
                 root.setHidden(True)
             else:
-                root.setExpanded(True)
                 for i in range(root.childCount()):
-                    root.child(i).setExpanded(True)
+                    folder = root.child(i)
+                    name = str(folder.data(0, QtCore.Qt.ItemDataRole.UserRole)).removeprefix("__folder__")
+                    folder.setExpanded(name not in collapsed)
 
         iterator = QtWidgets.QTreeWidgetItemIterator(self.spot_list)
         while iterator.value() is not None:
@@ -6816,13 +6893,14 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setData(0, _TREE_TEXT_ROLE, item.text(0))
             iterator += 1
         self.spot_list.blockSignals(False)
+        self._update_spot_tree_expand_button()
         self._sync_spot_tree_checks()
         self._filter_spot_tree(self.spot_tree_filter.text())
 
         if self.session.selected_spot:
-            self._select_spot_in_tree(self.session.selected_spot)
+            self._select_spot_in_tree(self.session.selected_spot, reveal=False)
 
-    def _select_spot_in_tree(self, spot_name: str) -> None:
+    def _select_spot_in_tree(self, spot_name: str, *, reveal: bool = True) -> None:
         root = self.spot_list.invisibleRootItem()
         for i in range(root.childCount()):
             section = root.child(i)
@@ -6831,6 +6909,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 for k in range(folder.childCount()):
                     leaf = folder.child(k)
                     if leaf.data(0, QtCore.Qt.ItemDataRole.UserRole) == spot_name:
+                        # Selecting a hidden leaf makes Qt open its ancestors.
+                        # A rebuild must respect the user's collapsed folders.
+                        if not reveal and not folder.isExpanded():
+                            return
                         self.spot_list.setCurrentItem(leaf)
                         return
 

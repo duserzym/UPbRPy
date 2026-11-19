@@ -27,6 +27,7 @@ from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
 from GUI.workers import FunctionWorker
 from GUI.stage_process import StageTask, calibration_preview, enabled as stage_process_enabled
 from UPbRPy.isochron import tera_wasserburg_point, wetherill_point
+from UPbRPy.naming import natural_sort_key
 from UPbRPy.isoplot import format_age_label, nice_step, visible_concordia_age_labels
 from UPbRPy.results import format_mswd, format_value_with_uncertainty, weighted_mean_and_mswd
 from UPbRPy.ratios import (
@@ -1599,7 +1600,18 @@ class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
             model = self.sourceModel()
             a = model.index(left.row(), 0).data(_SAMPLE_ROLE)
             b = model.index(right.row(), 0).data(_SAMPLE_ROLE)
+            a, b = natural_sort_key(str(a)), natural_sort_key(str(b))
             return a > b if self.sortOrder() == QtCore.Qt.SortOrder.DescendingOrder else a < b
+        model = self.sourceModel()
+        header = model.headerData(left.column(), QtCore.Qt.Orientation.Horizontal)
+        if header in {"spot_name", "sample"}:
+            a, b = left.data(self.sortRole()), right.data(self.sortRole())
+            if isinstance(a, str) and isinstance(b, str):
+                if header == "sample" and a == b and isinstance(model, DataFrameTableModel):
+                    return natural_sort_key(model.spot_name(left.row())) < natural_sort_key(model.spot_name(right.row()))
+                return natural_sort_key(a) < natural_sort_key(b)
+        if self._grouped and model.columnCount() == 1:
+            return natural_sort_key(str(left.data())) < natural_sort_key(str(right.data()))
         return super().lessThan(left, right)
 
 
@@ -5211,7 +5223,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _in_spot_order(self, names) -> list[str]:
         order = {name: index for index, name in enumerate(self._spot_acquisition)}
-        return sorted(map(str, names), key=lambda name: (order.get(name, len(order)), name))
+        return sorted(map(str, names), key=lambda name: (order.get(name, len(order)), natural_sort_key(name)))
 
     def _update_exclusion_styles(self, *, group_models=None, flat=True, changed_names=None):
         for model in (self.results_model, self.depth_model) if flat else ():
@@ -5797,7 +5809,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             model.setHorizontalHeaderLabels(["Include", *map(str, columns)])
             if "spot_name" in final:
                 samples = final.spot_name.astype(str).map(self._spot_samples)
-                for sample in sorted(set(samples)):
+                for sample in sorted(set(samples), key=natural_sort_key):
                     spots = final.loc[samples.eq(sample)]
                     names = list(spots.spot_name.astype(str))
                     parent = self._group_row({}, columns, names, sample)
@@ -5811,7 +5823,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             model.setHorizontalHeaderLabels(["Include", *columns])
             secondary = self.secondary_model.frame
             if "sample" in secondary:
-                for row in secondary.sort_values("sample").to_dict("records"):
+                for row in sorted(secondary.to_dict("records"), key=lambda row: natural_sort_key(str(row["sample"]))):
                     sample = str(row["sample"])
                     spots = self._spot_frame
                     spots = (spots.loc[spots["sample"].astype(str).eq(sample)]
@@ -5826,7 +5838,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
             depth = view is self.depth_choice_tree
             model.setHorizontalHeaderLabels(["Acquisitions shown" if depth else "Spots"])
             samples = self._sample_names(self._depth_frame) if depth else self._spot_samples
-            sample_order = dict.fromkeys(samples.values()) if depth else sorted(set(samples.values()))
+            sample_order = dict.fromkeys(samples.values()) if depth else sorted(set(samples.values()), key=natural_sort_key)
             for sample in sample_order:
                 names = [name for name in (samples if depth else self.include_flags)
                          if samples.get(name) == sample]

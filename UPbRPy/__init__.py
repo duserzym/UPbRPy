@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from importlib import import_module
 
+from .naming import natural_sort_key
+
 
 FOCUSED_SUBMODULES = frozenset(
     {
@@ -30,6 +32,7 @@ FOCUSED_SUBMODULES = frozenset(
         "isochron",
         "isoplot",
         "mpl_concordia",
+        "naming",
         "notices",
         "pipeline",
         "project",
@@ -68,7 +71,7 @@ def load_public_api() -> list[str]:
     damage = import_module(".radiation_damage", __name__)
     for name in ("alpha_dose", "ALPHA_DOSE_TOOLTIP"):
         globals()[name] = getattr(damage, name)
-    exports = [*core_names, *isochron_names, "alpha_dose", "ALPHA_DOSE_TOOLTIP"]
+    exports = [*core_names, *isochron_names, "alpha_dose", "ALPHA_DOSE_TOOLTIP", "natural_sort_key"]
     globals()["__all__"] = exports
     return exports
 
