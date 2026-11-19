@@ -148,3 +148,48 @@ def test_build_checks_version_even_without_smoke_test(tmp_path, monkeypatch, rep
         with pytest.raises(RuntimeError, match="Frozen app version mismatch"):
             build_desktop.main(arguments)
         assert not archived
+
+
+@pytest.mark.parametrize("platform,sandbox,check_tls", [
+    ("darwin", "/usr/bin/sandbox-exec", True),
+    ("darwin", None, True),
+    ("linux", None, True),
+    ("win32", None, True),
+    ("darwin", "/usr/bin/sandbox-exec", False),
+])
+def test_frozen_tls_hides_homebrew_only_when_supported(tmp_path, monkeypatch, platform, sandbox, check_tls):
+    import subprocess
+
+    monkeypatch.setattr(build_desktop.sys, "platform", platform)
+    monkeypatch.setattr(build_desktop.shutil, "which", lambda name: sandbox)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(build_desktop.subprocess, "run", run)
+    arguments = ["--check-tls", "https://api.github.com"] if check_tls else ["--version-output", "version.txt"]
+    overrides = {"SSL_CERT_FILE": str(tmp_path / "missing.pem"),
+                 "SSL_CERT_DIR": str(tmp_path / "missing-certs")}
+    build_desktop._run_frozen(tmp_path / "app", arguments, tmp_path, environment_overrides=overrides)
+    command, options = calls[0]
+    if platform == "darwin" and sandbox and check_tls:
+        profile = tmp_path / "no-homebrew-ca.sb"
+        assert command[:3] == [sandbox, "-f", str(profile)]
+        assert profile.read_text() == (
+            '(version 1)\n(allow default)\n'
+            '(deny file-read* (subpath "/opt/homebrew/etc/openssl@3") '
+            '(subpath "/usr/local/etc/openssl@3"))\n')
+    else:
+        assert "-f" not in command
+        assert not (tmp_path / "no-homebrew-ca.sb").exists()
+    assert command[-len(arguments):] == arguments
+    assert all(options["env"][name] == value for name, value in overrides.items())
+
+
+def test_build_requires_both_trust_dependencies(monkeypatch):
+    monkeypatch.setattr(build_desktop.importlib.util, "find_spec",
+                        lambda name: None if name in {"truststore", "certifi"} else object())
+    with pytest.raises(RuntimeError, match="certifi, truststore"):
+        build_desktop.require_build_dependencies()

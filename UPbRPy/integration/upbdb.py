@@ -43,8 +43,11 @@ import tempfile
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode, urlsplit
 import zipfile
+
+from .. import tls
 
 from ..pipeline import package_version
 from ..session_bundle import (
@@ -52,7 +55,6 @@ from ..session_bundle import (
     SessionBundleError,
     unpack_session_bundle,
 )
-from .tls import ca_bundle
 
 
 KEYRING_SERVICE = "UPbRPy"
@@ -150,7 +152,8 @@ def availability() -> tuple[bool, str]:
 
 def _requests():
     try:
-        return importlib.import_module("requests")
+        return SimpleNamespace(request=tls.request,
+                               exceptions=importlib.import_module("requests").exceptions)
     except ImportError as exc:
         raise DatabaseUnavailable(availability()[1]) from exc
 
@@ -401,7 +404,7 @@ def _request(
     stream: bool = False,
     **kwargs: Any,
 ):
-    requests = _requests()
+    transport = _requests()
     base = normalize_server(server)
     headers = {"User-Agent": user_agent(), "Accept": "application/json",
                "Accept-Encoding": "gzip"}
@@ -411,11 +414,8 @@ def _request(
         if not token:
             raise AuthenticationRequired(f"Sign in to {base} to {action}.")
         headers["Authorization"] = f"Bearer {token}"
-    bundle = ca_bundle()
-    if bundle is not None:
-        kwargs.setdefault("verify", bundle)
     try:
-        response = requests.request(
+        response = transport.request(
             method,
             api_url(base, path),
             headers=headers,
@@ -424,17 +424,12 @@ def _request(
             allow_redirects=False,
             **kwargs,
         )
-    except requests.exceptions.Timeout as exc:
-        raise ConnectionFailed(f"{base} did not answer in time.") from exc
-    except requests.exceptions.SSLError as exc:
-        raise ConnectionFailed(
-            f"Could not verify the secure connection to {base}. "
-            "Its certificate is not trusted on this computer."
-        ) from exc
-    except requests.exceptions.RequestException as exc:
-        raise ConnectionFailed(
-            f"Cannot reach {base}. Check the address and your network."
-        ) from exc
+    except transport.exceptions.Timeout as exc:
+        raise ConnectionFailed(f"{base} did not answer in time.", details=str(exc)) from exc
+    except transport.exceptions.RequestException as exc:
+        message = (tls.certificate_error_message(_host(base)) if tls.is_certificate_error(exc)
+                   else f"Cannot reach {base}. Check the address and your internet connection.")
+        raise ConnectionFailed(message, details=str(exc)) from exc
     _raise_for(response, base, action)
     return response
 

@@ -12,11 +12,16 @@ import sys
 import tomllib
 
 
+from UPbRPy.tls import certificate_error_message, is_certificate_error
+
+
 CHANNELS = ("stable", "beta")
 
 
 def friendly_update_error(raw: str) -> str:
     """Translate updater diagnostics into a short message for the user."""
+    if is_certificate_error(raw) or any(word in raw.lower() for word in ("certificate", "ssl:")):
+        return certificate_error_message("GitHub")
     message = raw.strip()
     lower = message.lower()
     if any(word in lower for word in ("pubkey", "public key", "base64", "decode", "not configured")):
@@ -24,12 +29,9 @@ def friendly_update_error(raw: str) -> str:
     if any(word in lower for word in ("404", "release json", "could not fetch a valid release",
                                       "not found", "no assets")):
         return "No release has been published yet."
-    if any(word in lower for word in ("certificate", "ssl:", "certificate_verify_failed")):
-        return ("Studio could not verify the secure connection to the update server. "
-                "Download the latest version from GitHub.")
     if any(word in lower for word in ("error sending request", "dns", "connect", "timed out",
                                       "timeout", "offline", "network", "failed to fetch",
-                                      "enotfound", "urlerror")):
+                                      "enotfound", "urlerror", "urlopen error")):
         return "Can't reach the update server. Check your internet connection and try again."
     return "The update check failed: " + (message[:117] + "…" if len(message) > 120 else message)
 

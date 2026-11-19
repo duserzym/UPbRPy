@@ -66,8 +66,8 @@ os.environ["UPBRPY_LAB_INBOX_DIR"] = _lab_inbox_folder.name
 # Windows start a background standards check that runs `git fetch` in the
 # shared checkout (~/UPbRPy/upb-standards). Tests must not reach the network or
 # write refs into the user's checkout, and a check still running when its
-# window is collected aborts Qt. Point it at an empty folder: the check then
-# reports "checkout is missing" at once. Tests can still set their own.
+# window is collected aborts Qt. Point it at an empty folder and block the
+# snapshot HTTP transport below. Tests can still inject their own responses.
 _standards_folder = tempfile.TemporaryDirectory(prefix="upbrpy-test-standards-")
 os.environ.setdefault("UPB_STANDARDS_DIR", str(Path(_standards_folder.name) / "absent"))
 
@@ -124,6 +124,18 @@ def _isolate_qt_settings() -> Path | None:
 
 
 _qt_settings_folder = _isolate_qt_settings()
+
+
+@pytest.fixture(autouse=True)
+def offline_standards(monkeypatch):
+    """Background standards checks never use the network in the test suite."""
+    from GUI import standards_updates
+    from urllib.error import URLError
+
+    def offline(*args, **kwargs):
+        raise URLError("Offline test transport")
+
+    monkeypatch.setattr(standards_updates, "urlopen", offline)
 
 
 @pytest.fixture(autouse=True)

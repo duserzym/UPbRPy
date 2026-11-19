@@ -24,9 +24,10 @@ dependencies = [
 [project.optional-dependencies]
 docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
 gui = [
-  "certifi>=2024.2.2",
   "PySide6>=6.11.1",
-  "pyqtgraph>=0.14.0"
+  "pyqtgraph>=0.14.0",
+  "truststore>=0.10.4",
+  "certifi>=2025.1.31"
 ]
 notebook = [
   "ipykernel>=7.3.0",
@@ -38,8 +39,9 @@ export = [
   "selenium>=4.39.0"
 ]
 database = [
-  "certifi>=2024.2.2",
   "requests>=2.32",
+  "truststore>=0.10.4",
+  "certifi>=2025.1.31",
   "keyring>=25.0"
 ]
 build = [

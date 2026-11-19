@@ -61,23 +61,20 @@ def test_normalize_server():
         db.normalize_server("")
 
 
-@pytest.mark.parametrize("bundle", ["/bundled/cacert.pem", None])
 @pytest.mark.parametrize("options", [{}, {"verify": "/custom/ca.pem"}, {"verify": True}, {"verify": False}])
-def test_request_uses_ca_bundle(monkeypatch, bundle, options):
+def test_request_uses_verified_shared_transport(monkeypatch, options):
     from unittest.mock import Mock
     import requests
 
     request = Mock(return_value=_Reply(200, {}))
-    monkeypatch.setattr(requests, "request", request)
-    monkeypatch.setattr(db, "ca_bundle", lambda: bundle)
+    monkeypatch.setattr(db.tls, "request", request)
     db._request("GET", "https://lab.example.org", "health", action="check health", auth=False, **options)
     assert request.call_count == 1
     if "verify" in options:
         assert request.call_args.kwargs["verify"] == options["verify"]
-    elif bundle is None:
-        assert "verify" not in request.call_args.kwargs
     else:
-        assert request.call_args.kwargs["verify"] == bundle
+        # The adapter supplies verified system trust; no path bypasses it.
+        assert "verify" not in request.call_args.kwargs
 
 
 def test_request_certificate_error_is_specific(monkeypatch):
@@ -86,12 +83,11 @@ def test_request_certificate_error_is_specific(monkeypatch):
 
     error = requests.exceptions.SSLError("certificate verify failed")
     request = Mock(side_effect=error)
-    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(db.tls, "request", request)
     with pytest.raises(db.ConnectionFailed) as failed:
         db._request("GET", "https://lab.example.org", "health", action="check health", auth=False)
-    assert str(failed.value) == (
-        "Could not verify the secure connection to https://lab.example.org. "
-        "Its certificate is not trusted on this computer.")
+    assert str(failed.value) == db.tls.certificate_error_message("lab.example.org")
+    assert failed.value.details == str(error)
     assert failed.value.__cause__ is error
     assert request.call_count == 1
 
@@ -115,7 +111,7 @@ def test_tls_keeps_large_lists_paged_and_revalidated(monkeypatch, tokens):
             reply.headers["X-Next-Cursor"] = str(start + limit)
         return reply
 
-    monkeypatch.setattr(requests, "request", request)
+    monkeypatch.setattr(db.tls, "request", request)
     monkeypatch.setattr(db, "_session_pages", db.OrderedDict())
     db.store_token("https://lab.example.org", "test-token")
     collected = []
@@ -131,7 +127,7 @@ def test_tls_keeps_large_lists_paged_and_revalidated(monkeypatch, tokens):
     assert db.list_sessions("https://lab.example.org", limit=500) == rows[:500]
     assert len(calls) == 7
     assert calls[-1][2]["headers"]["If-None-Match"] == '"page-0"'
-    assert all(call[2]["verify"] == db.ca_bundle() for call in calls)
+    assert all(call[2].get("verify", True) is True for call in calls)
 
 
 def test_password_login_whoami_and_user_agent(fake, tokens):

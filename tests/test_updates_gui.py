@@ -39,7 +39,7 @@ def prefs(app):
 
 
 def test_default_updater_opener_uses_tls(app, prefs):
-    from UPbRPy.integration import tls
+    from UPbRPy import tls
 
     updater = Updater(settings=prefs)
     try:

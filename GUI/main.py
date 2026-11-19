@@ -14,6 +14,59 @@ if __name__ == "__main__":
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+
+def _check_tls(url: str | None, output: str | None) -> int:
+    """Build shared trust and optionally verify an HTTPS request, without Qt."""
+    import UPbRPy.tls as tls
+
+    report = {
+        "ca_certificates": None, "ca_bundle": tls.ca_bundle(), "trust": None,
+        "url": url or None, "ok": False, "error": None, "detail": None,
+    }
+    context_built = False
+    try:
+        tls.ssl_context()
+        context_built = True
+        report["trust"] = tls.trust_source()
+        report["ca_certificates"] = tls.ca_certificate_count()
+        if url:
+            with tls.urlopen(url, timeout=10):
+                pass
+        report["ok"] = True
+    except Exception as exc:
+        report["error"] = "certificate" if tls.is_certificate_error(exc) else "network"
+        report["detail"] = str(exc)
+    report_json = json.dumps(report) + "\n"
+    if output:
+        Path(output).write_text(report_json, encoding="utf-8")
+    if sys.stdout is not None:
+        print(report_json, end="")
+    # A URL requires a successful request. Without one, a network diagnostic
+    # stays a warning, while a certificate failure always fails the check.
+    return int(not context_built or report["error"] == "certificate"
+               or (bool(url) and not report["ok"]))
+
+
+def _add_tls_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--check-tls", nargs="?", const="", metavar="URL",
+        help="Report HTTPS trust, optionally check an HTTPS URL, and exit",
+    )
+    parser.add_argument(
+        "--check-tls-output", metavar="PATH",
+        help="Also write the --check-tls JSON report to a UTF-8 file",
+    )
+
+
+# Dispatch the frozen self-check before Qt, windows or settings are imported.
+# Windowed Windows builds can report to a file when stdout is unavailable.
+if __name__ == "__main__" and "--check-tls" in sys.argv:
+    tls_parser = argparse.ArgumentParser(description="Studio HTTPS trust check")
+    _add_tls_arguments(tls_parser)
+    tls_parser.add_argument("--theme", choices=["system", "light", "dark"])
+    tls_args = tls_parser.parse_args()
+    raise SystemExit(_check_tls(tls_args.check_tls, tls_args.check_tls_output))
+
 from PySide6 import QtCore, QtWidgets
 
 from GUI.icon import build_app_icon
@@ -286,14 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="UPbRPy PySide6 + pyqtgraph GUI")
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
     parser.add_argument("--version-output", metavar="FILE", help="Write Studio's version to a file and exit")
-    parser.add_argument(
-        "--check-tls", nargs="?", const="", metavar="URL",
-        help="Report trusted CA certificates, optionally check an HTTPS URL, and exit",
-    )
-    parser.add_argument(
-        "--check-tls-output", metavar="PATH",
-        help="Also write the --check-tls JSON report to a UTF-8 file",
-    )
+    _add_tls_arguments(parser)
     parser.add_argument(
         "--open",
         metavar="TARGET",
@@ -334,28 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.version_output).write_text(installed_version() + "\n", encoding="utf-8")
         return 0
     if args.check_tls is not None:
-        from UPbRPy.integration import tls
-
-        report = {
-            "ca_certificates": 0, "ca_bundle": tls.ca_bundle(),
-            "url": args.check_tls or None, "ok": None, "error": None, "detail": None,
-        }
-        try:
-            report["ca_certificates"] = tls.ca_certificate_count()
-            if args.check_tls:
-                with tls.urlopen(args.check_tls, timeout=10):
-                    report["ok"] = True
-        except Exception as exc:
-            if args.check_tls:
-                report["ok"] = False
-            report["error"] = "certificate" if tls.is_certificate_error(exc) else "network"
-            report["detail"] = str(exc)
-        report_json = json.dumps(report) + "\n"
-        if args.check_tls_output:
-            Path(args.check_tls_output).write_text(report_json, encoding="utf-8")
-        if sys.stdout is not None:
-            print(report_json, end="")
-        return int(report["ca_certificates"] < 100 or report["error"] == "certificate")
+        return _check_tls(args.check_tls, args.check_tls_output)
 
     if args.verify_reduction and not args.verification_output:
         parser.error("--verify-reduction requires --verification-output")

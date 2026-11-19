@@ -22,7 +22,8 @@ import weakref
 from PySide6 import QtCore, QtWidgets
 import shiboken6
 
-from UPbRPy.integration import tls
+import UPbRPy.tls as tls
+
 from GUI.standards_updates import StandardsCheck, check_standards
 from GUI.updates import (
     CHANNELS, UpdateState, can_replace, compare_versions, find_asset,
@@ -211,7 +212,10 @@ class UpdateWorker(QtCore.QThread):
                 script = _prepare_install(self.path, self.root, self.runner)
                 self.result.emit(("installed", script))
         except Exception as exc:
-            self.result.emit(("failed", str(exc)))
+            diagnostic = str(exc)
+            if tls.is_certificate_error(exc) and not tls.is_certificate_error(diagnostic):
+                diagnostic = "Certificate verify failed: " + diagnostic
+            self.result.emit(("failed", diagnostic))
 
 
 _RUNNING_THREADS: "weakref.WeakSet[QtCore.QThread]" = weakref.WeakSet()

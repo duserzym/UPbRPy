@@ -79,6 +79,7 @@ class _PendingAction(QtCore.QObject):
         self.failures = 0
         self.deadline = 0.0
         self.connection_failed = False
+        self.connection_error = None
         self.authorization = None
         self.on_behalf = False
         self.oversight_offered = False
@@ -140,6 +141,7 @@ class _PendingAction(QtCore.QObject):
             return
 
         self.connection_failed = isinstance(error, upbdb.ConnectionFailed)
+        self.connection_error = error if self.connection_failed else None
         pending = (getattr(error, "status", None) == 409
                    and getattr(error, "code", None) == "idempotency_in_progress")
         if self.connection_failed or pending:
@@ -161,7 +163,10 @@ class _PendingAction(QtCore.QObject):
         seconds = max(1, math.ceil(self.deadline - time.monotonic()))
         host = urlsplit(self.server).netloc or self.server
         if self.connection_failed:
-            message = f"Server unreachable: {host}. Will retry in {seconds} s."
+            from UPbRPy.tls import is_certificate_error
+
+            message = (str(self.connection_error) if is_certificate_error(self.connection_error)
+                       else f"Server unreachable: {host}.") + f" Will retry in {seconds} s."
             queue = f"Queued: will {self.operation} when {host} answers."
         else:
             message = f"{host} answered: 409 idempotency_in_progress. Will retry in {seconds} s."
@@ -215,6 +220,8 @@ def _answered_error(server, error):
     from UPbRPy.integration import upbdb
 
     if not isinstance(error, upbdb.DatabaseError):
+        return str(error)
+    if isinstance(error, upbdb.ConnectionFailed):
         return str(error)
     host = urlsplit(server).netloc or server
     if isinstance(error, upbdb.AuthenticationRequired) and error.status is None:
@@ -1479,16 +1486,20 @@ def _heading(text: str) -> QtWidgets.QLabel:
 
 
 def _server_answers(server: str, timeout: float = 3.0) -> bool:
-    """True when ``<server>/v1/health`` answers (any HTTP reply counts as alive)."""
+    """Return health reachability; raise ConnectionFailed for certificate errors."""
     import urllib.error
-    from UPbRPy.integration import tls
+    import UPbRPy.tls as tls
 
     try:
         with tls.urlopen(server.rstrip("/") + "/v1/health", timeout=timeout):
             return True
     except urllib.error.HTTPError:
         return True
-    except Exception:
+    except Exception as exc:
+        if tls.is_certificate_error(exc):
+            from UPbRPy.integration.upbdb import ConnectionFailed
+
+            raise ConnectionFailed(tls.certificate_error_message(server), details=str(exc)) from exc
         return False
 
 
@@ -1501,6 +1512,8 @@ class ServerPickerDialog(QtWidgets.QDialog):
         self.server: str | None = None
         self.forgotten: list[str] = []
         self._check = check
+        self._errors: dict[str, str] = {}
+        self._error_details: dict[str, str] = {}
         self._status: dict[str, bool | None] = {s: None for s in servers}
         self.setWindowTitle(title)
         self.setMinimumWidth(480)
@@ -1581,7 +1594,11 @@ class ServerPickerDialog(QtWidgets.QDialog):
         changed = False
         for server, future in list(self._futures.items()):
             if future.done():
-                self._status[server] = bool(future.result()) if not future.exception() else False
+                error = future.exception()
+                self._status[server] = bool(future.result()) if error is None else False
+                if error is not None:
+                    self._errors[server] = str(error)
+                    self._error_details[server] = getattr(error, "details", "")
                 del self._futures[server]
                 changed = True
         if changed:
@@ -1609,7 +1626,13 @@ class ServerPickerDialog(QtWidgets.QDialog):
                 None: ("○", "checking…", theme.muted),
                 False: ("○", "not answering (switched off, or Tailscale not connected)", theme.faint),
             }[state]
+            if server in self._errors:
+                from UPbRPy.tls import is_certificate_error
+
+                note = ("certificate check failed" if is_certificate_error(self._errors[server])
+                        else "connection check failed (select for details)")
             item = QtWidgets.QListWidgetItem(f"{mark}  {server}\n     {note}")
+            item.setToolTip(self._errors.get(server, note) + "\n" + self._error_details.get(server, ""))
             item.setData(QtCore.Qt.ItemDataRole.UserRole, server)
             item.setForeground(theme_color(color) if state is not True else self.palette().text().color())
             self.list.addItem(item)
@@ -1627,9 +1650,12 @@ class ServerPickerDialog(QtWidgets.QDialog):
         server = self._chosen_item_server()
         self.forget_button.setEnabled(server is not None)
         if server is not None and self._status.get(server) is False:
-            self.message.setText(f"{server} is not answering. Connect Tailscale, or choose another server.")
+            self.message.setText(self._errors.get(
+                server, f"{server} is not answering. Connect Tailscale, or choose another server."))
+            self.message.setToolTip(self._error_details.get(server, ""))
         else:
             self.message.setText("")
+            self.message.setToolTip("")
 
     def _forget(self) -> None:
         server = self._chosen_item_server()

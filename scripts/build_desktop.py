@@ -88,7 +88,7 @@ def require_build_dependencies() -> None:
     them opens no upbr:// links and cannot submit to upbdb.
     """
     required = (
-        "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring", "certifi",
+        "PyInstaller", "PySide6", "pyqtgraph", "xlsxwriter", "requests", "keyring", "certifi", "truststore",
     )
     missing = [
         name
@@ -166,8 +166,18 @@ def _run_frozen(
     environment["MPLCONFIGDIR"] = str(work_directory / "matplotlib")
     environment["UPBRPY_AUTOSAVE_DIR"] = str(work_directory / "autosave")
     environment.update(environment_overrides or {})
+    command = [str(application_executable(application)), "--theme", "light", *arguments]
+    sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" and "--check-tls" in arguments else None
+    if sandbox:
+        profile = work_directory / "no-homebrew-ca.sb"
+        profile.write_text(
+            '(version 1)\n(allow default)\n'
+            '(deny file-read* (subpath "/opt/homebrew/etc/openssl@3") '
+            '(subpath "/usr/local/etc/openssl@3"))\n', encoding="utf-8",
+        )
+        command = [sandbox, "-f", str(profile), *command]
     result = subprocess.run(
-        [str(application_executable(application)), "--theme", "light", *arguments],
+        command,
         cwd=work_directory,
         env=environment,
         capture_output=True,
@@ -225,7 +235,7 @@ def smoke_test_application(
     3. Open a saved project for that fixture and render it.
     4. Run ``--verify-reduction`` on the fixture through concentrations, and
        through the export bundle on ``$UPBRPY_SMOKE_SESSION`` when it is set.
-    5. Check HTTPS with bundled CA roots and no default certificate paths.
+    5. Verify HTTPS with shared trust, missing default CA paths and Homebrew CAs hidden when supported.
     Load errors make the frozen app exit non-zero (see ``--export`` in
     GUI/main.py), so a module missing from the bundle fails the build.
     """
@@ -286,8 +296,12 @@ def smoke_test_application(
         report = json.loads(report_json)
     except ValueError as exc:
         raise RuntimeError(f"The frozen TLS check did not return JSON: {result.stderr[-4000:]}") from exc
-    if (report["ca_certificates"] < 100 or report["error"] == "certificate"
-            or result.returncode != 0 or "Traceback" in result.stderr):
+    # Offline builds still pass with a warning; only trust failures and
+    # crashes fail the build.
+    offline = report["error"] == "network"
+    if (report["error"] == "certificate" or "Traceback" in result.stderr
+            or (not offline and (result.returncode != 0
+                                 or (report.get("url") and report.get("ok") is not True)))):
         raise RuntimeError(f"The frozen TLS check failed: {report}")
     if report["error"] == "network":
         print(f"Warning: frozen TLS network check unavailable: {report['detail']}")

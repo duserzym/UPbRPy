@@ -9,7 +9,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from GUI.standards_updates import STANDARDS_PAGE
 from GUI.theme import active_theme, theme_color
 from GUI.updater import DOWNLOAD_PAGE
-from GUI.updates import check_button_view
+from GUI.updates import check_button_view, friendly_update_error
 
 
 def _percent(state):
@@ -473,18 +473,20 @@ class UpdatesDialog(QtWidgets.QDialog):
             "downloading": f"Downloading {version}, {_percent(state)}%",
             "ready": f"Version {version} is ready to install",
             "installing": "Installing and restarting",
-            "error": f"Update check failed: {state.message}", "unsupported": state.message,
+            "error": "Update check failed: " + friendly_update_error(state.message).removeprefix(
+                "The update check failed: "), "unsupported": state.message,
         }[state.status]
         if state.status == "unsupported" and info:
             status += f" Version {version} is available."
         self.status.setText(status)
+        self.status.setToolTip(state.message if state.status == "error" else "")
         self.check_button.setEnabled(state.status not in {"checking", "downloading", "installing"})
         self.download_button.setVisible(state.status == "available" and not self.updater.auto_download)
         self.restart_button.setVisible(state.status == "ready")
         self.page_button.setVisible(state.status == "unsupported")
         self.last_check.setText(f"Last check: {_last_check(self.updater)} · "
                                 + self.updater.prefs.value("updates/last_result", "Not checked yet", type=str))
-        self.notes.setPlainText(info.get("body") or "")
+        self.notes.setPlainText(state.message if state.status == "error" else info.get("body") or "")
         self._set_notes_link(info)
 
     def _standards_changed(self):
@@ -493,6 +495,6 @@ class UpdatesDialog(QtWidgets.QDialog):
         if self.updater.standards_library_changed:
             message += " Warning: the configured library changed since you last reviewed it."
         self.standards_status.setText(message)
-        self.standards_status.setToolTip(escape("\n".join(status.changed)))
+        self.standards_status.setToolTip(escape("\n".join((*status.changed, status.details))))
         self.standards_check.setEnabled(not self.updater.standards_checking)
         self.standards_ack.setVisible(self.updater.standards_library_changed)

@@ -44,9 +44,7 @@ def test_friendly_update_fallback():
     "SSL: untrusted issuer", "certificate rejected", "CERTIFICATE_VERIFY_FAILED",
 ])
 def test_friendly_update_certificate_errors(raw):
-    assert updates.friendly_update_error(raw) == (
-        "Studio could not verify the secure connection to the update server. "
-        "Download the latest version from GitHub.")
+    assert updates.friendly_update_error(raw) == updates.certificate_error_message("GitHub")
 
 
 def test_friendly_update_urlerror_timeout():

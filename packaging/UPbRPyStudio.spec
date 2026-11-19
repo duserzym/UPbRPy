@@ -44,11 +44,12 @@ metadata_directory.mkdir(parents=True, exist_ok=True)
 data_files += collect_data_files("certifi")
 
 hidden_imports = [
-    "certifi",
     "PySide6.QtSvg",
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtNetwork",
     "xlsxwriter",
+    "truststore",
+    "certifi",
     *collect_submodules("pyqtgraph.exporters"),
 ]
 
