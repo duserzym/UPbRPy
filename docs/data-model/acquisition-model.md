@@ -46,6 +46,16 @@ ordered labels. `acquisition(label)` finds the first matching acquisition or
 raises `KeyError`; `has(capability)` checks membership. These methods do not
 validate the entire session.
 
+Session readers skip acquisitions whose Y values are all missing, including
+metadata-only Rich columns and per-spot files with no sweep rows. Each skip
+adds `Skipped blank analysis '<label>' (no sweep rows)` to session `warnings`.
+Source files and original sequence indices are retained. Studio displays
+these warnings in the capabilities tooltip; experiment attrs and export
+context retain them in `qtegra.warnings`, and reduction manifests retain them
+in `metadata.qtegra.warnings`. A session with only blank analyses is empty;
+experiment import rejects it. The standalone `read_spot_file` still returns
+an Acquisition with zero sweeps for a blank file.
+
 ## Acquisition fields
 
 | Name | Type | Unit / definition | Filled by | Default or absence |

@@ -308,8 +308,14 @@ def read_rich_csv(path, *, cycle_time_s=None) -> QtegraSession:
             masses, np.isfinite(masses).argmax(axis=1)[:, None, :], axis=1,
         )[:, 0, :]
     acquisitions = []
+    acquisition_columns = []
+    reader_warnings = []
     for i, label in enumerate(labels):
         count = _sweep_count(cubes["Y"][i])
+        if count == 0:
+            reader_warnings.append(f"Skipped blank analysis '{label}' (no sweep rows)")
+            continue
+        acquisition_columns.append(columns[i])
         channels = tuple(
             Channel(name, mass=float(mass) if np.isfinite(mass) else None)
             for name, mass in zip(names, mass_values[i])
@@ -326,6 +332,7 @@ def read_rich_csv(path, *, cycle_time_s=None) -> QtegraSession:
         acquisitions, "rich", frozenset(capabilities),
         (SourceFile(path, sha256(raw).hexdigest(), "rich"),),
         times_reconstructed=reconstructed, nominal_cycle_time_s=cycle,
+        warnings=reader_warnings,
     )
     if reconstructed:
         session.warnings.append(
@@ -342,7 +349,7 @@ def read_rich_csv(path, *, cycle_time_s=None) -> QtegraSession:
     metadata = frame.loc[(frame.index >= 2) & (frame[0] != "MainRuns")]
     for row in metadata.itertuples(index=False, name=None):
         group, key, subkey = row[:3]
-        for acquisition, column in zip(acquisitions, columns):
+        for acquisition, column in zip(acquisitions, acquisition_columns):
             text = row[column]
             if group == "TuneSettings":
                 acquisition.tune_name = key
@@ -399,7 +406,7 @@ def _read_spot(path):
     count = _sweep_count(y)
     acquisition = Acquisition(
         label, 0, tuple(channels), y[:count].copy(),
-        table["Time"].iloc[:count].to_numpy(dtype=float),
+        table.reindex(columns=["Time"])["Time"].iloc[:count].to_numpy(dtype=float),
         start_text=start_text, start=datetime.strptime(start_text, "%m/%d/%Y %I:%M:%S %p"),
         tune_name=lines[3].split(":", 1)[0],
         sequence_fields={"spot_file_start_text": lines[0]},
@@ -456,6 +463,13 @@ def _spot_session(paths):
     )
     for index, acquisition in enumerate(session.acquisitions, 1):
         acquisition.sequence_index = index
+    session.warnings.extend(
+        f"Skipped blank analysis '{acquisition.label}' (no sweep rows)"
+        for acquisition in session.acquisitions if acquisition.n_sweeps == 0
+    )
+    session.acquisitions = [
+        acquisition for acquisition in session.acquisitions if acquisition.n_sweeps > 0
+    ]
     return session
 
 

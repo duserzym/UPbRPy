@@ -1233,6 +1233,8 @@ class ReductionPipeline:
                     record["sha256"] = sha256_file(path)
             files.append(record)
         metadata_record = dict(metadata or {})
+        if "qtegra" in self.experiment.attrs:
+            metadata_record.setdefault("qtegra", self.experiment.attrs["qtegra"])
         if self.origin and "origin" not in metadata_record:
             metadata_record["origin"] = dict(self.origin)
         library = self.reference_library_identity()

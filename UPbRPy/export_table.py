@@ -315,7 +315,7 @@ def _total_pb(pipeline, normalized, active_standards, results):
     internal normalization. No natural Hg ratio is substituted if that baseline
     ratio cannot be estimated. The input frames and cached stages are unchanged.
     """
-    data = normalized.copy()
+    data = normalized.loc[normalized.spot_name.isin(pipeline.total_data.spot_name)].copy()
     measured = [x for x in _PB_MASSES if x in pipeline.channels and x != "204Pb"]
     has204 = "204Pb" in pipeline.channels or "204Hg" in pipeline.channels
     correction = "not measured"
@@ -325,7 +325,9 @@ def _total_pb(pipeline, normalized, active_standards, results):
             raw_groups = dict(tuple(pipeline.total_data.groupby("spot_name", sort=False)))
             scales = {}
             for row in pipeline.experiment.to_dict("records"):
-                raw = raw_groups[row["spot_names"]]
+                raw = raw_groups.get(row["spot_names"])
+                if raw is None:
+                    continue
                 baseline = raw.loc[raw.Time.ge(row["baseline_start_times"]) & raw.Time.lt(row["baseline_end_times"])]
                 denom = baseline["202Hg"].mean()
                 scales[row["spot_names"]] = baseline[mass204].mean() / denom if denom > 0 else np.nan
