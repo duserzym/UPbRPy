@@ -205,6 +205,37 @@ _VIEWS_WITHOUT_SELECTION_WINDOWS = frozenset({
 _CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
 
 
+def _snap_plot_controls(point: QtCore.QPoint, size: QtCore.QSize,
+                        area: QtCore.QRect) -> QtCore.QPoint:
+    """Clamp controls to the data area and snap within eight logical pixels."""
+    if area.isEmpty():
+        return QtCore.QPoint(point)
+
+    def snap(value: int, low: int, high: int, stops: tuple[int, ...]) -> int:
+        high = max(low, high)
+        value = max(low, min(value, high))
+        nearest = min((stop for stop in stops if low <= stop <= high),
+                      key=lambda stop: abs(stop - value))
+        return nearest if abs(nearest - value) <= 8 else value
+
+    right = area.right() + 1 - size.width()
+    bottom = area.bottom() + 1 - size.height()
+    return QtCore.QPoint(
+        snap(point.x(), area.left(), right, (area.left(), right, right - 9)),
+        snap(point.y(), area.top(), bottom, (area.top(), bottom)))
+
+
+@dataclass
+class _PlotControlDrag:
+    """Press position and the data-area bounds captured when dragging starts."""
+
+    start: QtCore.QPoint
+    origin: QtCore.QPoint
+    kind: str
+    area: QtCore.QRect | None = None
+    target: QtCore.QPoint | None = None
+
+
 # Spots-tree roles: the text a row last showed (to tell a rename from a
 # check toggle) and the check state last applied.
 _TREE_TEXT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 7
@@ -1286,6 +1317,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Prevent accidental loss of an imported or edited reduction."""
+        self._finish_plot_control_drag()
         self.flush_selection_edits()
         restoring = self._restore_task is not None
         if (self._active_worker is not None and not restoring
@@ -1766,7 +1798,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if watched in getattr(self, "_plot_control_geometry_widgets", ()) and event.type() in {
                 QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Show,
                 QtCore.QEvent.Type.LayoutRequest} and not (
-                    watched is self.plot_control_scroll and event.type() == QtCore.QEvent.Type.LayoutRequest):
+                    watched is self.plot_control_scroll and event.type() in {
+                        QtCore.QEvent.Type.Move, QtCore.QEvent.Type.LayoutRequest}):
             timer = getattr(self, "_plot_control_overlay_timer", None)
             if timer is not None and not timer.isActive():
                 timer.start()
@@ -2623,7 +2656,7 @@ class MainWindow(QtWidgets.QMainWindow):
         it stays put when the window is resized. Default: data area's top right.
         """
         scroll = getattr(self, "plot_control_scroll", None)
-        if scroll is None:
+        if scroll is None or self._plot_control_drag is not None:
             return
         area = self._plot_control_area()
         scroll.setVisible(not area.isEmpty())
@@ -2667,7 +2700,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _move_plot_controls(self, point: QtCore.QPoint) -> None:
         scroll = self.plot_control_scroll
-        area = self._plot_control_area()
+        drag = self._plot_control_drag
+        area = drag.area if drag is not None and drag.area is not None else self._plot_control_area()
         if area.isEmpty():
             return
         x = max(area.left(), min(point.x(), area.right() + 1 - scroll.width()))
@@ -2692,25 +2726,72 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _plot_control_grip_event(self, event: QtCore.QEvent) -> bool:
         kind = event.type()
+        if kind == QtCore.QEvent.Type.Hide:
+            self._finish_plot_control_drag()
         if kind == QtCore.QEvent.Type.MouseButtonPress and event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._plot_control_drag = (event.globalPosition().toPoint(), self.plot_control_scroll.pos())
-            self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            self._finish_plot_control_drag()
+            self._plot_control_drag = _PlotControlDrag(
+                event.globalPosition().toPoint(), self.plot_control_scroll.pos(), self._plot_control_kind())
             return True
         if kind == QtCore.QEvent.Type.MouseMove and self._plot_control_drag is not None:
-            start, origin = self._plot_control_drag
-            self._move_plot_controls(origin + event.globalPosition().toPoint() - start)
+            if not event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+                self._finish_plot_control_drag()
+                return True
+            drag = self._plot_control_drag
+            delta = event.globalPosition().toPoint() - drag.start
+            if drag.target is None:
+                if delta.manhattanLength() < QtWidgets.QApplication.startDragDistance():
+                    return True
+                drag.area = self._plot_control_area()
+                if drag.area.isEmpty():
+                    self._finish_plot_control_drag()
+                    return True
+                ghost = self._plot_control_ghost
+                if ghost is None:
+                    ghost = QtWidgets.QLabel(self, QtCore.Qt.WindowType.ToolTip
+                                            | QtCore.Qt.WindowType.FramelessWindowHint)
+                    for attribute in (QtCore.Qt.WidgetAttribute.WA_TranslucentBackground,
+                                      QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating,
+                                      QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+                        ghost.setAttribute(attribute)
+                    self._plot_control_ghost = ghost
+                ghost.setPixmap(self.plot_control_scroll.grab())
+                ghost.setFixedSize(self.plot_control_scroll.size())
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            drag.target = _snap_plot_controls(drag.origin + delta, self.plot_control_scroll.size(), drag.area)
+            self._plot_control_ghost.move(self.plots_stack.mapToGlobal(drag.target))
+            self._plot_control_ghost.show()
             return True
-        if kind == QtCore.QEvent.Type.MouseButtonRelease and self._plot_control_drag is not None:
-            self._plot_control_drag = None
-            self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
-            self._remember_plot_control_place()
+        if (kind == QtCore.QEvent.Type.MouseButtonRelease
+                and event.button() == QtCore.Qt.MouseButton.LeftButton and self._plot_control_drag is not None):
+            self._finish_plot_control_drag()
             return True
         if kind == QtCore.QEvent.Type.MouseButtonDblClick:
+            self._finish_plot_control_drag()
             self.set_plot_controls_vertical(not self._plot_control_vertical)
             return True
         return False
 
-    def _remember_plot_control_place(self) -> None:
+    def _finish_plot_control_drag(self) -> None:
+        """Commit the last ghost position and balance the drag's cursor override."""
+        drag = getattr(self, "_plot_control_drag", None)
+        if drag is None:
+            return
+        try:
+            if drag.target is not None:
+                self._plot_control_ghost.hide()
+                self._move_plot_controls(drag.target)
+                self._remember_plot_control_place(drag.kind)
+        finally:
+            self._plot_control_drag = None
+            if drag.target is not None:
+                QtWidgets.QApplication.restoreOverrideCursor()
+
+    def _plot_control_view_changed(self, *_args) -> None:
+        self._finish_plot_control_drag()
+        self._position_plot_controls()
+
+    def _remember_plot_control_place(self, kind: str | None = None) -> None:
         """Store the place as the nearest stack corner and the offset from it."""
         scroll, stack = self.plot_control_scroll, self.plots_stack
         geometry = scroll.geometry()
@@ -2719,7 +2800,7 @@ class MainWindow(QtWidgets.QMainWindow):
         corner = ("top" if top else "bottom") + "_" + ("left" if left else "right")
         dx = geometry.left() if left else stack.width() - geometry.right() - 1
         dy = geometry.top() if top else stack.height() - geometry.bottom() - 1
-        self._plot_control_anchors[self._plot_control_kind()] = (corner, int(dx), int(dy))
+        self._plot_control_anchors[kind or self._plot_control_kind()] = (corner, int(dx), int(dy))
         self._save_plot_control_layout()
 
     def _save_plot_control_layout(self) -> None:
@@ -2730,6 +2811,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_plot_controls_vertical(self, vertical: bool) -> None:
         """Lay the floating plot controls out in a row or a column."""
+        self._finish_plot_control_drag()
         self._plot_control_vertical = bool(vertical)
         layout = self.plot_control_bar.layout()
         layout.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom if vertical
@@ -2743,6 +2825,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def reset_plot_controls(self) -> None:
         """Put the controls back in a row at the top right of every view."""
+        self._finish_plot_control_drag()
         self._plot_control_anchors.clear()
         self.set_plot_controls_vertical(False)
 
@@ -2937,6 +3020,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_control_grip = QtWidgets.QLabel("⠿")
         self.plot_control_grip.setObjectName("ControlBarLabel")
         self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        self.plot_control_grip.setMouseTracking(True)
         self.plot_control_grip.setToolTip(
             "Drag to move these controls inside the plot.\n"
             "Right-click: horizontal or vertical, or reset the position.")
@@ -2945,6 +3029,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_control_grip.installEventFilter(self)
         cb_layout.addWidget(self.plot_control_grip)
         self._plot_control_drag = None
+        self._plot_control_ghost = None
         try:
             saved = json.loads(self.settings.value("plot_controls_v1", "{}", type=str))
         except (TypeError, ValueError):
@@ -3104,8 +3189,8 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.viewport().setAutoFillBackground(False)
         control_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.plots_stack.installEventFilter(self)
-        self.plots_stack.currentChanged.connect(self._position_plot_controls)
-        self.results_table.tabs.currentChanged.connect(self._position_plot_controls)
+        self.plots_stack.currentChanged.connect(self._plot_control_view_changed)
+        self.results_table.tabs.currentChanged.connect(self._plot_control_view_changed)
         self.plots_stack.currentChanged.connect(self._position_empty_state)
         # A fixed-size child, outside all stack layouts. Moving it never
         # changes the stack's size hint or schedules another layout pass.
@@ -7452,6 +7537,8 @@ class MainWindow(QtWidgets.QMainWindow):
         item.setIcon(QtGui.QIcon(pixmap))
 
     def set_plot_mode(self, plot_mode: str, *, refresh: bool) -> None:
+        if plot_mode != self.session.plot_mode:
+            self._finish_plot_control_drag()
         self.session.plot_mode = plot_mode
         self.bias_card.setVisible(plot_mode == "standard_bias")
         if plot_mode == "standard_bias":
