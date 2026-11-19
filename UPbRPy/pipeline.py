@@ -12,11 +12,14 @@ import hashlib
 import math
 import pickle
 import platform
+import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -525,12 +528,68 @@ def sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def package_version() -> str:
-    """Return the installed UPbRPy version with a source-tree fallback."""
+def _source_project(root: Path) -> dict[str, object] | None:
+    """Read project metadata only from an UPbRPy source root."""
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        with (root / "pyproject.toml").open("rb") as stream:
+            project = tomllib.load(stream).get("project")
+    except (OSError, ValueError):
+        return None
+    if isinstance(project, dict) and project.get("name") == "UPbRPy":
+        return project
+    return None
+
+
+def _package_version(root: Path) -> str:
+    """Prefer the imported source root to installed distribution metadata."""
+    project = _source_project(root)
+    if project is not None:
+        source_version = project.get("version")
+        if isinstance(source_version, str) and source_version:
+            return source_version
     try:
         return version("UPbRPy")
     except PackageNotFoundError:
         return "0.1.0+source"
+
+
+@lru_cache(maxsize=1)
+def package_version() -> str:
+    """Return the running source or installed version, cached for this process."""
+    return _package_version(Path(__file__).resolve().parent.parent)
+
+
+def _source_revision(root: Path) -> dict[str, str | bool] | None:
+    """Read source provenance without requiring a .git directory at the root."""
+    if _source_project(root) is None:
+        return None
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True, timeout=2,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, check=True, timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return {"commit": commit, "dirty": bool(status)}
+
+
+@lru_cache(maxsize=1)
+def source_revision() -> dict[str, str | bool] | None:
+    """Return the source commit and tracked dirty state, cached for this process."""
+    return _source_revision(Path(__file__).resolve().parent.parent)
+
+
+# Capture provenance before reductions audit input reads: git's subprocess
+# pipes are not scientific inputs and would disable results caching. The
+# version lookup reads pyproject.toml, so warm it here for the same reason.
+package_version()
+source_revision()
 
 
 def _experiment_fingerprint(experiment: pd.DataFrame) -> bytes:
@@ -1242,6 +1301,7 @@ class ReductionPipeline:
             "format_version": PIPELINE_FORMAT_VERSION,
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "upbrpy_version": package_version(),
+            "upbrpy_source": source_revision(),
             "python_version": platform.python_version(),
             "platform": platform.platform(),
             "source_directory": (
@@ -1292,4 +1352,5 @@ __all__ = [
     "resolve_calibration_method",
     "sha256_file",
     "package_version",
+    "source_revision",
 ]
