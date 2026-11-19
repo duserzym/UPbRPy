@@ -17,8 +17,11 @@ trace elements, the thermometer for the session's mineral, and literature
 indices. The thermometer and the literature indices appear only for zircon
 sessions, except that rutile and titanite sessions get their own thermometer.
 
-- **Card checkbox.** Selects all or none of a card's columns.
-- **Chips.** Each chip is one column. Optional columns have a dotted border.
+- **Workbook sheets.** The first Core table card selects README (metadata),
+  Table S1 Methods, Table S3 Standard data and Table S4 QC for `<stem>.xlsx`.
+  All four start selected. The SI workbook always contains all five SI sheets.
+- **Card checkbox.** Selects all or none of a card's columns or workbook sheets.
+- **Chips.** Each chip is one column or workbook sheet. Optional columns have a dotted border.
 - **Chevron.** Opens a collapsed card.
 - **Citation.** Each card names its source in a short form such as
   Grimes et al. (2015).
@@ -30,7 +33,8 @@ sessions, except that rutile and titanite sessions get their own thermometer.
   every optional column, and **Minimal** keeps identifiers, U, Th, Th/U,
   ratios, dates and the preferred date. Any other choice shows as
   **Custom**. **Defaults** restores Publication and keeps the laboratory
-  metadata.
+  metadata. Every preset enables all workbook sheets; excluding a sheet shows
+  **Custom**.
 
 The thermometer card shows the calibration and the assumed values it needs:
 
@@ -45,19 +49,25 @@ file records the calibration and every assumed value.
 
 The right side previews the export and has three tabs:
 
-- **Columns & footnotes** updates as you choose. It lists the columns that will
-  be written and the footnotes that go with them.
+- **Columns & footnotes** updates as you choose. It lists the selected workbook
+  sheets above the columns and the footnotes that go with them.
 - **Table** shows headings, rows and sample summaries.
 - **Settings** holds acquisition metadata, the table title, the discordance
   definition and threshold, and CSV precision. Enter only metadata supported
   by the acquisition record. Unavailable fields are identified as "not
   recorded" in footnotes.
 
-Column, thermometer and setting choices persist in the project.
+Column, workbook-sheet, thermometer and setting choices persist in the project.
 
-The default products are `<stem>.xlsx`, `.csv` and `.md`. Excel keeps full
-numeric precision with publication display formats, grouped headings and a
-Reference materials sheet. CSV uses displayed values unless **CSV full
+The default products are `<stem>.xlsx`, `<stem>_SI.xlsx`, `.csv` and `.md`.
+The default Excel workbook contains README, Table S1 Methods, Table,
+Table S3 Standard data, Table S4 QC and Reference materials, in that order.
+Table is the selected sample data table and keeps full numeric precision with
+publication display formats and grouped headings. The **SI workbook** format
+starts selected and writes the complete five-sheet reference workbook: README,
+Table S1 Methods, Table S2 Sample data, Table S3 Standard data and Table S4 QC.
+Both workbooks use the same metadata and methods builder.
+CSV uses displayed values unless **CSV full
 precision** is selected, and has companion sample-summary and footnote files.
 Markdown contains sample blocks and numbered footnotes.
 

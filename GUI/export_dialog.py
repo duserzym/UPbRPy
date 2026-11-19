@@ -11,13 +11,15 @@ from GUI.flow_layout import FlowLayout
 from GUI.theme import active_theme
 from UPbRPy.export_citations import group_info, reference
 from UPbRPy.export_table import (
-    ExportSettings, ExportTable, export_column_preset, export_table_preview,
+    ExportColumn, ExportSettings, ExportTable, RICH_SHEETS, export_column_preset, export_table_preview,
     update_export_settings,
 )
 from UPbRPy.thermometry import THERMOMETERS
 
 
 THERMOMETRY_FIELDS = ("a_sio2", "a_tio2", "pressure_gpa")
+SHEET_LABELS = dict(zip(RICH_SHEETS, (
+    "README (metadata)", "Table S1 Methods", "Table S3 Standard data", "Table S4 QC")))
 
 
 def _reference_html(keys):
@@ -215,9 +217,9 @@ class _OutputRow(QtWidgets.QWidget):
 
 
 class _GroupCard(QtWidgets.QFrame):
-    """A group header and wrapping column choices owned by the export dialog."""
+    """A group header and wrapping choices owned by the export dialog."""
 
-    def __init__(self, group, columns):
+    def __init__(self, group, columns, *, workbook_sheets=False):
         super().__init__()
         self.setObjectName("exportGroupCard")
         theme = active_theme()
@@ -231,27 +233,30 @@ class _GroupCard(QtWidgets.QFrame):
         self.layout.setSpacing(4)
         header = QtWidgets.QHBoxLayout()
         header.setSpacing(4)
-        info = group_info(group)
+        info = None if workbook_sheets else group_info(group)
+        section = "core" if workbook_sheets else info.section
+        title = group if workbook_sheets else info.title
+        self.choice_noun = "sheets" if workbook_sheets else "columns"
         self.expand_button = None
-        if info.section == "core" or len(columns) > 12:
+        if section == "core" or len(columns) > 12:
             self.expand_button = QtWidgets.QToolButton()
             self.expand_button.setText("▸")
-            self.expand_button.setToolTip("Show columns")
-            self.expand_button.setAccessibleName(f"Show columns in {info.title}")
+            self.expand_button.setToolTip(f"Show {self.choice_noun}")
+            self.expand_button.setAccessibleName(f"Show {self.choice_noun} in {title}")
             self.expand_button.setCheckable(True)
             self.expand_button.setAutoRaise(True)
             self.expand_button.setFixedSize(18, 18)
             self.expand_button.setStyleSheet("QToolButton { border: none; padding: 0; }")
             self.expand_button.toggled.connect(self._expand)
             header.addWidget(self.expand_button)
-        self.checkbox = _GroupCheckBox(group if info.section == "core" else info.title)
+        self.checkbox = _GroupCheckBox(group if section == "core" else title)
         header.addWidget(self.checkbox, 1)
         self.count_label = _muted_label("")
         self.count_label.setWordWrap(False)
         header.addWidget(self.count_label)
         self.info_button = QtWidgets.QToolButton()
         self.info_button.setText("i")
-        self.info_button.setAccessibleName(f"About {info.title}")
+        self.info_button.setAccessibleName(f"About {title}")
         self.info_button.setFixedSize(18, 18)
         self.info_button.setStyleSheet(f"QToolButton {{ border: 1px solid {theme.input_border}; border-radius: 9px; padding: 0; }}")
         header.addWidget(self.info_button)
@@ -284,7 +289,7 @@ class _GroupCard(QtWidgets.QFrame):
     def _expand(self, expanded):
         self.body.setVisible(expanded)
         self.expand_button.setText("▾" if expanded else "▸")
-        self.expand_button.setToolTip("Hide columns" if expanded else "Show columns")
+        self.expand_button.setToolTip(f"{'Hide' if expanded else 'Show'} {self.choice_noun}")
 
 
 class ExportResultsDialog(QtWidgets.QDialog):
@@ -303,6 +308,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
         self.thermometer = THERMOMETERS.get(table.context.get("material"))
         self.numeric_fields = {}
         self.column_items = {}
+        self.sheet_items = {}
         self.group_items = {}
         self.preview_timer = QtCore.QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -328,7 +334,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
         for fmt in ("xlsx", "csv", "md", "si", "audit"):
             caption = {"si": "SI workbook", "audit": "Audit files"}.get(fmt, "." + fmt)
             check = _FormatCheckBox("SI workbook (.xlsx)" if fmt == "si" else caption, caption)
-            check.setChecked(fmt != "si")
+            check.setChecked(True)
             check.setStyleSheet(
                 f"QCheckBox {{ padding: 4px 7px; border: 1px solid {theme.input_border}; border-radius: 9px; }}"
                 f"QCheckBox:checked {{ background: {theme.accent_soft}; color: {theme.accent}; }}")
@@ -393,6 +399,23 @@ class ExportResultsDialog(QtWidgets.QDialog):
             section_layout = QtWidgets.QVBoxLayout(section_widget)
             section_layout.setContentsMargins(0, 0, 0, 0)
             section_layout.addWidget(_muted_label(title.upper()))
+            if section == "core":
+                self.sheet_card = _GroupCard("Workbook sheets", [
+                    ExportColumn(key, "Workbook sheets", SHEET_LABELS[key]) for key in RICH_SHEETS],
+                    workbook_sheets=True)
+                card = self.sheet_card
+                card.info_button.hide()
+                card.citation_row.hide()
+                card.layout.insertWidget(1, _muted_label(
+                    "Added to the .xlsx workbook; the SI workbook always has all five sheets"))
+                for key, chip in zip(RICH_SHEETS, card.chips):
+                    self.sheet_items[key] = chip
+                    name = "README" if key == "readme" else SHEET_LABELS[key]
+                    chip.setToolTip(f"{name}\nAdded to <stem>.xlsx")
+                    chip.toggled.connect(self._sheets_changed)
+                card.checkbox.checkStateChanged.connect(self._sheet_group_changed)
+                card.search_text = "workbook sheets"
+                section_layout.addWidget(card)
             grid = QtWidgets.QGridLayout()
             grid_columns = 3 if section == "core" else 2
             for column in range(grid_columns):
@@ -672,14 +695,31 @@ class ExportResultsDialog(QtWidgets.QDialog):
         popup.show()
 
     def _sync_group(self, group):
-        card = self.group_items[group]
+        self._sync_card(self.group_items[group])
+
+    def _sync_card(self, card, noun="columns"):
         count = sum(chip.isChecked() for chip in card.chips)
         state = (QtCore.Qt.CheckState.Checked if count == len(card.chips) else
                  QtCore.Qt.CheckState.PartiallyChecked if count else QtCore.Qt.CheckState.Unchecked)
         with QtCore.QSignalBlocker(card.checkbox):
             card.checkbox.setCheckState(state)
         card.count_label.setText(f"{count}/{len(card.chips)}")
-        card.count_label.setToolTip(f"{count} of {len(card.chips)} columns")
+        card.count_label.setToolTip(f"{count} of {len(card.chips)} {noun}")
+
+    def _sheets_changed(self, *_args):
+        if self._applying:
+            return
+        self._sync_card(self.sheet_card, "sheets")
+        self._update_preset_buttons()
+        self.schedule_preview()
+
+    def _sheet_group_changed(self, state):
+        if self._applying:
+            return
+        for chip in self.sheet_items.values():
+            with QtCore.QSignalBlocker(chip):
+                chip.setChecked(state != QtCore.Qt.CheckState.Unchecked)
+        self._sheets_changed()
 
     def _columns_changed(self, group):
         if self._applying:
@@ -705,6 +745,8 @@ class ExportResultsDialog(QtWidgets.QDialog):
         checked = {key for key, chip in self.column_items.items() if chip.isChecked()}
         selected = "custom"
         for name in ("publication", "everything", "minimal"):
+            if not all(chip.isChecked() for chip in self.sheet_items.values()):
+                break
             optional, excluded = export_column_preset(self.base_table, name)
             expected = {col.key for col in self.base_table.columns if col.key in self.column_items
                         and (col.key in optional if col.optional else col.key not in excluded)}
@@ -715,11 +757,22 @@ class ExportResultsDialog(QtWidgets.QDialog):
 
     def _apply_preset(self, name):
         optional, excluded = export_column_preset(self.base_table, name)
-        self._set_settings(replace(self.export_settings(), optional_columns=optional, excluded_columns=excluded))
+        self._set_settings(replace(self.export_settings(), optional_columns=optional,
+                                   excluded_columns=excluded, excluded_sheets=()))
         self.schedule_preview()
 
     def _filter_columns(self):
         query = self.filter_edit.text().strip().casefold()
+        card = self.sheet_card
+        header_match = not query or query in card.search_text
+        matches = [not query or query in (key + " " + chip.text()).casefold()
+                   for key, chip in self.sheet_items.items()]
+        sheets_visible = header_match or any(matches)
+        card.setVisible(sheets_visible)
+        for chip, match in zip(card.chips, matches):
+            chip.setVisible(header_match or match)
+        card.body.setVisible(bool(query) or card.expand_button.isChecked())
+        card.expand_button.setVisible(not query)
         for section, (section_widget, grid, groups) in self.sections.items():
             shown = []
             for group in groups:
@@ -737,7 +790,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
                 if visible:
                     shown.append(group)
             self._layout_cards(section, shown)
-            section_widget.setVisible(bool(shown))
+            section_widget.setVisible(bool(shown) or (section == "core" and sheets_visible))
 
     def choose_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export folder", self.folder_edit.text())
@@ -747,6 +800,10 @@ class ExportResultsDialog(QtWidgets.QDialog):
     def _set_settings(self, settings):
         self._applying = True
         try:
+            for key, chip in self.sheet_items.items():
+                with QtCore.QSignalBlocker(chip):
+                    chip.setChecked(key not in settings.excluded_sheets)
+            self._sync_card(self.sheet_card, "sheets")
             for col in self.base_table.columns:
                 if col.key in self.column_items:
                     chip = self.column_items[col.key]
@@ -785,7 +842,8 @@ class ExportResultsDialog(QtWidgets.QDialog):
             citation=self.base_table.settings.citation, **thermometry, rutile_calibration=self._calibration_key,
             **{key: edit.text() for key, edit in self.text_fields.items()},
             csv_full_precision=self.csv_precision_check.isChecked(),
-            optional_columns=optional, excluded_columns=excluded)
+            optional_columns=optional, excluded_columns=excluded,
+            excluded_sheets=tuple(key for key, chip in self.sheet_items.items() if not chip.isChecked()))
 
     def selected_formats(self) -> tuple[str, ...]:
         return tuple(fmt for fmt, check in self.format_checks.items() if check.isChecked())
@@ -807,6 +865,16 @@ class ExportResultsDialog(QtWidgets.QDialog):
                 item.widget().deleteLater()
         columns = self.table.visible_columns()
         self.exported_columns_label.setText(f"Columns that will be exported · {len(columns)}")
+        sheets = [key for key in RICH_SHEETS if key not in self.table.settings.excluded_sheets]
+        layout.addWidget(_muted_label(f"Workbook sheets · {len(sheets)}"))
+        row = QtWidgets.QWidget()
+        flow = FlowLayout(row)
+        for key in sheets:
+            chip = _ColumnChip(preview=True)
+            chip.setText(SHEET_LABELS[key])
+            chip.setToolTip(self.sheet_items[key].toolTip())
+            flow.addWidget(chip)
+        layout.addWidget(row)
         for group in dict.fromkeys(col.group for col in columns):
             layout.addWidget(_muted_label(group))
             row = QtWidgets.QWidget()

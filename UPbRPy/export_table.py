@@ -32,6 +32,7 @@ from .uncertainty import (
 
 if TYPE_CHECKING:
     from .pipeline import ReductionPipeline
+    from .supplement import SupplementSession
 
 
 # Sun and McDonough (1989), doi:10.1144/GSL.SP.1989.042.01.19, µg/g.
@@ -41,6 +42,7 @@ CHONDRITE_REE = dict(zip(
      .0566, .1655, .0255, .17, .0254),
 ))
 SYSTEMS = ("206Pb/238U", "207Pb/235U", "207Pb/206Pb", "208Pb/232Th")
+RICH_SHEETS = ("readme", "methods", "standards", "qc")
 _PB_MASSES = dict(zip(("204Pb", "206Pb", "207Pb", "208Pb"),
                       (203.973, 205.974, 206.976, 207.977)))
 _ELEMENT_MASSES = dict(zip(
@@ -62,6 +64,7 @@ class ExportSettings:
     rutile_calibration: str = "Kohn2020"
     optional_columns: tuple[str, ...] = ()
     excluded_columns: tuple[str, ...] = ()
+    excluded_sheets: tuple[str, ...] = ()
     csv_full_precision: bool = False
     laboratory: str = ""
     laser_system: str = ""
@@ -82,11 +85,13 @@ class ExportSettings:
             object.__setattr__(self, name, value)
         if self.rutile_calibration not in {"Kohn2020", "FW2007"}:
             raise ValueError("Unsupported rutile_calibration")
-        for name in ("optional_columns", "excluded_columns"):
+        for name in ("optional_columns", "excluded_columns", "excluded_sheets"):
             value = getattr(self, name)
             if not isinstance(value, (tuple, list)) or any(not isinstance(x, str) or not x for x in value):
-                raise ValueError(f"{name} must be a sequence of nonempty column keys")
+                raise ValueError(f"{name} must be a sequence of nonempty keys")
             object.__setattr__(self, name, tuple(dict.fromkeys(value)))
+        if set(self.excluded_sheets) - set(RICH_SHEETS):
+            raise ValueError("excluded_sheets must contain only " + ", ".join(RICH_SHEETS))
         if not isinstance(self.csv_full_precision, bool):
             raise ValueError("csv_full_precision must be a bool")
         for name in ("laboratory", "laser_system", "spot_diameter_um", "repetition_rate_hz",
@@ -96,7 +101,7 @@ class ExportSettings:
 
     def to_dict(self) -> dict:
         result = asdict(self)
-        for name in ("optional_columns", "excluded_columns"):
+        for name in ("optional_columns", "excluded_columns", "excluded_sheets"):
             result[name] = list(result[name])
         return result
 
@@ -165,7 +170,9 @@ def export_column_preset(
 
 
 def matching_column_preset(table: ExportTable, settings: ExportSettings) -> str | None:
-    """Identify a preset using order-independent column choices."""
+    """Identify a preset using column choices with all rich sheets enabled."""
+    if settings.excluded_sheets:
+        return None
     choices = set(settings.optional_columns), set(settings.excluded_columns)
     for name in ("publication", "everything", "minimal"):
         optional, excluded = export_column_preset(table, name)
@@ -1318,8 +1325,9 @@ def _excel_format(column):
             "int": "0", "temp": "0"}.get(column.kind, "General")
 
 
-def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
-    """Write full-precision publication cells, rich headings and reference summaries."""
+def write_export_xlsx(table: ExportTable, path: str | Path, *,
+                      supplement: SupplementSession | None = None) -> Path:
+    """Write publication cells and optional SI sheets around the sample Table."""
     import math
     import xlsxwriter
     from .results import publication_column_width
@@ -1328,6 +1336,18 @@ def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
     if not columns:
         raise ValueError("Select at least one populated export column")
     with xlsxwriter.Workbook(target, {"strings_to_formulas": False, "strings_to_urls": False}) as workbook:
+        if supplement is not None:
+            from .supplement import _SHEETS, SUPPLEMENT_SHEETS, supplement_info_from_settings, write_supplement_sheets
+            info = supplement_info_from_settings(table.settings)
+            enabled = tuple(key for key in RICH_SHEETS if key not in table.settings.excluded_sheets)
+            sheet_contents = dict(zip(SUPPLEMENT_SHEETS, _SHEETS))
+            contents = [sheet_contents[key] for key in enabled if key in {"readme", "methods"}]
+            contents.append(("Table", "Publication table: listed samples and reference materials with footnotes"))
+            contents.extend(sheet_contents[key] for key in enabled if key in {"standards", "qc"})
+            contents.append(("Reference materials", "Per-system reference-material weighted means against accepted dates"))
+            write_supplement_sheets(workbook, [supplement], info,
+                                    sheets=tuple(key for key in enabled if key in {"readme", "methods"}),
+                                    contents=contents)
         sheet = workbook.add_worksheet("Table")
         header = workbook.add_format(dict(bold=True, bg_color="#e9eff7", text_wrap=True, valign="top"))
         title_format = workbook.add_format(dict(bold=True, font_size=13, text_wrap=True, valign="top"))
@@ -1406,6 +1426,10 @@ def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
         sheet.fit_to_pages(1, 0)
         sheet.repeat_rows(0, 2)
         sheet.print_area(0, 0, max(table_end, row - 1), last)
+        if supplement is not None:
+            write_supplement_sheets(workbook, [supplement], info,
+                                    sheets=tuple(key for key in enabled if key in {"standards", "qc"}),
+                                    contents=contents)
         reference = workbook.add_worksheet("Reference materials")
         names = dict(sample="Material", system="System", n="n", weighted_mean="Weighted mean (Ma)",
                      weighted_mean_2e="±2s (Ma)", mswd="MSWD", probability="P(χ²)", accepted_date="Accepted (Ma)",
@@ -1449,5 +1473,5 @@ def write_export_xlsx(table: ExportTable, path: str | Path) -> Path:
     return target
 
 
-__all__ += ["format_value", "export_table_preview", "update_export_settings",
+__all__ += ["RICH_SHEETS", "format_value", "export_table_preview", "update_export_settings",
             "write_export_xlsx", "write_export_csv", "write_export_markdown"]

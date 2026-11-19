@@ -11,9 +11,13 @@ separate definitions and numbered provenance footnotes. See the
 [publication-table contract](export_table_spec.md) and
 [export data model](data-model/export-table.md) for column sources, settings
 and output files. The existing audit workbook remains available by default.
-The optional SI workbook adds methods, sample and standard tables, and QC
-across one or more sessions; it does not combine systematic uncertainties
-between sessions.
+The default `<stem>.xlsx` includes README metadata, Table S1 Methods, the
+selected Table, Table S3 Standard data, Table S4 QC and Reference materials.
+The Workbook sheets card can omit rich sheets from this file. The SI workbook
+format also starts selected and writes `<stem>_SI.xlsx` with all five SI sheets,
+including Table S2 Sample data. Both workbooks share the metadata and methods
+builder. SI workbooks can cover one or more sessions; they do not combine
+systematic uncertainties between sessions.
 
 ## Analytical uncertainty
 

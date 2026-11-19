@@ -303,7 +303,7 @@ def export_reduction_bundle(
     include_concentrations: bool = True,
     include_depth_concentrations: bool = True,
     export_settings: ExportSettings | None = None,
-    formats: Iterable[str] = ("xlsx", "csv", "md"),
+    formats: Iterable[str] = ("xlsx", "csv", "md", "si"),
     excluded_spots: Iterable[str] = (),
     file_stem: str | None = None,
     include_audit_files: bool = True,
@@ -350,14 +350,20 @@ def export_reduction_bundle(
                            ExportColumn("notes", "Analysis", "Notes"))
                 table = ExportTable(frame, columns, pd.DataFrame(), pd.DataFrame(), settings,
                     {"session_name": stem.removesuffix("_results_table"), "legacy_audit": True})
+        supplement = None
+        if "xlsx" in formats or "si" in formats:
+            notes = _table_footnotes(table) if table.context.get("legacy_audit") else build_footnotes(table, pipeline)
+            supplement = SupplementSession(table, tuple(notes))
         for fmt in formats:
             if fmt == "si":
-                notes = _table_footnotes(table) if table.context.get("legacy_audit") else build_footnotes(table, pipeline)
-                files.append(write_supplement_xlsx([SupplementSession(table, tuple(notes))],
+                files.append(write_supplement_xlsx([supplement],
                     root / (stem + "_SI.xlsx"), supplement_info_from_settings(settings)))
                 continue
             path = root / (stem + "." + fmt)
-            written = {"xlsx": write_export_xlsx, "csv": write_export_csv, "md": write_export_markdown}[fmt](table, path)
+            if fmt == "xlsx":
+                written = write_export_xlsx(table, path, supplement=supplement)
+            else:
+                written = {"csv": write_export_csv, "md": write_export_markdown}[fmt](table, path)
             files.extend(written if isinstance(written, list) else [written])
     isochron_fits = [dict(record) for record in isochron_fits]
     if isochron_fits:

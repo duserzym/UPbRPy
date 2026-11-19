@@ -32,7 +32,7 @@ def test_dialog_columns_preview_settings_and_laptop_size(app, tmp_path, monkeypa
         assert dialog.width() <= 1180 and dialog.height() <= 740
         assert dialog.minimumSizeHint().width() <= 1200 and dialog.minimumSizeHint().height() <= 740
         assert '1 analyses excluded' in dialog.exclusion_label.text()
-        assert dialog.selected_formats() == ('xlsx', 'csv', 'md')
+        assert dialog.selected_formats() == ('xlsx', 'csv', 'md', 'si')
         assert dialog.format_checks['si'].text() == 'SI workbook (.xlsx)'
         assert dialog.audit_check.isChecked()
         for col in table.columns:
@@ -158,6 +158,7 @@ def test_studio_routes_review_exclusions_and_logs_files(app, tmp_path, monkeypat
         dialog.stem_edit.setText('chosen')
         dialog.format_checks['xlsx'].setChecked(False)
         dialog.format_checks['csv'].setChecked(False)
+        dialog.format_checks['si'].setChecked(False)
         dialog.audit_check.setChecked(False)
         dialog.text_fields['laboratory'].setText('Lab')
         dialog.accept()
@@ -394,6 +395,58 @@ def test_layout_clamp_export_reachable_and_flow(app, make_dialog, monkeypatch, s
 def test_old_export_settings_fill_thermometry_defaults():
     settings = ExportSettings.from_dict({'a_sio2': .9, 'a_tio2': .8, 'laboratory': 'Legacy lab'})
     assert settings.pressure_gpa == 1. and settings.rutile_calibration == 'Kohn2020'
+
+
+@pytest.mark.parametrize('material', ['zircon', 'titanite'])
+def test_workbook_sheet_card_defaults_settings_presets_and_preview(app, make_dialog, material):
+    from UPbRPy.export_table import RICH_SHEETS
+
+    dialog = make_dialog(material)
+    card = dialog.sheet_card
+    assert card.checkbox.text() == 'Workbook sheets'
+    assert tuple(dialog.sheet_items) == RICH_SHEETS
+    assert all(chip.isChecked() for chip in dialog.sheet_items.values())
+    assert not set(dialog.sheet_items) & set(dialog.column_items)
+    assert card.checkbox.checkState() == QtCore.Qt.CheckState.Checked
+    assert dialog.format_checks['si'].isChecked()
+    assert all('<stem>.xlsx' in chip.toolTip() for chip in dialog.sheet_items.values())
+    core = dialog.sections['core'][0].layout()
+    assert core.itemAt(1).widget() is card
+    assert any(label.text() == 'Added to the .xlsx workbook; the SI workbook always has all five sheets'
+               for label in card.findChildren(QtWidgets.QLabel))
+
+    def preview_sheets():
+        return [chip.text() for chip in dialog.exported_columns_page.findChildren(QtWidgets.QToolButton)
+                if not chip.isHidden() and chip.text() in {item.text() for item in dialog.sheet_items.values()}]
+
+    assert 'README (metadata)' in preview_sheets()
+    dialog.sheet_items['readme'].click()
+    assert dialog.export_settings().excluded_sheets == ('readme',)
+    assert dialog.preset_buttons['custom'].isChecked()
+    assert card.checkbox.checkState() == QtCore.Qt.CheckState.PartiallyChecked
+    settle(app)
+    assert 'README (metadata)' not in preview_sheets()
+    assert any(label.text() == 'Workbook sheets · 3'
+               for label in dialog.exported_columns_page.findChildren(QtWidgets.QLabel))
+    for preset in ('publication', 'everything', 'minimal'):
+        dialog.preset_buttons[preset].click()
+        assert dialog.export_settings().excluded_sheets == ()
+        dialog.sheet_items['readme'].click()
+    dialog._set_settings(replace(dialog.export_settings(), excluded_sheets=('qc',)))
+    assert dialog.sheet_items['readme'].isChecked() and not dialog.sheet_items['qc'].isChecked()
+    card.checkbox.click()  # partial -> all, then none
+    assert dialog.export_settings().excluded_sheets == ()
+    card.checkbox.click()
+    assert dialog.export_settings().excluded_sheets == RICH_SHEETS
+    dialog.filter_edit.setText('metadata')
+    settle(app)
+    assert not card.isHidden() and not card.body.isHidden()
+    assert not dialog.sections['core'][0].isHidden()
+    dialog.filter_edit.clear()
+    settle(app)
+    assert card.body.isHidden()
+    card.expand_button.click()
+    assert not card.body.isHidden()
 
 
 @pytest.mark.parametrize('height', [720, 760])

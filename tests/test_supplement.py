@@ -265,8 +265,10 @@ def test_gui_si_choice_and_citation_preservation(tmp_path):
     session = supplement_session(synthetic_pipeline(), ExportSettings(citation="Study citation"))
     dialog = ExportResultsDialog(session.table, folder=tmp_path)
     try:
-        assert dialog.selected_formats() == ("xlsx", "csv", "md")
+        assert dialog.selected_formats() == ("xlsx", "csv", "md", "si")
         assert dialog.format_checks["si"].text() == "SI workbook (.xlsx)"
+        dialog.format_checks["si"].setChecked(False)
+        assert dialog.selected_formats() == ("xlsx", "csv", "md")
         dialog.format_checks["si"].setChecked(True)
         assert dialog.selected_formats() == ("xlsx", "csv", "md", "si")
         assert dialog.export_settings().citation == "Study citation"

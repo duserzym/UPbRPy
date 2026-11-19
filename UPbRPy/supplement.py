@@ -37,6 +37,7 @@ _SHEETS = (
     ("Table S3 Standard data", "All reference-material and concentration-glass analyses"),
     ("Table S4 QC", "Per-session analytical weighted means against accepted dates"),
 )
+SUPPLEMENT_SHEETS = ("readme", "methods", "samples", "standards", "qc")
 
 
 def _strings(obj, *names):
@@ -575,7 +576,7 @@ class _Workbook:
             sheet.write_number(row, col, float(value), style or self.style(valign="top"))
 
 
-def _write_readme(book, sessions, info, samples, rows, omitted, title):
+def _write_readme(book, sessions, info, samples, rows, omitted, title, contents):
     sheet = book.sheet("README", title, 5, portrait=True)
     sheet.set_column(0, 0, 25, book.body)
     sheet.set_column(1, 1, 28, book.body)
@@ -600,7 +601,7 @@ def _write_readme(book, sessions, info, samples, rows, omitted, title):
     sheet.write_string(row, 0, "Sheet name", book.header)
     book.merge(sheet, row, 1, 5, "What it holds", book.header)
     row += 1
-    for name, description in _SHEETS:
+    for name, description in contents:
         sheet.write_string(row, 0, name, book.body)
         book.merge(sheet, row, 1, 5, description)
         sheet.set_row(row, 30)
@@ -846,14 +847,23 @@ def _write_qc(book, sessions, references):
     sheet.print_area(0, 0, row, len(headers) - 1)
 
 
-def write_supplement_xlsx(sessions: Sequence[SupplementSession], path,
-                          info: SupplementInfo | None = None) -> Path:
-    """Write a stand-alone SI workbook for one or more reduced sessions."""
-    import xlsxwriter
+def write_supplement_sheets(workbook, sessions: Sequence[SupplementSession],
+                            info: SupplementInfo | None = None, *,
+                            sheets=SUPPLEMENT_SHEETS,
+                            contents: Sequence[tuple[str, str]] | None = None) -> None:
+    """Write selected SI sheets in canonical order into an open workbook.
+
+    Repeated calls for the same sessions and info reuse the workbook's styles
+    and instrument-login guard, allowing other sheets between SI sections.
+    Contents pairs set the README sheet list; None keeps the SI sheet list.
+    """
     if not isinstance(sessions, Sequence) or not sessions or any(not isinstance(s, SupplementSession) for s in sessions):
         raise ValueError("sessions must be a nonempty sequence of SupplementSession")
     if info is not None and not isinstance(info, SupplementInfo):
         raise ValueError("info must be SupplementInfo or None")
+    sheets = tuple(sheets)
+    if set(sheets) - set(SUPPLEMENT_SHEETS):
+        raise ValueError("sheets must contain only " + ", ".join(SUPPLEMENT_SHEETS))
     info = info or SupplementInfo()
     # ISO instrument-clock timestamps sort without imposing a timezone. Keep
     # caller order for sessions without acquisition timing and for ties.
@@ -862,20 +872,39 @@ def write_supplement_xlsx(sessions: Sequence[SupplementSession], path,
     materials = ", ".join(dict.fromkeys(str(s.table.context.get("material", "material")) for s in sessions))
     title = info.title or f"Supplementary information: {materials} LA-ICP-MS U-Pb dates and trace-element concentrations"
     references = [_reference_rows(s) for s in sessions]
-    target = _export_path(path, ".xlsx")
-    with xlsxwriter.Workbook(target, {"strings_to_formulas": False, "strings_to_urls": False}) as workbook:
+    book = getattr(workbook, "_upbrpy_supplement_book", None)
+    if book is None:
         # Set the default as well as explicit formats, including blank cells.
         workbook.formats[0].set_font_name("Calibri")
         workbook.formats[0].set_font_size(10)
         book = _Workbook(workbook, info, _logins(sessions))
-        _write_readme(book, sessions, info, samples, rows, omitted, title)
-        _write_methods(book, sessions, info, references)
-        _write_data(book, sessions, samples, rows)
-        _write_data(book, sessions, samples, rows, standards=True)
-        _write_qc(book, sessions, references)
+        workbook._upbrpy_supplement_book = book
+    for key in SUPPLEMENT_SHEETS:
+        if key not in sheets:
+            continue
+        if key == "readme":
+            _write_readme(book, sessions, info, samples, rows, omitted, title,
+                          _SHEETS if contents is None else contents)
+        elif key == "methods":
+            _write_methods(book, sessions, info, references)
+        elif key == "samples":
+            _write_data(book, sessions, samples, rows)
+        elif key == "standards":
+            _write_data(book, sessions, samples, rows, standards=True)
+        else:
+            _write_qc(book, sessions, references)
+
+
+def write_supplement_xlsx(sessions: Sequence[SupplementSession], path,
+                          info: SupplementInfo | None = None) -> Path:
+    """Write a stand-alone SI workbook for one or more reduced sessions."""
+    import xlsxwriter
+    target = _export_path(path, ".xlsx")
+    with xlsxwriter.Workbook(target, {"strings_to_formulas": False, "strings_to_urls": False}) as workbook:
+        write_supplement_sheets(workbook, sessions, info)
     return target
 
 
 __all__ = ["MethodsEntry", "SampleEntry", "SupplementInfo", "SupplementSession",
            "session_display_name", "supplement_session", "supplement_info_from_settings",
-           "write_supplement_xlsx", "SECTION_ORDER"]
+           "write_supplement_xlsx", "write_supplement_sheets", "SUPPLEMENT_SHEETS", "SECTION_ORDER"]

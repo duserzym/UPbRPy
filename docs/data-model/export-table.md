@@ -202,6 +202,7 @@ in the `.upbr` project. Old projects without that key use defaults.
 | rutile_calibration | Kohn2020 | Kohn2020 or FW2007; Kohn converts pressure to bar internally |
 | optional_columns | Empty | Enabled optional column keys |
 | excluded_columns | Empty | Disabled default column keys |
+| excluded_sheets | Empty | Disabled rich sheets in the default XLSX; subset of readme, methods, standards, qc; SI always has all five sheets |
 | csv_full_precision | False | Write full numeric precision in CSV instead of displayed values |
 | laboratory | Empty | Laboratory name |
 | laser_system | Empty | Laser system |
@@ -214,13 +215,24 @@ in the `.upbr` project. Old projects without that key use defaults.
 
 ## Files written
 
-`write_supplement_xlsx(sessions, path, info=None) -> Path` writes a stand-alone
-SI workbook. The optional bundle format `si` writes `<stem>_SI.xlsx`; the
-default bundle formats remain XLSX, CSV and Markdown. See the
+`write_supplement_sheets(workbook, sessions, info=None, *, sheets=SUPPLEMENT_SHEETS) -> None`
+writes selected sheets into an open xlsxwriter workbook in canonical order.
+`SUPPLEMENT_SHEETS = ("readme", "methods", "samples", "standards", "qc")`
+maps to README, Table S1 Methods, Table S2 Sample data, Table S3 Standard data
+and Table S4 QC. Repeated calls reuse the workbook's formatting and login guard.
+`write_supplement_xlsx(sessions, path, info=None) -> Path` uses this builder for
+all five sheets. The default bundle format `si` writes `<stem>_SI.xlsx`. See the
 [SI workbook contract](../export_table_spec.md#supplementary-information-workbook).
 
-`write_export_xlsx(table, path) -> Path` writes a `Table` sheet and a
-`Reference materials` sheet. The latter contains long summaries for all four
+`write_export_xlsx(table, path, *, supplement=None) -> Path` writes a `Table`
+sheet and a `Reference materials` sheet. With a `SupplementSession`, the shared
+builder adds README and Table S1 Methods before Table, and Table S3 Standard data
+and Table S4 QC after it; Reference materials stays last. Table plays the role
+of S2 and retains its name. `RICH_SHEETS = ("readme", "methods", "standards", "qc")`
+defines the optional rich sheets; `settings.excluded_sheets` omits only those
+sheets from this workbook. Old settings dictionaries without this key enable
+all rich sheets. Without `supplement`, the writer keeps its two-sheet output.
+Reference materials contains long summaries for all four
 systems and the wide 206/238 + 207/206 view. Values retain full precision;
 formats control display. The Table sheet has rich isotope/footnote superscripts,
 merged groups and sample summaries, a reference-material block, frozen headings
@@ -249,17 +261,22 @@ returns optional and excluded column keys applicable to the table's material.
 `minimal` keeps identifiers and notes, U, Th, Th/U, isotope ratios, dates and
 preferred dates, with no optional columns. Unknown names raise `ValueError`.
 `matching_column_preset(table, settings) -> str | None` compares column choices
-without regard to order. Existing settings dictionaries without pressure or
+without regard to order and returns `None` if any rich sheet is excluded.
+Studio's Publication, Everything and Minimal presets enable all rich sheets.
+Existing settings dictionaries without pressure or
 rutile calibration use the defaults above.
 
 ## Reduction bundle and manifest
 
 `export_reduction_bundle(pipeline, output_directory, *, export_settings=None,
-formats=("xlsx", "csv", "md"), excluded_spots=(), ...)` adds
-`<session>_results_table.xlsx`, `.csv`, `.md` and the CSV companions to the
+formats=("xlsx", "csv", "md", "si"), excluded_spots=(), ...)` adds
+`<session>_results_table.xlsx`, `<session>_results_table_SI.xlsx`, `.csv`, `.md`
+and the CSV companions to the
 existing audit files. `file_stem` overrides the default basename;
 `include_audit_files=False` writes only the chosen table formats. An already
 prepared `table` can be supplied by Studio to avoid rebuilding the quantities.
+One `SupplementSession` supplies both XLSX writers; the SI workbook always
+contains all five sheets regardless of `excluded_sheets`.
 The existing `UPbRPy_publication_results.xlsx` remains the audit workbook,
 with its companion CSVs, selection/spot/depth files and replay notebook.
 
