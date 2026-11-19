@@ -11,6 +11,7 @@ from .io import (
     find_signal_end,
     select_baseline_peak,
     select_signal_regions,
+    autopick_signal_regions,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "find_signal_end",
     "select_baseline_peak",
     "select_signal_regions",
+    "autopick_signal_regions",
 ]

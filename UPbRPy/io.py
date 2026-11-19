@@ -7,7 +7,7 @@ downstream ``start <= Time < end`` slicing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping
 
 from pathlib import Path
@@ -880,6 +880,34 @@ def select_signal_regions(
     )
 
 
+def autopick_signal_regions(data, **options) -> SelectionResult:
+    """Pick new windows with one measured sweep outside each plateau edge.
+
+    The detector's statistical boundaries and diagnostics remain available via
+    ``select_signal_regions``. Use this entry point for import and re-picking;
+    never apply it to saved or manually reviewed selections.
+    """
+    selection = select_signal_regions(data, **options)
+    # Plateau [p, q) excludes sweep q; signal [s, e] includes sweep e.
+    # A grab gap of one sweep AFTER the displayed exclusive boundary q means
+    # e >= q + 1 (not q or q - 1). Before p means s <= p - 1. Both are local
+    # acquisition indices, clamped to [0, n - 1], never the following spot.
+    signal_end = min(len(data) - 1, max(selection.signal_end, selection.plateau_end + 1))
+    washout_start = selection.washout_start
+    if washout_start is not None and washout_start <= signal_end:
+        washout_start = signal_end + 1 if signal_end + 1 < len(data) else None
+    # Never pull the signal start back into the baseline window [b0, b1):
+    # when the plateau starts right after the baseline, keep the detected start.
+    signal_start = max(min(selection.signal_start, selection.baseline_end),
+                       min(selection.signal_start, selection.plateau_start - 1), 0)
+    return replace(
+        selection,
+        signal_start_index=signal_start,
+        signal_end=signal_end,
+        washout_start=washout_start,
+    )
+
+
 def select_baseline_peak(
     data,
     baseline_sweep_n: int = 10,
@@ -1403,7 +1431,8 @@ def auto_select_baseline_peak(experiment,
     selection_options : mapping, optional
         Extra detector parameters, such as ``sigma_threshold``.
     signal_duration_limit_seconds : float, optional
-        Maximum retained elapsed time after the detected signal start.
+        Nominal on-peak duration after detected signal start. Signal handles
+        may extend one sweep beyond the resulting plateau boundary.
 
     Returns
     -------
@@ -1454,7 +1483,7 @@ def auto_select_baseline_peak(experiment,
         selection_errors = []
         for candidate_method in attempted_methods:
             try:
-                selection = select_signal_regions(
+                selection = autopick_signal_regions(
                     values,
                     time=spot_data['Time'].to_numpy(dtype=float),
                     method=candidate_method,
@@ -1568,6 +1597,7 @@ __all__ = [
     'selection_method_label',
     'select_baseline_peak',
     'select_signal_regions',
+    'autopick_signal_regions',
     'read_experiment_data',
     'experiment_from_session',
     'sample_from_label',

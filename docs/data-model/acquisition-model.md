@@ -250,3 +250,13 @@ window, primary standard, smoothing, warnings, and per-channel factors,
 one-standard-error estimates, intercepts, point/acquisition counts, relative
 difference from Qtegra and acquisition labels; drift adds times and slope
 arrays. Nonfinite numeric fit diagnostics serialize as `None`.
+
+New import picks and re-picks use `UPbRPy.io.autopick_signal_regions(data,
+**options)`. Plateau indices `[p, q)` have an exclusive end; the signal end
+`e` is an inclusive measured sweep. Automatic picks retain the detector's
+plateau and expand the signal to `s = max(0, min(detected_s, p - 1))` and
+`e = min(n - 1, max(detected_e, q + 1))`, where `n` is this acquisition's
+sweep count. Thus the visible end handles have one sweep of separation when
+available, including after a nominal duration cap. The statistical detector
+`select_signal_regions` remains available with its original boundaries and
+diagnostics. Saved and restored windows are used exactly as recorded.

@@ -72,6 +72,7 @@ from GUI.services import (
     unlocked_workflow_rows,
 )
 from GUI.state import ReductionSession
+from GUI.selection_windows import EDGE_NAMES, EDGE_LABELS, constrain_window_edit
 from GUI.spot_edits import SpotEditing, SpotEditState
 from GUI.change_guard import ChangeGuard, confirm_change, copy_session, sync_change_controls
 from GUI.wheel_guard import install_wheel_guard
@@ -101,6 +102,7 @@ from GUI.widgets import (
     SpotTree,
     StyledComboBox,
     TracePlotWidget,
+    SweepNumberSpinBox,
     WrappingButton,
     _WorkflowRailDelegate,
     SegmentButton,
@@ -774,7 +776,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.edit_plateau_action = add(
             "Edit Plateau Window", ["P"], lambda: self.set_active_edit_window("plateau"),
             "Make the plateau the window that the nudge keys move.")
-        for action in (self.edit_baseline_action, self.edit_plateau_action):
+        self.edit_signal_action = add(
+            "Edit Signal Window", [], lambda: self.set_active_edit_window("signal"),
+            "Make the signal boundaries the edges that the nudge keys move.")
+        for action in (self.edit_baseline_action, self.edit_plateau_action, self.edit_signal_action):
             action.setCheckable(True)
         self.edit_plateau_action.setChecked(True)
         add("Move Window Start Earlier", ["Alt+Left"], lambda: self.nudge_selection_edge("start", -1),
@@ -975,6 +980,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._active_edit_window = region_name
         self.edit_baseline_action.setChecked(region_name == "baseline")
         self.edit_plateau_action.setChecked(region_name == "plateau")
+        self.edit_signal_action.setChecked(region_name == "signal")
         start = self._shortcut_text(["Alt+Left"]) + " / " + self._shortcut_text(["Alt+Right"])
         end = self._shortcut_text(["Alt+Shift+Left"]) + " / " + self._shortcut_text(["Alt+Shift+Right"])
         self.statusBar().showMessage(
@@ -1001,10 +1007,61 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         index = min(max(index + step, 0), times.size - 1)
         moved = list(bounds)
         moved[position] = float(times[index])
-        if moved[0] >= moved[1] or tuple(moved) == tuple(bounds):
+        if name in {"plateau", "signal"}:
+            self._commit_sweep_edge(name + "_" + edge, index + 1)
+        elif moved[0] < moved[1] and tuple(moved) != tuple(bounds):
+            self.on_plot_region_changed(name, (moved[0], moved[1]))
+            self.refresh_view()
+
+    def _spot_sweep_times(self):
+        spot = self.current_spot_name()
+        cached = getattr(self, "_sweep_times_cache", None)
+        if cached is None or cached[0] is not self.session.total_data or cached[1] != spot:
+            times = get_spot_data(self.session, spot)["Time"].to_numpy(dtype=float) if spot else np.array([])
+            times = np.sort(times[np.isfinite(times)])
+            self._sweep_times_cache = (self.session.total_data, spot, times)
+        return self._sweep_times_cache[2]
+
+    def _sync_sweep_fields(self, regions=None, times=None):
+        if not hasattr(self, "sweep_fields"):
             return
-        self.on_plot_region_changed(name, (moved[0], moved[1]))
-        self.refresh_view()
+        self.sweep_controls.setVisible(self.session.loaded and bool(self.current_spot_name()))
+        enabled = (self.session.loaded and bool(self.current_spot_name())
+                   and self._workflow_step_allows_region_edits() and self._active_worker is None)
+        if times is None:
+            times = self._spot_sweep_times() if self.session.loaded else np.array([])
+        if regions is None:
+            regions = self._selection_regions(self.current_spot_name()) if self.session.loaded else {}
+        for edge, field in self.sweep_fields.items():
+            name, side = edge.rsplit("_", 1)
+            bounds = regions.get(name)
+            field.setEnabled(bool(enabled and bounds and len(times)))
+            with QtCore.QSignalBlocker(field):
+                field.setRange(1, max(1, len(times)))
+            if bounds and len(times):
+                value = bounds[0 if side == "start" else 1]
+                field.show_sweep(int(np.argmin(np.abs(times - value))) + 1)
+                field.setToolTip(f"{value:.9g} s · sweeps are numbered from 1" +
+                                 ("; end is an exclusive boundary" if edge == "plateau_end" else ""))
+
+    def _commit_sweep_edge(self, edge, sweep):
+        if not self._workflow_step_allows_region_edits() or self._active_worker is not None:
+            self._sync_sweep_fields()
+            return
+        spot = self.current_spot_name()
+        times = self._spot_sweep_times()
+        if not spot or not len(times):
+            return
+        # Finish a preceding operation before snapshotting this compound edit.
+        self.flush_selection_edits()
+        before = self._selection_regions(spot)
+        updated = constrain_window_edit(times, before, edge, times[min(max(sweep - 1, 0), len(times) - 1)])
+        changes = {name: updated[name] for name in ("signal", "plateau") if updated[name] != before[name]}
+        if changes:
+            self.pending_region_updates[spot] = changes
+            self.flush_selection_edits()
+            self.refresh_view()
+        self._sync_sweep_fields()
 
     def toggle_current_spot_excluded(self) -> None:
         """Exclude the current spot from calculations, or include it again."""
@@ -2371,10 +2428,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.on_peak_duration_spin.setSuffix(" s")
         self.on_peak_duration_spin.setSpecialValueText("Auto")
         self.on_peak_duration_spin.setToolTip(
-            "Nominal on-peak (laser-on) duration. When set, the plateau and "
-            "signal end no later than the detected signal start plus this "
-            "duration, so the pick cannot run into the washout; a shorter "
-            "detected signal is kept. Auto uses the detected washout. Applies "
+            "Nominal on-peak (laser-on) duration. When set, the on-peak "
+            "end is no later than the detected signal start plus this "
+            "duration. Signal edges leave a one-sweep grab gap where "
+            "the acquisition has room. Auto uses the detected washout. Applies "
             "at the next re-pick."
         )
         self.on_peak_duration_spin.valueChanged.connect(self.on_on_peak_duration_changed)
@@ -2928,6 +2985,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.trace_plot = TracePlotWidget()
         self.trace_plot.set_sigma_level(self.sigma_level)
         self.trace_plot.regionChanged.connect(self.on_plot_region_changed)
+        self.trace_plot.windowEditStarted.connect(self.flush_selection_edits)
+        self.trace_plot.windowsChanging.connect(
+            lambda regions: self._sync_sweep_fields(regions, self.trace_plot._selection_times))
         self.trace_plot.xWindowChanged.connect(self.on_trace_x_window_changed)
         self._overview_y_fit_timer = QtCore.QTimer(self)
         self._overview_y_fit_timer.setSingleShot(True)
@@ -3486,6 +3546,30 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         # participate in layout or consume visual space.
         browse_layout.addWidget(self.channel_list, 0)
         self.channel_list.setVisible(False)  # hidden; isotope_grid is the primary UI
+
+        self.sweep_controls = QtWidgets.QWidget()
+        self.sweep_controls.hide()
+        window_controls = QtWidgets.QGridLayout(self.sweep_controls)
+        window_controls.setContentsMargins(0, 0, 0, 0)
+        window_controls.setSpacing(3)
+        for column, text in ((1, "Begin sweep"), (2, "End sweep")):
+            caption = QtWidgets.QLabel(text)
+            caption.setStyleSheet("font-size: 10px;")
+            window_controls.addWidget(caption, 0, column)
+        self.sweep_fields = {}
+        for row, (name, title) in enumerate((("signal", "Signal"), ("plateau", "On-peak")), 1):
+            window_controls.addWidget(QtWidgets.QLabel(title), row, 0)
+            for column, side in enumerate(("start", "end"), 1):
+                edge = name + "_" + side
+                label = EDGE_LABELS[EDGE_NAMES.index(edge)]
+                field = SweepNumberSpinBox()
+                field.setObjectName(edge + "_sweep")
+                field.setAccessibleName(label + " sweep")
+                field.setEnabled(False)
+                field.sweepCommitted.connect(lambda value, name=edge: self._commit_sweep_edge(name, value))
+                window_controls.addWidget(field, row, column)
+                self.sweep_fields[edge] = field
+        browse_layout.addWidget(self.sweep_controls)
 
         color_controls = QtWidgets.QHBoxLayout()
         color_controls.setContentsMargins(0, 0, 0, 0)
@@ -7263,14 +7347,14 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             return
         edits = self.pending_region_updates.setdefault(spot_name, {})
         edits[region_name] = tuple(bounds)
-        # The plot can extend its signal edges locally to contain a dragged
-        # plateau. Capture those coupled bounds at drag finish as well.
-        if region_name == "plateau":
+        # Capture every pushed edge in the same pending operation. Direct
+        # service proposals still use their existing validation path.
+        if region_name in {"plateau", "signal"}:
             plotted = self.trace_plot.current_regions()
-            if plotted.get("plateau") == tuple(bounds) and plotted.get("signal") is not None:
-                signal = plotted["signal"]
-                if signal != self._selection_regions(spot_name)["signal"]:
-                    edits["signal"] = signal
+            if plotted.get(region_name) == tuple(bounds):
+                other = "signal" if region_name == "plateau" else "plateau"
+                if plotted.get(other) is not None and plotted[other] != self._selection_regions(spot_name)[other]:
+                    edits[other] = plotted[other]
         self._selection_edit_timer.start(self.selection_edit_debounce_ms)
         self._selection_recompute_timer.stop()
         self._selection_autosave_timer.stop()
@@ -8113,6 +8197,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                 self.channel_colors,
                 regions,
                 editable_regions=editable_regions,
+                selection_frame=baseline_subtracted[baseline_subtracted["spot_name"].eq(selected_spot)],
                 y_label="Baseline-subtracted cps",
                 stats_channel=self.current_stats_channel(),
                 region_colors=self.selection_colors,
@@ -8355,6 +8440,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if getattr(self, "_installing_project", False):
             return
         self._sync_selection_history_actions()
+        self._sync_sweep_fields()
         self.update_project_window_title()
         self._sync_session_actions()
         self._sync_workflow_step_locks()

@@ -24,7 +24,7 @@ from GUI.workflows import (
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.export_table import ExportSettings, build_export_table
-from UPbRPy.io import read_experiment_data, resolve_session_manifest, select_signal_regions
+from UPbRPy.io import read_experiment_data, resolve_session_manifest, autopick_signal_regions
 from UPbRPy.qtegra import QtegraSession, open_qtegra
 from UPbRPy.spot_edits import restore_spot_edits, spot_edit_metadata
 from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
@@ -1202,7 +1202,7 @@ def autopick_selection_regions(
     duration_limit = session.import_settings.get(
         "signal_duration_limit_seconds", option_duration_limit
     )
-    selection = select_signal_regions(
+    selection = autopick_signal_regions(
         spot_data[selection_channel].to_numpy(dtype=float),
         time=spot_data["Time"].to_numpy(dtype=float),
         method=str(session.import_settings.get("selection_method", "threshold")),

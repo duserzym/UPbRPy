@@ -21,6 +21,7 @@ from pyqtgraph.graphicsItems.LegendItem import ItemSample
 
 from GUI.services import CHANNEL_SECTIONS, _parse_channel_name, current_standard_archive
 from GUI.state import ReductionSession
+from GUI.selection_windows import EDGE_NAMES, EDGE_LABELS, constrain_window_edit
 from GUI.legend_series import LegendSeries
 from GUI.review_fits import ReviewFitPanel
 from GUI.theme import NeumorphicFrame, ThemeSpec, active_theme, theme_color
@@ -8160,8 +8161,48 @@ class _TraceSeriesItem(pg.PlotDataItem):
         self.scatter.sigHovered.connect(self.sigPointsHovered)
 
 
+class SweepNumberSpinBox(QtWidgets.QSpinBox):
+    """Commit typed sweeps on Enter/Tab, step immediately, and revert on Esc."""
+
+    sweepCommitted = QtCore.Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self._saved_sweep = 1
+        self.setKeyboardTracking(False)
+        self.setStyleSheet("QSpinBox {padding: 2px 3px; padding-right: 20px; min-height: 18px;}"
+                           "QSpinBox::up-button, QSpinBox::down-button {width: 16px;}"
+                           "QSpinBox::up-arrow, QSpinBox::down-arrow {width: 9px; height: 9px;}")
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                           QtWidgets.QSizePolicy.Policy.Fixed)
+        self.editingFinished.connect(self._commit_sweep)
+
+    def show_sweep(self, value):
+        with QtCore.QSignalBlocker(self):
+            self.setValue(value)
+        self._saved_sweep = value
+
+    def _commit_sweep(self):
+        if self.value() != self._saved_sweep:
+            self.sweepCommitted.emit(self.value())
+
+    def stepBy(self, steps):
+        super().stepBy(steps)
+        self._commit_sweep()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.show_sweep(self._saved_sweep)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class TracePlotWidget(RoundedPlotWidget):
     regionChanged = QtCore.Signal(str, tuple)
+    windowsChanging = QtCore.Signal(dict)
+    windowEditStarted = QtCore.Signal()
     xWindowChanged = QtCore.Signal(tuple)
 
     def __init__(self) -> None:
@@ -8192,6 +8233,13 @@ class TracePlotWidget(RoundedPlotWidget):
         self._suspend_x_window_signal = False
         self._navigation_active = False
         self._snap_guard = False
+        self._last_window_regions = {}
+        self._drag_edge = None
+        self._drag_pens = {}
+        self._window_frame_timer = QtCore.QTimer(self)
+        self._window_frame_timer.setSingleShot(True)
+        self._window_frame_timer.setInterval(16)
+        self._window_frame_timer.timeout.connect(self._draw_window_frame)
         self._overlay_label_timer = QtCore.QTimer(self)
         self._overlay_label_timer.setSingleShot(True)
         self._overlay_label_timer.setInterval(0)
@@ -8441,6 +8489,12 @@ class TracePlotWidget(RoundedPlotWidget):
         bottom_axis.setHeight(44 if narrow else 54)
         self.plot_item.showAxis("bottom")
 
+    def closeEvent(self, event):
+        self._window_frame_timer.stop()
+        self._overlay_label_timer.stop()
+        self._measurement_refresh_timer.stop()
+        super().closeEvent(event)
+
     def _reset_items(self) -> None:
         self._legend_series.reset()
         legend = self.plot_item.legend
@@ -8449,7 +8503,11 @@ class TracePlotWidget(RoundedPlotWidget):
                 self.plot_item.layout.removeItem(legend)
             legend.scene().removeItem(legend)
             self.plot_item.legend = None
+        self._window_frame_timer.stop()
+        self._finish_window_feedback()
         self.plot_item.clear()
+        self._drag_readout = None
+        self._last_window_regions = {}
         self._series_items = {}
         self._region_overlays = {}
         self._signal_boundaries = {}
@@ -8567,26 +8625,15 @@ class TracePlotWidget(RoundedPlotWidget):
             self._add_region("plateau", regions["plateau"], colors["plateau"], 52, movable=editable_regions, frame=active_selection_frame, stats_channel=region_channel, plateau_filter_method=plateau_filter_method)
         signal_region = regions.get("signal")
         if signal_region:
-            plateau_region = regions.get("plateau")
-            minimum_time = float(np.nanmin(x_values))
-            maximum_time = float(np.nanmax(x_values))
-            start_maximum = (
-                float(plateau_region[0])
-                if plateau_region
-                else float(signal_region[1])
-            )
-            end_minimum = (
-                float(plateau_region[1])
-                if plateau_region
-                else float(signal_region[0])
-            )
+            minimum_time = float(np.nanmin(self._selection_times))
+            maximum_time = float(np.nanmax(self._selection_times))
             self._add_signal_boundary(
                 "signal_start",
                 float(signal_region[0]),
                 "#00e676",
                 "signal start",
                 movable=editable_regions,
-                bounds=(minimum_time, start_maximum),
+                bounds=(minimum_time, maximum_time),
             )
             self._add_signal_boundary(
                 "signal_end",
@@ -8594,9 +8641,10 @@ class TracePlotWidget(RoundedPlotWidget):
                 "#ff8c1a",
                 "signal end",
                 movable=editable_regions,
-                bounds=(end_minimum, maximum_time),
+                bounds=(minimum_time, maximum_time),
             )
 
+        self._last_window_regions = self.current_regions()
         self._link_trace_series()
         self.setXRange(float(np.min(x_values)), float(np.max(x_values)), padding=0.01)
         if y_min is not None and y_max is not None:
@@ -8881,6 +8929,7 @@ class TracePlotWidget(RoundedPlotWidget):
         region = pg.LinearRegionItem(
             values=sorted(bounds),
             movable=movable,
+            swapMode=None if name == "plateau" else "sort",
             # The statistical FillBetweenItem below is the visible selection
             # box.  Keeping the region brush transparent avoids painting a
             # full-height vertical strip through unrelated channels.
@@ -8903,6 +8952,9 @@ class TracePlotWidget(RoundedPlotWidget):
         for line in region.lines:
             line.setPen(edge_pen)
             line.setHoverPen(hover_pen)
+            # InfiniteLine's hit rectangle adds marker radius + pen/2 + 1 px.
+            # Reserve five pixels even without a marker: about 8 px to grab.
+            line._maxMarkerSize = 5
             line.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         region.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         region.setZValue(6)
@@ -8971,7 +9023,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._update_region_overlay(name)
 
         if movable:
-            region.sigRegionChanged.connect(lambda _item, region_name=name: self._update_region_overlay(region_name, emit_live=True))
+            region.sigRegionChanged.connect(lambda _item, region_name=name: self._on_region_position_changed(region_name))
             region.sigRegionChangeFinished.connect(lambda _item, region_name=name: self._emit_region_change(region_name))
 
     def _add_signal_boundary(
@@ -8984,7 +9036,7 @@ class TracePlotWidget(RoundedPlotWidget):
         movable: bool,
         bounds: tuple[float, float],
     ) -> None:
-        """Add a draggable signal edge constrained around the plateau."""
+        """Add a draggable signal edge within the active acquisition."""
         line = pg.InfiniteLine(
             pos=value,
             angle=90,
@@ -8992,6 +9044,8 @@ class TracePlotWidget(RoundedPlotWidget):
             pen=pg.mkPen(color, width=2.6),
             hoverPen=pg.mkPen(color, width=4.0),
         )
+        line._maxMarkerSize = 5
+        line.setCursor(QtCore.Qt.CursorShape.SizeHorCursor)
         line.label = _PillLineLabel(line, text=label, position=0.93, color=self._theme.axis_text, movable=movable)
         line.label.textItem.document().setDocumentMargin(6)
         line.label.position_callback = self._position_signal_labels
@@ -9032,23 +9086,127 @@ class TracePlotWidget(RoundedPlotWidget):
         return float(finite_times[np.argmin(np.abs(finite_times - value))])
 
     def _on_signal_position_changed(self, boundary_name: str) -> None:
-        """Snap a moving signal edge to a sweep and update its point marker."""
         if self._snap_guard:
             return
         line = self._signal_boundaries.get(boundary_name)
-        if line is None:
+        if line is not None:
+            self._move_window(boundary_name, float(line.value()))
+
+    def _on_region_position_changed(self, region_name):
+        if self._snap_guard:
             return
-        snapped = self._nearest_measurement_time(float(line.value()))
-        if not np.isclose(snapped, float(line.value())):
-            self._snap_guard = True
-            try:
-                line.setValue(snapped)
-            finally:
-                self._snap_guard = False
-        self._update_signal_marker(boundary_name)
-        # The final snapped value is emitted by sigPositionChangeFinished.
-        # Keeping mouse-move updates local avoids repeatedly rebuilding the
-        # workflow status while the handle is still moving.
+        region = self._region_overlays[region_name]["region"]
+        bounds = tuple(float(v) for v in region.getRegion())
+        if region_name == "plateau" and self._last_window_regions.get("plateau"):
+            previous = self._last_window_regions["plateau"]
+            moving = [i for i, line in enumerate(region.lines) if line.moving]
+            if region.moving or (not moving and all(a != b for a, b in zip(bounds, previous))):
+                translated = np.isclose(bounds[0] - previous[0], bounds[1] - previous[1])
+                kind = "plateau" if region.moving or translated or self._drag_edge == "plateau" else "plateau_range"
+                self._move_window(kind, bounds)
+            else:
+                i = moving[0] if moving else (0 if bounds[0] != previous[0] else 1)
+                self._move_window(("plateau_start", "plateau_end")[i], bounds[i])
+        else:
+            self._move_window(region_name, bounds)
+
+    def _move_window(self, edge, value):
+        if self._drag_edge is None:
+            self.windowEditStarted.emit()
+        previous = self._last_window_regions or self.current_regions()
+        if edge == "baseline":
+            updated = dict(previous)
+            updated[edge] = tuple(sorted(self._nearest_measurement_time(v) for v in value))
+        else:
+            updated = constrain_window_edit(self._selection_times, previous, edge, value)
+        self._snap_guard = True
+        try:
+            for name in ("baseline", "plateau"):
+                if updated.get(name) and name in self._region_overlays:
+                    self._region_overlays[name]["region"].setRegion(updated[name])
+            for i, name in enumerate(("signal_start", "signal_end")):
+                if updated.get("signal") and name in self._signal_boundaries:
+                    self._signal_boundaries[name].setValue(updated["signal"][i])
+        finally:
+            self._snap_guard = False
+        self._last_window_regions = updated
+        self._show_window_feedback(edge, previous, updated)
+        self.windowsChanging.emit(updated)
+        if not self._window_frame_timer.isActive():
+            self._window_frame_timer.start()
+
+    def _window_lines(self):
+        lines = dict(self._signal_boundaries)
+        for name, overlay in self._region_overlays.items():
+            lines[name + "_start"], lines[name + "_end"] = overlay["region"].lines
+        return lines
+
+    def _show_window_feedback(self, edge, before, after):
+        self._drag_edge = edge
+        lines = self._window_lines()
+        active = {"plateau_start", "plateau_end"} if edge in {"plateau", "plateau_range"} else {edge}
+        for name in EDGE_NAMES:
+            window, side = name.rsplit("_", 1)
+            i = 0 if side == "start" else 1
+            if before.get(window) and after.get(window) and before[window][i] != after[window][i]:
+                active.add(name)
+        for name in active:
+            if name in lines:
+                line = lines[name]
+                if name not in self._drag_pens:
+                    self._drag_pens[name] = QtGui.QPen(line.pen)
+                line.setPen(pg.mkPen(line.pen.color(), width=4))
+        if not getattr(self, "_drag_readout", None):
+            self._drag_readout = pg.TextItem(color=self._theme.axis_text,
+                                             fill=pg.mkBrush(self._theme.plot_background),
+                                             anchor=(0, 1))
+            self._drag_readout.setZValue(30)
+            self.plot_item.addItem(self._drag_readout, ignoreBounds=True)
+        read_edge = "plateau_end" if edge in {"plateau", "plateau_range"} else edge
+        window, side = read_edge.rsplit("_", 1) if "_" in read_edge else (read_edge, "end")
+        value = after[window][0 if side == "start" else 1]
+        sweep = int(np.argmin(np.abs(self._selection_times - value))) + 1
+        label = EDGE_LABELS[EDGE_NAMES.index(read_edge)] if read_edge in EDGE_NAMES else "Baseline"
+        self._drag_readout.setText(f"{label} · sweep {sweep} · {value:.6g} s")
+        x_range, y_range = self.plot_item.vb.viewRange()
+        # Keep the text inside the view when an edge approaches the right side.
+        self._drag_readout.setAnchor((1 if value > sum(x_range) / 2 else 0, 1))
+        self._drag_readout.setPos(value, y_range[1] - (y_range[1] - y_range[0]) * .12)
+        self._drag_readout.show()
+
+    def _draw_window_frame(self):
+        # Move the cached uncertainty box without recalculating statistics.
+        # Qt coalesces paint requests; this timer limits overlay data to 60 Hz.
+        for overlay in self._region_overlays.values():
+            bounds = sorted(overlay["region"].getRegion())
+            mean = overlay.get("mean")
+            if mean is None:
+                continue
+            spread = overlay.get("spread", 0)
+            for name, y in (("mean_line", mean), ("upper_line", mean + spread),
+                            ("lower_line", mean - spread)):
+                overlay[name].setData(bounds, [y, y])
+        for name in self._signal_boundaries:
+            self._update_signal_marker(name)
+        self._position_signal_labels()
+
+    def _finish_window_feedback(self):
+        self._window_frame_timer.stop()
+        lines = self._window_lines()
+        for name, pen in self._drag_pens.items():
+            if name in lines:
+                lines[name].setPen(pen)
+        self._drag_pens.clear()
+        self._drag_edge = None
+        if getattr(self, "_drag_readout", None) is not None:
+            self._drag_readout.hide()
+
+    def _finish_window_edit(self):
+        self._finish_window_feedback()
+        for name in self._region_overlays:
+            self._update_region_overlay(name)
+        for name in self._signal_boundaries:
+            self._update_signal_marker(name)
 
     def _update_signal_marker(self, boundary_name: str) -> None:
         """Place a signal-start/end glyph on the selected display channel."""
@@ -9068,6 +9226,9 @@ class TracePlotWidget(RoundedPlotWidget):
 
     def _emit_signal_change(self, boundary_name: str) -> None:
         """Report the combined signal interval after either edge moves."""
+        if self._snap_guard:
+            return
+        self._finish_window_edit()
         start = self._signal_boundaries.get("signal_start")
         end = self._signal_boundaries.get("signal_end")
         if start is None or end is None:
@@ -9075,31 +9236,12 @@ class TracePlotWidget(RoundedPlotWidget):
         bounds = tuple(sorted((float(start.value()), float(end.value()))))
         self.regionChanged.emit(boundary_name, bounds)
 
-    def _update_region_overlay(
-        self,
-        region_name: str,
-        *,
-        emit_live: bool = False,
-    ) -> None:
+    def _update_region_overlay(self, region_name: str) -> None:
+        """Calculate selection statistics on installation or drag release."""
         overlay = self._region_overlays.get(region_name)
         if overlay is None:
             return
         start_value, end_value = sorted(float(value) for value in overlay["region"].getRegion())
-        snapped_bounds = (
-            self._nearest_measurement_time(start_value),
-            self._nearest_measurement_time(end_value),
-        )
-        snapped_bounds = tuple(sorted(snapped_bounds))
-        if emit_live and not np.allclose(
-            snapped_bounds,
-            (start_value, end_value),
-        ):
-            self._snap_guard = True
-            try:
-                overlay["region"].setRegion(snapped_bounds)
-            finally:
-                self._snap_guard = False
-            start_value, end_value = snapped_bounds
         frame = overlay["frame"]
         stats_channel = overlay["channel"]
         if frame.empty or stats_channel is None or stats_channel not in frame:
@@ -9169,35 +9311,6 @@ class TracePlotWidget(RoundedPlotWidget):
         self._update_region_span(overlay)
         self._position_signal_labels()
 
-        if region_name == "plateau":
-            self._constrain_signal_edges_to_plateau(start_value, end_value)
-        # Selection points, filtered sweeps, and statistics have already been
-        # redrawn locally. sigRegionChangeFinished persists the final bounds;
-        # emitting every mouse move made large-session dragging noticeably
-        # laggy without adding useful state changes.
-
-    def _constrain_signal_edges_to_plateau(
-        self,
-        plateau_start: float,
-        plateau_end: float,
-    ) -> None:
-        """Keep signal edges valid while a plateau window is dragged."""
-        signal_start = self._signal_boundaries.get("signal_start")
-        signal_end = self._signal_boundaries.get("signal_end")
-        if signal_start is None or signal_end is None:
-            return
-        finite_times = self._selection_times[np.isfinite(self._selection_times)]
-        if not finite_times.size:
-            return
-        signal_start.setBounds((float(finite_times.min()), plateau_start))
-        signal_end.setBounds((plateau_end, float(finite_times.max())))
-        if float(signal_start.value()) > plateau_start:
-            signal_start.setValue(plateau_start)
-        if float(signal_end.value()) < plateau_end:
-            signal_end.setValue(plateau_end)
-        self._update_signal_marker("signal_start")
-        self._update_signal_marker("signal_end")
-
     def _region_stats_text(self, x_value: float) -> list[str]:
         texts: list[str] = []
         for region_name, overlay in self._region_overlays.items():
@@ -9223,6 +9336,10 @@ class TracePlotWidget(RoundedPlotWidget):
         overlay = self._region_overlays.get(region_name)
         if overlay is None:
             return
+        current = tuple(sorted(float(value) for value in overlay["region"].getRegion()))
+        if current != self._last_window_regions.get(region_name):
+            self._on_region_position_changed(region_name)
+        self._finish_window_edit()
         bounds = tuple(sorted(float(value) for value in overlay["region"].getRegion()))
         self.regionChanged.emit(region_name, bounds)
 
