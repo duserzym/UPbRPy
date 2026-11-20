@@ -78,3 +78,14 @@ def test_cli(inputs):
             "--pubkey-file", str(inputs["pubkey_file"]), "--out", str(inputs["out"])]
     assert release.main(args) == 0
     assert inputs["out"].is_file()
+
+
+@pytest.mark.parametrize("name", ["My App-1.2.3.app.tar.gz", "app%20x.tar.gz", "app#1.tar.gz"])
+def test_asset_names_that_need_url_encoding_are_refused(inputs, tmp_path, name):
+    archive = tmp_path / name
+    archive.write_bytes(b"signed archive")
+    Path(str(archive) + ".sig").write_text(sign(archive.read_bytes()))
+    inputs["archives"] = {"darwin-aarch64": archive}
+    with pytest.raises(ValueError, match="URL encoding"):
+        release.build_feed(**inputs)
+    assert not inputs["out"].exists()
