@@ -1,4 +1,4 @@
-"""Concordia views open in Pan; live isochron fits start off for zircon only."""
+"""Concordia views open in Pan; live isochron fits start off for every mineral."""
 
 from pathlib import Path
 
@@ -41,12 +41,10 @@ def fit_states(window):
     return {kind: panel.fit_button.isChecked() for kind, panel in window.results_table.fit_panels.items()}
 
 
-def test_presets_default_live_fits_on_only_for_common_pb_phases():
-    assert not get_workflow_preset("zircon").live_fit_by_default
-    for key in ("apatite", "titanite", "rutile"):
-        assert get_workflow_preset(key).live_fit_by_default
-    assert {key for key, preset in WORKFLOW_PRESETS.items() if preset.live_fit_by_default} == {
-        key for key, preset in WORKFLOW_PRESETS.items() if preset.common_pb_calibration != "radiogenic"}
+def test_no_preset_starts_with_a_live_fit():
+    # Including the Tera-Wasserburg (common-Pb) phases: the concordia opens
+    # without a fit until the user turns one on (Yiming, 2026-11-20).
+    assert not any(preset.live_fit_by_default for preset in WORKFLOW_PRESETS.values())
 
 
 def test_new_zircon_session_opens_concordia_in_select_with_fits_off(window, app):
@@ -76,14 +74,17 @@ def test_new_zircon_session_opens_concordia_in_select_with_fits_off(window, app)
     assert window._selected_interaction_mode() == "pan"
 
 
-def test_new_apatite_session_keeps_fits_on(window):
+def test_new_apatite_session_starts_with_fits_off(window):
     window.load_experiment_directory(str(RICH), background=False)
     assert fit_states(window) == {"spot": False, "depth": False}
     # The slice is zircon data; install it as a new session under the
     # apatite preset, as an apatite import does.
     window.workflow_preset = get_workflow_preset("apatite")
+    # A per-user preference left on must not carry into the new session.
+    for panel in window.results_table.fit_panels.values():
+        panel.fit_button.setChecked(True)
     window.install_loaded_session(window.session, str(RICH))
-    assert fit_states(window) == {"spot": True, "depth": True}
+    assert fit_states(window) == {"spot": False, "depth": False}
 
 
 def test_saved_project_keeps_its_fit_state(window, app, tmp_path):
