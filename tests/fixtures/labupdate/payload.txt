@@ -1,0 +1,1 @@
+labupdate signature fixture: signed by a throwaway Tauri key (not any app key)
