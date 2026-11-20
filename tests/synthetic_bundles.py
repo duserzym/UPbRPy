@@ -94,7 +94,7 @@ def manifest_toml(
             f'spot_id = "spot-{index}"',
             f'grain_id = "grain-{index}"',
             f'sample_id = "sample-{index}"',
-            f"started_at = 2025-03-20T21:0{index}:00",
+            f"started_at = {(datetime(2025, 3, 20, 21) + timedelta(minutes=index)).isoformat()}",
             f'sha256 = "{sha256(path)}"',
             f'kind = "{kind}"',
             f'filename = "{path.name}"',

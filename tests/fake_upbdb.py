@@ -56,10 +56,12 @@ class FakeState:
     username: str = "analyst"
     password: str = "correct horse"
     sessions: dict = field(default_factory=dict)  # id -> bundle folder
+    conditional_bundles: bool = True
     tokens: set = field(default_factory=set)
     codes: set = field(default_factory=set)
     calls: list = field(default_factory=list)
     imports: list = field(default_factory=list)  # (session_id, form, zip bytes)
+    run_projects: dict = field(default_factory=dict)  # run_id -> project bytes
     runs: dict = field(default_factory=dict)  # run_id -> session_id
     preferred: dict = field(default_factory=dict)  # session_id -> run_id
     fail_next: dict = field(default_factory=dict)  # path regex -> (status, detail or full error body)
@@ -168,12 +170,32 @@ class Handler(BaseHTTPRequestHandler):
             if folder is None:
                 return self._send(404, {"detail": "Not Found"})
             manifest = (folder / "session_manifest.toml").read_bytes()
+            export_hash = hashlib.sha256(manifest).hexdigest()
+            if (self.state.conditional_bundles
+                    and self.headers.get("If-None-Match") == f'"{export_hash}"'):
+                return self._send(304, headers={"ETag": f'"{export_hash}"',
+                                                "X-Export-SHA256": export_hash})
             return self._send(200, raw=_zip_folder(folder), headers={
                 "Content-Type": "application/zip",
                 "Content-Disposition": f'attachment; filename="{folder.name}.zip"',
-                "X-Export-SHA256": hashlib.sha256(manifest).hexdigest(),
+                "X-Export-SHA256": export_hash,
+                "ETag": f'"{export_hash}"',
                 "X-Session-Key": folder.name,
             })
+        match = re.fullmatch(r"/v1/sessions/([^/]+)/reductions", path)
+        if match:
+            sid = match.group(1)
+            return self._send(200, [
+                {"id": rid, "session_id": sid, "status": "completed",
+                 "is_preferred_for_session": self.state.preferred.get(sid) == rid}
+                for rid, session in self.state.runs.items() if session == sid
+            ])
+        match = re.fullmatch(r"/v1/runs/([^/]+)/project", path)
+        if match:
+            data = self.state.run_projects.get(match.group(1))
+            if data is None:
+                return self._send(404, {"detail": "No saved project"})
+            return self._send(200, raw=data, headers={"Content-Type": "application/json"})
         match = re.fullmatch(r"/v1/runs/([^/]+)", path)
         if match:
             session_id = self.state.runs.get(match.group(1))
@@ -434,3 +456,71 @@ def main() -> None:  # pragma: no cover - manual use
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+class InProcessUpbdb:
+    """Use the same fake routes through a requests-like transport, without ports."""
+
+    url = "https://lab.example.org"
+
+    def __init__(self, state=None):
+        self.state = state or FakeState()
+        self.responses = []
+
+    def transport(self, request=None):
+        """Supply the client adapter without installing requests or keyring."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            request=request or self.request,
+            exceptions=SimpleNamespace(Timeout=TimeoutError, RequestException=ConnectionError),
+        )
+
+    def request(self, method, url, **kwargs):
+        from email.message import Message
+
+        class Route(Handler):
+            def _send(route, status, payload=None, *, headers=None, raw=None):
+                route.reply = MemoryReply(status, payload, headers, raw)
+
+        route = object.__new__(Route)
+        route.state = self.state
+        route.command = method
+        parts = urlsplit(url)
+        route.path = parts.path + ("?" + parts.query if parts.query else "")
+        if kwargs.get("params"):
+            route.path += ("&" if "?" in route.path else "?") + urlencode(kwargs["params"])
+        route.headers = Message()
+        for key, value in kwargs.get("headers", {}).items():
+            route.headers[key] = value
+        body = kwargs.get("data", b"")
+        if "json" in kwargs:
+            body = json.dumps(kwargs["json"]).encode()
+            route.headers["Content-Type"] = "application/json"
+        if hasattr(body, "read"):
+            body = body.read()
+        route.headers["Content-Length"] = str(len(body))
+        route.rfile = io.BytesIO(body)
+        getattr(route, "do_" + method)()
+        self.responses.append(route.reply)
+        return route.reply
+
+
+class MemoryReply:
+    def __init__(self, status, payload=None, headers=None, raw=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self.content = raw if raw is not None else json.dumps(payload).encode()
+        self.text = self.content.decode(errors="replace")
+        self.body_reads = 0
+        self.closed = False
+
+    def json(self):
+        return json.loads(self.content)
+
+    def iter_content(self, chunk_size):
+        self.body_reads += 1
+        for offset in range(0, len(self.content), chunk_size):
+            yield self.content[offset:offset + chunk_size]
+
+    def close(self):
+        self.closed = True

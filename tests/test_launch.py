@@ -301,3 +301,37 @@ def test_open_bundle_zip_unpacks_into_cache(controller, tmp_path):
 def test_auth_callback_keeps_the_state():
     target = parse_upbr_url("upbr://auth/callback?code=xyz&state=abcdefghijklmnop_12345")
     assert target.kind == "auth_callback" and target.state == "abcdefghijklmnop_12345"
+
+
+def test_second_launch_subprocess_has_no_heavy_imports(tmp_path):
+    """Patch only send, so the real -m dispatch runs without a socket or port."""
+    import json
+
+    guard = tmp_path / "sitecustomize.py"
+    guard.write_text("""
+import json
+import sys
+import time
+started = time.perf_counter()
+from GUI.launch import SingleInstance
+
+def send(self, target, timeout_ms=2000):
+    forbidden = ("GUI.main_window", "GUI.studio_window", "pyqtgraph", "pandas",
+                 "numpy", "scipy", "UPbRPy", "PySide6.QtWidgets", "PySide6.QtGui")
+    loaded = [name for name in sys.modules if any(
+        name == prefix or name.startswith(prefix + ".") for prefix in forbidden)]
+    print(json.dumps({"heavy": loaded, "elapsed": time.perf_counter() - started,
+                      "target": target}))
+    assert not loaded, loaded
+    return True
+SingleInstance.send = send
+""")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path), str(REPO)]))
+    started = time.perf_counter()
+    reply = subprocess.run([sys.executable, "-m", "GUI.main", "--open", str(tmp_path)],
+                           env=env, capture_output=True, text=True, timeout=20)
+    elapsed = time.perf_counter() - started
+    assert reply.returncode == 0, reply.stderr
+    report = json.loads(reply.stdout)
+    assert report["heavy"] == [] and report["target"] == str(tmp_path)
+    print(f"second launch with patched send: {elapsed:.3f}s; imports+dispatch {report['elapsed']:.3f}s")

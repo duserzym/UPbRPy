@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
 import zipfile
+import zlib
 
 from .session_manifest import (
     RAW_DIRECTORY_NAME,
@@ -223,8 +224,12 @@ def _verify_unpacked(folder: Path) -> tuple[str, str, str]:
         manifest = read_session_manifest(manifest_path)
     except SessionManifestError as exc:
         raise SessionBundleError(str(exc)) from exc
+    verified: dict[str, str] = {}
     for row in manifest.acquisitions:
         if not (row.filename and row.sha256):
+            continue
+        expected = row.sha256.lower()
+        if verified.get(row.filename) == expected:
             continue
         raw_file = folder / RAW_DIRECTORY_NAME / row.filename
         if not raw_file.is_file():
@@ -232,11 +237,13 @@ def _verify_unpacked(folder: Path) -> tuple[str, str, str]:
                 f"raw/{row.filename} ({row.label}) is listed in the manifest "
                 "but missing from the bundle."
             )
-        if _sha256_file(raw_file) != row.sha256.lower():
+        actual = verified.get(row.filename) or _sha256_file(raw_file)
+        if actual != expected:
             raise SessionBundleError(
                 f"raw/{row.filename} ({row.label}) does not match the SHA-256 "
                 "recorded in the manifest; the download may be damaged."
             )
+        verified[row.filename] = actual
     return (
         manifest.session_key or folder.name,
         manifest.session_id,
@@ -324,24 +331,24 @@ def unpack_session_bundle(
     *,
     server: str | None = None,
     expected_export_sha256: str | None = None,
+    zip_sha256: str | None = None,
 ) -> SessionBundle:
     """Verify a session-bundle zip and unpack it to ``cache_root/<key>/``.
 
     ``source`` is a zip path or the zip bytes. ``expected_export_sha256``
     (the server's ``X-Export-SHA256``) is checked against the manifest.
+    A streaming caller may supply the already-computed zip_sha256.
     """
-    data = source if isinstance(source, bytes) else Path(source).read_bytes()
-    zip_sha256 = sha256_bytes(data)
+    archive_source = io.BytesIO(source) if isinstance(source, bytes) else Path(source)
+    zip_sha256 = zip_sha256 or (sha256_bytes(source) if isinstance(source, bytes)
+                                else _sha256_file(Path(source)))
     root = Path(cache_root).expanduser() if cache_root else default_cache_root()
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
+        archive = zipfile.ZipFile(archive_source)
     except zipfile.BadZipFile as exc:
         raise SessionBundleError("The download is not a zip file.") from exc
     with archive:
         top, members = _safe_members(archive)
-        damaged = archive.testzip()
-        if damaged is not None:
-            raise SessionBundleError(f"The zip is damaged at {damaged!r}.")
         root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".unpack-", dir=root))
         try:
@@ -349,8 +356,11 @@ def unpack_session_bundle(
                 parts = PurePosixPath(info.filename.replace("\\", "/")).parts
                 target = staging.joinpath(*parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as src, target.open("wb") as out:
-                    shutil.copyfileobj(src, out)
+                try:
+                    with archive.open(info) as src, target.open("wb") as out:
+                        shutil.copyfileobj(src, out)
+                except (zipfile.BadZipFile, EOFError, zlib.error) as exc:
+                    raise SessionBundleError(f"The zip is damaged at {info.filename!r}.") from exc
             unpacked = staging / top
             session_key, session_id, export_sha256 = _verify_unpacked(unpacked)
             if (
@@ -396,7 +406,13 @@ def _install(
     superseded: Path | None = None
     if destination.exists():
         previous = read_bundle_record(destination)
+        intact = False
         if previous.get("export_sha256") == export_sha256:
+            try:
+                intact = _verify_unpacked(destination)[2] == export_sha256
+            except (OSError, ValueError):
+                pass
+        if intact:
             previous.update(
                 fetched_at=record["fetched_at"],
                 server=record["server"] or previous.get("server", ""),
@@ -445,14 +461,17 @@ def _install(
 def find_cached_session(
     session_id: str,
     cache_root: str | Path | None = None,
+    *, server: str | None = None,
 ) -> Path | None:
-    """Return the cached folder of a session id, if one exists."""
+    """Find an active bundle by its small record, optionally scoped to a server."""
     root = Path(cache_root).expanduser() if cache_root else default_cache_root()
     if not root.is_dir():
         return None
     for folder in sorted(root.iterdir()):
         if folder.is_dir() and ".superseded-" not in folder.name:
-            if read_bundle_record(folder).get("session_id") == session_id:
+            record = read_bundle_record(folder)
+            if (record.get("session_id") == session_id
+                    and (server is None or record.get("server", "").rstrip("/") == server.rstrip("/"))):
                 return folder
     return None
 

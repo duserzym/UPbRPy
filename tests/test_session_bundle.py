@@ -190,3 +190,73 @@ def test_holds_reduced_work(tmp_path, document, expected):
     (tmp_path / "broken.upbr").write_text("invalid json")
     (tmp_path / "project.upbr").write_text(json.dumps(document))
     assert holds_reduced_work(tmp_path) is expected
+
+
+def test_shared_raw_file_is_hashed_once_and_conflicting_row_rejected(tmp_path, monkeypatch):
+    from collections import Counter
+    from UPbRPy import session_bundle as bundles
+    from synthetic_bundles import manifest_toml
+
+    source = write_session_bundle(tmp_path / "src")
+    raw = source / "raw" / "Synthetic_1.csv"
+    manifest = source / "session_manifest.toml"
+    text = manifest_toml(session_id="session", session_key=source.name,
+                         raw_paths=[raw] * 300, labels=[f"A_{i}" for i in range(300)])
+    manifest.write_text(text)
+    original = bundles._sha256_file
+    calls = Counter()
+
+    def hashed(path):
+        calls[path.name] += 1
+        return original(path)
+
+    monkeypatch.setattr(bundles, "_sha256_file", hashed)
+    unpack_session_bundle(zip_directory(source), tmp_path / "cache")
+    assert calls[raw.name] == 1
+    # A second digest for the same filename must retain the existing mismatch message.
+    digest = original(raw)
+    before, after = text.rsplit(f'sha256 = "{digest}"', 1)
+    manifest.write_text(before + f'sha256 = "{"0" * 64}"' + after)
+    with pytest.raises(SessionBundleError, match="does not match the SHA-256"):
+        unpack_session_bundle(zip_directory(source), tmp_path / "bad")
+    assert not list((tmp_path / "bad").glob(".unpack-*"))
+
+
+def test_path_unpack_streams_and_extracts_once(tmp_path, monkeypatch):
+    from UPbRPy import session_bundle as bundles
+    source = write_session_bundle(tmp_path / "src")
+    archive = tmp_path / "bundle.zip"
+    archive.write_bytes(zip_directory(source))
+    digest = bundles._sha256_file(archive)
+    original_read = type(archive).read_bytes
+
+    def read(path):
+        assert path != archive, "zip must not be read into memory"
+        return original_read(path)
+
+    monkeypatch.setattr(type(archive), "read_bytes", read)
+    monkeypatch.setattr(zipfile.ZipFile, "testzip", lambda *_: pytest.fail("second decompression"))
+    result = unpack_session_bundle(archive, tmp_path / "cache", zip_sha256=digest)
+    assert result.zip_sha256 == digest
+
+
+def test_crc_failure_removes_staging_and_preserves_installed_folder(tmp_path):
+    import io
+    source = write_session_bundle(tmp_path / "src")
+    good = zip_directory(source)
+    installed = unpack_session_bundle(good, tmp_path / "cache")
+    # ZIP_STORED lets us corrupt member bytes without damaging directory metadata.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        for path in source.rglob("*"):
+            if path.is_file():
+                archive.write(path, source.name + "/" + str(path.relative_to(source)))
+    damaged = bytearray(buffer.getvalue())
+    with zipfile.ZipFile(io.BytesIO(damaged)) as archive:
+        info = next(i for i in archive.infolist() if "/raw/" in i.filename)
+        offset = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+        damaged[offset] ^= 1
+    with pytest.raises(SessionBundleError, match="zip is damaged at"):
+        unpack_session_bundle(bytes(damaged), tmp_path / "cache")
+    assert installed.project_file.is_file()
+    assert not list((tmp_path / "cache").glob(".unpack-*"))

@@ -53,6 +53,7 @@ from ..pipeline import package_version
 from ..session_bundle import (
     SessionBundle,
     SessionBundleError,
+    _verify_unpacked, find_cached_session, read_bundle_record, find_bundle_project,
     unpack_session_bundle,
 )
 
@@ -597,18 +598,41 @@ def fetch_session_bundle(
     """
     base = normalize_server(server)
     action = "download the session"
+    cached = find_cached_session(session_id, dest_dir, server=base)
+    record = read_bundle_record(cached) if cached is not None else {}
+    if cached is not None:
+        try:
+            key, identity, export_hash = _verify_unpacked(cached)
+            if identity != session_id or export_hash != record.get("export_sha256"):
+                cached = None
+        except (OSError, ValueError):
+            cached = None
+    headers = {"Accept": "application/zip"}
+    if cached is not None:
+        headers["If-None-Match"] = f'"{export_hash}"'
     response = _request(
         "GET", base, f"sessions/{quote(str(session_id))}/export/upbrpy",
-        action=action, stream=True, headers={"Accept": "application/zip"},
+        action=action, stream=True, headers=headers,
     )
+    if cached is not None and (
+        response.status_code == 304
+        or response.headers.get("X-Export-SHA256", "").lower() == export_hash
+    ):
+        response.close()
+        return SessionBundle(
+            cached, key, identity, export_hash, str(record.get("zip_sha256", "")),
+            find_bundle_project(cached, key), reused=True,
+        )
     expected = response.headers.get("X-Export-SHA256") or None
     with tempfile.TemporaryDirectory(prefix="upbrpy-fetch-") as scratch:
         target = Path(scratch) / "bundle.zip"
+        digest = hashlib.sha256()
         try:
             with target.open("wb") as out:
                 for chunk in response.iter_content(chunk_size=1 << 16):
                     if chunk:
                         out.write(chunk)
+                        digest.update(chunk)
         except _requests().exceptions.RequestException as exc:
             raise ConnectionFailed(
                 f"The download from {base} was interrupted."
@@ -617,7 +641,8 @@ def fetch_session_bundle(
             response.close()
         try:
             return unpack_session_bundle(
-                target, dest_dir, server=base, expected_export_sha256=expected
+                target, dest_dir, server=base, expected_export_sha256=expected,
+                zip_sha256=digest.hexdigest()
             )
         except SessionBundleError as exc:
             raise BundleError(str(exc)) from exc

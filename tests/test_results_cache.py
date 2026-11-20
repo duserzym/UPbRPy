@@ -398,3 +398,41 @@ def test_warm_child_priority_and_no_parent_archive(fixture_project, cache_root, 
     monkeypatch.setattr(restore_process, "_child_restore", lambda *a: None)
     restore_process._child_warm(None, "project")
     assert nice == [10]
+
+
+def _store_without_commit(request, payload, deps):
+    """Die after payload replacement, before the atomic index commits the entry."""
+    real = cache._atomic
+
+    def interrupted(path, data):
+        if path.suffix == ".json":
+            (path.parent / f".results-{os.getpid()}-interrupted").write_bytes(data[:8])
+            os._exit(9)
+        real(path, data)
+
+    cache._atomic = interrupted
+    cache.store(request, payload, deps)
+
+
+def test_interrupted_child_store_leaves_no_loadable_entry(fixture_project, cache_root):
+    import multiprocessing
+    request = cache.prepare(fixture_project)
+    with cache.DependencyRecorder(request) as recorder:
+        restored = services.restore_session_from_project(fixture_project)
+    deps = recorder.dependencies(restored)
+    context = multiprocessing.get_context("spawn")
+    child = context.Process(target=_store_without_commit,
+                            args=(request, pickle.dumps(restored, protocol=5), deps))
+    child.start()
+    child.join(timeout=30)
+    try:
+        assert not child.is_alive() and child.exitcode == 9
+        assert (cache_root / (request.key + ".payload")).is_file()
+        assert cache.load(request) is None
+        cache.cleanup_process(child.pid)
+        assert not list(cache_root.glob(f".results-{child.pid}-*"))
+    finally:
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=2)
+        child.close()

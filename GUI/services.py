@@ -9,6 +9,10 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from GUI import _load_engine_standards
+
+_load_engine_standards()
+
 import numpy as np
 import pandas as pd
 

@@ -67,9 +67,8 @@ if __name__ == "__main__" and "--check-tls" in sys.argv:
     tls_args = tls_parser.parse_args()
     raise SystemExit(_check_tls(tls_args.check_tls, tls_args.check_tls_output))
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore
 
-from GUI.icon import build_app_icon
 from GUI.launch import (
     FileOpenFilter,
     LaunchError,
@@ -79,11 +78,20 @@ from GUI.launch import (
     register_url_scheme,
     unregister_url_scheme,
 )
-from GUI.main_window import MainWindow
-from GUI.studio_window import StudioWindow
-from GUI.theme import build_application
-from GUI.wheel_guard import install_wheel_guard
-from GUI.updater import Updater
+
+
+def build_application(*args, **kwargs):
+    """Build Qt widgets only after the single-instance hand-off."""
+    from GUI.theme import build_application as build
+    return build(*args, **kwargs)
+
+
+def _load_ui():
+    global QtWidgets, MainWindow, StudioWindow, Updater
+    from PySide6 import QtWidgets
+    from GUI.main_window import MainWindow
+    from GUI.studio_window import StudioWindow
+    from GUI.updater import Updater
 
 
 class StudioWindowController(QtCore.QObject):
@@ -96,6 +104,7 @@ class StudioWindowController(QtCore.QObject):
         app_icon,
     ) -> None:
         super().__init__()
+        _load_ui()
         self.theme_mode = theme_mode
         self.app_icon = app_icon
         self.windows: dict[int, StudioWindow] = {}
@@ -282,6 +291,27 @@ class StudioWindowController(QtCore.QObject):
         )
         return window
 
+    def start_initial_target(self, target: LaunchTarget) -> bool:
+        """Overlap the first database link with construction of the empty tab."""
+        if not target.is_url:
+            return False
+        self._initial_callbacks = []
+
+        def deliver(callback):
+            if self._initial_callbacks is None:
+                callback()
+            else:
+                self._initial_callbacks.append(callback)
+
+        return self.database.start_initial_target(target, deliver=deliver)
+
+    def finish_initial_target(self) -> None:
+        """Release startup callbacks only once the first window is complete."""
+        callbacks = getattr(self, "_initial_callbacks", None) or []
+        self._initial_callbacks = None
+        for callback in callbacks:
+            callback()
+
     def open_target(self, value: str | LaunchTarget) -> None:
         """Open an ``--open`` value: folder, .upbr, bundle zip or upbr:// link."""
         try:
@@ -338,6 +368,8 @@ class StudioWindowController(QtCore.QObject):
 
 
 def export_window(window: QtWidgets.QMainWindow, output_path: str) -> None:
+    from PySide6 import QtWidgets
+
     window.show()
     for _ in range(4):
         QtWidgets.QApplication.processEvents()
@@ -414,6 +446,14 @@ def main(argv: list[str] | None = None) -> int:
         except LaunchError as exc:
             parser.error(str(exc))
 
+    interactive = not (args.export or args.verify_reduction)
+    instance = SingleInstance() if interactive else None
+    if instance is not None and target is not None:
+        if instance.send(args.open):
+            return 0
+
+    from GUI.icon import build_app_icon
+    from GUI.wheel_guard import install_wheel_guard
     settings = QtCore.QSettings("UPbRPy", "Studio")
     theme_mode = args.theme or str(settings.value("theme_mode", "light", type=str) or "light")
     app = build_application(argv, theme_mode=theme_mode)
@@ -421,19 +461,14 @@ def main(argv: list[str] | None = None) -> int:
     install_gc_policy(app)
     install_wheel_guard(app)
 
-    interactive = not (args.export or args.verify_reduction)
-    instance = SingleInstance() if interactive else None
-    if instance is not None and target is not None:
-        # A file or link while Studio runs: hand it over and leave.
-        if instance.send(args.open):
-            return 0
-
     icon = build_app_icon()
     app.setWindowIcon(icon)
     controller = StudioWindowController(
         theme_mode=theme_mode,
         app_icon=icon,
     )
+    initial_started = (interactive and target is not None
+                       and controller.start_initial_target(target))
     window = controller.create_window(show=False)
 
     if args.verify_reduction:
@@ -505,7 +540,8 @@ def main(argv: list[str] | None = None) -> int:
     app.installEventFilter(file_open_filter)
 
     window.show()
-    if target is not None:
+    controller.finish_initial_target()
+    if target is not None and not initial_started:
         controller.open_target(target)
     try:
         return app.exec()

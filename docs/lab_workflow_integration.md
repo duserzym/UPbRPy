@@ -83,8 +83,12 @@ suite still passes with the `[database]` extra absent.
 
 - `origin.export_sha256` is the SHA-256 of `session_manifest.toml` (the
   server's `X-Export-SHA256`), not of the zip, which is streamed and not
-  reproducible. An equal hash keeps the cached folder, saved project
-  included; a different one moves it aside as `<key>.superseded-<UTC time>`.
+  reproducible. Studio verifies each distinct raw file once and revalidates
+  an intact cached bundle with `If-None-Match`. A 304, or a 200 with the same manifest
+  hash, reuses the folder without reading the response body. A damaged cache
+  triggers a full download. Zip downloads are streamed, hashed in chunks and
+  extracted once into staging before installation. An equal hash keeps the
+  cached folder, saved project included; a different one moves it aside as `<key>.superseded-<UTC time>`.
 - `origin.server` is replaced by the base URL Studio actually used, since the
   keychain token belongs to that URL.
 - The reduction zip has its files at the top level and includes

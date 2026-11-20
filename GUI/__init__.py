@@ -22,6 +22,3 @@ def _load_engine_standards():
                 os.environ.pop("UPBRPY_LAB_STANDARDS", None)
             else:
                 os.environ["UPBRPY_LAB_STANDARDS"] = configured
-
-
-_load_engine_standards()

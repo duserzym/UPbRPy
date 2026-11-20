@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 import functools
 import json
 import math
@@ -527,6 +528,129 @@ class DatabaseLinks(QtCore.QObject):
             self.open_run(target.server, target.identifier, code=target.code,
                           acquisition=target.acquisition, via=target.via)
 
+    def start_initial_target(
+        self, target: LaunchTarget, *, deliver: Callable[[Callable[[], None]], None] | None = None,
+    ) -> bool:
+        """Start a first link before window construction; deliver on the GUI thread.
+
+        Only startup calls this, before any windows exist. Interactive links keep
+        the normal activation and sign-in flow. No worker touches a widget.
+        """
+        if target.kind not in {"run", "session"} or not target.server:
+            return False
+        if not database_availability()[0]:
+            return False
+        db = client()
+        try:
+            server = db.normalize_server(target.server)
+        except db.DatabaseError:
+            return False
+        self.remember_server(server)
+        retry_target = replace(target, server=server, code="")
+        title = "Open from database"
+        cache_root = self.cache_root
+
+        def prepare_contents():
+            if target.code:
+                try:
+                    db.exchange_code(server, target.code)
+                except Exception as exc:
+                    return "authorization", exc
+            # A locally saved run can open without a current sign-in.
+            run_id = target.identifier if target.kind == "run" else ""
+            messages = ()
+            if target.kind == "session" and not target.fresh:
+                try:
+                    run = pick_session_run(db.list_session_runs(server, target.identifier))
+                    if run is not None:
+                        run_id = str(run.get("id") or run["run_id"])
+                        messages = (self._chosen_run_message(run, run_id),)
+                except Exception as exc:
+                    messages = (f"Could not list session runs; opened the session data instead: {exc}",)
+            if run_id:
+                project = find_project_for_run(run_id, cache_root)
+                if project is not None:
+                    return "opened", (run_id, None, str(project), messages)
+                run = db.get_run(server, run_id)
+                bundle, project = self._download_run(db, server, run_id, str(run["session_id"]), cache_root)
+                if project is None:
+                    messages += (f"Run {short_id(run_id)} has no saved project on the server; "
+                                 "opened the session's raw data instead.",)
+                else:
+                    messages += project.notes
+                return "opened", (run_id, bundle, str(project.path) if project else None, messages)
+            bundle = db.fetch_session_bundle(server, target.identifier, cache_root)
+            return "opened", ("", bundle, None, messages)
+
+        def prepare():
+            try:
+                return prepare_contents()
+            except NewerFileError as exc:
+                # A nested event loop during window construction must not
+                # display this refusal before the delivery gate opens.
+                return "newer", exc
+
+        def done(result):
+            state, value = result
+            if state == "newer":
+                self.show_error("Newer Studio file", value)
+                return
+            if state == "authorization":
+                self._sign_in_then(server, lambda: self.handle(retry_target), title, value)
+                return
+            run_id, bundle, project, messages = value
+            identity = dict(server=server)
+            if run_id:
+                identity["run_id"] = run_id
+            else:
+                identity.update(session_id=target.identifier, fresh=target.fresh)
+            existing = self._activate(**identity)
+            if existing is not None:
+                self._opened(existing, acquisition=target.acquisition, via=target.via, messages=messages)
+            elif project is not None:
+                window = self.open_project(project)
+                self._opened(window, acquisition=target.acquisition, via=target.via,
+                             messages=(*messages, *(self._bundle_messages(bundle) if bundle else ())))
+            else:
+                self.open_bundle(bundle, acquisition=target.acquisition, via=target.via, messages=messages)
+
+        deliver = deliver or (lambda callback: callback())
+
+        def dispatch(callback):
+            def apply():
+                try:
+                    callback()
+                except NewerFileError as exc:
+                    self.show_error("Newer Studio file", exc)
+            deliver(apply)
+
+        self.run(prepare, lambda result: dispatch(lambda: done(result)), title=title,
+                 on_failure=lambda error: dispatch(lambda: self._retry_after_sign_in(
+                     server, lambda: self.handle(retry_target), title, error)))
+        return True
+
+    @staticmethod
+    def _chosen_run_message(run, run_id):
+        reason = "preferred run" if run.get("is_preferred_for_session") else "newest complete run, none preferred"
+        return (f"Opened run {short_id(run_id)} ({reason}). To start a fresh reduction, use "
+                "File > Database > New Reduction from Session Data.")
+
+    @staticmethod
+    def _download_run(db, server, run_id, session_id, cache_root):
+        """Fetch one bundle and optional run project entirely in a worker."""
+        bundle = db.fetch_session_bundle(server, session_id, cache_root)
+        try:
+            data = db.fetch_run_project(server, run_id)
+        except db.DatabaseError as exc:
+            if exc.status != 404:
+                raise
+            return bundle, None
+        project = install_run_project(
+            bundle.path, run_id, data, server=server, session_id=session_id,
+            session_key=bundle.session_key, export_sha256=bundle.export_sha256,
+        )
+        return bundle, project
+
     def _activate(self, **identity) -> Any:
         return self.activate_project(**identity) if self.activate_project else None
 
@@ -676,9 +800,7 @@ class DatabaseLinks(QtCore.QObject):
                 fetch()
                 return
             run_id = str(run.get("id") or run["run_id"])
-            reason = "preferred run" if run.get("is_preferred_for_session") else "newest complete run, none preferred"
-            message = (f"Opened run {short_id(run_id)} ({reason}). To start a fresh reduction, use "
-                       "File > Database > New Reduction from Session Data.")
+            message = self._chosen_run_message(run, run_id)
             self.open_run(server, run_id, acquisition=acquisition, via=via, _messages=(message,))
 
         def listing():
@@ -790,18 +912,7 @@ class DatabaseLinks(QtCore.QObject):
                 return
 
             def download():
-                bundle = db.fetch_session_bundle(server, session_id, self.cache_root)
-                try:
-                    data = db.fetch_run_project(server, run_id)
-                except db.DatabaseError as exc:
-                    if exc.status != 404:
-                        raise
-                    return bundle, None
-                project = install_run_project(
-                    bundle.path, run_id, data, server=server, session_id=session_id,
-                    session_key=bundle.session_key, export_sha256=bundle.export_sha256,
-                )
-                return bundle, project
+                return self._download_run(db, server, run_id, session_id, self.cache_root)
 
             self.run(download, downloaded, title=title, on_failure=lambda message:
                      self._retry_after_sign_in(server, lookup, title, message))

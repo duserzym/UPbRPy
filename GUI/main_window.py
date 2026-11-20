@@ -19,7 +19,6 @@ import shiboken6
 from UPbRPy.notices import ReductionError
 from UPbRPy.naming import natural_sort_key
 from UPbRPy.spot_edits import spot_edit_metadata
-from UPbRPy.standards import canonicalize_reference_material_samples
 
 from GUI.icon import (
     build_app_icon,
@@ -71,6 +70,7 @@ from GUI.services import (
     update_selection_region,
     unlocked_workflow_rows,
 )
+from UPbRPy.standards import canonicalize_reference_material_samples
 from GUI.state import ReductionSession
 from GUI.selection_windows import EDGE_NAMES, EDGE_LABELS, constrain_window_edit
 from GUI.spot_edits import SpotEditing, SpotEditState

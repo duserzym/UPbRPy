@@ -189,3 +189,56 @@ def test_unpickle_avoids_pyside_import_hook(fixture_project, monkeypatch, caplog
     restored = restore_process.restore_project_in_process(fixture_project)
     assert restored.session.loaded
     assert "Process restore unavailable" not in caplog.text
+
+
+def _blocked_store_child(connection, project_file):
+    import time
+    from pathlib import Path
+    from GUI import results_cache
+
+    real_store = results_cache.store
+
+    def store(*args):
+        marker = Path(os.environ["UPBRPY_TEST_STORE_MARKER"])
+        marker.write_text("storing")
+        deadline = time.monotonic() + 30
+        while not marker.with_suffix(".release").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        real_store(*args)
+        marker.with_suffix(".done").write_text("done")
+
+    results_cache.store = store
+    restore_process._child_restore(connection, project_file)
+
+
+def test_result_returns_while_child_is_still_storing(fixture_project, tmp_path, monkeypatch):
+    import time
+    from GUI import results_cache
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    marker = cache_dir / "store"
+    monkeypatch.setenv("UPBRPY_TEST_STORE_MARKER", str(marker))
+    monkeypatch.setenv("UPBRPY_RESULTS_CACHE_DIR", str(tmp_path / "cache"))
+    real = restore_process._child_restore
+    # Use a wrapper in the spawn bootstrap; the child imports the real module.
+    monkeypatch.setattr(restore_process, "_child_restore", _blocked_store_child)
+    task = restore_process.RestoreTask()
+    try:
+        restored = task.restore(fixture_project, use_cache=False)
+        assert restored.session.loaded
+        assert task._process is None
+        assert not marker.with_suffix(".done").exists()
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists()
+        assert results_cache.load(results_cache.prepare(fixture_project)) is None
+    finally:
+        monkeypatch.setattr(restore_process, "_child_restore", real)
+        marker.with_suffix(".release").touch()
+    deadline = time.monotonic() + 15
+    while not marker.with_suffix(".done").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert marker.with_suffix(".done").exists()
+    assert results_cache.load(results_cache.prepare(fixture_project)) is not None

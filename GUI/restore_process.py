@@ -61,13 +61,13 @@ def _child_restore(connection, project_file):
         except Exception as exc:
             connection.send(("infrastructure", f"Cannot pickle restored project: {exc}"))
             return
+        connection.send(("imports", "PySide6" in sys.modules))
+        connection.send(("result", payload))
         if recorder is not None:
             try:
                 results_cache.store(request, payload, recorder.dependencies(restored))
             except Exception:
                 _logger.debug("Cache dependency validation failed", exc_info=True)
-        connection.send(("imports", "PySide6" in sys.modules))
-        connection.send(("result", payload))
     finally:
         if recorder is not None:
             recorder.__exit__()
@@ -95,6 +95,20 @@ def _finish_payload(payload):
     return restored
 
 
+
+
+def _reap_store(process):
+    """Allow cache writes to finish without delaying the restored window."""
+    from GUI import results_cache
+
+    try:
+        process.join(timeout=300)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+        results_cache.cleanup_process(process.pid)
+    finally:
+        process.close()
 
 
 class RestoreTask:
@@ -149,6 +163,7 @@ class RestoreTask:
             return None if self._warm_only else restore_session_from_project(project_file, progress=progress)
         receiver = sender = process = None
         remote_error = None
+        succeeded = False
         try:
             context = multiprocessing.get_context("spawn")
             receiver, sender = context.Pipe(duplex=False)
@@ -185,7 +200,11 @@ class RestoreTask:
                 elif kind == "infrastructure":
                     raise RuntimeError(message[1])
                 elif kind == "result":
-                    return None if self._warm_only else _finish_payload(message[1])
+                    restored = None if self._warm_only else _finish_payload(message[1])
+                    if self.cancelled:
+                        raise RestoreCancelled()
+                    succeeded = True
+                    return restored
                 else:
                     raise RuntimeError(f"Unknown restore message: {kind}")
         except RestoreCancelled:
@@ -197,12 +216,15 @@ class RestoreTask:
         finally:
             with self._lock:
                 if process is not None and process.pid is not None:
-                    process.join(timeout=0.2)
-                    if process.is_alive():
-                        process.terminate()
+                    if succeeded and not self.cancelled:
+                        threading.Thread(target=_reap_store, args=(process,),
+                                         name="UPbRPy cache store reaper", daemon=True).start()
+                    else:
+                        if process.is_alive():
+                            process.terminate()
                         process.join(timeout=1)
-                    results_cache.cleanup_process(process.pid)
-                    process.close()
+                        results_cache.cleanup_process(process.pid)
+                        process.close()
                 self._process = None
             for connection in (receiver, sender):
                 if connection is not None:
