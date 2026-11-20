@@ -254,7 +254,14 @@ class StudioWindow(QtWidgets.QMainWindow):
             return reduction
         return self.add_tab()
 
-    def open_project(self, path: str) -> MainWindow:
+    def open_project(self, path: str) -> MainWindow | None:
+        from GUI.newer_file import refuse_newer_project
+
+        active = self.active_reduction
+        if refuse_newer_project(self, path, open_updates=(
+            (lambda: active.version_chip.open_dialog(manual=True)) if active else None
+        )):
+            return None
         reduction = self.reduction_for_new_content()
         reduction.load_project_file(path)
         return reduction

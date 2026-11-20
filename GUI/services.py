@@ -886,7 +886,9 @@ def restore_session_from_project(
     pipeline_values = dict(document["pipeline"])
     workspace = dict(document.get("workspace", {}))
     config = pipeline_config_from_dict(
-        dict(pipeline_values["config"])
+        dict(pipeline_values["config"]),
+        saved_version=(document.get("saved_by") or {}).get("version"),
+        saved_schema=pipeline_values.get("settings_schema"),
     )
     preset = get_workflow_preset(config.workflow_key)
 

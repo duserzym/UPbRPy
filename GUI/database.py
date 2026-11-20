@@ -32,6 +32,8 @@ from shiboken6 import isValid
 from GUI.launch import LaunchTarget
 from GUI.workers import FunctionWorker
 from GUI.widgets import IssueBanner
+from GUI.newer_file import show_newer_file_dialog
+from UPbRPy.pipeline import NewerFileError
 from UPbRPy.session_bundle import (
     SessionBundle, find_project_for_run, holds_reduced_work,
     install_run_project, pick_session_run,
@@ -305,11 +307,17 @@ class DatabaseLinks(QtCore.QObject):
 
     @QtCore.Slot(object)
     def _worker_done(self, result):
-        self._workers[self.sender()][1](result)
+        try:
+            self._workers[self.sender()][1](result)
+        except NewerFileError as exc:
+            self.show_error("Newer Studio file", exc)
 
     @QtCore.Slot(str, str)
     def _worker_failed(self, message, _trace):
         worker, _done, failed = self._workers[self.sender()]
+        if isinstance(worker.error, NewerFileError):
+            self.show_error("Newer Studio file", worker.error)
+            return
         failed(worker.error if worker.error is not None else message)
 
     @QtCore.Slot()
@@ -394,6 +402,11 @@ class DatabaseLinks(QtCore.QObject):
         return ok
 
     def show_error(self, title: str, message: object) -> None:
+        if isinstance(message, NewerFileError):
+            self._flow_dialog(self.parent_widget(), lambda: show_newer_file_dialog(
+                self.parent_widget(), message
+            ))
+            return
         self._flow_dialog(self.parent_widget(), lambda: QtWidgets.QMessageBox.warning(
             self.parent_widget(), title, str(message)
         ))
@@ -518,7 +531,11 @@ class DatabaseLinks(QtCore.QObject):
     def open_bundle(self, bundle: SessionBundle, *, acquisition: str = "", via: str = "",
                     messages: tuple[str, ...] = ()):
         """Open a bundle and report any preserved cache folder after loading."""
-        window = self._open_bundle(bundle)
+        try:
+            window = self._open_bundle(bundle)
+        except NewerFileError as exc:
+            self.show_error("Newer Studio file", exc)
+            return None
         self._opened(window, acquisition=acquisition, via=via,
                      messages=(*messages, *self._bundle_messages(bundle)))
         return window
@@ -691,6 +708,9 @@ class DatabaseLinks(QtCore.QObject):
 
             try:
                 origin = read_reduction_project(project).get("origin") or {}
+            except NewerFileError as exc:
+                self.show_error("Newer Studio file", exc)
+                return
             except (OSError, ValueError):
                 # Let the normal project loader report a malformed cached file.
                 origin = {}
@@ -701,8 +721,12 @@ class DatabaseLinks(QtCore.QObject):
                 return
 
             def open_cached() -> None:
-                self._opened(self.open_project(str(project)), acquisition=acquisition, via=via,
-                             messages=_messages)
+                try:
+                    window = self.open_project(str(project))
+                except NewerFileError as exc:
+                    self.show_error("Newer Studio file", exc)
+                    return
+                self._opened(window, acquisition=acquisition, via=via, messages=_messages)
 
             if code:
                 title = "Open reduction run"

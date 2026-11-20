@@ -37,6 +37,17 @@ not rejected. Raw sweeps and computed tables are not embedded. Reopening uses
 validated local results when available, otherwise re-imports dependencies and
 recalculates the saved completed stages.
 
+New saves record `saved_by` at the project root (`app`, package `version`,
+and source `commit`, or null when unavailable) and `pipeline.settings_schema`
+(currently **1**). Manifests also record top-level `settings_schema`, alongside
+`upbrpy_version` and `upbrpy_source`. These keys are outside the scientific
+configuration and leave both format versions unchanged. Older files without
+them still load with defaults. Unknown setting keys, including nested settings,
+a newer settings schema, or a newer project format refuse opening with a plain
+message asking the user to update Studio; settings are never discarded to make
+a file load. Bump `SETTINGS_SCHEMA_VERSION` whenever a saved setting is added
+or changes meaning in `PipelineConfig` or its nested settings dataclasses.
+
 ### Studio spot edits
 
 `spot_edits` stores `spot_renames` (current name to original acquisition label),
@@ -112,6 +123,8 @@ entry for the current project.
 | --- | --- | --- | --- | --- |
 | format | Required | String | `UPbRPy reduction project` | Exact marker; otherwise rejected |
 | format_version | Required | Integer, converted with `int` | `2` | Supported version 1 or 2 |
+| saved_by | Optional | Object | `{"app": "UPbRPy Studio", "version": "0.1.4", "commit": null}` | Saving application and source revision; absent in older files |
+| pipeline.settings_schema | Optional | Integer | `1` | Saved settings revision; newer revisions refuse opening |
 | saved_utc | Optional on read | ISO datetime string | `2026-11-05T12:00:00+00:00` | Writer time; not validated on read |
 | paths | Required | Object | See children | Dependency paths; missing/non-object rejected |
 | paths.source_directory | Required to reopen | Path record or string | `{"relative": "raw", "absolute": "/data/session/raw"}` | Source folder or CSV despite the key name; missing/unresolvable fails on restore |
@@ -401,6 +414,7 @@ may be null. `hash_inputs=True` is the bundle default, while the standalone
 | format_version | Integer, `2` | Pipeline manifest format |
 | created_utc | ISO string | Manifest creation time |
 | upbrpy_version | String | Installed package version or implementation fallback |
+| settings_schema | Integer | Saved settings revision, currently `1`; newer revisions refuse replay |
 | python_version | String | Runtime version |
 | platform | String | Runtime platform description |
 | source_directory | String/null | Input source path, possibly a CSV |

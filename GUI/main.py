@@ -210,10 +210,18 @@ class StudioWindowController(QtCore.QObject):
         self._show_window(shell)
         return reduction
 
-    def open_project_in_window(self, project_file: str) -> MainWindow:
+    def open_project_in_window(self, project_file: str) -> MainWindow | None:
         existing = self.activate_open_project(project_file=project_file)
         if existing is not None:
             return existing
+        from GUI.newer_file import refuse_newer_project
+
+        shell = self.active_window()
+        active = shell.active_reduction if shell else None
+        if refuse_newer_project(shell, project_file, open_updates=(
+            (lambda: active.version_chip.open_dialog(manual=True)) if active else None
+        )):
+            return None
         window = self.window_for_new_content()
         window.load_project_file(project_file)
         return window
@@ -260,12 +268,14 @@ class StudioWindowController(QtCore.QObject):
         window.load_experiment_directory(directory)
         return window
 
-    def open_session_bundle(self, bundle) -> MainWindow:
+    def open_session_bundle(self, bundle) -> MainWindow | None:
         """Open an unpacked session bundle: its project, else its raw/ folder."""
         if bundle.project_file is not None:
             window = self.open_project_in_window(str(bundle.project_file))
         else:
             window = self.open_directory_in_window(str(bundle.raw_directory))
+        if window is None:
+            return None
         note = "cached copy is current" if bundle.reused else "fetched"
         window.append_log(
             f"Session bundle {bundle.session_key} ({note}): {bundle.path}"

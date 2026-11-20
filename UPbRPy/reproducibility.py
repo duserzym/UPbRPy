@@ -97,6 +97,7 @@ def build_reproducibility_notebook(
     the original auto-pick settings.
     """
     config_json = json.dumps(pipeline.config.to_dict(), indent=2)
+    manifest = pipeline.manifest()
     edits_json = json.dumps(spot_edit_metadata(pipeline.experiment))
     selections_json = selection_export_frame(pipeline.experiment).to_json(
         orient="records",
@@ -147,7 +148,9 @@ def build_reproducibility_notebook(
             "    if reference_library_text\n"
             "    else None\n"
             ")\n"
-            f"config = pipeline_config_from_dict(json.loads({config_json!r}))\n"
+            f"config = pipeline_config_from_dict(json.loads({config_json!r}),\n"
+            f"    saved_version={manifest['upbrpy_version']!r},\n"
+            f"    saved_schema={manifest['settings_schema']!r})\n"
             "read_options = dict(config.selection_options)\n"
             "read_options.pop('primary_channel', None)\n"
             "read_options.setdefault('selection_method', config.selection_method)\n"

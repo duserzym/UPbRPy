@@ -19,7 +19,11 @@ session a project was exported from (``upblab/docs/WORKFLOW.md`` section
         "run_id": "0193…"                # after Submit to database
     }
 
-Version 1 files load unchanged; they simply have no origin.
+Version 1 files load unchanged; they simply have no origin. The optional
+top-level ``saved_by`` records Studio's app name, package version and source
+commit. ``pipeline.settings_schema`` records the scientific settings schema;
+neither is part of ``pipeline.config``. Unknown settings or a newer schema
+are refused with an update message rather than discarded.
 """
 
 from __future__ import annotations
@@ -37,7 +41,10 @@ import pandas as pd
 
 from .spot_edits import spot_edit_metadata
 
-from .pipeline import PipelineStage, ReductionPipeline
+from .pipeline import (
+    NewerFileError, PipelineStage, ReductionPipeline, SETTINGS_SCHEMA_VERSION,
+    _validate_saved_settings, package_version, source_revision,
+)
 from .reproducibility import selection_export_frame
 
 
@@ -242,6 +249,11 @@ def build_reduction_project(
         "format": PROJECT_FORMAT_NAME,
         "format_version": PROJECT_FORMAT_VERSION,
         "saved_utc": datetime.now(timezone.utc).isoformat(),
+        "saved_by": {
+            "app": "UPbRPy Studio",
+            "version": package_version(),
+            "commit": (source_revision() or {}).get("commit"),
+        },
         "paths": {
             "source_directory": project_path_record(
                 pipeline.source_directory,
@@ -253,6 +265,7 @@ def build_reduction_project(
             ),
         },
         "pipeline": {
+            "settings_schema": SETTINGS_SCHEMA_VERSION,
             "config": pipeline.config.to_dict(),
             "completed_stages": [
                 stage.value for stage in pipeline.cache.stages()
@@ -275,11 +288,12 @@ def validate_reduction_project(
     if document.get("format") != PROJECT_FORMAT_NAME:
         raise ValueError("This file is not an UPbRPy reduction project.")
     version = int(document.get("format_version", 0))
+    saved_by = document.get("saved_by")
+    saved_version = saved_by.get("version") if isinstance(saved_by, Mapping) else None
     if version > PROJECT_FORMAT_VERSION:
-        raise ValueError(
-            f"Project format {version} is newer than this UPbRPy build "
-            f"(supports through {PROJECT_FORMAT_VERSION})."
-        )
+        pipeline = document.get("pipeline")
+        saved_schema = pipeline.get("settings_schema") if isinstance(pipeline, Mapping) else None
+        raise NewerFileError(saved_version, saved_schema=saved_schema)
     if version < 1:
         raise ValueError("The project format version is missing or invalid.")
 
@@ -293,6 +307,8 @@ def validate_reduction_project(
         raise ValueError("Project pipeline settings are missing or invalid.")
     if not isinstance(pipeline.get("config"), Mapping):
         raise ValueError("Project reduction configuration is missing.")
+    _validate_saved_settings(pipeline["config"], saved_version=saved_version,
+                             saved_schema=pipeline.get("settings_schema"))
     if not isinstance(selections, list):
         raise ValueError("Project selection records are missing or invalid.")
     if not isinstance(workspace, Mapping):

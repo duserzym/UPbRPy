@@ -5432,6 +5432,11 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         use_cache: bool = True,
     ) -> None:
         """Restore a saved project, optionally forcing recalculation."""
+        from GUI.newer_file import refuse_newer_project
+
+        if refuse_newer_project(self, project_file,
+                                open_updates=lambda: self.version_chip.open_dialog(manual=True)):
+            return
         results_cache_warmer.cancel()
         if not self.flush_selection_edits():
             self.statusBar().showMessage(f"Please wait for {self._busy_label.lower()} to finish.")
@@ -8729,6 +8734,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._refresh_workflow_status()
 
     def _show_reduction_issue(self, title: str, exc: Exception, details: str = "") -> None:
+        from UPbRPy.pipeline import NewerFileError
+        from GUI.newer_file import show_newer_file_dialog
+
+        if isinstance(exc, NewerFileError):
+            show_newer_file_dialog(self, exc,
+                                  open_updates=lambda: self.version_chip.open_dialog(manual=True))
+            return
         stage = getattr(exc, "stage", None)
         if not stage:
             labels = (("open", "import"), ("load", "import"), ("import", "import"),

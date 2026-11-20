@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
 from functools import lru_cache
@@ -49,6 +49,32 @@ if TYPE_CHECKING:
     from .export_table import ExportSettings
 
 PIPELINE_FORMAT_VERSION = 2
+# Bump whenever a saved setting is added to or changes meaning in
+# PipelineConfig or any nested settings dataclass.
+SETTINGS_SCHEMA_VERSION = 1
+
+
+class NewerFileError(ValueError):
+    """Saved scientific settings require a newer Studio implementation."""
+
+    def __init__(
+        self, saved_version: str | None = None, current_version: str | None = None,
+        unknown_settings: tuple[str, ...] = (), saved_schema: int | None = None,
+    ) -> None:
+        self.saved_version = saved_version
+        self.current_version = package_version() if current_version is None else current_version
+        self.unknown_settings = tuple(sorted(unknown_settings))
+        self.saved_schema = saved_schema
+        saved = (f"UPbRPy Studio {saved_version}" if saved_version
+                 else "a newer UPbRPy Studio")
+        super().__init__(
+            f"Saved by {saved}; you have {self.current_version}. Update Studio to open it."
+        )
+
+    def __reduce__(self):
+        """Preserve the typed refusal across the project-restore process."""
+        return type(self), (self.saved_version, self.current_version,
+                            self.unknown_settings, self.saved_schema)
 
 
 class PipelineStage(str, Enum):
@@ -424,8 +450,46 @@ def config_invalidation_stage(
     return PipelineStage.FINALIZE
 
 
-def pipeline_config_from_dict(values: Mapping[str, object]) -> PipelineConfig:
+def _validate_saved_settings(
+    values: Mapping[str, object], *, saved_version: str | None = None,
+    saved_schema: int | None = None,
+) -> None:
+    """Check all reconstructed settings before defaults or models are built."""
+    from .export_table import ExportSettings
+
+    settings_types = {
+        "": PipelineConfig,
+        "downhole": FitSettings,
+        "session": FitSettings,
+        "decision": ReductionDecision,
+        "automatic_flags": AutomaticFlagSettings,
+        "uncertainty": UncertaintySettings,
+        "export_settings": ExportSettings,
+        "depth_calibration": LinearDepthCalibration,
+    }
+    # The depth reader consumes this discriminator before constructing the
+    # dataclass. History contains no renamed/legacy setting-key aliases.
+    compatible_keys = {"depth_calibration": {"model"}}
+    unknown = []
+    for prefix, settings_type in settings_types.items():
+        record = values if not prefix else values.get(prefix)
+        if not isinstance(record, Mapping):
+            continue
+        accepted = {item.name for item in fields(settings_type)}
+        accepted.update(compatible_keys.get(prefix, ()))
+        unknown.extend(f"{prefix}.{key}" if prefix else str(key)
+                       for key in record if key not in accepted)
+    if unknown or (saved_schema is not None and saved_schema > SETTINGS_SCHEMA_VERSION):
+        raise NewerFileError(saved_version, unknown_settings=tuple(unknown),
+                             saved_schema=saved_schema)
+
+
+def pipeline_config_from_dict(
+    values: Mapping[str, object], *, saved_version: str | None = None,
+    saved_schema: int | None = None,
+) -> PipelineConfig:
     """Reconstruct immutable pipeline settings from a saved manifest."""
+    _validate_saved_settings(values, saved_version=saved_version, saved_schema=saved_schema)
     data = dict(values)
     data["detector_calibration"] = dict(data.get("detector_calibration", {}))
     data["concentration_standards"] = tuple(
@@ -1328,6 +1392,7 @@ class ReductionPipeline:
         library = self.reference_library_identity()
         return {
             "format_version": PIPELINE_FORMAT_VERSION,
+            "settings_schema": SETTINGS_SCHEMA_VERSION,
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "upbrpy_version": package_version(),
             "upbrpy_source": source_revision(),
@@ -1369,6 +1434,8 @@ class ReductionPipeline:
 
 __all__ = [
     "PIPELINE_FORMAT_VERSION",
+    "SETTINGS_SCHEMA_VERSION",
+    "NewerFileError",
     "PIPELINE_STAGE_DEFINITIONS",
     "PIPELINE_STAGE_BY_ID",
     "PipelineStage",

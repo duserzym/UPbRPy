@@ -99,6 +99,7 @@ def install_run_project(
     from .project import (
         resolve_project_path, validate_reduction_project, write_project_document,
     )
+    from .pipeline import NewerFileError
 
     folder = Path(folder).expanduser().resolve()
     # Both identifiers become filename components, never paths supplied by a server.
@@ -113,6 +114,8 @@ def install_run_project(
         if not isinstance(document, dict):
             raise ValueError("The project root must be a JSON object.")
         document = validate_reduction_project(document)
+    except NewerFileError:
+        raise
     except (ValueError, TypeError, OverflowError) as exc:
         raise SessionBundleError(f"Invalid saved UPbRPy reduction project: {exc}") from exc
     notes = []
@@ -261,6 +264,17 @@ def _update_project_origin(
         return
     if not isinstance(document, dict):
         return
+    from .pipeline import NewerFileError
+    from .project import validate_reduction_project
+
+    try:
+        validate_reduction_project(document)
+    except NewerFileError:
+        # Preserve incompatible bundled files byte-for-byte. The project
+        # opener presents the refusal after the bundle is available.
+        return
+    except (ValueError, TypeError):
+        pass
     origin = document.get("origin")
     if not isinstance(origin, dict):
         if not server or not session_id:

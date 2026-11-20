@@ -187,7 +187,7 @@ def test_project_rejects_newer_unknown_format(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="newer than this UPbRPy build"):
+    with pytest.raises(ValueError, match="Update Studio to open it"):
         read_reduction_project(project_path)
 
 
