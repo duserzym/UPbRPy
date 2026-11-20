@@ -132,7 +132,7 @@ def test_controls_render_without_overflow(app, tmp_path, dark, status):
         assert image.width() == 1280 and image.height() == 800
         assert not button.grab().isNull() and not chip.grab().isNull()
         image.save(str(tmp_path / f"updates-{status}-{'dark' if dark else 'light'}.png"))
-        assert button._rotation_timer.isActive() == (status in {"checking", "downloading"})
+        assert button._rotation_timer.isActive() == (status in {"checking", "downloading", "installing"})
     finally:
         updater.shutdown()
         window.close()

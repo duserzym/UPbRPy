@@ -9,7 +9,7 @@ from .install import NotConfiguredError
 from .manifest import NoPublicRelease
 from .minisign import SignatureError
 
-STATES = frozenset({"idle", "checking", "none", "available", "downloading", "ready", "error", "unsupported"})
+STATES = frozenset({"idle", "checking", "none", "available", "downloading", "ready", "installing", "error", "unsupported"})
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ def transition(state: UpdateState, event) -> UpdateState:
     name, *args = (event,) if isinstance(event, str) else event
     if name == "check_started":
         manual = bool(args and args[0])
-        if state.status in {"checking", "downloading"} or (state.status == "ready" and not manual):
+        if state.status in {"checking", "downloading", "installing"} or (state.status == "ready" and not manual):
             return state
         return UpdateState("checking", manual=manual, app_name=state.app_name, host=state.host)
     if name == "unsupported":
@@ -52,7 +52,9 @@ def transition(state: UpdateState, event) -> UpdateState:
         return replace(state, progress=args[0], total=args[1])
     if name == "downloaded" and state.status == "downloading":
         return replace(state, status="ready", path=Path(args[0]))
-    if name == "failed" and state.status in {"checking", "downloading", "ready"}:
+    if name == "install_started" and state.status == "ready":
+        return replace(state, status="installing")
+    if name == "failed" and state.status in {"checking", "downloading", "ready", "installing"}:
         kind, _ = classify_error(args[0], app=state.app_name, host=state.host)
         return replace(state, status="error", path=None, message=str(args[0]), kind=kind)
     return state
@@ -73,18 +75,19 @@ def _message(kind, *, app, host, raw=""):
 def classify_error(exc, *, app="Application", host="github.com") -> tuple[str, str]:
     """Classify typed errors; callers supply application and update-host names."""
     raw = " ".join(str(exc).split())
-    if tls.is_certificate_error(exc):
-        kind = "certificate"
-    elif isinstance(exc, NotConfiguredError) or "no public key configured" in raw.lower():
+    lower = raw.lower()
+    if isinstance(exc, NotConfiguredError) or any(word in lower for word in ("pubkey", "public key", "not configured")):
         kind = "not_configured"
-    elif isinstance(exc, NoPublicRelease):
-        kind = "no_release"
-    elif isinstance(exc, SignatureError):
+    elif tls.is_certificate_error(exc) or any(word in lower for word in ("certificate", "unknownissuer", "invalid peer certificate")):
+        kind = "certificate"
+    elif isinstance(exc, SignatureError) or any(word in lower for word in ("signature", "minisign", "verify")):
         kind = "signature"
-    elif isinstance(exc, PermissionError):
-        kind = "not_writable"
-    elif isinstance(exc, (ConnectionError, TimeoutError)) or (isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError)):
+    elif isinstance(exc, NoPublicRelease) or (isinstance(exc, urllib.error.HTTPError) and exc.code == 404) or any(word in lower for word in ("404", "release json", "could not fetch a valid release", "not found", "no assets")):
+        kind = "no_release"
+    elif isinstance(exc, (ConnectionError, TimeoutError)) or (isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError)) or any(word in lower for word in ("dns", "connect", "timed out", "timeout", "offline", "network", "error sending request", "enotfound", "urlerror")):
         kind = "offline"
+    elif isinstance(exc, PermissionError) or "not writable" in lower:
+        kind = "not_writable"
     else:
         kind = "other"
     return kind, _message(kind, app=app, host=host, raw=raw)
@@ -107,15 +110,16 @@ def button_view(state: UpdateState, version: str, auto_download=True) -> ButtonV
     current = "v" + version.removeprefix("v")
     percent = min(100, max(0, int(100 * state.progress / state.total))) if state.total else 0
     text = {
-        "idle": f"Check for a new version of {state.app_name}.",
+        "idle": f"Current version: {current}",
         "checking": "Checking for updates…",
         "none": f"Up to date ({current})",
         "available": f"Update available: {target}\nCurrent version: {current}",
-        "downloading": f"Downloading {target}… {percent}%",
-        "ready": f"Restart to update to {target}",
+        "downloading": f"Downloading {target}…" + (f" {percent}%" if state.total else ""),
+        "ready": f"{target} is ready",
+        "installing": f"Installing {target} and restarting…",
         "error": _message(state.kind or "other", app=state.app_name, host=state.host, raw=state.message),
         "unsupported": _message(state.kind, app=state.app_name, host=state.host, raw=state.message) if state.kind else state.message,
     }[state.status]
     action = ("download" if state.status == "available" and not auto_download else
               "restart" if state.status == "ready" else "page" if state.status == "unsupported" else None)
-    return ButtonView(text, action, state.status in {"available", "ready"} or (state.status == "unsupported" and bool(info)), state.status in {"checking", "downloading"})
+    return ButtonView(text, action, state.status in {"available", "ready"} or (state.status == "unsupported" and bool(info)), state.status in {"checking", "downloading", "installing"})

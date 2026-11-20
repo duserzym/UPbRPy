@@ -38,7 +38,10 @@ def install_http(monkeypatch, archive):
 
     def opener(request, *, timeout):
         calls.append(request)
-        response = io.BytesIO(SHA.encode() if len(calls) % 2 else archive)
+        feed = (f'<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+                f'<id>tag:github.com,2008:Grit::Commit/{SHA}</id>'
+                '<updated>2026-11-19T12:00:00Z</updated></entry></feed>').encode()
+        response = io.BytesIO(feed if request.full_url.endswith(".atom") else archive)
         response.headers = {"Last-Modified": "Thu, 19 Nov 2026 12:00:00 GMT"}
         return response
 
@@ -67,7 +70,7 @@ def test_git_free_check_fetches_snapshot_and_compares(tmp_path, monkeypatch, git
     assert metadata["sha256"]["library.toml"]
     assert standards.reference_library_info(snapshot)["sha256"] == checked.digest
     assert len(calls) == 2
-    assert calls[0].get_header("Accept") == "application/vnd.github.sha"
+    assert calls[0].get_header("Accept") == "application/atom+xml"
     assert calls[1].full_url.endswith("/zip/" + SHA)
     assert all(p.read_bytes() == data for p, data in before.items())
     if real_checkout:

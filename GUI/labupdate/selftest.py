@@ -17,7 +17,7 @@ SELF_TEST_PUBKEY = "dW50cnVzdGVkIGNvbW1lbnQ6IHRlc3Qga2V5ClJXUjBaWE4wTFd0bGVkZGFt
 SELF_TEST_SIGNATURE = "dW50cnVzdGVkIGNvbW1lbnQ6IHRlc3Qgc2lnbmF0dXJlClJVUjBaWE4wTFd0bGVkdmxQU1NTcDhFeC84QXhOaFYyeWpXQk9PcSt2SVZJaVRGU3RlZ09PNTdDRUdaRmtrb2c5YXNaVVB0ZEFIanJEdnkybUl3YkQ5a2FKZklDOTlja0Z3WT0KdHJ1c3RlZCBjb21tZW50OiBsYWJ1cGRhdGUgdGVzdAora2J5T1MrcGJFbVpxaHRTRHNkN0tyVVB4RDNQcy92cmQzcUJqZWd5cmRTTTB1aTlWdlZiZ0VEQy9hZTdIUkVXbm5Kd1RlNy9xcThhQzNqVFFWQ0JBdz09Cg=="
 
 
-def _verify_archive(release, config, archive_dir):
+def _verify_archive(release, config, archive_dir, opener):
     """Self-test only: verify an archive with the embedded disposable key."""
     if archive_dir is not None:
         name = Path(urllib.parse.unquote(urllib.parse.urlsplit(release.url).path)).name
@@ -31,7 +31,7 @@ def _verify_archive(release, config, archive_dir):
     with tempfile.TemporaryDirectory(prefix="labupdate-selftest-") as folder:
         path = Path(folder) / "archive"
         request = urllib.request.Request(validate_url(release.url))
-        with tls.urlopen(request, timeout=20) as response, path.open("wb") as output:
+        with opener(request, timeout=20) as response, path.open("wb") as output:
             received = 0
             while chunk := response.read(min(1024 * 1024, config.max_archive_bytes - received + 1)):
                 received += len(chunk)
@@ -43,6 +43,7 @@ def _verify_archive(release, config, archive_dir):
 
 def run_self_test(config, manifest_url=None, archive_dir=None) -> dict:
     """Check trust, known signatures and optionally a disposable-key test feed."""
+    opener = config.opener or tls.urlopen
     report = {"ok": True, "verification_ran": False}
     try:
         report["tls"] = tls.describe()
@@ -50,7 +51,7 @@ def run_self_test(config, manifest_url=None, archive_dir=None) -> dict:
         report["tls"] = {"status": "error", "message": str(exc)}
         report["ok"] = False
     try:
-        with tls.urlopen(urllib.request.Request("https://github.com/"), timeout=20) as response:
+        with opener(urllib.request.Request("https://github.com/"), timeout=20) as response:
             report["https"] = {"status": "ok", "http_status": getattr(response, "status", None)}
     except urllib.error.HTTPError as exc:
         report["https"] = {"status": "ok", "http_status": exc.code}
@@ -85,8 +86,8 @@ def run_self_test(config, manifest_url=None, archive_dir=None) -> dict:
         report["public_key"] = {"status": "error", "message": str(exc)}
     if manifest_url is not None:
         try:
-            release = fetch_manifest(replace(config, feed_url=manifest_url), tls.urlopen)
-            _verify_archive(release, config, archive_dir)
+            release = fetch_manifest(replace(config, feed_url=manifest_url), opener)
+            _verify_archive(release, config, archive_dir, opener)
             report["manifest"] = {"status": "ok", "version": release.version, "archive_verified": True}
         except Exception as exc:
             report["ok"] = False

@@ -73,6 +73,7 @@ UPbRPy = [
   "reference_materials/*/*.toml",
 ]
 GUI = [
+  "../release-notes/*.md",
   "assets/icons/*.svg",
   "assets/icons/*.icns",
   "assets/icons/*.ico",

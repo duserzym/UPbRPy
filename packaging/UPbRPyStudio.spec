@@ -33,6 +33,8 @@ data_files = [
         ".",
     ),
 ]
+data_files += [(str(path), "release-notes") for path in (PROJECT_ROOT / "release-notes").glob("*.md")]
+
 # The build venv may have an editable install from another checkout. Generate
 # our version metadata here instead of copying that install's stale egg-info.
 metadata_directory = Path(workpath) / "studio-metadata" / "UPbRPy.egg-info"

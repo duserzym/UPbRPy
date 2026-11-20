@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import platform
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class UpdateConfig:
     download_page: str | None = None
     max_manifest_bytes: int = 256 * 1024
     max_archive_bytes: int = 1024 * 1024 * 1024
+    release_notes: Callable[[str], str | None] | None = None
+    opener: Callable | None = None
 
     def __post_init__(self):
         if self.max_manifest_bytes <= 0 or self.max_archive_bytes <= 0:

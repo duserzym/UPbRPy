@@ -67,6 +67,16 @@ if __name__ == "__main__" and "--check-tls" in sys.argv:
     tls_args = tls_parser.parse_args()
     raise SystemExit(_check_tls(tls_args.check_tls, tls_args.check_tls_output))
 
+# This path imports only the standard-library updater core and Studio TLS config.
+if __name__ == "__main__" and "--update-self-test" in sys.argv:
+    from GUI.labupdate.selftest import add_self_test_argument, handle_self_test
+    from GUI.update_config import update_config
+
+    update_parser = argparse.ArgumentParser(description="Studio signed update check")
+    add_self_test_argument(update_parser)
+    update_parser.add_argument("--theme", choices=["system", "light", "dark"])
+    raise SystemExit(handle_self_test(update_parser.parse_args(), update_config()))
+
 from PySide6 import QtCore
 
 from GUI.launch import (
@@ -382,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--export", metavar="PNG", help="Export the current window to a PNG and exit")
     parser.add_argument("--version-output", metavar="FILE", help="Write Studio's version to a file and exit")
     _add_tls_arguments(parser)
+    from GUI.labupdate.selftest import add_self_test_argument, handle_self_test
+    add_self_test_argument(parser)
     parser.add_argument(
         "--open",
         metavar="TARGET",
@@ -423,6 +435,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.check_tls is not None:
         return _check_tls(args.check_tls, args.check_tls_output)
+
+    if args.update_self_test is not None:
+        # Only the self-test needs Studio's update config (it imports UPbRPy.tls);
+        # a second launch must hand off without importing UPbRPy.
+        from GUI.update_config import update_config
+
+        return handle_self_test(args, update_config())
 
     if args.verify_reduction and not args.verification_output:
         parser.error("--verify-reduction requires --verification-output")

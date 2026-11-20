@@ -131,7 +131,7 @@ def test_build_checks_version_even_without_smoke_test(tmp_path, monkeypatch, rep
     monkeypatch.setattr(build_desktop, "run_pyinstaller", lambda *a, **kw: tmp_path / "fake.app")
     monkeypatch.setattr(build_desktop, "sign_application", lambda app: None)
     archived = []
-    monkeypatch.setattr(build_desktop, "archive_application", lambda *args: archived.append(args))
+    monkeypatch.setattr(build_desktop, "archive_application", lambda *args, **kw: archived.append((args, kw)))
 
     def run_frozen(app, arguments, work_directory):
         Path(arguments[1]).write_text(
@@ -152,6 +152,7 @@ def test_build_checks_version_even_without_smoke_test(tmp_path, monkeypatch, rep
 
 @pytest.mark.parametrize("platform,sandbox,check_tls", [
     ("darwin", "/usr/bin/sandbox-exec", True),
+    ("darwin", "/usr/bin/sandbox-exec", "update"),
     ("darwin", None, True),
     ("linux", None, True),
     ("win32", None, True),
@@ -169,7 +170,8 @@ def test_frozen_tls_hides_homebrew_only_when_supported(tmp_path, monkeypatch, pl
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(build_desktop.subprocess, "run", run)
-    arguments = ["--check-tls", "https://api.github.com"] if check_tls else ["--version-output", "version.txt"]
+    arguments = (["--update-self-test", "file:///feed.json"] if check_tls == "update" else
+                 ["--check-tls", "https://github.com/"] if check_tls else ["--version-output", "version.txt"])
     overrides = {"SSL_CERT_FILE": str(tmp_path / "missing.pem"),
                  "SSL_CERT_DIR": str(tmp_path / "missing-certs")}
     build_desktop._run_frozen(tmp_path / "app", arguments, tmp_path, environment_overrides=overrides)
@@ -193,3 +195,132 @@ def test_build_requires_both_trust_dependencies(monkeypatch):
                         lambda name: None if name in {"truststore", "certifi"} else object())
     with pytest.raises(RuntimeError, match="certifi, truststore"):
         build_desktop.require_build_dependencies()
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_archive_keeps_legacy_zip_and_adds_tar_checksums(tmp_path, monkeypatch, signed):
+    import hashlib
+    import json
+    import tarfile
+    import zipfile
+    from GUI import update_config
+    from GUI.labupdate import release
+    from labupdate_signing import public_key, sign
+
+    monkeypatch.setattr(build_desktop.sys, "platform", "darwin")
+    monkeypatch.setattr(build_desktop, "platform_label", lambda: "macOS-arm64")
+    monkeypatch.setattr(build_desktop, "project_version", lambda: "0.1.5")
+    monkeypatch.delenv("UPBRPY_UPDATER_KEY", raising=False)
+    monkeypatch.setattr(update_config, "PUBLIC_KEY", public_key())
+    app = tmp_path / "UPbRPy Studio.app"
+    contents = app / "Contents"
+    contents.mkdir(parents=True)
+    (contents / "payload").write_bytes(b"signed application")
+    (contents / "link").symlink_to("payload")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "ditto":
+            assert command[1:5] == ["-c", "-k", "--sequesterRsrc", "--keepParent"]
+            with zipfile.ZipFile(command[-1], "w") as archive:
+                archive.write(contents / "payload", arcname="UPbRPy Studio.app/Contents/payload")
+        elif command[:4] == ["cargo", "tauri", "signer", "sign"]:
+            path = Path(command[-1])
+            Path(str(path) + ".sig").write_text(sign(path.read_bytes()))
+        else:
+            pytest.fail(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(build_desktop.subprocess, "run", run)
+    result = build_desktop.archive_application(app, tmp_path, sign_with=Path("test.key") if signed else None)
+    assert result.name == "UPbRPy-Studio-0.1.5-macOS-arm64.zip"
+    tarball = tmp_path / "UPbRPy-Studio-0.1.5-macOS-arm64.app.tar.gz"
+    with tarfile.open(tarball) as bundle:
+        link = bundle.getmember("UPbRPy Studio.app/Contents/link")
+        assert link.issym() and link.linkname == "payload"
+    expected = {result.name, tarball.name}
+    if signed:
+        expected |= {tarball.name + ".sig", "latest.json"}
+        feed = json.loads((tmp_path / "latest.json").read_text())
+        assert feed["notes"] == (ROOT / "release-notes/0.1.5.md").read_text()
+        assert feed["platforms"]["darwin-aarch64"]["url"].endswith(tarball.name)
+        assert sum(command[0] == "cargo" for command in commands) == 1
+    lines = (tmp_path / "SHA256SUMS.txt").read_text().splitlines()
+    assert {line.split("  ", 1)[1] for line in lines} == expected
+    for line in lines:
+        digest, name = line.split("  ", 1)
+        assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
+    assert not (tmp_path / "updater.pub").exists()
+
+
+@pytest.mark.parametrize("failure", [None, "signature", "manifest", "tls", "public_key", "verification_ran", "crash", "missing"])
+def test_frozen_update_self_test_mandatory_checks(tmp_path, monkeypatch, failure):
+    import json
+    from GUI.labupdate import minisign, selftest
+    from GUI.labupdate.config import platform_key
+
+    def frozen(app, arguments, work_directory, **kwargs):
+        assert arguments[0] == "--update-self-test"
+        manifest = json.loads((tmp_path / "update-self-test.json").read_text())
+        selected = manifest["platforms"][platform_key()]
+        from urllib.parse import urlsplit, unquote
+        archive = Path(unquote(urlsplit(selected["url"]).path))
+        minisign.verify_file(archive, selected["signature"], selftest.SELF_TEST_PUBKEY)
+        assert kwargs["environment_overrides"] == {
+            "SSL_CERT_FILE": str(tmp_path / "nonexistent-cert.pem"),
+            "SSL_CERT_DIR": str(tmp_path / "nonexistent-certs"),
+        }
+        report = {"ok": True, "verification_ran": True, "tls": {"source": "truststore"},
+                  "https": {"status": "network", "message": "offline"},
+                  "signature": {"status": "ok", "tampered_rejected": True},
+                  "manifest": {"status": "ok", "archive_verified": True},
+                  "public_key": {"status": "ok"}}
+        if failure in {"tls", "manifest", "signature", "public_key"}:
+            report[failure]["status"] = "error"
+        if failure == "tls":
+            report["tls"] = {}
+        if failure == "verification_ran":
+            report["verification_ran"] = False
+        if failure != "missing":
+            Path(arguments[-1]).write_text(json.dumps(report))
+        return SimpleNamespace(returncode=int(failure == "crash"), stderr="")
+
+    monkeypatch.setattr(build_desktop, "_run_frozen", frozen)
+    if failure:
+        with pytest.raises(RuntimeError, match="self-test"):
+            build_desktop.verify_update_self_test(tmp_path / "fake.app", tmp_path)
+    else:
+        build_desktop.verify_update_self_test(tmp_path / "fake.app", tmp_path)
+
+
+def test_self_test_cli_exits_before_gui(tmp_path, monkeypatch):
+    from GUI import main
+    from GUI.labupdate import selftest
+
+    calls = []
+    monkeypatch.setattr(selftest, "run_self_test", lambda cfg, manifest_url: calls.append((cfg, manifest_url)) or {"ok": True})
+    monkeypatch.setattr(main, "build_application", lambda *a, **kw: pytest.fail("Started GUI"))
+    output = tmp_path / "report.json"
+    assert main.main(["--update-self-test", "file:///feed.json", "--update-self-test-output", str(output)]) == 0
+    assert calls[0][1] == "file:///feed.json"
+    assert output.read_text().strip() == '{\n  "ok": true\n}'
+
+
+def test_package_data_and_frozen_lookup_include_root_notes(tmp_path, monkeypatch):
+    import tomllib
+    from setuptools import Distribution
+    from setuptools.command.build_py import build_py
+    from GUI import update_config
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    dist = Distribution({"packages": ["GUI"], "package_dir": {"": str(ROOT)},
+                         "package_data": {"GUI": metadata["tool"]["setuptools"]["package-data"]["GUI"]}})
+    dist.script_name = str(ROOT / "setup.py")
+    command = build_py(dist)
+    command.build_lib = str(tmp_path / "bundle")
+    command.ensure_finalized()
+    command.run()
+    bundled = tmp_path / "bundle/release-notes/0.1.5.md"
+    assert bundled.read_bytes() == (ROOT / "release-notes/0.1.5.md").read_bytes()
+    monkeypatch.setattr(update_config, "__file__", str(tmp_path / "bundle/GUI/update_config.py"))
+    assert update_config.release_notes("0.1.5") == bundled.read_text().strip()

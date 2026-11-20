@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import urllib.parse
+import weakref
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -61,14 +62,17 @@ class Updater(QtCore.QObject):
     """One updater per app; injected I/O, root and previews support offline testing."""
 
     stateChanged = QtCore.Signal(object)
+    whatsNew = QtCore.Signal(str, str)
 
     def __init__(self, config, version: str, parent=None, *, opener=None, runner=None,
                  preview=None, settings=None, root=None):
         super().__init__(parent or QtCore.QCoreApplication.instance())
         self.config, self.version = config, version
         self.root = Path(root) if root is not None else install.install_root()
-        self._opener, self._runner = opener or tls.urlopen, runner or install.detached_runner
+        self._opener, self._runner = opener or config.opener or tls.urlopen, runner or install.detached_runner
         self._prefs = settings if settings is not None else QtCore.QSettings(config.settings_org, config.settings_app)
+        self._prefs.setValue("updates/channel", "stable")
+        self._whats_new = None
         self._state = UpdateState(app_name=config.app_name, host=urllib.parse.urlsplit(config.feed_url).hostname or "github.com")
         self._jobs = []
         self._downloads = set()
@@ -90,7 +94,7 @@ class Updater(QtCore.QObject):
             if preview not in STATES:
                 raise ValueError(f"Unknown update preview: {preview}")
             info = Release("2.0.0", "Release notes", None, config.download_page, "")
-            self._state = replace(self._state, status=preview, info=info if preview in {"available", "downloading", "ready", "unsupported"} else None,
+            self._state = replace(self._state, status=preview, info=info if preview in {"available", "downloading", "ready", "installing", "unsupported"} else None,
                                   progress=43, total=100, message="Network error" if preview == "error" else "Preview" if preview == "unsupported" else "")
         self._preview_state = self._state
         app = QtCore.QCoreApplication.instance()
@@ -112,6 +116,7 @@ class Updater(QtCore.QObject):
     def set_auto_download(self, enabled):
         """Persist the preference and download an already available update."""
         self.prefs.setValue("updates/auto_download", bool(enabled))
+        self.stateChanged.emit(self.state)
         if enabled:
             self.download()
 
@@ -130,8 +135,39 @@ class Updater(QtCore.QObject):
             return "not_writable", "Installation folder is not writable or this is a source checkout"
         return "", ""
 
+    def current_notes(self):
+        """Return bundled notes, matching pending notes, or a version fallback."""
+        text = self.config.release_notes(self.version) if self.config.release_notes else None
+        if not text and str(self.prefs.value("updates/pending_version", "")).removeprefix("v") == self.version.removeprefix("v"):
+            text = self.prefs.value("updates/pending_notes", "", type=str)
+        return text or f"Updated to v{self.version.removeprefix('v')}."
+
+    def show_whats_new(self):
+        """Reopen the running version's notes without changing first-run settings."""
+        self.whatsNew.emit(self.version, self.current_notes())
+
+    def start(self):
+        """Record the running version and announce an upgrade once per settings store."""
+        if self._started or self._preview is not None or self._closing:
+            return
+        previous = self.prefs.value("updates/last_seen_version", "", type=str)
+        try:
+            newer = bool(previous and compare_versions(self.version, previous) > 0)
+        except ValueError:
+            newer = False
+        if newer:
+            self._whats_new = (self.version, self.current_notes())
+            # Startup precedes widget creation in some hosts; deliver after it.
+            QtCore.QTimer.singleShot(0, lambda: self.whatsNew.emit(*self._whats_new))
+        self.prefs.setValue("updates/last_seen_version", self.version)
+        self._start_scheduler()
+
     def start_scheduler(self):
-        """Call after successful startup; discard the backup and schedule checks."""
+        """Compatibility entry point for start()."""
+        self.start()
+
+    def _start_scheduler(self):
+        """Discard the backup and schedule supported checks."""
         if self._started or self._preview is not None or self._closing:
             return
         self._started = True
@@ -190,6 +226,10 @@ class Updater(QtCore.QObject):
         if reason:
             self._emit(("unsupported", reason, kind))
             return
+        self.prefs.setValue("updates/pending_version", self.state.info.version)
+        self.prefs.setValue("updates/pending_notes", self.state.info.notes)
+        self.prefs.sync()
+        self._emit("install_started")
         self._work("install")
 
     def _work(self, operation):
@@ -247,6 +287,110 @@ class Updater(QtCore.QObject):
         self._downloads.clear()
 
 
+def release_notes_url(updater):
+    """Return the selected release's public notes page."""
+    version = getattr(updater.state.info, "version", updater.version).removeprefix("v")
+    return f"https://github.com/{updater.config.repo}/releases/tag/v{version}"
+
+
+class NotesLabel(QtWidgets.QLabel):
+    """Plain notes rendered in at most four wrapped lines, ending in an ellipsis."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * 4)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.ColorRole.WindowText))
+        lines = []
+        for paragraph in self.text().splitlines():
+            layout = QtGui.QTextLayout(paragraph or " ", self.font())
+            layout.beginLayout()
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(max(1, self.width()))
+                lines.append(paragraph[line.textStart():line.textStart() + line.textLength()])
+            layout.endLayout()
+        metrics = self.fontMetrics()
+        for index, line in enumerate(lines[:4]):
+            if index == 3 and len(lines) > 4:
+                line = metrics.elidedText(line + "…", QtCore.Qt.TextElideMode.ElideRight, self.width())
+            painter.drawText(0, metrics.ascent() + index * metrics.lineSpacing(), line)
+
+
+class WhatsNewCard(QtWidgets.QFrame):
+    """Dismissible, palette-based running-version notes anchored near a check button."""
+
+    def __init__(self, button):
+        super().__init__(button, QtCore.Qt.WindowType.Popup)
+        self.button = button
+        if not hasattr(button.updater, "_note_buttons"):
+            button.updater._note_buttons = weakref.WeakSet()
+        button.updater._note_buttons.add(button)
+        self.setObjectName("WhatsNewCard")
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setAutoFillBackground(True)
+        layout = QtWidgets.QVBoxLayout(self)
+        row = QtWidgets.QHBoxLayout()
+        self.heading = QtWidgets.QLabel()
+        row.addWidget(self.heading)
+        close = QtWidgets.QToolButton()
+        close.setText("✕")
+        close.setAccessibleName("Close what’s new")
+        close.clicked.connect(self.hide)
+        row.addWidget(close)
+        layout.addLayout(row)
+        self.notes = QtWidgets.QLabel()
+        self.notes.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.notes.setWordWrap(True)
+        layout.addWidget(self.notes)
+        button.updater.whatsNew.connect(self.show_notes)
+
+    @QtCore.Slot(str, str)
+    def show_notes(self, version, text):
+        buttons = []
+        for button in self.button.updater._note_buttons:
+            try:
+                if button.isVisible():
+                    buttons.append(button)
+            except RuntimeError:
+                # Qt may have deleted a tab before Python collects its wrapper.
+                continue
+        active = QtWidgets.QApplication.activeWindow()
+        candidates = [button for button in buttons if button.window() is active] or buttons
+        if not candidates or self.button is not candidates[0]:
+            return
+        self.heading.setText(f"What's new in v{version.removeprefix('v')}")
+        self.notes.setText(text)
+        bounds = self.button.screen().availableGeometry()
+        self.setFixedWidth(min(390, bounds.width() - 20))
+        margins = self.layout().contentsMargins()
+        notes_width = self.width() - margins.left() - margins.right() - 2 * self.frameWidth()
+        self.notes.setFixedHeight(self.notes.heightForWidth(max(1, notes_width)))
+        self.adjustSize()
+        point = self.button.mapToGlobal(QtCore.QPoint(self.button.width(), 0))
+        self.move(max(bounds.left(), min(point.x() - self.width(), bounds.right() - self.width() + 1)),
+                  max(bounds.top(), min(point.y() - self.height() - 6, bounds.bottom() - self.height() + 1)))
+        self.show()
+        self.setFocus()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.ColorRole.Window))
+        super().paintEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(event)
+
+
 class UpdatePopover(QtWidgets.QFrame):
     """A screen-clamped popover with release notes, actions and raw diagnostics."""
 
@@ -273,11 +417,16 @@ class UpdatePopover(QtWidgets.QFrame):
         self.details.setTextFormat(QtCore.Qt.TextFormat.PlainText)
         self.details.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.details.setMaximumHeight(70)
-        self.notes = QtWidgets.QPlainTextEdit()
-        self.notes.setReadOnly(True)
-        self.notes.setFixedHeight(100)
+        self.notes = NotesLabel()
         for widget in (self.heading, self.status, self.details, self.notes):
             layout.addWidget(widget)
+        self.notes_link = QtWidgets.QLabel('<a href="release">Release notes</a>')
+        self.notes_link.linkActivated.connect(lambda _: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl(release_notes_url(self.updater))))
+        layout.addWidget(self.notes_link)
+        self.whats_new_link = QtWidgets.QLabel("<a href=\"new\">What's new</a>")
+        self.whats_new_link.linkActivated.connect(lambda _: self._show_whats_new())
+        layout.addWidget(self.whats_new_link)
         row = QtWidgets.QHBoxLayout()
         self.check_button = QtWidgets.QPushButton("Check now")
         self.check_button.clicked.connect(lambda: self.updater.check(manual=True))
@@ -301,17 +450,28 @@ class UpdatePopover(QtWidgets.QFrame):
     def _changed(self, state):
         view = button_view(state, self.updater.version, self.updater.auto_download)
         self.status.setText(view.text)
-        self.details.setText("Details: " + state.message)
+        raw = " ".join(state.message.split())
+        self.details.setText("Details: " + (raw[:119] + "…" if len(raw) > 120 else raw))
         self.details.setToolTip(state.message)
-        self.details.setVisible(bool(state.message))
-        self.notes.setPlainText(getattr(state.info, "notes", ""))
-        self.notes.setVisible(bool(self.notes.toPlainText()))
+        self.details.setVisible(state.status == "error" and bool(state.message))
+        self.notes.setText(getattr(state.info, "notes", "") if state.status in {"available", "ready"} else "")
+        self.notes.setVisible(bool(self.notes.text()))
+        self.notes_link.setVisible(state.status in {"available", "ready"})
         self.action.setVisible(view.action is not None)
         self.action.setText({"download": "Download", "restart": "Restart to update", "page": "Download page"}.get(view.action, ""))
         self.check_button.setEnabled(not view.busy)
         if self.isVisible():
             self.adjustSize()
             self.reanchor()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), self.palette().brush(QtGui.QPalette.ColorRole.Window))
+        super().paintEvent(event)
+
+    def _show_whats_new(self):
+        self.hide()
+        self.updater.show_whats_new()
 
     def _act(self):
         action = button_view(self.updater.state, self.updater.version, self.updater.auto_download).action
@@ -356,15 +516,19 @@ class CheckUpdatesButton(QtWidgets.QToolButton):
     def __init__(self, updater, open_settings=None, parent=None):
         super().__init__(parent)
         self.updater = updater
+        self.setObjectName("CheckUpdatesButton")
+        self.setIconSize(QtCore.QSize(16, 16))
         self.setAccessibleName("Check for updates")
         self.setAutoRaise(True)
-        self.setFixedSize(24, 24)
+        self.setFixedSize(21, 21)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self._angle = 0
         self._rotation_timer = QtCore.QTimer(self)
         self._rotation_timer.setInterval(40)
         self._rotation_timer.timeout.connect(self._rotate)
+        self.whats_new_card = WhatsNewCard(self)
         self.popover = UpdatePopover(self, open_settings)
+        self.installEventFilter(self)
         self.clicked.connect(self._toggle)
         updater.stateChanged.connect(self._changed)
         self._changed(updater.state)
@@ -385,8 +549,8 @@ class CheckUpdatesButton(QtWidgets.QToolButton):
         view = button_view(state, self.updater.version, self.updater.auto_download)
         self.setProperty("badge", view.badge)
         self.setProperty("busy", view.busy)
-        self.setToolTip(view.text)
-        if view.busy and self.isVisible():
+        self.setToolTip(f"Check for updates · v{self.updater.version} · {view.text}")
+        if view.busy and self.isVisible() and self.style().styleHint(QtWidgets.QStyle.StyleHint.SH_Widget_Animate, None, self):
             self._rotation_timer.start()
         else:
             self._rotation_timer.stop()
@@ -401,6 +565,11 @@ class CheckUpdatesButton(QtWidgets.QToolButton):
         self._rotation_timer.stop()
         self.popover.hide()
         super().hideEvent(event)
+
+    def eventFilter(self, watched, event):
+        if watched is self and event.type() == QtCore.QEvent.Type.StyleChange:
+            self._changed(self.updater.state)
+        return super().eventFilter(watched, event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -430,6 +599,7 @@ class VersionChip(QtWidgets.QToolButton):
     def __init__(self, updater, parent=None):
         super().__init__(parent)
         self.updater, self._canvas = updater, None
+        self.setObjectName("VersionChip")
         self.setAutoRaise(True)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.setAccessibleName("Application version and updates")
@@ -446,9 +616,7 @@ class VersionChip(QtWidgets.QToolButton):
     def _changed(self, state):
         view = button_view(state, self.updater.version)
         self.setProperty("badge", view.badge)
-        text = {"checking": "Checking", "available": "Update available", "downloading": "Downloading…",
-                "ready": "Update ready, restart", "error": "Check failed"}.get(state.status, f"v{self.updater.version.removeprefix('v')}")
-        self.setText(("● " if view.badge else "") + text)
+        self.setText(f"v{self.updater.version.removeprefix('v')}")
         self.setToolTip(view.text)
         self._position()
 
@@ -456,13 +624,17 @@ class VersionChip(QtWidgets.QToolButton):
         """Keep the chip ten pixels inside a resizable canvas."""
         if self._canvas is not None:
             self._canvas.removeEventFilter(self)
+            if isinstance(self._canvas, QtWidgets.QStackedWidget):
+                self._canvas.currentChanged.disconnect(self._position)
         self._canvas = parent_widget
         self.setParent(parent_widget)
         parent_widget.installEventFilter(self)
+        if isinstance(parent_widget, QtWidgets.QStackedWidget):
+            parent_widget.currentChanged.connect(self._position)
         self._position()
         self.show()
 
-    def _position(self):
+    def _position(self, *_args):
         self.adjustSize()
         if self._canvas is not None:
             self.move(max(0, self._canvas.width() - self.width() - 10), max(0, self._canvas.height() - self.height() - 10))

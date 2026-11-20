@@ -18,6 +18,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import zipfile
 import tomllib
 
 
@@ -167,7 +169,7 @@ def _run_frozen(
     environment["UPBRPY_AUTOSAVE_DIR"] = str(work_directory / "autosave")
     environment.update(environment_overrides or {})
     command = [str(application_executable(application)), "--theme", "light", *arguments]
-    sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" and "--check-tls" in arguments else None
+    sandbox = shutil.which("sandbox-exec") if sys.platform == "darwin" and any(flag in arguments for flag in ("--check-tls", "--update-self-test")) else None
     if sandbox:
         profile = work_directory / "no-homebrew-ca.sb"
         profile.write_text(
@@ -282,7 +284,7 @@ def smoke_test_application(
     tls_output.unlink(missing_ok=True)
     result = _run_frozen(
         application,
-        ["--check-tls", "https://api.github.com", "--check-tls-output", str(tls_output)],
+        ["--check-tls", "https://github.com/", "--check-tls-output", str(tls_output)],
         work_directory,
         environment_overrides={
             "SSL_CERT_FILE": str(work_directory / "nonexistent-cert.pem"),
@@ -305,20 +307,68 @@ def smoke_test_application(
         raise RuntimeError(f"The frozen TLS check failed: {report}")
     if report["error"] == "network":
         print(f"Warning: frozen TLS network check unavailable: {report['detail']}")
+    verify_update_self_test(application, work_directory)
     return screenshots["empty"][0]
+
+
+def verify_update_self_test(application: Path, work_directory: Path) -> None:
+    """Verify a local signed feed and mandatory tamper rejection in the frozen app."""
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from GUI.labupdate.config import platform_key
+    from GUI.labupdate.selftest import SELF_TEST_DATA
+
+    # The disposable private test key stays in the source-side test helper.
+    # It is never bundled or used by the production updater.
+    helper = importlib.util.spec_from_file_location("labupdate_smoke_signing", PROJECT_ROOT / "tests/labupdate_signing.py")
+    signing = importlib.util.module_from_spec(helper)
+    helper.loader.exec_module(signing)
+    archive = work_directory / "update-self-test.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("Self Test.app/Contents/MacOS/Self Test", SELF_TEST_DATA)
+    signature = signing.sign(archive.read_bytes())
+    manifest = work_directory / "update-self-test.json"
+    manifest.write_text(json.dumps({"version": project_version(), "notes": "Frozen update check",
+        "platforms": {platform_key(): {"url": archive.as_uri(), "signature": signature}}}), encoding="utf-8")
+    output = work_directory / "update-self-test-result.json"
+    output.unlink(missing_ok=True)
+    result = _run_frozen(application,
+        ["--update-self-test", manifest.as_uri(), "--update-self-test-output", str(output)],
+        work_directory, environment_overrides={
+            "SSL_CERT_FILE": str(work_directory / "nonexistent-cert.pem"),
+            "SSL_CERT_DIR": str(work_directory / "nonexistent-certs"),
+        }, check=False)
+    try:
+        report = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Frozen update self-test did not return JSON: {result.stderr[-4000:]}") from exc
+    required = (report.get("ok") is True, report.get("verification_ran") is True,
+                report.get("signature", {}).get("tampered_rejected") is True,
+                report.get("signature", {}).get("status") == "ok",
+                report.get("public_key", {}).get("status") == "ok",
+                report.get("manifest", {}).get("status") == "ok",
+                report.get("manifest", {}).get("archive_verified") is True,
+                report.get("https", {}).get("status") in {"ok", "network"},
+                bool(report.get("tls", {}).get("source")),
+                report.get("tls", {}).get("status") != "error")
+    if result.returncode != 0 or "Traceback" in result.stderr or not all(required):
+        raise RuntimeError(f"Frozen update self-test failed: {report}")
+    if report["https"]["status"] == "network":
+        print(f"Warning: frozen update HTTPS check unavailable: {report['https'].get('message', '')}")
 
 
 def archive_application(
     application: Path,
     dist_directory: Path,
+    *, sign_with: Path | None = None,
 ) -> Path:
-    """Create a transport-safe archive suitable for CI or manual testing."""
+    """Keep the legacy ZIP and add a signed-update tarball, feed and checksums."""
     archive_stem = (
         f"UPbRPy-Studio-{project_version()}-{platform_label()}"
     )
     archive = dist_directory / f"{archive_stem}.zip"
     if archive.exists():
         archive.unlink()
+    Path(str(archive) + ".sig").unlink(missing_ok=True)
     if sys.platform == "darwin":
         subprocess.run(
             [
@@ -345,6 +395,43 @@ def archive_application(
             base_dir=bundle_directory.name,
         )
         archive = Path(generated)
+    assets = [archive]
+    signed_archive = archive
+    target = "windows-x86_64" if sys.platform == "win32" else None
+    if sys.platform == "darwin":
+        tarball = dist_directory / f"{archive_stem}.app.tar.gz"
+        # Regenerating an archive invalidates any signature from an earlier build.
+        Path(str(tarball) + ".sig").unlink(missing_ok=True)
+        with tarfile.open(tarball, "w:gz", dereference=False) as bundle:
+            bundle.add(application, arcname=application.name)
+        assets.append(tarball)
+        signed_archive = tarball
+        target = "darwin-aarch64" if platform_label() == "macOS-arm64" else None
+    key = sign_with or os.environ.get("UPBRPY_UPDATER_KEY")
+    if key:
+        if target is None:
+            raise ValueError("Signed Studio feeds support macOS arm64 and Windows x86_64")
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from GUI.labupdate.release import build_feed
+        from GUI.update_config import PUBLIC_KEY
+        public_key = dist_directory / "updater.pub"
+        public_key.write_text(PUBLIC_KEY, encoding="utf-8")
+        try:
+            feed = dist_directory / "latest.json"
+            build_feed(repo="duserzym/UPbRPy", version=project_version(),
+                notes_file=PROJECT_ROOT / "release-notes" / f"{project_version()}.md",
+                archives={target: signed_archive}, pubkey_file=public_key,
+                out=feed, sign_with=Path(key).expanduser())
+        finally:
+            public_key.unlink(missing_ok=True)
+        assets.extend([Path(str(signed_archive) + ".sig"), feed])
+    checksums = dist_directory / "SHA256SUMS.txt"
+    lines = []
+    for asset in assets:
+        with asset.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        lines.append(f"{digest}  {asset.name}\n")
+    checksums.write_text("".join(lines), encoding="utf-8")
     return archive
 
 
@@ -384,6 +471,7 @@ def parse_arguments(
         action="store_true",
         help="Create a platform-labelled ZIP after validation.",
     )
+    parser.add_argument("--sign-with", type=Path, help="Updater private key (or UPBRPY_UPDATER_KEY).")
     return parser.parse_args(argv)
 
 
@@ -432,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Smoke-test screenshot: {screenshot}")
     if arguments.archive:
-        archive = archive_application(application, dist_directory)
+        archive = archive_application(application, dist_directory, sign_with=arguments.sign_with)
         print(f"Archive: {archive}")
     return 0
 

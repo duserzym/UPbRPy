@@ -13,13 +13,13 @@ import stat
 import sys
 import tempfile
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 import subprocess
 import tomllib
 import urllib.error
 from urllib.request import Request
 import zipfile
+import xml.etree.ElementTree as ET
 
 from UPbRPy.standards import reference_library_info
 from UPbRPy.tls import urlopen, is_certificate_error, certificate_error_message
@@ -27,7 +27,7 @@ from UPbRPy.tls import urlopen, is_certificate_error, certificate_error_message
 
 STANDARDS_PAGE = "https://github.com/duserzym/upb-standards"
 UPSTREAM_REF = "refs/upb-standards/checked"
-COMMITS_API = "https://api.github.com/repos/duserzym/upb-standards/commits/main"
+COMMITS_FEED = "https://github.com/duserzym/upb-standards/commits/main.atom"
 MAX_DOWNLOAD = 8 * 1024 * 1024
 MAX_EXPANDED = 32 * 1024 * 1024
 MINERALS = {"apatite", "carbonate", "glass", "hematite", "rutile", "titanite", "zircon"}
@@ -172,13 +172,13 @@ def _existing_snapshot(checkout: Path, commit: str) -> Path | None:
 def _check_snapshot(active_path, active_info: dict, checkout: Path) -> StandardsCheck:
     digest = active_info["sha256"]
     try:
-        data, headers = _read_url(COMMITS_API, accept="application/vnd.github.sha", limit=4096)
-        commit = data.decode("ascii").strip()
+        data, _ = _read_url(COMMITS_FEED, accept="application/atom+xml", limit=256 * 1024)
+        entry = ET.fromstring(data).find("{http://www.w3.org/2005/Atom}entry")
+        identifier = entry.findtext("{http://www.w3.org/2005/Atom}id", "") if entry is not None else ""
+        commit = identifier.rsplit("/", 1)[-1]
         if not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise ValueError("GitHub did not return a valid standards commit SHA")
-        commit_date = ""
-        if headers.get("Last-Modified"):
-            commit_date = parsedate_to_datetime(headers["Last-Modified"]).isoformat()
+        commit_date = entry.findtext("{http://www.w3.org/2005/Atom}updated", "")
         fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         snapshot = _existing_snapshot(checkout, commit)
         if snapshot is None:

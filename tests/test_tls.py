@@ -135,16 +135,16 @@ def test_upbdb_uses_shared_requests_transport_without_new_calls(monkeypatch):
 
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_certificate_message_is_distinct_and_retains_details(monkeypatch, wrapped):
-    from GUI import database, updates
+    from GUI import database
+    from GUI.labupdate.state import classify_error
     from UPbRPy.integration import upbdb
 
     certificate = ssl.SSLCertVerificationError(1, "certificate verify failed: local issuer")
     error = URLError(certificate) if wrapped else certificate
     assert tls.is_certificate_error(error)
-    assert "certificate check failed" in updates.friendly_update_error(str(error))
-    assert "Check your internet connection" in updates.friendly_update_error("DNS offline")
-    assert "Check your internet connection" in updates.friendly_update_error(
-        str(URLError(OSError("nodename nor servname provided, or not known"))))
+    assert classify_error(error)[0] == "certificate"
+    assert classify_error("DNS offline")[0] == "offline"
+    assert classify_error(URLError(OSError("nodename nor servname provided, or not known")))[0] == "offline"
 
     def fail(*args, **kwargs):
         raise error
@@ -175,19 +175,23 @@ def test_requests_certificate_wrapper_and_database_error(monkeypatch):
 
 
 def test_certificate_exception_type_survives_updater_worker(tmp_path, monkeypatch):
-    from GUI.updater import UpdateWorker
-    from GUI.updates import friendly_update_error
+    from GUI.labupdate.qt import Updater, _Worker
+    from GUI.labupdate.state import classify_error
+    from GUI.update_config import update_config
 
     def fail(*args, **kwargs):
         raise ssl.SSLCertVerificationError(1, "issuer unavailable")
 
-    worker = UpdateWorker("check", opener=fail, version="0.1.0", channel="stable")
+    updater = Updater(update_config(), "0.1.0", opener=fail)
+    worker = _Worker("check", updater)
     events = []
     worker.result.connect(events.append)
     worker.run()
     assert events[0][0] == "failed"
-    assert "issuer unavailable" in events[0][1]
-    assert "certificate check failed" in friendly_update_error(events[0][1])
+    assert isinstance(events[0][1], ssl.SSLCertVerificationError)
+    assert "issuer unavailable" in str(events[0][1])
+    assert classify_error(events[0][1])[0] == "certificate"
+    updater.shutdown()
 
 
 def test_database_server_picker_shows_certificate_cause(tmp_path):
@@ -415,10 +419,11 @@ def test_build_smoke_tls(monkeypatch, tmp_path, capsys, source, roots, error,
 
     monkeypatch.delenv("UPBRPY_SMOKE_SESSION", raising=False)
     monkeypatch.setattr(build, "_write_smoke_project", lambda work: work / "smoke.upbr")
+    monkeypatch.setattr(build, "verify_update_self_test", lambda *args: None)
     output = tmp_path / "check-tls.json"
     output.write_text('{"stale": true}', encoding="utf-8")
     report_json = json.dumps({"ca_certificates": roots, "trust": "truststore",
-                              "url": "https://api.github.com", "ok": error is None,
+                              "url": "https://github.com/", "ok": error is None,
                               "error": error, "detail": "unavailable"})
 
     def run_frozen(application, arguments, work, **kwargs):
@@ -431,7 +436,7 @@ def test_build_smoke_tls(monkeypatch, tmp_path, capsys, source, roots, error,
                 "frozen": True, "spots": 12, "stages": ["concentration"],
             }), encoding="utf-8")
         else:
-            assert arguments == ["--check-tls", "https://api.github.com",
+            assert arguments == ["--check-tls", "https://github.com/",
                                  "--check-tls-output", str(output)]
             assert not output.exists()
             assert kwargs["check"] is False
