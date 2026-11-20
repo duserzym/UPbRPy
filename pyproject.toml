@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "UPbRPy"
-version = "0.1.4"
+version = "0.1.5"
 description = "Python LA-ICP-MS U-Pb and trace-element reduction toolkit with an optional PySide6 desktop GUI."
 readme = "README.md"
 requires-python = ">=3.12"
