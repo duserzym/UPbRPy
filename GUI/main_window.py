@@ -3034,6 +3034,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.downhole_frac_plot.set_sigma_level(self.sigma_level)
         self.session_frac_plot.set_sigma_level(self.sigma_level)
         self.results_table = ResultsTableWidget(settings=self.settings)
+        self.session_frac_plot.set_spot_status_provider(
+            lambda name: (name in self.results_table.excluded_spots,
+                          self._review_flags.get(name, ""))
+        )
         self.results_table.appearance_changed.connect(self.update_project_window_title)
         self.results_table.tabs.currentChanged.connect(
             self.on_results_review_tab_changed

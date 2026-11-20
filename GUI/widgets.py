@@ -5,7 +5,7 @@ import html
 import re
 import sys
 import weakref
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from html import escape
 from types import MethodType
 
@@ -7704,10 +7704,20 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # GraphicsLayoutWidget installs an instance alias that hides clear().
+        self.__dict__.pop("clear", None)
         self.colours = SpotColours()
         self._theme: ThemeSpec | None = None
         self._data: dict | None = None
         self._plot_item: pg.PlotItem | None = None
+        self._point_index = None
+        self._curve_index = None
+        self._hover_ring = None
+        self._max_weight = float("nan")
+        self._spot_status_provider = None
+        self._hover_proxy = pg.SignalProxy(
+            self.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
+        )
         self._sigma_level = 2
         self._zoom_mode = "xy"
         self._interaction_mode = "zoom"
@@ -7730,6 +7740,8 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         self._draw()
 
     def _draw(self) -> None:
+        self._hide_hover()
+        self._point_index = self._curve_index = None
         theme = self._theme
         data = self._data
         if theme is None:
@@ -7805,12 +7817,18 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
             size=8,
             pen=[pg.mkPen(color, width=1.2) for color in point_colors],
             brush=[pg.mkBrush(color) for color in point_colors],
-            hoverable=True,
-            hoverSize=12,
             data=data.get("spot_names", [primary_standard] * len(t_arr)),
-            tip=lambda x, y, name: f"{name}\nSession time: {x:,.2f} s\nFactor: {y:.5g}",
         )
         p.addItem(scatter)
+        self._point_index = self._build_hover_index(t_arr, f_arr)
+        self._curve_index = self._build_hover_index(fit_times, fit_vals)
+        weights = np.asarray(data.get("spot_weights", []), dtype=float)
+        finite_weights = weights[np.isfinite(weights)]
+        self._max_weight = float(np.max(finite_weights)) if finite_weights.size else float("nan")
+        self._hover_ring = _ConcordiaHoverRing(pg.mkPen(theme.accent, width=2))
+        self._hover_ring.setZValue(20)
+        self._hover_ring.hide()
+        p.addItem(self._hover_ring, ignoreBounds=True)
 
         # Reference line at 1.0
         p.addLine(y=1.0, pen=pg.mkPen(theme.muted, width=1,
@@ -7818,6 +7836,143 @@ class SessionFractionationWidget(RoundedGraphicsLayoutWidget):
         p.end_update()
         self._apply_zoom_mode()
         self._apply_interaction_mode()
+
+    def set_spot_status_provider(
+        self, provider: Callable[[str], tuple[bool, str]] | None,
+    ) -> None:
+        """Read review status for the hovered spot, or clear the provider."""
+        self._spot_status_provider = provider
+
+    @staticmethod
+    def _build_hover_index(times, values):
+        times = np.asarray(times, dtype=float)
+        values = np.asarray(values, dtype=float)
+        order = np.flatnonzero(np.isfinite(times))
+        order = order[np.argsort(times[order], kind="stable")]
+        return times[order], values[order], order
+
+    @staticmethod
+    def _hover_candidates(index, time, radius, *, segments=False):
+        """Return only time-window candidates, including crossing segments."""
+        times = index[0]
+        lo = int(np.searchsorted(times, time - radius, side="left"))
+        hi = int(np.searchsorted(times, time + radius, side="right"))
+        if segments:
+            return np.arange(max(0, lo - 1), min(hi, len(times) - 1))
+        return np.arange(lo, hi)
+
+    def _hide_hover(self) -> None:
+        QtWidgets.QToolTip.hideText()
+        if self._hover_ring is not None:
+            self._hover_ring.hide()
+
+    def clear(self) -> None:
+        """Clear the plot and its hover state."""
+        self._hide_hover()
+        self._point_index = self._curve_index = None
+        self._hover_ring = None
+        self._plot_item = None
+        self.ci.clear()
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self._hide_hover()
+        super().leaveEvent(event)
+
+    def _on_mouse_moved(self, event: tuple) -> None:
+        if self._plot_item is None or self._point_index is None or not event:
+            self._hide_hover()
+            return
+        vb = self._plot_item.vb
+        if not vb.sceneBoundingRect().contains(event[0]):
+            self._hide_hover()
+            return
+        point = vb.mapSceneToView(event[0])
+        pos = np.array([point.x(), point.y()])
+        scale = np.abs(vb.viewPixelSize())
+        if not np.all(np.isfinite(scale)) or not np.all(scale > 0):
+            self._hide_hover()
+            return
+        times, values, source = self._point_index
+        candidates = self._hover_candidates(self._point_index, pos[0], 6 * scale[0])
+        if candidates.size:
+            offsets = (np.column_stack((times[candidates], values[candidates])) - pos) / scale
+            distances = np.sum(offsets ** 2, axis=1)
+            distances[~np.isfinite(distances)] = np.inf
+            nearest = int(np.argmin(distances))
+            if distances[nearest] <= 6 ** 2:
+                hit = candidates[nearest]
+                self._hover_ring.setData([times[hit]], [values[hit]])
+                self._hover_ring.show()
+                QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self._point_tooltip(int(source[hit])), self)
+                return
+
+        self._hover_ring.hide()
+        times, values, _source = self._curve_index
+        candidates = self._hover_candidates(self._curve_index, pos[0], 6 * scale[0], segments=True)
+        if candidates.size:
+            start = np.column_stack((times[candidates], values[candidates]))
+            end = np.column_stack((times[candidates + 1], values[candidates + 1]))
+            delta = (end - start) / scale
+            offset = (pos - start) / scale
+            lengths = np.sum(delta ** 2, axis=1)
+            fraction = np.clip(np.divide(np.sum(offset * delta, axis=1), lengths,
+                                         out=np.zeros_like(lengths), where=lengths > 0), 0, 1)
+            distances = np.sum((offset - fraction[:, None] * delta) ** 2, axis=1)
+            distances[~np.isfinite(distances)] = np.inf
+            nearest = int(np.argmin(distances))
+            if distances[nearest] <= 6 ** 2:
+                time, factor = (start + fraction[:, None] * (end - start))[nearest]
+                QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self._fit_tooltip(time, factor), self)
+                return
+        elif len(times) == 1 and np.isfinite(values[0]):
+            if np.sum(((np.array([times[0], values[0]]) - pos) / scale) ** 2) <= 6 ** 2:
+                QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self._fit_tooltip(times[0], values[0]), self)
+                return
+        self._hide_hover()
+
+    def _point_tooltip(self, index: int) -> str:
+        data = self._data
+        def value(key, default=np.nan):
+            values = data.get(key, ())
+            return values[index] if index < len(values) else default
+
+        name = str(value("spot_names", f"standard {index + 1}"))
+        sample = str(value("spot_samples", data["primary_standard"]))
+        time = float(value("spot_mean_times"))
+        seconds = int(round(time))
+        elapsed = f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+        order = value("spot_order")
+        acquisition = f"#{int(order)} of {data['total_spots']} · " if np.isfinite(order) and data.get("total_spots") else ""
+        lines = [sample, f"Acquisition: {acquisition}session time {time:,.1f} s ({elapsed})"]
+        factor = float(value("spot_mean_fracs"))
+        error = float(value("spot_frac_errs"))
+        uncertainty = f" ± {self._sigma_level * error:.4f} ({self._sigma_level}σ)" if np.isfinite(error) else ""
+        ratio = data.get("known_ratio", np.nan) / factor if factor else np.nan
+        measured = f" · {data['ratio_name']} {ratio:.5f}" if np.isfinite(ratio) else ""
+        lines.append(f"Factor {factor:.4f}{uncertainty}{measured}")
+        fit = ["Used in session fit"]
+        weight = float(value("spot_weights"))
+        residual = float(value("spot_residuals"))
+        if np.isfinite(weight) and self._max_weight > 0:
+            fit.append(f"weight {weight / self._max_weight:.2f} (relative)")
+        if np.isfinite(residual):
+            fit.append(f"residual {residual:.4f}".replace("-", "−"))
+        lines.append(" · ".join(fit))
+        if self._spot_status_provider is not None:
+            excluded, reason = self._spot_status_provider(name)
+            if excluded:
+                lines.append("Excluded in review")
+            if reason:
+                lines.append(f"Flagged: {reason}")
+        return f"<b>{escape(name)}</b><br>" + "<br>".join(escape(line) for line in lines)
+
+    def _fit_tooltip(self, time: float, factor: float) -> str:
+        data = self._data
+        text = f"Session fit ({data.get('fit_label', 'Polynomial')}) · t {time:,.1f} s · factor {factor:.4f}"
+        error = float(data["fit_std"])
+        if data.get("show_uncertainty", False) and np.isfinite(error):
+            text += f" ± {self._sigma_level * error:.4f} ({self._sigma_level}σ)"
+        return escape(text)
 
     def set_sigma_level(self, sigma_level: int) -> None:
         """Redraw fit bands and standard-spot error bars at 1σ or 2σ."""

@@ -1947,23 +1947,67 @@ def get_session_plot_data(
         )
     )
 
+    # run_session passes the primary-standard rows of plateau_corrected to
+    # calc_session_nominal_fractionation, which groups with sort=False and
+    # takes Time.mean(). Match those times, including partial old caches.
     dh_corrected = downhole_results.get("plateau_corrected")
-    spot_names_out: list[str] = []
+    spot_names_out = [f"standard {index + 1}" for index in range(t_arr.size)]
+    spot_samples = [primary_standard] * t_arr.size
     if isinstance(dh_corrected, pd.DataFrame):
         rows = pd.DataFrame(dh_corrected, copy=False)
         selected = rows[rows["sample"].eq(primary_standard)]
-        spot_names_out = [
-            str(name)
-            for name in selected.groupby("spot_name", sort=False).groups
-        ]
-    if len(spot_names_out) != len(t_arr):
-        spot_names_out = [f"standard {index + 1}" for index in range(len(t_arr))]
+        groups = selected.groupby("spot_name", sort=False).agg(
+            time=("Time", "mean"), sample=("sample", "first")
+        )
+        group_times = groups["time"].to_numpy(dtype=float)
+        matches = {}
+        if group_times.shape == t_arr.shape and np.all(
+            np.isclose(group_times, t_arr, rtol=1e-9, atol=1e-6)
+        ):
+            matches = dict(enumerate(range(t_arr.size)))
+        else:
+            order = np.argsort(group_times)
+            sorted_times = group_times[order]
+            for index, time in enumerate(t_arr):
+                if not np.isfinite(time):
+                    continue
+                tolerance = 1e-6 + 1e-9 * abs(time)
+                lo = np.searchsorted(sorted_times, time - tolerance, side="left")
+                hi = np.searchsorted(sorted_times, time + tolerance, side="right")
+                candidates = order[lo:hi]
+                candidates = candidates[np.isclose(group_times[candidates], time,
+                                                    rtol=1e-9, atol=1e-6)]
+                if candidates.size == 1:
+                    matches[index] = int(candidates[0])
+            # A group cannot identify two observations unambiguously.
+            used = list(matches.values())
+            counts = pd.Series(used).value_counts()
+            matches = {i: group for i, group in matches.items() if counts[group] == 1}
+        for index, group in matches.items():
+            spot_names_out[index] = str(groups.index[group])
+            spot_samples[index] = str(groups.iloc[group]["sample"])
+
+    experiment = session.experiment
+    measurement_names = session.spot_names
+    starts = {}
+    if "spot_names" in experiment and "spot_starting_times" in experiment:
+        measurement_names = experiment.sort_values("spot_starting_times", kind="stable")["spot_names"].astype(str).tolist()
+        starts = dict(zip(experiment["spot_names"].astype(str), experiment["spot_starting_times"]))
+    spot_indices = {name: index + 1 for index, name in enumerate(measurement_names)}
+    weights = np.asarray(observations.get("weights", []), dtype=float)
+    residuals = np.asarray(ratio_results.get("fit_residuals", []), dtype=float)
 
     data = {
         "ratio_name": ratio_name,
         "known_ratio": known_ratio,
         "primary_standard": primary_standard,
         "spot_names": spot_names_out,
+        "spot_samples": spot_samples,
+        "spot_order": np.array([spot_indices.get(name, np.nan) for name in spot_names_out]),
+        "total_spots": len(measurement_names),
+        "spot_start_times": np.array([starts.get(name, np.nan) for name in spot_names_out]),
+        "spot_weights": weights if weights.shape == t_arr.shape else np.full(t_arr.shape, np.nan),
+        "spot_residuals": residuals if residuals.shape == t_arr.shape else np.full(t_arr.shape, np.nan),
         "spot_mean_times": t_arr,
         "spot_mean_fracs": f_arr,
         "spot_frac_errs": e_arr,
