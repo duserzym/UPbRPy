@@ -479,6 +479,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.sign_in_action.triggered.connect(
             lambda _checked=False: self.database().sign_in_from_menu()
         )
+        self.refresh_tims_action = database_menu.addAction("Refresh TIMS marks")
+        self.refresh_tims_action.triggered.connect(lambda: self.tims().refresh())
         database_menu.addSeparator()
         database_menu.aboutToShow.connect(self._refresh_database_status)
         self.open_from_database_action = database_menu.addAction(
@@ -5817,6 +5819,16 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             )
         self._update_database_actions()
         self.title_changed.emit(label)
+        self.tims().sync()
+
+    def tims(self):
+        """Return this tab's transient TIMS markup controller."""
+        if not hasattr(self, "_tims"):
+            from GUI.tims import TimsController
+
+            self._tims = TimsController(self)
+            self.results_table.tims_menu = self._tims.add_action
+        return self._tims
 
     def database(self):
         """The database-mode flows serving this window."""
@@ -7026,6 +7038,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._update_spot_tree_expand_button()
         self._sync_spot_tree_checks()
         self._filter_spot_tree(self.spot_tree_filter.text())
+        self.tims().apply()
 
         if self.session.selected_spot:
             self._select_spot_in_tree(self.session.selected_spot, reveal=False)
@@ -7133,6 +7146,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             rename_act = menu.addAction("Rename spot…\tF2")
             name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
             targets = self._colour_targets(name)
+            self.tims().add_action(menu, targets)
             menu.addAction("Set colour…").setData(("spot_colour", targets))
             menu.addAction("Reset to sample colour").setData(("reset_spot_colour", targets))
             menu.addSeparator()

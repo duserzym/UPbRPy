@@ -34,6 +34,7 @@ records every acquisition belongs to (``[[acquisition]]``)::
     label = "MADUCSB_122"
     acquisition_id = "…"
     spot_id = "…"
+    atlas_spot_id = "…"
     grain_id = "…"
     sample_id = "…"
     sample_label = "MADUCSB"   # optional per-acquisition sample correction
@@ -99,6 +100,7 @@ class SessionAcquisition:
     kind: str = ""
     filename: str = ""
     sample_label: str = ""
+    atlas_spot_id: str = ""
 
 
 @dataclass(frozen=True)

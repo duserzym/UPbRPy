@@ -23,6 +23,7 @@ import shutil
 import tempfile
 import time
 import uuid
+import weakref
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -255,6 +256,7 @@ class DatabaseLinks(QtCore.QObject):
     operation_changed = QtCore.Signal(object, str, str, object)
     # The signed-in account changed (sign-in confirmed, or signed out).
     signed_in_changed = QtCore.Signal()
+    _instances = weakref.WeakSet()
 
     def __init__(
         self,
@@ -266,6 +268,7 @@ class DatabaseLinks(QtCore.QObject):
         activate_project: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
+        self._instances.add(self)
         self._open_bundle = open_bundle
         self.open_project = open_project
         self.activate_project = activate_project
@@ -495,10 +498,16 @@ class DatabaseLinks(QtCore.QObject):
         def shown(account: dict) -> None:
             name = str(account.get("display_name") or account.get("username") or "")
             self._set_account_name(server, name or None)
-            self.signed_in_changed.emit()
+            self._notify_signed_in_changed()
             self._status(f"Studio is signed in to {server}" + (f" as {name}." if name else "."))
 
         self.run(lambda: db.whoami(server), shown, title="Sign in", on_failure=lambda error: self._status(str(error)))
+
+    def _notify_signed_in_changed(self) -> None:
+        """Notify every tab because credentials are shared across Studio."""
+        for links in list(self._instances):
+            if isValid(links):
+                links.signed_in_changed.emit()
 
     def require_available(self, title: str) -> bool:
         ok, reason = database_availability()
@@ -857,7 +866,7 @@ class DatabaseLinks(QtCore.QObject):
 
         def done(_r) -> None:
             self._set_account_name(server, None)
-            self.signed_in_changed.emit()
+            self._notify_signed_in_changed()
             self._status(f"Signed out of {server}.")
 
         self.run(lambda: db.sign_out(server), done, title=title, on_failure=lambda error: self._status(str(error)))

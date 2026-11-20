@@ -1,8 +1,7 @@
 """Client for a UPbDB server: database mode of UPbRPy Studio.
 
-Thin, typed and free of Qt. It moves the two bundles of
-``upblab/docs/WORKFLOW.md`` (sections 3.2 and 3.3) over HTTP and nothing
-else; everything scientific stays in the engine.
+Thin, typed and free of Qt. It transfers session and reduction bundles
+and TIMS markup over HTTP; everything scientific stays in the engine.
 
 Endpoints (all under ``<server>/v1/``, bearer token unless noted)::
 
@@ -44,6 +43,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 from types import SimpleNamespace
+from threading import RLock
 from urllib.parse import quote, urlencode, urlsplit
 import zipfile
 
@@ -282,6 +282,10 @@ def store_token(server: str, token: str) -> None:
 def forget_token(server: str) -> None:
     base = normalize_server(server)
     _token_store.delete(base)
+    with _tims_lock:
+        for key in list(_tims_responses):
+            if key[0] == base:
+                del _tims_responses[key]
     for key in list(_session_pages):
         if key[0] == base:
             del _session_pages[key]
@@ -825,3 +829,142 @@ __all__ = [
     "fetch_run_project",
     "list_session_runs",
 ]
+
+
+# --------------------------------------------------------------- TIMS
+_tims_lock = RLock()
+_tims_responses: OrderedDict = OrderedDict()
+
+
+def _tims_read(server, path, params=None):
+    base = normalize_server(server)
+    token = stored_token(base)
+    key = (base, token, path, tuple(sorted((params or {}).items())))
+    with _tims_lock:
+        cached = _tims_responses.get(key)
+    response = _request("GET", server, path, action="read TIMS choices", params=params,
+                        headers={"If-None-Match": cached[0]} if cached and cached[0] else {})
+    if response.status_code == 304:
+        if cached is None:
+            raise ServerError("TIMS returned 304 without a cached response.")
+        return cached[1], cached[2]
+    payload = _json(response, server, "read TIMS choices")
+    cursor = response.headers.get("X-Next-Cursor")
+    with _tims_lock:
+        if stored_token(base) == token:
+            _tims_responses[key] = (response.headers.get("ETag"), payload, cursor)
+            _tims_responses.move_to_end(key)
+            while len(_tims_responses) > 128:
+                _tims_responses.popitem(last=False)
+    return payload, cursor
+
+
+class FractionPage(list):
+    """A TIMS list page, or a 304 retaining the caller's cached page."""
+
+    def __init__(self, items=(), *, next_cursor=None, etag=None, not_modified=False):
+        super().__init__(items)
+        self.next_cursor = next_cursor
+        self.etag = etag
+        self.not_modified = not_modified
+
+
+def list_fractions(server, *, sample=None, grain=None, spot=None, limit=500,
+                   cursor=None, etag=None):
+    """Read one bounded fraction page; ``cursor`` is sent as ``after``."""
+    params = {key: value for key, value in
+              (("sample", sample), ("grain", grain), ("spot", spot),
+               ("limit", limit), ("after", cursor)) if value is not None}
+    response = _request("GET", server, "fractions", action="read TIMS marks",
+                        params=params, headers={"If-None-Match": etag} if etag else {})
+    return FractionPage(
+        () if response.status_code == 304 else _json(response, server, "read TIMS marks"),
+        next_cursor=response.headers.get("X-Next-Cursor"),
+        etag=response.headers.get("ETag", etag), not_modified=response.status_code == 304,
+    )
+
+
+def all_fractions(server, *, sample=None, grain=None, spot=None, limit=500):
+    """Follow fraction cursors for one filter on a worker thread."""
+    rows, cursor, seen = [], None, set()
+    while True:
+        page = list_fractions(server, sample=sample, grain=grain, spot=spot,
+                              limit=limit, cursor=cursor)
+        rows.extend(page)
+        cursor = page.next_cursor
+        if not cursor:
+            return rows
+        if cursor in seen:
+            raise ServerError("The TIMS list repeated a page cursor.")
+        seen.add(cursor)
+
+
+def suggest_fraction_name(server, sample_id, mineral) -> str:
+    """Return the server's next fraction name for this sample and mineral."""
+    response = _request("GET", server, "fractions/suggest-name", action="suggest a fraction name",
+                        params={"sample": sample_id, "mineral": mineral})
+    return str(_json(response, server, "suggest a fraction name")["suggestion"])
+
+
+def _tims_list(server, path, params):
+    rows, cursor, seen = [], None, set()
+    while True:
+        payload, cursor = _tims_read(server, path,
+                                     {**params, "limit": 500, **({"after": cursor} if cursor else {})})
+        rows.extend(payload)
+        if not cursor:
+            return rows
+        if cursor in seen:
+            raise ServerError("The TIMS list repeated a page cursor.")
+        seen.add(cursor)
+
+
+def list_capsule_sets(server, *, active=True):
+    """Read capsule sets in server order."""
+    return _tims_list(server, "tims/capsule-sets", {"active": str(active).lower()})
+
+
+def list_batches(server, capsule_set_id):
+    """Read batches belonging to a capsule set."""
+    return _tims_list(server, "tims/batches", {"capsule_set": capsule_set_id})
+
+
+def get_batch(server, batch_id):
+    """Read a batch and its capsule map in one request."""
+    return _tims_read(server, f"tims/batches/{quote(str(batch_id), safe='')}")[0]
+
+
+def list_recipes(server, *, lab_id, mineral):
+    """Read active recipes for a lab and mineral."""
+    return _tims_list(server, "tims/recipes", {"lab": lab_id, "mineral": mineral, "active": "true"})
+
+
+def _tims_create(server, path, payload, idempotency_key):
+    if not idempotency_key:
+        raise ValueError("A TIMS write requires an idempotency key.")
+    response = _request("POST", server, path, action="save TIMS markup", json=payload,
+                        headers={"Idempotency-Key": idempotency_key})
+    return _json(response, server, "save TIMS markup")
+
+
+def create_batch(server, payload, *, idempotency_key):
+    """Create a batch, retaining the supplied key when retrying."""
+    return _tims_create(server, "tims/batches", payload, idempotency_key)
+
+
+def create_fraction(server, payload, *, idempotency_key):
+    """Create a fraction and its sources atomically."""
+    return _tims_create(server, "fractions", payload, idempotency_key)
+
+
+def list_sample_batches(server, sample_id, *, limit=500, cursor=None, etag=None):
+    """Read one sample's batch summaries, without fetching batch details per spot."""
+    response = _request("GET", server, "tims/batches", action="read TIMS batch dates",
+                        params={"sample": sample_id, "limit": limit,
+                                **({"after": cursor} if cursor else {})},
+                        headers={"If-None-Match": etag} if etag else {})
+    return FractionPage(
+        () if response.status_code == 304 else _json(response, server, "read TIMS batch dates"),
+        next_cursor=response.headers.get("X-Next-Cursor"),
+        etag=response.headers.get("ETag", etag), not_modified=response.status_code == 304,
+    )

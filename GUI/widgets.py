@@ -706,10 +706,37 @@ class SegmentedBar(QtWidgets.QFrame):
 
 SPOT_TREE_COUNT_ROLE = QtCore.Qt.ItemDataRole.UserRole + 9
 SPOT_TREE_COLOUR_ROLE = QtCore.Qt.ItemDataRole.UserRole + 10
+SPOT_TREE_TIMS_ROLE = QtCore.Qt.ItemDataRole.UserRole + 11
+SPOT_TREE_TIMS_GRAIN_ROLE = QtCore.Qt.ItemDataRole.UserRole + 12
+SPOT_TREE_TIMS_TOOLTIP_ROLE = QtCore.Qt.ItemDataRole.UserRole + 13
 
 
 class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
-    """Draw a folder's shown/total count at the right of its name."""
+    """Draw folder counts and spot TIMS badges to the right of the name."""
+
+    @staticmethod
+    def _tims_layout(option, index):
+        badge = index.data(SPOT_TREE_TIMS_ROLE)
+        if not badge:
+            return None
+        font = QtGui.QFont(option.font)
+        if font.pointSizeF() > 0:
+            font.setPointSizeF(max(8.0, font.pointSizeF() - 1))
+        else:
+            font.setPixelSize(max(8, font.pixelSize() - 1))
+        rect = option.rect.adjusted(0, 0, -18 if index.data(SPOT_TREE_COLOUR_ROLE) else 0, 0)
+        width = min(QtGui.QFontMetrics(font).horizontalAdvance(badge) + 8, max(0, rect.width() - 22))
+        return font, QtCore.QRect(rect.right() - width - 3, rect.top(), width, rect.height())
+
+    def helpEvent(self, event, view, option, index):
+        layout = self._tims_layout(option, index)
+        if (event is not None and view is not None and layout is not None
+                and event.type() == QtCore.QEvent.Type.ToolTip and layout[1].contains(event.pos())):
+            text = index.data(SPOT_TREE_TIMS_TOOLTIP_ROLE)
+            if text:
+                QtWidgets.QToolTip.showText(event.globalPos(), text, view.viewport(), layout[1])
+                return True
+        return super().helpEvent(event, view, option, index)
 
     def createEditor(self, parent, option, index):
         editor = super().createEditor(parent, option, index)
@@ -742,6 +769,7 @@ class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
         editor.setGeometry(rect)
 
     def paint(self, painter, option, index):
+        badge_layout = self._tims_layout(option, index)
         colour = index.data(SPOT_TREE_COLOUR_ROLE)
         if colour:
             painter.save()
@@ -752,6 +780,20 @@ class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
             painter.restore()
             option = QtWidgets.QStyleOptionViewItem(option)
             option.rect = option.rect.adjusted(0, 0, -18, 0)
+        if badge_layout is not None:
+            font, rect = badge_layout
+            name_option = QtWidgets.QStyleOptionViewItem(option)
+            name_option.rect.setWidth(max(0, rect.left() - option.rect.left() - 4))
+            super().paint(painter, name_option, index)
+            painter.save()
+            painter.setFont(font)
+            theme = active_theme()
+            painter.setPen(theme_color(theme.faint if index.data(SPOT_TREE_TIMS_GRAIN_ROLE) else theme.muted))
+            text = QtGui.QFontMetrics(font).elidedText(index.data(SPOT_TREE_TIMS_ROLE),
+                                                     QtCore.Qt.TextElideMode.ElideMiddle, rect.width())
+            painter.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), text)
+            painter.restore()
+            return
         count = index.data(SPOT_TREE_COUNT_ROLE)
         if not count:
             return super().paint(painter, option, index)
@@ -1605,6 +1647,7 @@ class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
     def __init__(self, parent=None, *, grouped=False):
         super().__init__(parent)
         self._query = ""
+        self._plucked_names = None
         self._grouped = grouped
         self.setRecursiveFilteringEnabled(grouped)
         self.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
@@ -1630,9 +1673,14 @@ class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
         self._query = text.strip().casefold()
         self.endFilterChange()
 
+    def set_plucked_filter(self, names):
+        self.beginFilterChange()
+        self._plucked_names = names
+        self.endFilterChange()
+
     def filterAcceptsRow(self, row, parent):
         """Match spots directly and retain their sample ancestors recursively."""
-        if not self._query:
+        if not self._query and self._plucked_names is None:
             return super().filterAcceptsRow(row, parent)
         model = self.sourceModel()
         index = model.index(row, 0, parent)
@@ -1644,7 +1692,8 @@ class _SpotReviewProxy(QtCore.QSortFilterProxyModel):
         else:
             names = [model.spot_name(row)]
             sample = model.frame.iloc[row].get("sample", "")
-        return any(self._query in str(value).casefold() for value in [*names, sample])
+        return ((self._plucked_names is None or bool(set(names) & self._plucked_names))
+                and any(self._query in str(value).casefold() for value in [*names, sample]))
 
     def lessThan(self, left, right):
         """Sort samples ascending even when their spot sort is descending."""
@@ -4235,7 +4284,7 @@ class SpotInfoCard(QtWidgets.QFrame):
 
     def show_spot(self, name: str, final_row: dict, spot_row: dict, *, excluded: bool,
                   acquisition: tuple[int, str] | None = None, transition_ma: float = 1000.0,
-                  calibration: bool = True) -> None:
+                  calibration: bool = True, tims_marks=()) -> None:
         """Show one spot. ``final_row`` and ``spot_row`` may be empty dicts."""
         self._name, self._excluded = name, bool(excluded)
         row = {**spot_row, **final_row}
@@ -4304,7 +4353,17 @@ class SpotInfoCard(QtWidgets.QFrame):
         footnote = (f"<br><span style='font-size:9pt'>* The method varies by spot: "
                     f"206Pb/238U below {transition_ma:g} Ma, 207Pb/206Pb above, unless a "
                     f"common-Pb correction is chosen.</span>") if method else ""
-        self.body.setText(f"{header}<table cellspacing='0' cellpadding='1'>{''.join(rows)}</table>{footnote}")
+        from GUI.tims import tims_html
+
+        tims_block = tims_html(tims_marks)
+        if tims_marks:
+            first = tims_marks[0]
+            short = f"{first.badge} · {first.fraction.get('status', '')}"
+            if len(tims_marks) > 1:
+                short += f" (+{len(tims_marks) - 1})"
+            self.compact_body.setText(self.compact_body.text() + "<br>TIMS: " + html.escape(short))
+            self.compact_body.setToolTip("Dates ± 2σ in Ma" + tims_block)
+        self.body.setText(f"{header}<table cellspacing='0' cellpadding='1'>{''.join(rows)}</table>{tims_block}{footnote}")
         self.show_signal_button.setEnabled(True)
         self.exclude_button.setEnabled(True)
         self.exclude_button.setText("Unhide" if excluded else "Hide")
@@ -4357,7 +4416,7 @@ RESULTS_KEY_GROUPS = (
     ("Ratios", ("206Pb/238U", "207Pb/206Pb", "208Pb/232Th", "207Pb/235U", "238U/206Pb"), 0),
     ("Flags", ("automatic_flags", "preferred_date_pass"), 0),
 )
-RESULTS_FROZEN_COLUMNS = ("sample", "spot_name")
+RESULTS_FROZEN_COLUMNS = ("sample", "spot_name", "TIMS")
 
 
 def results_column_group(name: str) -> str:
@@ -4997,6 +5056,9 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.include_flags: dict[str, bool] = {}
         self.excluded_spots: set[str] = set()
         self.fit_panels = {}
+        self.tims_marks = {}
+        self._tims_enabled = False
+        self.tims_menu = None
         self.selected_spots: set[str] = set()
         self._spot_samples: dict[str, str] = {}
         self._spot_sample_order: list[str] = []
@@ -5054,6 +5116,10 @@ class ResultsTableWidget(QtWidgets.QWidget):
         self.secondary_tree, self.secondary_group_model = self._create_grouped_view()
         (self.results_page, self.results_group_toggle, self.results_filter,
          self._results_stack) = self._create_group_page(self.results_table, self.results_tree, "final")
+        self.plucked_only = QtWidgets.QCheckBox("Plucked only")
+        self.plucked_only.hide()
+        self.plucked_only.toggled.connect(self._filter_tims)
+        self.results_page.layout().itemAt(0).layout().addWidget(self.plucked_only)
         self._build_results_navigation()
         (self.secondary_page, self.secondary_group_toggle, self.secondary_filter,
          self._secondary_stack) = self._create_group_page(self.secondary_table, self.secondary_tree, "secondary")
@@ -5147,7 +5213,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
 
     def _apply_column_visibility(self) -> None:
         frame = self.results_model.frame
-        keep = results_key_columns(frame) if self.key_columns_only() else set(frame.columns)
+        keep = (results_key_columns(frame) | {"TIMS"}) if self.key_columns_only() else set(frame.columns)
         for position, name in enumerate(frame.columns):
             self.results_table.setColumnHidden(position + 1, name not in keep)
         self.results_frozen._refresh()
@@ -5302,7 +5368,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         card.show_spot(name, final_row, spot_row, excluded=name in self.excluded_spots,
                        acquisition=self._spot_acquisition.get(name),
                        transition_ma=self._age_transition_ma,
-                       calibration=self._include_calibration_uncertainty)
+                       calibration=self._include_calibration_uncertainty,
+                       tims_marks=self.tims_marks.get(name, ()))
         self._position_spot_card()
 
     def _in_spot_order(self, names) -> list[str]:
@@ -5871,6 +5938,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
                 self._update_exclusion_styles(group_models=(model,), flat=False)
             columns = [model.headerData(column, QtCore.Qt.Orientation.Horizontal)
                        for column in range(model.columnCount())]
+            view.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            self._size_tims_column(view, columns)
             view.sortByColumn(columns.index("spot_name") if "spot_name" in columns else 0,
                               QtCore.Qt.SortOrder.AscendingOrder)
             for row in range(view.model().rowCount()):
@@ -6267,9 +6336,80 @@ class ResultsTableWidget(QtWidgets.QWidget):
         samples = {self._spot_samples[name] for name in self.selected_spots if name in self._spot_samples}
         self.set_selected_spots({name for name, sample in self._spot_samples.items() if sample in samples})
 
+    def set_tims_marks(self, marks, *, linked=True):
+        """Decorate the display frame without changing finalized results."""
+        self.tims_marks = marks if linked else {}
+        self._tims_enabled = bool(linked)
+        self.plucked_only.setVisible(linked)
+        if not linked:
+            self.plucked_only.setChecked(False)
+        frame = self.results_model.frame
+        display = self._tims_display_frame(frame)
+        if not frame.equals(display):
+            selected = set(self.selected_spots)
+            syncing = self._syncing_selection
+            self._syncing_selection = True
+            try:
+                self._set_results_frame(display)
+                self._defer_grouped_view(self.results_tree)
+                if self.results_tree.isVisible():
+                    self._ensure_grouped_view(self.results_tree)
+                self._apply_column_visibility()
+            finally:
+                self._syncing_selection = syncing
+            if not syncing:
+                self.set_selected_spots(selected)
+        self._filter_tims()
+        self._update_spot_card()
+
+    def _tims_display_frame(self, frame):
+        """Insert the in-memory badge beside the spot name in either view."""
+        from GUI.tims import badge_text
+
+        display = frame.drop(columns=["TIMS"], errors="ignore")
+        if self._tims_enabled and "spot_name" in display:
+            display = display.copy()
+            display.insert(display.columns.get_loc("spot_name") + 1, "TIMS",
+                           display["spot_name"].map(lambda name: badge_text(self.tims_marks.get(str(name), ()))))
+        return display
+
+    @staticmethod
+    def _size_tims_column(view, columns):
+        """Keep the badge column compact without truncating a normal badge."""
+        if "TIMS" in columns:
+            column = columns.index("TIMS")
+            header = view.header() if isinstance(view, QtWidgets.QTreeView) else view.horizontalHeader()
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            width = max(view.fontMetrics().horizontalAdvance("K12 · z13†"),
+                        header.fontMetrics().horizontalAdvance("TIMS")) + 24
+            header.resizeSection(column, width)
+
+    def _set_results_frame(self, frame):
+        """Preserve widths by name when the display-only column comes or goes."""
+        header = self.results_table.horizontalHeader()
+        model = self.results_model
+        sizes = {model.headerData(column, QtCore.Qt.Orientation.Horizontal):
+                 (header.sectionSize(column), header.sectionResizeMode(column))
+                 for column in range(model.columnCount())}
+        model.set_frame(frame)
+        columns = [model.headerData(column, QtCore.Qt.Orientation.Horizontal)
+                   for column in range(model.columnCount())]
+        for column, name in enumerate(columns):
+            width, mode = sizes.get(name, (header.defaultSectionSize(), QtWidgets.QHeaderView.ResizeMode.Interactive))
+            header.setSectionResizeMode(column, mode)
+            header.resizeSection(column, width)
+        self._size_tims_column(self.results_table, columns)
+
+    def _filter_tims(self, *_args):
+        names = {name for name, marks in self.tims_marks.items() if marks} if self.plucked_only.isChecked() else None
+        for view in (self.results_table, self.results_tree):
+            view.model().set_plucked_filter(names)
+
     def _show_spot_menu(self, pos):
         view = self.sender()
         menu = QtWidgets.QMenu(view)
+        if self.tims_menu is not None:
+            self.tims_menu(menu, self._in_spot_order(self.selected_spots))
         for text, callback in ((self._hide_action_text(), lambda: self._review_action("exclude_toggle", "spot")),
                                ("Show only selected", self.show_only_selected),
                                ("Remove selected from plot", self.exclude_selected),
@@ -7202,7 +7342,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         # header/geometry work independently of the width of the results frame.
         columns, self._pending_column_sizes = self._pending_column_sizes[:4], self._pending_column_sizes[4:]
         for column in columns:
-            self.results_table.resizeColumnToContents(column)
+            if self.results_model.headerData(column, QtCore.Qt.Orientation.Horizontal) != "TIMS":
+                self.results_table.resizeColumnToContents(column)
         if self._pending_column_sizes:
             self._column_resize_timer.start(0)
 
@@ -7246,7 +7387,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         retained_selection = set(self.selected_spots)
         self._syncing_selection = True
         display = results_display_frame(final_frame, parallel_frame, pb204_frame)
-        self.results_model.set_frame(display)
+        display = self._tims_display_frame(display)
+        self._set_results_frame(display)
         self._style_key_columns()
         sort_column = next((display.columns.get_loc(name) + 1
                             for name in ("sample", "spot_name") if name in display), -1)
@@ -7258,7 +7400,8 @@ class ResultsTableWidget(QtWidgets.QWidget):
         metrics = header.fontMetrics()
         for column in range(self.results_model.columnCount()):
             label = str(self.results_model.headerData(column, QtCore.Qt.Orientation.Horizontal) or "")
-            header.resizeSection(column, max(header.sectionSize(column), metrics.horizontalAdvance(label)+28))
+            if label != "TIMS":
+                header.resizeSection(column, max(header.sectionSize(column), metrics.horizontalAdvance(label)+28))
         self._pending_column_sizes = list(range(self.results_model.columnCount()))
         self._column_resize_timer.start(0)
         self.secondary_model.set_frame(secondary)

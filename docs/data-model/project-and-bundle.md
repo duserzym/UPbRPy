@@ -319,6 +319,7 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 | acquisition[].label | Required for each listed row | Nonempty text | `NIST612_896` | Missing/blank row label rejected |
 | acquisition[].acquisition_id | Optional | Text | Acquisition UUID | Defaults empty |
 | acquisition[].spot_id | Optional | Text | Spot UUID | Defaults empty |
+| acquisition[].atlas_spot_id | Optional | Text | GrainAtlas spot UUID | Defaults empty; old manifests remain valid |
 | acquisition[].grain_id | Optional | Text | Grain UUID | Defaults empty |
 | acquisition[].sample_id | Optional | Text | Sample UUID | Defaults empty |
 | acquisition[].sample_label | Optional | Text | `SMP2` | Per-acquisition sample; absent/empty keeps the sample derived from the label |
