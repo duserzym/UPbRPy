@@ -1661,11 +1661,6 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         """Fit compact button rows without reserving horizontal scrollbar space."""
         for scroll, bar in getattr(self, "_toolbar_strips", ()):
             bar.layout().invalidate()
-            if bar is getattr(self, "plot_control_bar", None) and self._plot_control_vertical:
-                bar.setMinimumWidth(bar.layout().minimumSize().width())
-                bar.setFixedHeight(bar.layout().minimumSize().height())
-                scroll.setFixedHeight(bar.height())
-                continue
             height = max(36, bar.sizeHint().height())
             minimum_width = bar.layout().minimumSize().width()
             bar.setMinimumWidth(minimum_width)
@@ -2869,28 +2864,22 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def _save_plot_control_layout(self) -> None:
         self.settings.setValue("plot_controls_v1", json.dumps({
             "anchors": {kind: list(value) for kind, value in self._plot_control_anchors.items()},
-            "vertical": self._plot_control_vertical,
+            "orientation": "vertical" if self._plot_control_vertical else "horizontal",
         }))
 
     def set_plot_controls_vertical(self, vertical: bool) -> None:
         """Lay the floating plot controls out in a row or a column."""
         self._finish_plot_control_drag()
         self._plot_control_vertical = bool(vertical)
-        layout = self.plot_control_bar.layout()
-        layout.setDirection(QtWidgets.QBoxLayout.Direction.TopToBottom if vertical
-                            else QtWidgets.QBoxLayout.Direction.LeftToRight)
-        for divider in self._plot_control_labels[3:]:
-            divider.setVisible(not vertical and not getattr(self, "_narrow_controls", False))
-        self.plot_control_bar.setMaximumHeight(16777215)
-        self.plot_control_bar.setMinimumHeight(0)
         self._save_plot_control_layout()
-        self._sync_toolbar_strips()
+        self._position_plot_controls()
 
     def reset_plot_controls(self) -> None:
-        """Put the controls back in a row at the top right of every view."""
+        """Return the controls to the top right of every view."""
         self._finish_plot_control_drag()
         self._plot_control_anchors.clear()
-        self.set_plot_controls_vertical(False)
+        self._save_plot_control_layout()
+        self._position_plot_controls()
 
     def _plot_control_menu(self, position: QtCore.QPoint) -> None:
         menu = QtWidgets.QMenu(self)
@@ -3091,7 +3080,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._database_plot_widgets = (mode_scroll, self.plots_stack)
         plot_layout.addWidget(self.database_panel, 1)
 
-        # ── Control bar below both plots ───────────────────────────────────
+        # Floating controls for the active plot.
         control_bar = QtWidgets.QFrame()
         control_bar.setObjectName("PlotControlBar")
         self.plot_control_bar = control_bar
@@ -3101,6 +3090,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         # Drag this grip to move the controls; right-click to rearrange them.
         self.plot_control_grip = QtWidgets.QLabel("⠿")
         self.plot_control_grip.setObjectName("ControlBarLabel")
+        self.plot_control_grip.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.plot_control_grip.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
         self.plot_control_grip.setMouseTracking(True)
         self.plot_control_grip.setToolTip(
@@ -3121,7 +3111,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             kind: tuple(value) for kind, value in saved.get("anchors", {}).items()
             if isinstance(value, list) and len(value) == 3 and value[0] in _CORNERS
         }
-        self._plot_control_vertical = bool(saved.get("vertical", False))
+        # Earlier versions saved the horizontal default on every drag.
+        # Keep those anchors and use the new default until an orientation is saved.
+        self._plot_control_vertical = saved.get("orientation") != "horizontal"
 
         drag_lbl = QtWidgets.QLabel("Drag")
         drag_lbl.setObjectName("ControlBarLabel")
@@ -3134,12 +3126,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             ibtn.setText(imode_label)
             ibtn.setCheckable(True)
             ibtn.setProperty("modeToggle", True)
-            ibtn.setSizePolicy(
-                QtWidgets.QSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Fixed,
-                    QtWidgets.QSizePolicy.Policy.Fixed,
-                )
-            )
+            ibtn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
             ibtn.clicked.connect(lambda _checked=False, selected_imode=imode: self.set_interaction_mode(selected_imode))
             self.interact_mode_group.addButton(ibtn)
             self.interact_mode_buttons[imode] = ibtn
@@ -3170,12 +3157,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             btn.setText(mode_label)
             btn.setCheckable(True)
             btn.setProperty("modeToggle", True)
-            btn.setSizePolicy(
-                QtWidgets.QSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Fixed,
-                    QtWidgets.QSizePolicy.Policy.Fixed,
-                )
-            )
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _checked=False, selected_mode=mode: self.set_zoom_mode(selected_mode))
             self.zoom_mode_group.addButton(btn)
             self.zoom_mode_buttons[mode] = btn
@@ -3203,6 +3185,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.sigma_toggle_button = QtWidgets.QToolButton()
         self.sigma_toggle_button.setProperty("modeToggle", True)
         self.sigma_toggle_button.setCheckable(True)
+        self.sigma_toggle_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
         self.sigma_toggle_button.setChecked(True)
         self.sigma_toggle_button.setToolTip(
             "Toggle displayed baseline, plateau, downhole-fit, and "
@@ -3253,8 +3236,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         )
         control_scroll.setFixedHeight(control_bar.sizeHint().height() + 18)
         control_scroll.setWidget(control_bar)
-        self._toolbar_strips.append((control_scroll, control_bar))
-        # The controls float inside the canvas instead of taking a row.
+        # Size and place the floating controls together inside the canvas.
         self.plot_control_scroll = control_scroll
         control_scroll.setParent(self.plots_stack)
         self._plot_control_overlay_timer = QtCore.QTimer(self)
@@ -7905,7 +7887,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         layout = self.plot_control_bar.layout()
         target = self._current_plot_interaction_target()
         calibration = self.session.plot_mode == "calibration_slopes"
-        self.ratio_combo.setVisible(not calibration)
+        show_ratio = self.session.plot_mode in {"raw_ratios", "downhole_ratios", "session_ratios"}
+        picker_visibility_changed = (self.ratio_combo.isHidden() == show_ratio
+                                     or self.calibration_channel_combo.isHidden() == calibration)
+        self.ratio_combo.setVisible(show_ratio)
         self.ratio_toolbar_label.setText("Element" if calibration else "Ratio")
         self.calibration_channel_combo.setVisible(calibration)
         for index in range(layout.count()):
@@ -7916,15 +7901,12 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             if widget is self.calibration_channel_combo:
                 available = enabled and calibration and widget.count() > 0
             elif widget is self.ratio_combo:
-                available = enabled and self.session.plot_mode in {
-                    "raw_ratios", "downhole_ratios", "session_ratios",
-                }
-                # Only views that plot a ratio show the ratio picker.
-                widget.setVisible(not calibration and self.session.plot_mode in {
-                    "raw_ratios", "downhole_ratios", "session_ratios"})
+                available = enabled and show_ratio
             elif widget is self.interact_mode_buttons["select"]:
                 available = enabled and hasattr(target, "supports_select_mode") and target.supports_select_mode()
             widget.setEnabled(available)
+        if picker_visibility_changed:
+            self._position_plot_controls()
 
     def _selected_interaction_mode(self) -> str:
         for key, button in self.interact_mode_buttons.items():

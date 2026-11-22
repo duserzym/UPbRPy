@@ -276,6 +276,8 @@ def test_plot_toolbar_zoom_axis_text_and_single_row(app):
     for _ in range(10):
         app.processEvents()
     try:
+        window.set_plot_controls_vertical(False)
+        app.processEvents()
         bar = window.plot_control_bar
         assert isinstance(bar.layout(), QtWidgets.QHBoxLayout)
         labels = [label.text() for label in bar.findChildren(QtWidgets.QLabel)]

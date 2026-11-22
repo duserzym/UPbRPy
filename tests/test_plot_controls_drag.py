@@ -36,6 +36,7 @@ def window(app, monkeypatch):
     window.resize(1440, 900)
     window.show()
     window.load_experiment_directory(str(RICH), background=False)
+    window.set_plot_controls_vertical(False)
     window.reset_plot_controls()
     settle(app)
     yield window
