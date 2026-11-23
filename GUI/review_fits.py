@@ -406,6 +406,8 @@ class ReviewFitPanel(QtWidgets.QWidget):
     def invalidate(self):
         """Cancel stale work immediately and coalesce the next fit update."""
         enabled = self.fit_button.isChecked()
+        if not enabled:
+            self._clear_overlays()
         scopes = self._scopes() if enabled else []
         options = self.settings()
         key = (enabled, tuple((scope["label"], _scope_key(scope)) for scope in scopes),
@@ -441,8 +443,12 @@ class ReviewFitPanel(QtWidgets.QWidget):
             self.records = []
             self._live_records = self.records
             self._errors = []
-            self.readout.setPlainText("Fitting…")
-            self._timer.start(60)
+            if scopes:
+                self.readout.setPlainText("Fitting…")
+                self._timer.start(60)
+            else:
+                self.readout.setPlainText("No spots to fit")
+                self.recordsChanged.emit()
 
     def _clear_overlays(self):
         for plot, items in self._overlays:
@@ -486,6 +492,8 @@ class ReviewFitPanel(QtWidgets.QWidget):
             rho = numeric(rho_column) if rho_column else np.zeros(len(used))
             rho = np.clip(np.nan_to_num(rho, nan=0., posinf=np.inf, neginf=-np.inf), -.999, .999)
             valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(sx) & np.isfinite(sy) & np.isfinite(rho) & (sx > 0) & (sy > 0)
+            if not valid.any():
+                continue
             # Let the engine report an informative insufficient-points error.
             kwargs = dict(space=canvas._diagram, model=settings["model"], anchor=anchor,
                           include_decay_uncertainty=settings["decay"])
@@ -505,7 +513,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
             return
         scopes = self._pending_scopes
         if not scopes:
-            self.readout.setPlainText("No compatible shown points to fit")
+            self.readout.setPlainText("No spots to fit")
             return
         self._scope_count = len(scopes)
         self._analytical_complete = False
@@ -589,18 +597,23 @@ class ReviewFitPanel(QtWidgets.QWidget):
         self.readout.setPlainText("\n\n".join([*blocks, *errors]))
 
     def _draw_records(self):
+        if not self.fit_button.isChecked():
+            self._clear_overlays()
+            return
         canvas = getattr(self.review, self.kind + "_concordia", None)
         if canvas is None:
             return
         plot = canvas._plot_item
         if plot is None:
             return
-        while len(self._overlays) > len(self.records):
+        # A curve refresh can arrive before the new diagram's fit is queued.
+        records = [r for r in self.records if r.get("space") == canvas._diagram]
+        while len(self._overlays) > len(records):
             old_plot, items = self._overlays.pop()
             for item in items:
                 old_plot.removeItem(item)
         fit_x, fit_y = [], []
-        for index, r in enumerate(self.records):
+        for index, r in enumerate(records):
             if index >= len(self._overlays):
                 items = [pg.PlotDataItem() for _ in range(3)] + [pg.ScatterPlotItem(symbol="d", size=9)]
                 for item in items:

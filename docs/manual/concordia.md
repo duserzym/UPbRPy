@@ -81,9 +81,15 @@ in the concordia toolbar's **Session** popover.
 
 **Fit** opens the on/off toggle and options: models 1–3, common-Pb and age
 anchors, decay-constant uncertainty, a combined fit, bootstrap resamples and
-seed. Zircon starts with Fit off; common-Pb mineral presets start with it on.
-Fits use selected shown points, or all shown points if none are selected,
-after calculation exclusions. Analytical results appear first, followed by
+seed. New sessions start with Fit off for every mineral. Each concordia page
+keeps its own on/off state, which only the toggle (or the right-click **Fit selected**
+action) changes; it is saved in the project. While Fit is off no fit line is
+drawn, whatever you select, hide, exclude, zoom or undo; the status line keeps
+the last results, marked "Fit off". While Fit is on, the fit recomputes when
+its spots change. Fits use selected shown points, or all shown points if none
+are selected, after calculation exclusions. If every selected spot is hidden
+or excluded, there is no fit and the status reads "No spots to fit"; clearing
+the selection fits all shown spots again. Analytical results appear first, followed by
 progressive bootstrap results. Defaults are 2000 resamples and seed 1; long
 runs use 500-resample chunks with seed + chunk index. The settings and last
 results are saved in the project. The status line summarises intercepts, MSWD
