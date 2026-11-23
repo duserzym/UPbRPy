@@ -5276,7 +5276,7 @@ class ResultsTableWidget(QtWidgets.QWidget):
         return {kind: panel.settings() for kind, panel in self.fit_panels.items()}
 
     def fit_records(self) -> list[dict]:
-        """Return the last fit records of both pages for saving or export."""
+        """Return the last fit records of both pages for project saving."""
         return [dict(record) for panel in self.fit_panels.values() for record in panel.records]
 
     def apply_fit_default(self, enabled: bool) -> None:
@@ -6539,9 +6539,6 @@ class ResultsTableWidget(QtWidgets.QWidget):
         form.setParent(content)
         box.addWidget(form)
         form.show()
-        export = QtWidgets.QPushButton("Export fits…")
-        export.clicked.connect(panel.export_fits)
-        box.addWidget(export)
         panel.options_button.hide()
         panel.hide()
         button = self._popover("Fit", content)

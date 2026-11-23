@@ -317,7 +317,7 @@ def test_bundle_contains_isochron_table_and_exclusions(tmp_path):
     assert {"session_isochron_fits.csv", "session_isochron_fits.md", "session_isochron_fits_footnotes.txt"} <= {p.name for p in bundle.files}
 
 
-def test_studio_hiding_does_not_exclude_export_and_routes_both_page_fits(app, tmp_path, monkeypatch):
+def test_studio_hiding_does_not_exclude_export_or_send_page_fits(app, tmp_path, monkeypatch):
     import GUI.main_window as module
     from GUI.studio_window import StudioWindow
     from test_export_table import synthetic_pipeline
@@ -342,15 +342,13 @@ def test_studio_hiding_does_not_exclude_export_and_routes_both_page_fits(app, tm
         dialog = window._export_dialog
         assert dialog.excluded_spots == ()
         assert not dialog.table.rows.set_index("spot_name").loc["B_3", "excluded"]
-        # A bootstrap can finish while the export preview is open. Export the
-        # latest record at acceptance, rather than the earlier preview snapshot.
+        # A bootstrap finishing during the preview still belongs only to the project.
         window.results_table.fit_panels["spot"].records[0]["bootstrap_resamples"] = 2000
         dialog.folder_edit.setText(str(tmp_path))
         dialog.accept()
         app.processEvents()
         assert calls[0]["excluded_spots"] == ()
-        assert len(calls[0]["isochron_fits"]) == 2
-        assert calls[0]["isochron_fits"][0]["bootstrap_resamples"] == 2000
+        assert "isochron_fits" not in calls[0]
         state = window.project_workspace_state()
         assert state["review_excluded_spots"] == []
         assert len(state["review_fits"]) == 2
@@ -361,16 +359,6 @@ def test_studio_hiding_does_not_exclude_export_and_routes_both_page_fits(app, tm
         shell.deleteLater()
         app.processEvents()
 
-
-def test_fit_export_writes_tables_and_canvas_figures(review, app, tmp_path, monkeypatch):
-    panel = fit(app, review)
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a: str(tmp_path))
-    warnings = []
-    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a: warnings.append(a))
-    panel.export_fits()
-    assert not warnings
-    for suffix in (".csv", ".md", "_footnotes.txt", ".svg", ".png"):
-        assert (tmp_path / ("spot_means_isochron_fits" + suffix)).stat().st_size > 0
 
 
 def test_project_save_and_install_restores_exclusions_and_last_fits(app, tmp_path, monkeypatch):

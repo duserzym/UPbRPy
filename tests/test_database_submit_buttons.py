@@ -231,3 +231,32 @@ def test_database_review_panels_fit_laptop(window, app, size):
     assert not clipped_widgets(shell)
     scroll = window.inspector_tabs.currentWidget()
     assert scroll.horizontalScrollBar().maximum() == 0
+
+
+def test_submission_sends_no_fit_export_and_keeps_project_fits(window, dialogs, monkeypatch):
+    database_review(window)
+    bridge = window.database()
+    # Thousands of retained records must not add requests.
+    records = [dict(label=f"synthetic-{i}", slope=float(i)) for i in range(3000)]
+    workspace = dict(review_fits=records, review_fit_settings={"spot": {"enabled": True}},
+                     review_excluded_spots=["Synthetic_1"])
+    monkeypatch.setattr(window, "project_workspace_state", lambda: workspace)
+    monkeypatch.setattr(window, "apply_pending_project_edits", lambda: None)
+    monkeypatch.setattr(window, "run_background", lambda title, fn, done: done(fn()))
+    monkeypatch.setattr(bridge, "_authorize", lambda server, code, then, title: then())
+    monkeypatch.setattr(bridge, "run", lambda fn, done, **kwargs: done(fn()))
+    upload = Mock(return_value=SimpleNamespace(run_id="data-only", counts={}, quarantine_items=[]))
+    monkeypatch.setattr(gui_database, "client", lambda: SimpleNamespace(submit_reduction=upload))
+    export = Mock()
+    project = Mock()
+    monkeypatch.setattr("UPbRPy.reproducibility.export_reduction_bundle", export)
+    monkeypatch.setattr("UPbRPy.project.write_reduction_project", project)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args: QtWidgets.QMessageBox.StandardButton.Yes)
+    bridge.submit(window)
+    export.assert_called_once()
+    assert "isochron_fits" not in export.call_args.kwargs
+    upload.assert_called_once()
+    # The submitted project is the project: it keeps its fits, like a local save.
+    assert project.call_args.kwargs["workspace"] == workspace
+    assert workspace["review_fits"] is records and len(records) == 3000
+    assert not dialogs

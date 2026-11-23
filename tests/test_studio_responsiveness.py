@@ -6,11 +6,10 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
 
 from GUI.theme import THEMES, build_application
 from GUI.widgets import ConcordiaReviewWidget, ResultsTableWidget
-from GUI.review_fits import _export_svg
 from test_concordia_render_parity import synthetic_frame, dispose
 
 
@@ -56,7 +55,14 @@ def test_analytic_ellipse_picking_and_bezier_export(app, tmp_path, diagram):
         assert canvas._ellipse_batch is batch and canvas._scatter is scatter
         assert canvas._highlight.path().elementAt(1).isCurveTo()
         path = tmp_path / "smooth.svg"
-        _export_svg(canvas.scene(), path)
+        generator = QtSvg.QSvgGenerator()
+        generator.setFileName(str(path))
+        generator.setSize(canvas.size())
+        painter = QtGui.QPainter(generator)
+        try:
+            canvas.render(painter)
+        finally:
+            painter.end()
         assert re.search(r"[Cc]", " ".join(re.findall(r'\bd="([^"]+)"', path.read_text())))
     finally:
         dispose(canvas, app)

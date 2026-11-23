@@ -179,18 +179,3 @@ def test_cannot_open_is_reported_in_active_tab(window):
     assert not window.issue_banner.isHidden()
     assert window.issue_banner.stage == "import"
     assert "Open an existing" in window.issue_banner.next_step.text()
-
-
-def test_fit_export_error_is_reported_in_fit_readout(window, monkeypatch, tmp_path):
-    from GUI import review_fits
-
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *args: str(tmp_path))
-
-    def fail(*args):
-        raise OSError("Folder is read-only")
-
-    monkeypatch.setattr(review_fits, "write_isochron_fits", fail)
-    panel = SimpleNamespace(records=[{}], kind="spot", readout=QtWidgets.QPlainTextEdit())
-    review_fits.ReviewFitPanel.export_fits(panel)
-    assert "Fit export failed: Folder is read-only" in panel.readout.toPlainText()
-    assert "writable export folder" in panel.readout.toPlainText()

@@ -5987,7 +5987,6 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                 file_stem = dialog.stem_edit.text().strip()
                 include_audit = dialog.audit_check.isChecked()
                 prepared_table = dialog.table
-                isochron_fits = self.results_table.fit_records()
                 self.run_background("Exporting results", lambda: export_reduction_bundle(
                     pipeline, target,
                     include_depth_profile=self.workflow_preset.supports_depth_profiles,
@@ -5996,8 +5995,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                     include_depth_concentrations=self.session.include_export_depth_concentrations,
                     export_settings=export_settings, formats=formats,
                     excluded_spots=excluded, file_stem=file_stem,
-                    include_audit_files=include_audit, table=prepared_table,
-                    isochron_fits=isochron_fits), show_result)
+                    include_audit_files=include_audit, table=prepared_table), show_result)
             dialog.finished.connect(finished)
             dialog.open()
 

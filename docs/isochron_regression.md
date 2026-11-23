@@ -206,7 +206,10 @@ Differences from IsoplotR found on real apatite data, and why:
   by the data; IsoplotR and UPbRPy return different, equally meaningless
   values with very large uncertainties.
 
-## Exporting fits
+## Exporting fits from Python
+
+Studio exports data only. Fits are for viewing and are saved with the project.
+The following library functions remain available to notebook users.
 
 `fit_record(fit, boot)` returns a JSON-safe record;
 `write_isochron_fits(records, folder, stem)` writes `<stem>.csv`, `<stem>.md`

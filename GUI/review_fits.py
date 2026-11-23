@@ -2,21 +2,19 @@
 from __future__ import annotations
 
 import json
-import importlib
 import threading
 import time
 import hashlib
 from collections import OrderedDict
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from UPbRPy.regression import (
     Anchor, BootstrapResult, bootstrap_discordia, concordia_xy, fit_discordia,
-    fit_record, model_name, write_isochron_fits,
+    fit_record, model_name,
 )
 from UPbRPy.results import format_mswd, format_value_with_uncertainty
 
@@ -90,38 +88,6 @@ class _FitCache:
                 self.entries.popitem(last=False)
 
 
-
-def _export_svg(scene, path):
-    """Use pyqtgraph's SVG exporter with Qt's close-path tokens preserved.
-
-    This pyqtgraph version's coordinate mapper assumes every path token has
-    an x,y pair, but Qt emits standalone Z tokens for closed paths. Temporarily
-    remove those tokens while it transforms coordinates, then restore them.
-    The hook is scoped to this synchronous GUI-thread export.
-    """
-    module = importlib.import_module("pyqtgraph.exporters.SVGExporter")
-    original = module.correctCoordinates
-
-    def coordinates(node, defs, item, options):
-        closed = []
-        for element in node.getElementsByTagName("path"):
-            tokens = element.getAttribute("d").split()
-            positions = [i for i, token in enumerate(tokens) if token.upper() == "Z"]
-            if positions:
-                closed.append((element, positions))
-                element.setAttribute("d", " ".join(token for token in tokens if token.upper() != "Z"))
-        original(node, defs, item, options)
-        for element, positions in closed:
-            tokens = element.getAttribute("d").split()
-            for index in positions:
-                tokens.insert(index, "Z")
-            element.setAttribute("d", " ".join(tokens))
-
-    module.correctCoordinates = coordinates
-    try:
-        module.SVGExporter(scene).export(str(path))
-    finally:
-        module.correctCoordinates = original
 
 
 class _FitSignals(QtCore.QObject):
@@ -246,7 +212,7 @@ class ReviewFitPanel(QtWidgets.QWidget):
         row.addWidget(self.fit_button)
         self.options_button = QtWidgets.QToolButton()
         self.options_button.setText("Options")
-        self.options_button.setToolTip("Fit options: model, anchor, decay constants, bootstrap, export")
+        self.options_button.setToolTip("Fit options: model, anchor, decay constants, bootstrap")
         self.options_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QtWidgets.QMenu(self.options_button)
         form_widget = QtWidgets.QWidget()
@@ -289,8 +255,6 @@ class ReviewFitPanel(QtWidgets.QWidget):
         action = QtWidgets.QWidgetAction(menu)
         action.setDefaultWidget(form_widget)
         menu.addAction(action)
-        menu.addSeparator()
-        menu.addAction("Export fits…", self.export_fits)
         self.options_button.setMenu(menu)
         self.fit_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         self.options_button.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }")
@@ -671,20 +635,3 @@ class ReviewFitPanel(QtWidgets.QWidget):
             plot.setRange(xRange=(min(*current_x, *fit_x), max(*current_x, *fit_x)),
                           yRange=(min(*current_y, *fit_y), max(*current_y, *fit_y)), padding=.04)
             self._fit_view_pending = False
-
-    def export_fits(self):
-        """Write the fit table, footnotes, and current SVG and PNG canvas."""
-        if not self.records:
-            self.readout.setPlainText("Turn Fit on to calculate fits before export")
-            return
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export fits")
-        if not folder:
-            return
-        try:
-            stem = "spot_means_isochron_fits" if self.kind == "spot" else "depth_intervals_isochron_fits"
-            write_isochron_fits(self.records, folder, stem)
-            from pyqtgraph.exporters import ImageExporter
-            _export_svg(self.canvas.scene(), Path(folder) / (stem + ".svg"))
-            ImageExporter(self.canvas.scene()).export(str(Path(folder) / (stem + ".png")))
-        except Exception as exc:
-            self.readout.setPlainText(f"Fit export failed: {exc}\nChoose a writable export folder and try again.")

@@ -95,8 +95,9 @@ runs use 500-resample chunks with seed + chunk index. The settings and last
 results are saved in the project. The status line summarises intercepts, MSWD
 and bootstrap progress; **details** opens the complete readout.
 
-**Export fits…** writes fit tables, footnotes, SVG and PNG. **Export results…**
-includes the last fits from both concordia pages in its audit bundle.
+Studio exports data only. Fits are for viewing; their settings and last
+records are saved with the project. **Export results…** includes no concordia
+fit tables, figures or records, including in the audit bundle.
 
 Depth concordia uses the same layout, with a focused acquisition, Glasses,
 diagram, colour map and selection actions in its toolbar and popovers.
