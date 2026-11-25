@@ -299,6 +299,7 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 | Manifest key | Required/optional | Type / unit | Example | Meaning / without it |
 | --- | --- | --- | --- | --- |
 | format | Optional | String | `upbdb-session-bundle` | Also accepts `laicpmsdb-session-bundle`, written before the 2026-11-15 rename; other values rejected. Reading preserves the manifest file |
+| format_version | Optional | Integer | `2` | Defaults to `1`; no maximum version check |
 | session | Optional | Table | `[session]` | Defaults empty; if present must be a table |
 | session.id | Optional | Scalar converted to text | Session UUID | Defaults empty; not used to gate raw parsing |
 | session.key | Optional | Scalar converted to text | `Zircon_04Nov26` | Defaults empty; unpacker falls back to folder name |
@@ -327,6 +328,47 @@ manifest documents parse; ZIP unpacking separately requires the manifest and
 | acquisition[].sha256 | Optional | Text | Raw file SHA-256 | Unpacker verifies only if filename also nonempty |
 | acquisition[].kind | Optional | Text | `primary_standard` | Metadata, not used to select reduction standard |
 | acquisition[].filename | Optional | Text | `Zircon_demo_1.csv` | Relative to raw for hash checks; absent skips that check |
+
+Version 2 adds optional top-level `[[laser_log]]` and `[[laser_setting]]`
+tables, read as frozen `SessionLaserLog` and `SessionLaserSetting` objects in
+`SessionManifest.laser_logs` and `.laser_settings`. There is no single
+`[laser]` table. Each log stores `id`, `file_name`, `sha256`, `system_type`,
+`serial_number`, `software_version`, `time_zone`, `laser_instrument`,
+`spot_key` (`position` or `description`), `has_laser_times`, `clock_offset_s`,
+`clock_offset_spread_s`, `offset_pairs` and `linked`. Each setting stores
+`log_sha256`, `fluence_j_cm2`, `rep_rate_hz`, `spot_um`, `output_pct`,
+`scan_speed_um_s`, `spot_shape`, `shot_count` and `acquisitions`.
+
+Linked acquisition rows may carry `laser_log_sha256`, `laser_scan_position`
+(one-based), `laser_on_at`, `laser_off_at`, `laser_fluence_j_cm2`,
+`laser_rep_rate_hz`, `laser_spot_um`, `laser_spot_shape`, `laser_shot_count`,
+`laser_output_pct`, `laser_stage_um` (three stage coordinates in µm) and
+`laser_link_method` (`spot_number`, `time` or `manual`). These become one
+optional `SessionAcquisition.laser: AcquisitionLaser`; without laser keys it
+is `None`. Its fields omit the `laser_` prefix, except for `laser_on_at` and
+`laser_off_at`; the log hash is `log_sha256`, and scan position is
+`scan_position`. `duration_s` returns off minus on, or `None` when incomplete.
+Stage coordinates are read for display/QC and excluded from exports unless
+opted in; export support is a later stage.
+
+Laser times accept TOML datetimes or ISO strings and are normalised to UTC;
+naive values are treated as UTC. `SessionManifest.laser_log(sha256)` finds a
+log, and `acquisition_laser_window(label)` returns `(on, off)` in seconds
+after that acquisition's `started_at`: laser time plus the log's
+`clock_offset_s`, minus acquisition start. The stored start text is parsed
+with `datetime.fromisoformat`; a naive start is treated as UTC. Missing or
+invalid start, missing on time, or missing log/offset gives `None`; a missing
+off time gives `(on, None)`. Logs without firing times can still supply
+settings and stage coordinates. `has_laser_data` is true when any log or
+acquisition laser metadata exists.
+
+Laser metadata is optional: invalid values or malformed laser table rows
+are dropped with row/key context in `SessionManifest.warnings`. Hashes must
+be 64 hexadecimal characters; numeric fields reject booleans and nonfinite
+numbers. Missing strings default empty, optional numbers/times/stage default
+`None`, `has_laser_times` defaults false, and `offset_pairs`, `linked` and
+`acquisitions` default zero. Unknown keys and tables are ignored. Version-1
+bundles retain their existing text values and reduction behaviour.
 
 `SessionManifest.standards_config()` maps `primary`/`primary_68`,
 `primary_76`, `primary_82` to the corresponding primary-standard config

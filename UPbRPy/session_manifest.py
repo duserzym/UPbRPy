@@ -47,14 +47,24 @@ records every acquisition belongs to (``[[acquisition]]``)::
 rows with ``rm_name``, ``role`` and ``planned_bracket_every``, the shape of
 UPbDB's ``ReferenceMaterialPlan``. The module is plain Python: no Qt, no
 HTTP, no database.
+
+Version 2 adds optional ``[[laser_log]]`` and ``[[laser_setting]]`` tables
+and acquisition keys prefixed with ``laser_`` (log hash, scan position,
+on/off times, settings, stage coordinates and link method). Laser times are
+normalised to UTC; adding the matching log's ``clock_offset_s`` places them
+on the acquisition clock. Invalid laser values are dropped with warnings,
+and unknown keys are ignored. Stage coordinates are read for display/QC and
+excluded from exports unless opted in; export support is a later stage.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+import math
 from pathlib import Path
+import re
 
 try:  # Python 3.11+
     import tomllib
@@ -87,6 +97,66 @@ class SessionManifestError(ValueError):
 
 
 @dataclass(frozen=True)
+class SessionLaserLog:
+    """One laser log's identity, linking summary and clock correction."""
+
+    id: str = ""
+    file_name: str = ""
+    sha256: str = ""
+    system_type: str = ""
+    serial_number: str = ""
+    software_version: str = ""
+    time_zone: str = ""
+    laser_instrument: str = ""
+    spot_key: str = ""
+    has_laser_times: bool = False
+    clock_offset_s: float | None = None
+    clock_offset_spread_s: float | None = None
+    offset_pairs: int = 0
+    linked: int = 0
+
+
+@dataclass(frozen=True)
+class SessionLaserSetting:
+    """One distinct ablation setting combination within a laser log."""
+
+    log_sha256: str = ""
+    fluence_j_cm2: float | None = None
+    rep_rate_hz: float | None = None
+    spot_um: float | None = None
+    output_pct: float | None = None
+    scan_speed_um_s: float | None = None
+    spot_shape: str = ""
+    shot_count: int | None = None
+    acquisitions: int = 0
+
+
+@dataclass(frozen=True)
+class AcquisitionLaser:
+    """Laser firing metadata linked to one acquisition; times are UTC."""
+
+    log_sha256: str = ""
+    scan_position: int | None = None
+    laser_on_at: datetime | None = None
+    laser_off_at: datetime | None = None
+    fluence_j_cm2: float | None = None
+    rep_rate_hz: float | None = None
+    spot_um: float | None = None
+    output_pct: float | None = None
+    spot_shape: str = ""
+    shot_count: int | None = None
+    stage_um: tuple[float, float, float] | None = None
+    link_method: str = ""
+
+    @property
+    def duration_s(self) -> float | None:
+        """Return firing duration in seconds when both endpoints exist."""
+        if self.laser_on_at is None or self.laser_off_at is None:
+            return None
+        return (self.laser_off_at - self.laser_on_at).total_seconds()
+
+
+@dataclass(frozen=True)
 class SessionAcquisition:
     """One ``[[acquisition]]`` row: a spot label and its database records."""
 
@@ -101,6 +171,7 @@ class SessionAcquisition:
     filename: str = ""
     sample_label: str = ""
     atlas_spot_id: str = ""
+    laser: AcquisitionLaser | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +191,51 @@ class SessionManifest:
         default_factory=dict
     )
     acquisitions: tuple[SessionAcquisition, ...] = ()
+    format_version: int = 1
+    laser_logs: tuple[SessionLaserLog, ...] = ()
+    laser_settings: tuple[SessionLaserSetting, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def has_laser_data(self) -> bool:
+        """Whether a log or acquisition carries laser metadata."""
+        return bool(self.laser_logs) or any(
+            row.laser is not None for row in self.acquisitions
+        )
+
+    def laser_log(self, sha256: str) -> SessionLaserLog | None:
+        """Return the laser log with the given SHA-256, if listed."""
+        if not sha256:
+            return None
+        for log in self.laser_logs:
+            if log.sha256.casefold() == sha256.casefold():
+                return log
+        return None
+
+    def acquisition_laser_window(
+        self, label: str,
+    ) -> tuple[float, float | None] | None:
+        """Return firing endpoints in seconds after acquisition start.
+
+        Laser times are shifted by the log's clock offset. ``started_at``
+        is parsed from its stored ISO text; a naive start is treated as UTC.
+        Missing or unparseable start/on times or clock offsets give None.
+        """
+        row = self.acquisition(label)
+        if row is None or row.laser is None or row.laser.laser_on_at is None:
+            return None
+        log = self.laser_log(row.laser.log_sha256)
+        if log is None or log.clock_offset_s is None:
+            return None
+        try:
+            start = _utc_datetime(row.started_at)
+        except (ValueError, OverflowError):
+            return None
+        on = (row.laser.laser_on_at - start).total_seconds() + log.clock_offset_s
+        off = row.laser.laser_off_at
+        return on, (
+            None if off is None else (off - start).total_seconds() + log.clock_offset_s
+        )
 
     @property
     def bundle_directory(self) -> Path:
@@ -168,6 +284,150 @@ def _text(value: object) -> str:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return str(value).strip()
+
+
+def _laser_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError
+    return value
+
+
+def _laser_sha256(value: object) -> str:
+    text = _laser_text(value)
+    if re.fullmatch(r"[0-9a-fA-F]{64}", text) is None:
+        raise ValueError
+    return text
+
+
+def _laser_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError
+    return number
+
+
+def _laser_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError
+    return value
+
+
+def _laser_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError
+    return value
+
+
+def _utc_datetime(value: object) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        raise ValueError
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _laser_stage(value: object) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError
+    return (_laser_float(value[0]), _laser_float(value[1]), _laser_float(value[2]))
+
+
+class _LaserRow:
+    """Read optional laser values, keeping failures local to one key."""
+
+    def __init__(self, row: Mapping, where: str, warnings: list[str]):
+        self.row = row
+        self.where = where
+        self.warnings = warnings
+
+    def value(self, key: str, parser: Callable, default=None):
+        if key not in self.row:
+            return default
+        try:
+            return parser(self.row[key])
+        except (ValueError, TypeError, OverflowError):
+            self.warnings.append(f"{self.where}: invalid {key}; ignored.")
+            return default
+
+
+def _laser_rows(document: Mapping, key: str, warnings: list[str]) -> list[_LaserRow]:
+    if key not in document:
+        return []
+    rows = document[key]
+    if not isinstance(rows, list):
+        warnings.append(f"{key}: expected an array of tables; ignored.")
+        return []
+    result = []
+    for index, row in enumerate(rows, start=1):
+        where = f"{key} row {index}"
+        if not isinstance(row, Mapping):
+            warnings.append(f"{where}: expected a table; ignored.")
+        else:
+            result.append(_LaserRow(row, where, warnings))
+    return result
+
+
+def _laser_log(row: _LaserRow) -> SessionLaserLog:
+    return SessionLaserLog(
+        **{
+            key: row.value(key, _laser_text, "")
+            for key in (
+                "id", "file_name", "system_type", "serial_number",
+                "software_version", "time_zone", "laser_instrument", "spot_key",
+            )
+        },
+        sha256=row.value("sha256", _laser_sha256, ""),
+        has_laser_times=row.value("has_laser_times", _laser_bool, False),
+        clock_offset_s=row.value("clock_offset_s", _laser_float),
+        clock_offset_spread_s=row.value("clock_offset_spread_s", _laser_float),
+        offset_pairs=row.value("offset_pairs", _laser_int, 0),
+        linked=row.value("linked", _laser_int, 0),
+    )
+
+
+def _laser_setting(row: _LaserRow) -> SessionLaserSetting:
+    return SessionLaserSetting(
+        log_sha256=row.value("log_sha256", _laser_sha256, ""),
+        **{
+            key: row.value(key, _laser_float)
+            for key in (
+                "fluence_j_cm2", "rep_rate_hz", "spot_um", "output_pct",
+                "scan_speed_um_s",
+            )
+        },
+        spot_shape=row.value("spot_shape", _laser_text, ""),
+        shot_count=row.value("shot_count", _laser_int),
+        acquisitions=row.value("acquisitions", _laser_int, 0),
+    )
+
+
+def _acquisition_laser(row: _LaserRow) -> AcquisitionLaser | None:
+    keys = {
+        "laser_log_sha256", "laser_scan_position", "laser_on_at", "laser_off_at",
+        "laser_fluence_j_cm2", "laser_rep_rate_hz", "laser_spot_um",
+        "laser_output_pct", "laser_spot_shape", "laser_shot_count",
+        "laser_stage_um", "laser_link_method",
+    }
+    if not keys.intersection(row.row):
+        return None
+    return AcquisitionLaser(
+        log_sha256=row.value("laser_log_sha256", _laser_sha256, ""),
+        scan_position=row.value("laser_scan_position", _laser_int),
+        laser_on_at=row.value("laser_on_at", _utc_datetime),
+        laser_off_at=row.value("laser_off_at", _utc_datetime),
+        **{
+            key: row.value(f"laser_{key}", _laser_float)
+            for key in ("fluence_j_cm2", "rep_rate_hz", "spot_um", "output_pct")
+        },
+        spot_shape=row.value("laser_spot_shape", _laser_text, ""),
+        shot_count=row.value("laser_shot_count", _laser_int),
+        stage_um=row.value("laser_stage_um", _laser_stage),
+        link_method=row.value("laser_link_method", _laser_text, ""),
+    )
 
 
 def _names(value: object, where: str) -> tuple[str, ...]:
@@ -244,6 +504,7 @@ def parse_session_manifest(
     if not isinstance(rows, list):
         raise SessionManifestError("[[acquisition]] must be an array of tables.")
     acquisitions = []
+    warnings: list[str] = []
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, Mapping) or not _text(row.get("label")):
             raise SessionManifestError(
@@ -253,11 +514,27 @@ def parse_session_manifest(
             SessionAcquisition(
                 **{
                     name: _text(row.get(name))
-                    for name in SessionAcquisition.__dataclass_fields__
-                }
+                    for name in (
+                        "label", "acquisition_id", "spot_id", "grain_id",
+                        "sample_id", "started_at", "sha256", "kind", "filename",
+                        "sample_label", "atlas_spot_id",
+                    )
+                },
+                laser=_acquisition_laser(_LaserRow(
+                    row, f"acquisition row {index} ({_text(row.get('label'))})", warnings,
+                )),
             )
         )
 
+    laser_logs = tuple(
+        _laser_log(row) for row in _laser_rows(document, "laser_log", warnings)
+    )
+    laser_settings = tuple(
+        _laser_setting(row) for row in _laser_rows(document, "laser_setting", warnings)
+    )
+    format_version = _LaserRow(document, "manifest", warnings).value(
+        "format_version", _laser_int, 1,
+    )
     return SessionManifest(
         path=Path(path),
         session_id=_text(session.get("id")),
@@ -272,6 +549,10 @@ def parse_session_manifest(
             document.get("reference_materials")
         ),
         acquisitions=tuple(acquisitions),
+        format_version=format_version,
+        laser_logs=laser_logs,
+        laser_settings=laser_settings,
+        warnings=tuple(warnings),
     )
 
 
@@ -322,6 +603,9 @@ __all__ = [
     "SESSION_BUNDLE_FORMATS",
     "ROLE_FIELDS",
     "SessionManifestError",
+    "SessionLaserLog",
+    "SessionLaserSetting",
+    "AcquisitionLaser",
     "SessionAcquisition",
     "SessionManifest",
     "parse_session_manifest",
