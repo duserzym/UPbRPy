@@ -314,3 +314,17 @@ def test_acquisition_metadata_alone_counts_as_laser_data():
     manifest = parse('[[acquisition]]\nlabel = "SYNTHETIC_1"\nlaser_spot_um = 20\n')
     assert manifest.has_laser_data
     assert not parse(SETTING).has_laser_data
+
+
+def test_format_version_is_provenance_not_content():
+    """UPbDB's no-log v2 bundle must compare equal to its v1 counterpart."""
+    v1 = parse_session_manifest(
+        tomllib.loads('format = "upbdb-session-bundle"\nformat_version = 1\n[session]\nkey = "K"\n'),
+        "session_manifest.toml",
+    )
+    v2 = parse_session_manifest(
+        tomllib.loads('format = "upbdb-session-bundle"\nformat_version = 2\n[session]\nkey = "K"\n'),
+        "session_manifest.toml",
+    )
+    assert (v1.format_version, v2.format_version) == (1, 2)
+    assert v1 == v2

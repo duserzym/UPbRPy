@@ -191,7 +191,9 @@ class SessionManifest:
         default_factory=dict
     )
     acquisitions: tuple[SessionAcquisition, ...] = ()
-    format_version: int = 1
+    # Provenance only: a version-2 manifest without laser rows equals its
+    # version-1 counterpart (UPbDB relies on this).
+    format_version: int = field(default=1, compare=False)
     laser_logs: tuple[SessionLaserLog, ...] = ()
     laser_settings: tuple[SessionLaserSetting, ...] = ()
     warnings: tuple[str, ...] = ()
