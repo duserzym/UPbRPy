@@ -40,7 +40,7 @@ moves over HTTP.
 | client | `UPbRPy/integration/upbdb.py` | thin, typed, no Qt: `exchange_code`, `fetch_session_bundle`, `submit_reduction`, `prefer_run`, `whoami`; bearer token per server stored in the OS keychain (`keyring`, service `UPbRPy`), never in files; errors mapped to messages the GUI can show |
 | `origin` in the project | `UPbRPy/project.py` | format version 2, additive: `origin { server, session_id, session_key, export_sha256, exported_at, run_id? }`; version 1 files still load |
 | manifest provenance | `UPbRPy/pipeline.py` `manifest()` | `hash_inputs=True` by default in `export_reduction_bundle`; `reference_library_version` from `library.toml`; `metadata.origin` echoing the project's origin (UPbDB plan section 8.3) |
-| session manifest | `UPbRPy/io.py` | `read_experiment_data` accepts `session_manifest.toml` beside `raw/` as the source of `sample_aliases`, `sep` and the reference-material plan; the GUI pre-fills from it |
+| session manifest | `UPbRPy/io.py` | `read_experiment_data` accepts `session_manifest.toml` beside `raw/` for sample aliases, separator and optional laser data; the GUI also pre-fills the reference-material plan |
 | URL scheme | `GUI/main.py`, `packaging/UPbRPyStudio.spec`, installer | `--open` accepts a directory, a `.upbr`, a session-bundle zip, or a `upbr://` URL; macOS `CFBundleURLTypes` for `upbr` in the spec and a `QFileOpenEvent` handler; Windows registry entry `HKCU\Software\Classes\upbr` written by the installer (and offered on first run of a portable build); a second launch hands the URL to the running instance (local socket) |
 | database mode UI | `GUI/` | a "Database" group in the File menu: Open from database… (server URL and sign-in: password, or ORCID through the system browser returning to `upbr://auth/callback?code=`), Submit to database, Mark as preferred; the origin shown in the window title and the project panel; a status row with the run id after a submit |
 | cache | `~/UPbRPy/sessions/<session_key>/` | one folder per fetched session; the bundle hash tells Studio whether a re-fetch is needed; the user may move it |
@@ -49,7 +49,8 @@ moves over HTTP.
 ## 3. The exchange
 
 When `session_manifest.toml` declares a top-level `format`, it must be
-`"upbdb-session-bundle"`. Manifests without that optional field still load.
+`"upbdb-session-bundle"` or the legacy `"laicpmsdb-session-bundle"`.
+Manifests without that optional field still load.
 
 ```text
 browser or UPb Studio ── upbr://session/<id>?server=S&code=C ──> Studio
@@ -333,6 +334,9 @@ def read_experiment_data(
     selection_method='threshold', selection_fallback_methods=(),
     selection_options=None, signal_duration_limit_seconds=None,
     session_manifest=None, *, detector_calibration=None, cycle_time_s=None,
+    restored_selections=None, laser_qc_threshold_s=2.0,
+    signal_duration_limit_source="fixed", laser_tie=None,
+    laser_tie_confirmed=False,
 ): ...
 ```
 
@@ -494,3 +498,71 @@ and validate companions with the merge tolerance, not bitwise equality.
 UPb Studio needs only the file types its shell opens. Bracketeer's
 sample-list columns correspond to Rich's `BrigidMS`/`PMIAnalyteLaser` rows,
 which reconcile the planned sequence with acquired labels.
+
+## Laser logs (Chromium `.lase`)
+
+UPbRPy reads UPbDB's version-2 `session_manifest.toml` laser metadata.
+Optional top-level `[[laser_log]]` rows carry identity, SHA-256, instrument,
+time zone, `spot_key`, `has_laser_times`, clock offset/spread and link counts;
+`[[laser_setting]]` rows group distinct ablation settings by `log_sha256`.
+There is no single `[laser]` table. Only linked `[[acquisition]]` rows carry
+`laser_log_sha256`, `laser_scan_position`, `laser_on_at`/`laser_off_at`,
+ablation settings, `laser_stage_um` and `laser_link_method`. See
+[Projects and bundles](data-model/project-and-bundle.md#session-bundle)
+for all keys and types. Omit unavailable values and empty laser tables.
+Settings-only logs have `has_laser_times=false`, `offset_pairs=0` and no
+clock offset or firing times; incomplete firings may omit either endpoint.
+
+UPbDB supplies zone-corrected, aware UTC laser times and an aware acquisition
+`started_at`. The acquisition-clock instant is **laser time +
+`clock_offset_s`**; subtract that acquisition's `started_at` to obtain its
+relative firing window. `clock_offset_s` is the median acquisition-start
+minus laser-on difference; `clock_offset_spread_s` is its median absolute
+deviation and `offset_pairs` is the pair count. UPbRPy normalizes times to
+UTC (tolerating naive values as UTC), drops invalid optional laser values
+with row/key warnings, and ignores unknown keys and tables. Missing clock
+evidence prevents timing guidance but does not prevent reading settings.
+
+The reported transport delay is the median **data-detected onset minus
+clock-corrected laser-on**, requiring at least three successful spot pairs.
+With fewer pairs it is unknown. Because the clock offset aligns median
+laser-on with median acquisition start, this delay also absorbs Qtegra's
+start-to-fire interval: it is a combined shift, not a pure transport time.
+Studio's **Laser Δ (s)** QC column shows the onset residual after subtracting that
+delay; `laser_onset_flag` marks absolute residuals strictly above the
+default 2 s limit (`laser_qc_threshold_s`). QC is informational and does not
+change reduction. Onsets are detected independently of guided selections.
+
+**Laser-guided** (`laser_guided`) selection is off by default. When chosen,
+it uses laser-on/off plus the session delay; unknown delay uses zero and is
+recorded in diagnostics. Missing on allows configured detector fallbacks;
+missing off uses ordinary washout detection. The separate **Laser-on
+duration** source (`signal_duration_limit_source="laser"`) uses off minus
+on as the signal-duration limit, falling back to the fixed limit when that
+duration is unavailable. See the
+[acquisition model](data-model/acquisition-model.md#optional-laser-guidance).
+
+For standalone use, **File > Load laser log…** previews a `.lase` beside an
+open session. Position matches the acquisition spot number to scan index + 1
+by default; Description number is the analyst's alternative. The fitted
+clock absorbs the difference between the two local clocks. Matches more
+than 30 s from that clock are doubtful by default and excluded from timing.
+Settings-only ties require confirmation. Unlike UPbDB, standalone loading
+has no time fallback for unmatched numbers. See
+[standalone session ties](laser_log_format.md#standalone-session-ties)
+for matching, review and project persistence.
+
+Exports prefill empty laser-system, diameter, repetition-rate and fluence
+fields, preserving analyst entries. Varying numeric settings show ranges
+and per-spot columns; constant settings need no extra columns. Stage
+coordinates may be stored and displayed, but appear in no export—tables,
+footnotes, CSV/XLSX, project-export side files or manifests—unless **Include
+stage coordinates in exports** (`include_stage_coordinates`) is enabled.
+It defaults off, including for old projects. With laser data,
+`reduction_manifest.json` gains a `laser` object recording log/clock
+provenance, delay, QC, selection choices and ablation combinations; coordinates
+require the same opt-in. Studio exports data only and never fits during
+export. See [laser export metadata](data-model/export-table.md#laser-metadata).
+
+Sessions without laser data, version-1 bundles and projects saved before L3
+keep their existing default selections and reduction numbers.
