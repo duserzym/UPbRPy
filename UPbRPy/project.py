@@ -278,6 +278,9 @@ def build_reduction_project(
     }
     if resolved_origin:
         document["origin"] = resolved_origin
+    tie = getattr(pipeline, "laser_tie", None)
+    if tie is not None:
+        document["laser_log"] = tie.to_dict()
     return document
 
 

@@ -1,7 +1,7 @@
 """Place laser windows on the session axis and compare measured onsets.
 
-This module accepts relative windows from any source. It does not read laser
-files or manifests, and never adds stage coordinates to analytical tables.
+This module accepts relative windows or a parsed session manifest. It does not
+read files and never adds stage coordinates to analytical tables.
 """
 
 from collections.abc import Mapping
@@ -52,6 +52,48 @@ def add_laser_timing(
         "source": source,
         "spot_key": spot_key,
     }
+
+
+def add_manifest_laser_timing(experiment, manifest):
+    """Add bundle windows without re-reading sweeps or changing selections."""
+    if manifest is None or not manifest.has_laser_data:
+        return
+    windows = {
+        row.label: window for row in manifest.acquisitions
+        if (window := manifest.acquisition_laser_window(row.label)) is not None
+    }
+    # The manifest convenience method requires an on-time. Preserve an
+    # off-only incomplete firing for display, although it cannot guide a
+    # selection or contribute a transport-delay pair.
+    for row in manifest.acquisitions:
+        laser = row.laser
+        if row.label in windows or laser is None or laser.laser_off_at is None:
+            continue
+        log = manifest.laser_log(laser.log_sha256)
+        if log is None or log.clock_offset_s is None:
+            continue
+        try:
+            start = pd.Timestamp(row.started_at)
+            if pd.isna(start):
+                continue
+            start = start.tz_localize('UTC') if start.tzinfo is None else start.tz_convert('UTC')
+            off = (pd.Timestamp(laser.laser_off_at) - start).total_seconds() + log.clock_offset_s
+        except (ValueError, OverflowError):
+            continue
+        windows[row.label] = (None, off)
+    # Keep labels aligned when Studio restores manifest timing after a rename.
+    renames = experiment.attrs.get("spot_renames", {})
+    scan_positions = {row.label: row.laser.scan_position for row in manifest.acquisitions
+                      if row.laser is not None and row.laser.scan_position is not None}
+    add_laser_timing(
+        experiment, {label: windows[renames.get(label, label)] for label in experiment.spot_names
+                     if renames.get(label, label) in windows},
+        dict(zip(experiment.spot_names, experiment.spot_starting_times)),
+        scan_positions={label: scan_positions.get(renames.get(label, label))
+                        for label in experiment.spot_names},
+        log_sha256=tuple(log.sha256 for log in manifest.laser_logs if log.sha256),
+        spot_key=",".join(dict.fromkeys(log.spot_key for log in manifest.laser_logs if log.spot_key)),
+    )
 
 
 def _delay_pairs(experiment: pd.DataFrame) -> pd.Series:
@@ -151,6 +193,6 @@ def nondefault_laser_settings(settings: Mapping) -> dict:
 
 
 __all__ = [
-    "add_laser_timing", "estimate_transport_delay", "update_laser_qc",
+    "add_laser_timing", "add_manifest_laser_timing", "estimate_transport_delay", "update_laser_qc",
     "laser_selection_options", "nondefault_laser_settings",
 ]

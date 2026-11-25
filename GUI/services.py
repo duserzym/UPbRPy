@@ -32,6 +32,7 @@ from UPbRPy.io import (
     read_experiment_data, resolve_session_manifest, autopick_signal_regions,
     SelectionError, resolve_method,
 )
+from UPbRPy.laser_tie import LaserTie
 from UPbRPy.laser_guidance import laser_selection_options, update_laser_qc
 from UPbRPy.qtegra import QtegraSession, open_qtegra
 from UPbRPy.spot_edits import restore_spot_edits, spot_edit_metadata
@@ -399,6 +400,7 @@ def ensure_shared_pipeline(
     for key, stage in _REDUCTION_CACHE_STAGES.items():
         if not session.pipeline.cache.has(stage):
             session.reduction_cache.pop(key, None)
+    session.pipeline.laser_tie = session.laser_tie
     return session.pipeline
 
 
@@ -719,11 +721,15 @@ def load_session(
     import_settings: Mapping[str, object] | None = None,
     *,
     restored_selections: Sequence[Mapping[str, object]] | None = None,
+    laser_tie: LaserTie | None = None,
+    laser_tie_confirmed: bool = False,
 ) -> ReductionSession:
     """Open Qtegra data with preset or restored import settings.
 
     ``restored_selections`` allows the reader to omit redundant automatic
     picks when the caller will overlay complete saved selection records.
+    ``laser_tie`` replaces bundle timing; settings-only ties require
+    ``laser_tie_confirmed=True`` after confirmation or saved-project restore.
     """
     workflow_preset = preset or infer_workflow_preset(directory)
     effective_primary = primary_channel or workflow_preset.primary_channel
@@ -758,6 +764,7 @@ def load_session(
         qtegra,
         primary_channel=effective_primary,
         restored_selections=restored_selections,
+        laser_tie=laser_tie, laser_tie_confirmed=laser_tie_confirmed,
         **{**read_kwargs, "session_manifest": manifest or False},
     )
     if "plateau_filter_method" not in experiment.columns:
@@ -787,7 +794,8 @@ def load_session(
     session = ReductionSession(
         directory=str(directory),
         qtegra=qtegra,
-        laser_data_available=bool(manifest is not None and manifest.has_laser_data),
+        laser_data_available=bool(laser_tie is not None or (manifest is not None and manifest.has_laser_data)),
+        laser_tie=laser_tie,
         experiment=experiment,
         total_data=total_data,
         channels=clean_channels,
@@ -806,6 +814,62 @@ def load_session(
     return session
 
 
+def check_stored_laser_file(session: ReductionSession) -> None:
+    """Check nearby source identity, including when reopening cached results."""
+    import hashlib
+
+    session.laser_file_warnings = ()
+    if session.laser_tie is None:
+        return
+    folder = Path(session.directory)
+    folder = folder.parent if folder.is_file() else folder
+    for parent in (folder, folder.parent):
+        candidate = parent / Path(session.laser_tie.file_name).name
+        if candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() != session.laser_tie.sha256:
+            session.laser_file_warnings = (
+                f"{candidate.name} has changed. Keeping the laser tie stored in the project.",
+            )
+            break
+
+
+def apply_session_laser_tie(session: ReductionSession, tie: LaserTie | None, *, confirmed=False) -> None:
+    """Replace standalone timing (or restore bundle timing), preserving picks.
+
+    The caller owns the session. Re-picking and its change guard belong to the
+    UI. This function only updates timing, transport delay and informational QC.
+    """
+    from UPbRPy.laser_guidance import add_manifest_laser_timing
+
+    if tie is not None and tie.requires_confirmation and not confirmed:
+        raise ValueError("Confirm the settings-only laser tie before applying it.")
+    experiment = session.experiment
+    detected = experiment.get("laser_detected_onset_time")
+    if detected is None and "signal_start_times" in experiment:
+        detected = pd.to_numeric(experiment.signal_start_times, errors="coerce").where(
+            experiment.selection_error.isna() & experiment.selection_method.ne("laser_guided")
+            & ~experiment.get(MANUAL_SELECTION_COLUMN, pd.Series(False, index=experiment.index)).fillna(False))
+    for column in list(experiment):
+        if column.startswith("laser_"):
+            del experiment[column]
+    experiment.attrs.pop("laser", None)
+    manifest = resolve_session_manifest(session.directory, session.import_settings.get("session_manifest"))
+    session.laser_tie = tie
+    session.laser_data_available = bool(tie is not None or (manifest is not None and manifest.has_laser_data))
+    if tie is not None:
+        tie.apply(experiment, confirmed=confirmed)
+    else:
+        add_manifest_laser_timing(experiment, manifest)
+    if "laser" in experiment.attrs:
+        experiment["laser_detected_onset_time"] = detected if detected is not None else np.nan
+        options = session.import_settings.get("selection_options", {})
+        update_laser_qc(experiment, threshold_s=float(session.import_settings.get(
+            "laser_qc_threshold_s", options.get("laser_qc_threshold_s", 2.0))))
+    session.laser_file_warnings = ()
+    if session.pipeline is not None:
+        session.pipeline.update_inputs(experiment, session.total_data, invalidate_from=None)
+        session.pipeline.laser_tie = tie
+
+
 def reimport_detector_calibration(
     session: ReductionSession,
     detector_calibration: Mapping[str, object],
@@ -822,7 +886,8 @@ def reimport_detector_calibration(
     read_kwargs = dict(settings)
     read_kwargs.pop("primary_channel", None)
     experiment, channels, total_data = read_experiment_data(
-        session.qtegra, primary_channel=session.primary_channel, **read_kwargs,
+        session.qtegra, primary_channel=session.primary_channel,
+        laser_tie=session.laser_tie, laser_tie_confirmed=True, **read_kwargs,
     )
     experiment, total_data = restore_spot_edits(experiment, total_data, spot_edit_metadata(session.experiment))
     for key in ("studio_empty_spot_folders", "studio_collapsed_spot_folders"):
@@ -929,7 +994,10 @@ def restore_session_from_project(
         selection_method=config.selection_method,
         import_settings=restored_import_settings,
         restored_selections=document["selections"],
+        laser_tie=LaserTie.from_dict(document["laser_log"]) if "laser_log" in document else None,
+        laser_tie_confirmed=True,
     )
+    check_stored_laser_file(session)
     session.experiment, session.total_data = restore_spot_edits(
         session.experiment, session.total_data, document.get("spot_edits", {}),
     )
@@ -944,6 +1012,8 @@ def restore_session_from_project(
             session.experiment[MANUAL_SELECTION_COLUMN] = infer_manual_selections(
                 auto_picks, session.experiment
             )
+    if "laser" in session.experiment.attrs:
+        update_laser_qc(session.experiment, threshold_s=float(config.selection_options.get("laser_qc_threshold_s", 2.0)))
     # else: a project fresh from a session bundle has no reviewed windows
     # yet; the auto-picked windows of this import are the starting point.
     session.origin = project_origin(document) or session.origin
@@ -1026,6 +1096,7 @@ def restore_session_from_project(
         build_diagnostic_plots=False,
         origin=session.origin,
     )
+    session.pipeline.laser_tie = session.laser_tie
     completed = completed_project_stages(
         pipeline_values.get("completed_stages", ())
     )

@@ -48,6 +48,23 @@ message asking the user to update Studio; settings are never discarded to make
 a file load. Bump `SETTINGS_SCHEMA_VERSION` whenever a saved setting is added
 or changes meaning in `PipelineConfig` or its nested settings dataclasses.
 
+### Standalone laser log
+
+An optional top-level `laser_log` object stores the complete
+`UPbRPy.laser_tie.LaserTie.to_dict()` only when an analyst has loaded a `.lase`.
+It includes file name, SHA-256 of the original bytes, spot key, threshold,
+clock evidence, warnings and per-label matches with relative laser times,
+settings and stage coordinates. It is separate from pipeline configuration
+and reduction manifests. Projects without a loaded log omit this object and
+retain their existing serialization.
+
+Reopening applies the stored tie before selection, even if the original file
+has moved. A different SHA-256 in a same-named file beside the session (or in
+its parent) warns and keeps the saved tie, including when cached results load.
+Removing the standalone log removes this object on the next save and restores
+manifest laser timing when available. Stage coordinates remain project data;
+they are absent from analytical columns and reduction exports.
+
 ### Studio spot edits
 
 `spot_edits` stores `spot_renames` (current name to original acquisition label),

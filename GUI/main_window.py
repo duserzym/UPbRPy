@@ -446,6 +446,10 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         open_experiment_action.triggered.connect(
             self.choose_experiment_directory
         )
+        self.load_laser_log_action = file_menu.addAction("Load laser log…")
+        self.load_laser_log_action.triggered.connect(self.choose_laser_log)
+        self.remove_laser_log_action = file_menu.addAction("Remove laser log")
+        self.remove_laser_log_action.triggered.connect(self.remove_laser_log)
         self.recent_sources_menu = file_menu.addMenu("Open Recent")
         self.recent_sources_menu.aboutToShow.connect(self._rebuild_recent_sources)
         self._rebuild_recent_sources()
@@ -1285,6 +1289,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if not self.session.loaded:
             return ""
         payload = {
+            **({"laser_log": self.session.laser_tie.to_dict()} if self.session.laser_tie is not None else {}),
             "origin": self.session.origin,
             "workflow_key": self.workflow_preset.key,
             "primary_channel": self.session.primary_channel,
@@ -5741,6 +5746,12 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             restored.session.directory,
             project_path=restored.project_path,
         )
+        from GUI.services import check_stored_laser_file
+
+        check_stored_laser_file(self.session)
+        for warning in self.session.laser_file_warnings:
+            QtWidgets.QMessageBox.warning(self, "Laser log changed", warning)
+
         with QtCore.QSignalBlocker(self.laser_marks_action):
             self.laser_marks_action.setChecked(bool(workspace.get("laser_marks", True)))
         self.spot_colours.restore(workspace.get("sample_colours", {}), workspace.get("spot_colours", {}))
@@ -6109,12 +6120,14 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         )
         if self.selection_method == "laser_guided" and str(directory) != self.session.directory:
             self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
+        retained_laser_tie = self.session.laser_tie if str(directory) == self.session.directory else None
         calculation = lambda: load_session(
                 directory,
                 primary_channel=chosen_primary,
                 preset=self.workflow_preset,
                 selection_method=self.selection_method,
                 import_settings=detector_settings,
+                laser_tie=retained_laser_tie, laser_tie_confirmed=True,
             )
 
         if background:
@@ -6439,6 +6452,85 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if self.autopick_settings_toggle.isChecked():
             self._position_compact_panels()
 
+    def choose_laser_log(self) -> None:
+        """Preview and apply a standalone Chromium log to the active session."""
+        from GUI.laser_log_dialog import LaserLogDialog, laser_log_start_path
+        from UPbRPy.laserlog import read_lase
+
+        if not self._require_loaded() or self._active_worker is not None:
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load laser log", laser_log_start_path(self.session.directory),
+            "Chromium laser logs (*.lase)")
+        if not path:
+            return
+        if self.session.laser_tie is None and self.session.laser_data_available:
+            answer = QtWidgets.QMessageBox.question(
+                self, "Replace bundle laser data?",
+                "Replace the database manifest's laser data with this log for this project?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No)
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        try:
+            dialog = LaserLogDialog(read_lase(path), self.session.qtegra, self)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                self.apply_laser_log(dialog.tie, confirmed=dialog.confirm_check.isChecked())
+        except Exception as exc:
+            self._handle_action_error("Laser log failed", exc)
+
+    def _laser_repick_required(self) -> bool:
+        settings = self.session.import_settings
+        options = settings.get("selection_options", {})
+        return (settings.get("selection_method", self.selection_method) == "laser_guided"
+                or settings.get("signal_duration_limit_source", options.get("signal_duration_limit_source", "fixed")) == "laser")
+
+    def apply_laser_log(self, tie, *, confirmed=False) -> None:
+        """Apply timing, asking through the change guard before any re-pick."""
+        if not self.session.loaded or self._active_worker is not None:
+            return
+        if not self.flush_selection_edits():
+            return
+        if tie.requires_confirmation and not confirmed:
+            raise ValueError("Confirm the settings-only laser tie before applying it.")
+        if self._laser_repick_required():
+            self.request_laser_tie(tie, confirmed=confirmed)
+        else:
+            self.change_guard.clear()
+            self._apply_laser_tie(tie, confirmed=confirmed)
+
+    def remove_laser_log(self) -> None:
+        """Remove the loaded log, restoring bundle timing when present."""
+        if self.session.laser_tie is None or self._active_worker is not None:
+            return
+        if not self.flush_selection_edits():
+            return
+        if self._laser_repick_required():
+            self.request_laser_tie(None)
+        else:
+            self.change_guard.clear()
+            self._apply_laser_tie(None)
+
+    def _apply_laser_tie(self, tie, *, confirmed=False) -> None:
+        from GUI.services import apply_session_laser_tie
+
+        self.session = copy_session(self.session)
+        apply_session_laser_tie(self.session, tie, confirmed=confirmed)
+        if not self._has_laser_times():
+            if self.session.import_settings.get("selection_method", self.selection_method) == "laser_guided":
+                self.session.import_settings["selection_method"] = "threshold"
+                self.selection_method = "threshold"
+            self._set_laser_setting("signal_duration_limit_source", "fixed", "fixed")
+        self._sync_selection_method_combo()
+        self.refresh_view()
+        self.update_project_window_title()
+
+    @confirm_change('Laser log: re-pick spots', 'repick_all_spots_button', 'baseline', replace_session=True, review=True, always=True)
+    def request_laser_tie(self, tie, *, confirmed=False) -> None:
+        """Apply a laser replacement and use the existing confirmed re-pick path."""
+        self._apply_laser_tie(tie, confirmed=confirmed)
+        self.run_autopick_all_spots()
+
     def _has_laser_times(self) -> bool:
         experiment = self.session.experiment
         return self.session.loaded and any(
@@ -6449,6 +6541,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def _sync_laser_controls(self) -> None:
         """Expose laser selection tools only for applicable sessions."""
         timed = self._has_laser_times()
+        self.load_laser_log_action.setEnabled(self.session.loaded and self._active_worker is None)
+        self.remove_laser_log_action.setEnabled(self.session.laser_tie is not None and self._active_worker is None)
         available = timed or (self.session.loaded and self.session.laser_data_available)
         self.laser_marks_action.setVisible(available)
         self.laser_marks_action.setEnabled(timed)

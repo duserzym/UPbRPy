@@ -219,3 +219,73 @@ Each `LaserScan` records its 1-based `line_number`; warnings contain
 - Why `Position.Start` uses integer coordinates while placed vertices have
   decimals. They agree within 1 µm in the observed files; the reader retains
   both rather than rounding or reconciling them.
+
+## Standalone session ties
+
+Studio's **File > Load laser log…** previews a `.lase` beside an open Qtegra
+session. Position is the default key; Description is an explicit alternative.
+The threshold defaults to 30 s. Apply updates timing, transport delay and QC.
+Existing selections stay as they are unless the active method is Laser-guided
+or the duration source is laser; those cases use the confirmed re-pick path,
+with manual-window protection and Undo. **Remove laser log** restores bundle
+laser timing if present, otherwise removes timing. Loading over database laser
+data first asks whether to replace it for this project.
+
+The script API is independent of Studio:
+
+```python
+from UPbRPy.laser_tie import read_session_with_laser
+
+tie, experiment = read_session_with_laser(
+    "synthetic_session", "synthetic.lase", primary_channel="29Si",
+)
+```
+
+`read_session_with_laser(source, lase_path, *, spot_key="position",
+threshold_s=30.0, confirm_settings_only=False, **read_options)` accepts a session
+folder, Qtegra input path or `QtegraSession`. It returns `(LaserTie, experiment)`;
+`read_options` forwards to `read_experiment_data`, including selection settings.
+It adds timing before selection and reports source `"lase"`. Settings-only logs
+require `confirm_settings_only=True` after review.
+
+`tie_laser_log(log, acquisitions, *, spot_key="position", threshold_s=30.0)`
+accepts a `LaserLog` and a `QtegraSession` or iterable of acquisitions. Rich
+`Laser Scan Position Number` metadata replaces the label-derived spot number
+in the Qtegra reader, warning on disagreement. Without metadata the reader's
+label-number fallback is used. Position matches that number to `scan.index + 1`,
+including Copy scans without description numbers. Description matches it to
+`scan.spot_number`.
+
+Naive acquisition and laser times are treated as UTC wall clocks for this
+standalone tie; aware acquisition starts are converted to UTC instants. The
+median acquisition-start minus laser-on absorbs clock and zone differences.
+Spread is the median absolute deviation. Only acquisitions with exactly one
+candidate firing estimate the clock. Both Spot and Line scans consider all
+firings with laser-on, selecting the nearest available firing to that clock,
+once per acquisition. Fewer than three clock pairs produces a warning. Pairs
+farther than the threshold are doubtful and excluded from timing; absent
+number matches or missing firing times remain unlinked. Unlike the database's
+broader workflow, standalone ties do not attempt time fallback or manual links.
+
+`LaserTie` and `LaserTieRow` are frozen dataclasses. `tie.rows` maps raw
+acquisition labels to status, scan position, description number, acquisition
+relative laser-on/off seconds, duration, ablation settings and optional stage
+coordinates. `tie.windows()` returns only linked `(on, off)` windows for
+`laser_guidance.add_laser_timing`. `tie.apply(experiment, *, confirmed=False)`
+adds timing without selecting regions. `LaserTie.to_dict()` and
+`LaserTie.from_dict(value)` round-trip through JSON, retaining the original
+file name, SHA-256, key, threshold, clock evidence, counts and warnings.
+A settings-only log has no clock or times, sets `requires_confirmation=True`,
+and cannot be applied without explicit confirmation.
+
+`LaserLog.sha256` records the original bytes when read from a file or parsed
+from bytes. Text passed to `parse_lase` is hashed as UTF-8. Byte identity does
+not participate in parsed-log equality, so equivalent encodings still compare
+equal. Stage coordinates stay in the tie for display and project persistence;
+they do not enter experiment columns, experiment attrs or reduction exports.
+
+`laser_guidance.add_manifest_laser_timing(experiment, manifest)` supplies the
+same timing columns from a parsed manifest without re-reading sweeps or
+changing selections. Studio uses it when removing a standalone replacement.
+`read_experiment_data` also accepts optional keyword arguments `laser_tie=None`
+and `laser_tie_confirmed=False` to install a precomputed tie before selection.

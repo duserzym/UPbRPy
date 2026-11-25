@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 import csv
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from math import isfinite
@@ -149,6 +150,7 @@ class LaserLog:
     scans: tuple[LaserScan, ...]
     warnings: tuple[LaserLogWarning, ...]
     truncated: bool
+    sha256: str = field(default="", compare=False)
 
     @property
     def fired_scans(self) -> tuple[LaserScan, ...]:
@@ -465,6 +467,7 @@ def parse_lase(data: bytes | str, *, path: str | Path | None = None) -> LaserLog
         other_sections={name: values for name, values in sections.items() if name != "Scans" or values},
         scan_header=header, scans=tuple(scans[index] for index in sorted(scans)),
         warnings=tuple(warnings), truncated=missing_system_info or partial_final_scan,
+        sha256=hashlib.sha256(data if isinstance(data, bytes) else data.encode("utf-8")).hexdigest(),
     )
 
 

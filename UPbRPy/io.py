@@ -1026,8 +1026,13 @@ def read_experiment_data(
     restored_selections=None,
     laser_qc_threshold_s=2.0,
     signal_duration_limit_source="fixed",
+    laser_tie=None,
+    laser_tie_confirmed=False,
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
+
+    ``laser_tie`` optionally replaces manifest timing before selection; a
+    settings-only tie requires ``laser_tie_confirmed=True``.
 
     Acquisitions retain reader order (sequence order for single CSVs, time
     order for per-spot folders). Their relative sweep times are aligned onto
@@ -1163,43 +1168,12 @@ def read_experiment_data(
     )
     experiment.attrs["detector_calibration"] = calibration_record
 
-    # The axis itself remains the reader's recorded-start axis. Window offsets
-    # use manifest.started_at (not the potentially rounded CSV start), because
-    # UPbDB computed the log clock correction against that instant.
-    if manifest is not None and manifest.has_laser_data:
-        from .laser_guidance import add_laser_timing
+    if laser_tie is not None:
+        laser_tie.apply(experiment, confirmed=laser_tie_confirmed)
+    else:
+        from .laser_guidance import add_manifest_laser_timing
 
-        windows = {
-            row.label: window for row in manifest.acquisitions
-            if (window := manifest.acquisition_laser_window(row.label)) is not None
-        }
-        # The manifest convenience method requires an on-time. Preserve an
-        # off-only incomplete firing for display, although it cannot guide a
-        # selection or contribute a transport-delay pair.
-        for row in manifest.acquisitions:
-            laser = row.laser
-            if row.label in windows or laser is None or laser.laser_off_at is None:
-                continue
-            log = manifest.laser_log(laser.log_sha256)
-            if log is None or log.clock_offset_s is None:
-                continue
-            try:
-                start = pd.Timestamp(row.started_at)
-                if pd.isna(start):
-                    continue
-                start = start.tz_localize('UTC') if start.tzinfo is None else start.tz_convert('UTC')
-                off = (pd.Timestamp(laser.laser_off_at) - start).total_seconds() + log.clock_offset_s
-            except (ValueError, OverflowError):
-                continue
-            windows[row.label] = (None, off)
-        add_laser_timing(
-            experiment, windows,
-            dict(zip(experiment.spot_names, experiment.spot_starting_times)),
-            scan_positions={row.label: row.laser.scan_position for row in manifest.acquisitions
-                            if row.laser is not None and row.laser.scan_position is not None},
-            log_sha256=tuple(log.sha256 for log in manifest.laser_logs if log.sha256),
-            spot_key=",".join(dict.fromkeys(log.spot_key for log in manifest.laser_logs if log.spot_key)),
-        )
+        add_manifest_laser_timing(experiment, manifest)
 
     selection_data = total_data
     if restored_selections:
