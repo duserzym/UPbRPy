@@ -6014,6 +6014,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             written = write_reproducibility_notebook(
                 pipeline,
                 target,
+                export_settings=self.export_settings,
                 include_concentrations=self.session.include_export_concentrations,
                 include_depth_concentrations=self.session.include_export_depth_concentrations,
             )

@@ -31,6 +31,7 @@ FOCUSED_SUBMODULES = frozenset(
         "io",
         "isochron",
         "isoplot",
+        "laser_exports",
         "laser_guidance",
         "laser_tie",
         "laserlog",

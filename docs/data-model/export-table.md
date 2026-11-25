@@ -204,6 +204,7 @@ in the `.upbr` project. Old projects without that key use defaults.
 | excluded_columns | Empty | Disabled default column keys |
 | excluded_sheets | Empty | Disabled rich sheets in the default XLSX; subset of readme, methods, standards, qc; SI always has all five sheets |
 | csv_full_precision | False | Write full numeric precision in CSV instead of displayed values |
+| include_stage_coordinates | False | Include laser stage coordinates in exports; omitted from serialized settings when False |
 | laboratory | Empty | Laboratory name |
 | laser_system | Empty | Laser system |
 | spot_diameter_um | Empty | Spot diameter in µm |
@@ -293,3 +294,61 @@ corrections, uncertainty components, constants, software provenance, and the
 visible columns' definitions. Missing metadata is explicitly “not recorded”.
 Footnote numbers are regenerated after column changes and are shared by the
 preview and all file writers.
+
+
+## Laser metadata
+
+A version-2 bundle or a loaded `.lase` tie fills empty laser-system, spot-diameter,
+repetition-rate and fluence fields. Analyst entries take precedence and remain
+editable. The system name uses `laser_instrument`, falling back to `system_type`.
+Serial numbers and software versions are not used as system names. Linked
+acquisitions among the exported spots supply the numeric fields: one value is
+shown plainly; several values produce a minimum–maximum range and a range note.
+
+Varying settings add columns in the Analysis group: `laser_spot_um`
+(Spot diameter, µm), `laser_rep_rate_hz` (Rep. rate, Hz), and
+`laser_fluence_j_cm2` (Fluence, J/cm²). Constant settings add no columns.
+Audit tables use these display headings with units. Laser values retain full
+precision in the files.
+
+`ExportSettings.include_stage_coordinates` is a validated bool field with a False
+default. `to_dict()` omits it when False and writes it when True; `from_dict()`
+uses False when it is absent.
+
+The Settings tab's **Include stage coordinates in exports** checkbox defaults
+off, including for old settings dictionaries. Only an enabled option adds
+`Stage x (µm)`, `Stage y (µm)`, and `Stage z (µm)` to per-spot tables. The same
+choice controls audit CSVs, workbooks, supplements, notebooks, manifest data,
+and the project copy sent with a database reduction. Working `.upbr` projects
+retain their full laser tie. Free-text laser parser warnings are omitted from
+coordinate-free tie copies because they can quote malformed positions. Disabling coordinates does not remove workflow
+stage names from provenance.
+
+`reduction_manifest.json` gains `laser` only when laser metadata is present.
+It records source (`manifest` or `lase`), log hashes and names, system/instrument,
+spot key, clock offset/spread/pairs, transport delay, QC threshold and flagged
+count, duration-limit source, use of laser-guided selection, and distinct
+ablation combinations with acquisition counts. Coordinate mappings occur only
+when opted in. Exports without laser data retain their existing tables and
+manifest fields; the false default is omitted from all serialized export
+settings to preserve existing project and export bytes. Studio exports add no fitted results.
+
+Engine helpers in `UPbRPy.laser_exports`:
+
+- `laser_export_data(experiment, *, manifest=None, laser_tie=None)` returns
+  `LaserExportData` with settings and stage keyed by current spot labels,
+  respecting `experiment.attrs["spot_renames"]`. A loaded tie takes precedence.
+- `laser_export_prefill(data, spot_names=None, *, existing=None)` returns
+  `(values, varies)`, dictionaries keyed by the four export-setting names.
+  It reads no files and preserves nonempty strings from `existing`.
+- `export_manifest(pipeline, settings, *, laser_data=None, spot_names=None, **kwargs)`
+  applies the coordinate policy and laser summary to pipeline provenance.
+
+`build_publication_tables(..., export_settings=None, laser_data=None)` can add
+laser columns to audit tables. `export_publication_tables(tables, output_path,
+*, export_settings=None)` defaults to removing coordinates. Both notebook
+builders accept `export_settings=None`. `write_export_project(pipeline,
+output_path, *, export_settings=None, **project_options)` writes the filtered
+project copy. The underlying `write_reduction_project(...,
+include_stage_coordinates=None)` keeps working-file behaviour when omitted;
+export writers pass a bool explicitly.

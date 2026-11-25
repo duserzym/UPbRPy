@@ -1203,8 +1203,7 @@ class DatabaseLinks(QtCore.QObject):
             return
         from GUI.services import ensure_shared_pipeline
         from UPbRPy.pipeline import PipelineStage
-        from UPbRPy.project import write_reduction_project
-        from UPbRPy.reproducibility import export_reduction_bundle
+        from UPbRPy.reproducibility import export_reduction_bundle, write_export_project
 
         try:
             window.apply_pending_project_edits()
@@ -1229,9 +1228,11 @@ class DatabaseLinks(QtCore.QObject):
                 hash_inputs=True,
                 include_concentrations=session.include_export_concentrations,
                 include_depth_concentrations=session.include_export_depth_concentrations,
+                export_settings=getattr(window, "export_settings", None),
             )
-            write_reduction_project(
-                pipeline, folder / f"{key}.upbr", resume_stage=resume, workspace=workspace
+            write_export_project(
+                pipeline, folder / f"{key}.upbr", resume_stage=resume, workspace=workspace,
+                export_settings=getattr(window, "export_settings", None)
             )
             return folder
 

@@ -424,11 +424,13 @@ def pipeline_for_database_submission(session, preset):
     experiment.attrs["sample_overrides"] = {
         renames.get(name, name): value for name, value in experiment.attrs.get("sample_overrides", {}).items()}
     experiment.attrs["calculation_excluded_spots"] = [renames.get(name, name) for name in experiment.attrs.get("calculation_excluded_spots", [])]
-    return ReductionPipeline(
+    submission = ReductionPipeline(
         experiment, total_data, session.channels, pipeline.base_standard_archive, pipeline.config,
         source_directory=pipeline.source_directory, reference_library_path=pipeline.reference_library_path,
         input_files=pipeline.input_files, build_diagnostic_plots=False, origin=pipeline.origin,
     )
+    submission.laser_tie = session.laser_tie
+    return submission
 
 
 # ── Isotope channel parsing ────────────────────────────────────────────────

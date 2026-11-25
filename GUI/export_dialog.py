@@ -474,6 +474,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
         for edit in self.text_fields.values():
             edit.textChanged.connect(self.schedule_preview)
         self.csv_precision_check.toggled.connect(self.schedule_preview)
+        self.stage_coordinates_check.toggled.connect(self.schedule_preview)
         self.refresh_preview()
         self.left_scroll.viewport().installEventFilter(self)
         screen = self.screen().availableGeometry()
@@ -563,6 +564,8 @@ class ExportResultsDialog(QtWidgets.QDialog):
         form.addRow("Discordance threshold (%)", spin)
         self.csv_precision_check = QtWidgets.QCheckBox("CSV full precision")
         form.addRow(self.csv_precision_check)
+        self.stage_coordinates_check = QtWidgets.QCheckBox("Include stage coordinates in exports")
+        form.addRow(self.stage_coordinates_check)
         self.text_fields = {}
         for key, label in (("laboratory", "Laboratory"), ("laser_system", "Laser system"),
                            ("spot_diameter_um", "Spot diameter (µm)"), ("repetition_rate_hz", "Repetition rate (Hz)"),
@@ -826,6 +829,8 @@ class ExportResultsDialog(QtWidgets.QDialog):
                     edit.setText(getattr(settings, key))
             with QtCore.QSignalBlocker(self.csv_precision_check):
                 self.csv_precision_check.setChecked(settings.csv_full_precision)
+            with QtCore.QSignalBlocker(self.stage_coordinates_check):
+                self.stage_coordinates_check.setChecked(settings.include_stage_coordinates)
             for group in self.group_items:
                 self._sync_group(group)
             self._update_preset_buttons()
@@ -842,6 +847,7 @@ class ExportResultsDialog(QtWidgets.QDialog):
             citation=self.base_table.settings.citation, **thermometry, rutile_calibration=self._calibration_key,
             **{key: edit.text() for key, edit in self.text_fields.items()},
             csv_full_precision=self.csv_precision_check.isChecked(),
+            include_stage_coordinates=self.stage_coordinates_check.isChecked(),
             optional_columns=optional, excluded_columns=excluded,
             excluded_sheets=tuple(key for key, chip in self.sheet_items.items() if not chip.isChecked()))
 

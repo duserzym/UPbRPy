@@ -68,7 +68,7 @@ class LaserTie:
         data["warnings"] = tuple(data["warnings"])
         data["rows"] = {
             label: LaserTieRow(**{**row, "stage_um": tuple(row["stage_um"])
-                                 if row["stage_um"] is not None else None})
+                                 if row.get("stage_um") is not None else None})
             for label, row in data["rows"].items()
         }
         return cls(**data)

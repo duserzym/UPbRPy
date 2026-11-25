@@ -1380,6 +1380,8 @@ def build_publication_tables(
     depth_profile=None,
     include_concentrations=True,
     include_depth_concentrations=True,
+    export_settings=None,
+    laser_data=None,
 ):
     """Build the logical tables written to a publication workbook.
 
@@ -1406,6 +1408,10 @@ def build_publication_tables(
         {"setting": key, "value": value}
         for key, value in asdict(finalized.decision).items()
     ]
+    if laser_data is not None and laser_data.source:
+        from .laser_exports import laser_export_prefill
+        values, _ = laser_export_prefill(laser_data, finalized.parallel_results.spot_name)
+        decision_rows.extend({"setting": key, "value": value} for key, value in values.items())
     for key, value in (metadata or {}).items():
         if key == "detector_calibration":
             continue
@@ -1524,6 +1530,22 @@ def build_publication_tables(
     if not depth_table.empty:
         tables["Depth profiles"] = depth_table
     tables["Table notes"] = publication_table_notes(tables)
+    if laser_data is not None and laser_data.source:
+        values, varies = laser_export_prefill(laser_data, finalized.parallel_results.spot_name)
+        ranges = [f"{label}: {values[key]} {unit}" for key, label, unit in (
+            ("spot_diameter_um", "spot diameter", "µm"),
+            ("repetition_rate_hz", "repetition rate", "Hz"),
+            ("fluence_j_cm2", "fluence", "J/cm²")) if varies[key]]
+        if ranges:
+            notes = tables["Table notes"]
+            extra = [{"worksheet": name, "footnote": int(notes.loc[notes.worksheet.eq(name), "footnote"].max()) + 1,
+                      "note": "Recorded ablation ranges: " + "; ".join(ranges) + "."}
+                     for name, frame in tables.items() if "spot_name" in frame]
+            tables["Table notes"] = pd.concat([notes, pd.DataFrame(extra)], ignore_index=True)
+    from .laser_exports import LaserExportData, laser_export_frame
+    include_stage = bool(export_settings and export_settings.include_stage_coordinates)
+    tables = {name: laser_export_frame(frame, laser_data or LaserExportData(),
+              include_stage_coordinates=include_stage, headings=True) for name, frame in tables.items()}
     return tables
 
 
@@ -1561,7 +1583,7 @@ def publication_number_format(column):
     return "0.0000"
 
 
-def export_publication_tables(tables, output_path):
+def export_publication_tables(tables, output_path, *, export_settings=None):
     """Write styled Excel and companion CSV publication tables.
 
     Parameters
@@ -1582,6 +1604,9 @@ def export_publication_tables(tables, output_path):
     decisions. Each table is also written as a plain CSV beside the workbook,
     ensuring a transparent non-proprietary export.
     """
+    if not (export_settings and export_settings.include_stage_coordinates):
+        from .laser_exports import without_stage_coordinates
+        tables = {name: without_stage_coordinates(frame) for name, frame in tables.items()}
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".xlsx":
         output_path = output_path.with_suffix(".xlsx")

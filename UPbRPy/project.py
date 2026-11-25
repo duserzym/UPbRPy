@@ -352,8 +352,13 @@ def write_reduction_project(
     resume_stage: PipelineStage | str | None = None,
     workspace: Mapping[str, object] | None = None,
     origin: Mapping[str, object] | None = None,
+    include_stage_coordinates: bool | None = None,
 ) -> Path:
-    """Atomically write a lightweight, human-readable project document."""
+    """Atomically write a project; None retains coordinates in working files.
+
+    Export copies pass False to remove coordinates without changing the tie
+    in memory or the analyst's working project.
+    """
     target = Path(project_file).expanduser()
     if target.suffix.lower() != PROJECT_FILE_EXTENSION:
         target = target.with_suffix(PROJECT_FILE_EXTENSION)
@@ -365,6 +370,9 @@ def write_reduction_project(
         workspace=workspace,
         origin=origin,
     )
+    if include_stage_coordinates is False:
+        from .laser_exports import without_stage_coordinates
+        document = without_stage_coordinates(document)
     return write_project_document(document, target)
 
 

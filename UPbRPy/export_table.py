@@ -23,6 +23,10 @@ from .concentration import calc_concentration, element_from_channel
 from .constants import lambda_232, lambda_235, lambda_238
 from .results import weighted_mean_and_mswd
 from .export_citations import GROUPS, reference
+from .laser_exports import (
+    LASER_COLUMNS, STAGE_COLUMNS, laser_export_prefill, pipeline_laser_export_data,
+    laser_export_frame, without_stage_coordinates, export_manifest,
+)
 from .thermometry import THERMOMETERS
 from .uncertainty import (
     common_corrected_systematic_components,
@@ -66,6 +70,7 @@ class ExportSettings:
     excluded_columns: tuple[str, ...] = ()
     excluded_sheets: tuple[str, ...] = ()
     csv_full_precision: bool = False
+    include_stage_coordinates: bool = False
     laboratory: str = ""
     laser_system: str = ""
     spot_diameter_um: str = ""
@@ -92,8 +97,9 @@ class ExportSettings:
             object.__setattr__(self, name, tuple(dict.fromkeys(value)))
         if set(self.excluded_sheets) - set(RICH_SHEETS):
             raise ValueError("excluded_sheets must contain only " + ", ".join(RICH_SHEETS))
-        if not isinstance(self.csv_full_precision, bool):
-            raise ValueError("csv_full_precision must be a bool")
+        for name in ("csv_full_precision", "include_stage_coordinates"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
         for name in ("laboratory", "laser_system", "spot_diameter_um", "repetition_rate_hz",
                      "fluence_j_cm2", "operator", "table_title", "citation"):
             if not isinstance(getattr(self, name), str):
@@ -101,6 +107,8 @@ class ExportSettings:
 
     def to_dict(self) -> dict:
         result = asdict(self)
+        if not self.include_stage_coordinates:
+            result.pop("include_stage_coordinates")
         for name in ("optional_columns", "excluded_columns", "excluded_sheets"):
             result[name] = list(result[name])
         return result
@@ -108,7 +116,8 @@ class ExportSettings:
     @classmethod
     def from_dict(cls, values: Mapping) -> ExportSettings:
         """Validate known fields and ignore keys written by newer versions."""
-        return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+        known = {f.name: values[f.name] for f in fields(cls) if f.name in values}
+        return cls(**known)
 
 
 @dataclass(frozen=True)
@@ -148,6 +157,7 @@ class ExportTable:
                      if (c.key in self.settings.optional_columns if c.optional
                          else c.key not in self.settings.excluded_columns)
                      and (c.materials is None or self.context.get("material") in c.materials)
+                     and (self.settings.include_stage_coordinates or c.key not in STAGE_COLUMNS)
                      and c.key in self.rows
                      and self.rows[c.key].replace("", np.nan).notna().any())
 
@@ -587,6 +597,18 @@ def high_204_note(record) -> str:
             f"in the session, of the baseline-mean mass-204 count rates{numbers}; no Hg correction enters this test.")
 
 
+def _laser_columns(rows, columns, data, settings):
+    rows = laser_export_frame(rows, data, include_stage_coordinates=settings.include_stage_coordinates)
+    added = [ExportColumn("laser_" + key, "Analysis", label, unit, "laser", footnotes=("session",))
+             for key, label, unit in LASER_COLUMNS if "laser_" + key in rows]
+    added += [ExportColumn(key, "Analysis", key.split(" (")[0], "µm", "laser")
+              for key in STAGE_COLUMNS if key in rows]
+    keys = {c.key for c in added} | set(STAGE_COLUMNS)
+    columns = [c for c in columns if c.key not in keys]
+    insert = next((i for i, c in enumerate(columns) if c.group != "Analysis"), len(columns))
+    return rows, tuple([*columns[:insert], *added, *columns[insert:]])
+
+
 def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | None = None, *,
                        excluded_spots: Iterable[str] = ()) -> ExportTable:
     """Build the full catalogue and publication quantities from cached stages.
@@ -601,6 +623,10 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
     config = pipeline.config
     primary = tuple(dict.fromkeys((config.primary_68_standard, config.primary_76_standard, config.primary_82_standard)))
     primary = tuple(x for x in primary if x)
+    laser_data = pipeline_laser_export_data(pipeline)
+    if laser_data.source:
+        prefill, _ = laser_export_prefill(laser_data, frame.spot_name, existing=settings.to_dict())
+        settings = replace(settings, **prefill)
     rows = frame.copy()
     rows["role"] = rows["sample"].map(lambda name: "primary" if name in primary else "secondary" if name in config.secondary_standards else "glass" if name in config.concentration_standards else "unknown")
     # Studio hides glasses from the concordia review by default; that is not
@@ -705,7 +731,7 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
         notes.append(", ".join(words))
     rows["notes"] = notes
     rows = rows.copy()  # defragment after many column insertions
-    columns = _catalogue(elements)
+    rows, columns = _laser_columns(rows, _catalogue(elements), laser_data, settings)
     for column in columns:
         if column.key not in rows:
             rows[column.key] = np.nan
@@ -738,7 +764,12 @@ def build_export_table(pipeline: ReductionPipeline, settings: ExportSettings | N
         total_pb=pb_context, high_204=high_204_context, discordance_covariance="analytical 68/75 rho; independent 68/76 dates",
         experiment_metadata=dict(pipeline.experiment.attrs), selections=pipeline.experiment.to_dict("records"),
         reference_values=pipeline.standard_archive.to_dict("index"),
-        manifest=pipeline.manifest(metadata={"export_settings": settings.to_dict()}))
+        manifest=export_manifest(pipeline, settings, laser_data=laser_data,
+            spot_names=rows.spot_name, metadata={"export_settings": settings.to_dict()}))
+    if not settings.include_stage_coordinates:
+        context = without_stage_coordinates(context)
+    if laser_data.source:
+        context["laser_export_data"] = laser_data
     return ExportTable(rows, columns, summaries, secondary, settings, context)
 
 
@@ -871,6 +902,14 @@ def build_footnotes(table: ExportTable, pipeline: ReductionPipeline) -> list[Foo
         ("repetition_rate_hz", "repetition rate", settings.repetition_rate_hz, "Hz"),
         ("fluence_j_cm2", "fluence", settings.fluence_j_cm2, "J/cm²")]
     sentence("session", "; ".join(f"{label}: {fmt('session', field, value, unit)}" for field, label, value, unit in session_fields) + ".")
+    data = context.get("laser_export_data")
+    if data is not None:
+        recorded, varies = laser_export_prefill(data, table.rows.spot_name)
+        for field, label, unit in (("spot_diameter_um", "spot diameter", "µm"),
+                                   ("repetition_rate_hz", "repetition rate", "Hz"),
+                                   ("fluence_j_cm2", "fluence", "J/cm²")):
+            if varies[field]:
+                notes["session"] += f" Recorded {label} range: {recorded[field]} {unit}."
 
     grouped = {}
     for channel, value in acquisition.get("dwell_s", {}).items():
@@ -1181,6 +1220,8 @@ def format_value(column: ExportColumn, value, *, full_precision: bool = False) -
         return ""
     if column.kind == "text":
         return str(value)
+    if column.kind == "laser":
+        return str(float(value))
     if full_precision:
         return str(value)
     kind = column.kind
@@ -1204,6 +1245,9 @@ def update_export_settings(table: ExportTable, settings: ExportSettings) -> Expo
     sample statistics do not depend on these settings and are retained.
     """
     updated = replace(table, rows=table.rows.copy(), settings=settings, context=dict(table.context))
+    data = table.context.get("laser_export_data")
+    if data is not None:
+        updated.rows, updated.columns = _laser_columns(updated.rows, updated.columns, data, settings)
     rows = updated.rows
     if settings.discordance_definition != table.settings.discordance_definition:
         other = SYSTEMS[1] if settings.discordance_definition == "7/5-6/8" else SYSTEMS[2]
@@ -1227,6 +1271,16 @@ def update_export_settings(table: ExportTable, settings: ExportSettings) -> Expo
     rows["notes"] = [notes(text, flag) for text, flag in zip(rows.notes, discordant)]
     manifest = dict(updated.context["manifest"])
     manifest["metadata"] = {**manifest.get("metadata", {}), "export_settings": settings.to_dict()}
+    if not settings.include_stage_coordinates:
+        manifest = without_stage_coordinates(manifest)
+    if data is not None:
+        # Rebuild only coordinate fields; all other provenance remains cached.
+        laser = dict(manifest.get("laser", {}))
+        if settings.include_stage_coordinates:
+            labels = set(rows.spot_name)
+            laser["stage_um"] = {label: row["stage_um"] for label, row in data.spots.items()
+                                 if row.get("stage_um") is not None and label in labels}
+        manifest["laser"] = laser
     updated.context["manifest"] = manifest
     return updated
 
@@ -1235,7 +1289,17 @@ def _table_footnotes(table):
     # Only library provenance and channel names are required, never reduction stages.
     from types import SimpleNamespace
     if table.context.get("legacy_audit"):
-        return [Footnote("legacy", 1, "Legacy audit results: publication quantities and acquisition metadata are unavailable in this cached frame.", ())]
+        text = "Legacy audit results: publication quantities and acquisition metadata are unavailable in this cached frame."
+        data = table.context.get("laser_export_data")
+        legacy = Footnote("legacy", 1, text, ())
+        if data is not None:
+            values, _ = laser_export_prefill(data, table.rows.spot_name)
+            text = (f"Recorded laser system: {values['laser_system'] or 'not recorded'}; "
+                     f"spot diameter: {values['spot_diameter_um'] or 'not recorded'} µm; "
+                     f"repetition rate: {values['repetition_rate_hz'] or 'not recorded'} Hz; "
+                     f"fluence: {values['fluence_j_cm2'] or 'not recorded'} J/cm².")
+            return [legacy, Footnote("session", 2, text, ())]
+        return [legacy]
     source = SimpleNamespace(reference_library_path=table.context.get("reference_library_path"),
         standard_archive=pd.DataFrame.from_dict(table.context["reference_values"], orient="index"),
         channels=table.context.get("channels", ()))

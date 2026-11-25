@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Iterable
 from datetime import datetime, timezone
 import json
@@ -18,7 +18,11 @@ from .results import build_publication_tables, export_publication_tables
 from .export_table import (
     ExportSettings, ExportTable, ExportColumn, build_export_table,
     write_export_xlsx, write_export_csv, write_export_markdown,
-    build_footnotes, _table_footnotes,
+    build_footnotes, _table_footnotes, update_export_settings, _laser_columns,
+)
+from .laser_exports import (
+    laser_export_frame, pipeline_laser_export_data, laser_export_prefill,
+    without_stage_coordinates, export_manifest,
 )
 from .supplement import SupplementSession, supplement_info_from_settings, write_supplement_xlsx
 
@@ -47,7 +51,7 @@ class ExportBundle:
     warnings: tuple[str, ...] = ()
 
 
-def selection_export_frame(experiment: pd.DataFrame) -> pd.DataFrame:
+def selection_export_frame(experiment: pd.DataFrame, *, include_stage_coordinates=False) -> pd.DataFrame:
     """Return the reviewed selection decisions needed to replay a session."""
     columns = [
         column
@@ -58,7 +62,8 @@ def selection_export_frame(experiment: pd.DataFrame) -> pd.DataFrame:
         column for column in experiment.columns
         if column not in columns and str(column).startswith("selection_")
     )
-    return experiment.loc[:, columns].copy()
+    frame = experiment.loc[:, columns].copy()
+    return frame if include_stage_coordinates else without_stage_coordinates(frame)
 
 
 def notebook_code_cell(source: str) -> dict[str, Any]:
@@ -89,6 +94,7 @@ def build_reproducibility_notebook(
     title: str = "UPbRPy reproducible reduction",
     include_concentrations: bool = True,
     include_depth_concentrations: bool = True,
+    export_settings: ExportSettings | None = None,
 ) -> dict[str, Any]:
     """Create a complete notebook representation of GUI reduction choices.
 
@@ -96,10 +102,16 @@ def build_reproducibility_notebook(
     notebook therefore replays manual GUI edits rather than merely repeating
     the original auto-pick settings.
     """
-    config_json = json.dumps(pipeline.config.to_dict(), indent=2)
-    manifest = pipeline.manifest()
+    settings = export_settings or pipeline.config.export_settings or ExportSettings()
+    data = pipeline_laser_export_data(pipeline)
+    config_record = pipeline.config.to_dict()
+    if not settings.include_stage_coordinates:
+        config_record = without_stage_coordinates(config_record)
+    config_json = json.dumps(config_record, indent=2)
+    manifest = export_manifest(pipeline, settings, laser_data=data)
     edits_json = json.dumps(spot_edit_metadata(pipeline.experiment))
-    selections_json = selection_export_frame(pipeline.experiment).to_json(
+    selections_json = selection_export_frame(pipeline.experiment,
+        include_stage_coordinates=settings.include_stage_coordinates).to_json(
         orient="records",
         double_precision=15,
     )
@@ -260,6 +272,51 @@ def build_reproducibility_notebook(
             "display(pd.json_normalize(manifest, sep='.').T)\n"
         ),
     ]
+    if data.source:
+        from dataclasses import asdict
+        payload = asdict(data)
+        if not settings.include_stage_coordinates:
+            payload = without_stage_coordinates(payload)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        laser_json = json.dumps(manifest["laser"], ensure_ascii=False)
+        settings_json = json.dumps(settings.to_dict(), ensure_ascii=False)
+        cells.insert(1, notebook_code_cell(
+            "from UPbRPy.laser_exports import LaserExportData\n"
+            "from UPbRPy.export_table import ExportSettings\n"
+            f"laser_export_data = LaserExportData(**json.loads({payload_json!r}))\n"
+            f"export_settings = ExportSettings.from_dict(json.loads({settings_json!r}))\n"
+        ))
+        # Import json before the laser cell, while keeping original cell order.
+        cells[1]["source"].insert(0, "import json\n")
+        publication = next(cell for cell in cells if "manifest = pipeline.manifest" in "".join(cell["source"]))
+        code = "".join(publication["source"])
+        code = code.replace("publication_tables = build_publication_tables(",
+            f"manifest['laser'] = json.loads({laser_json!r})\npublication_tables = build_publication_tables(")
+        code = code.replace("    finalized,", "    finalized,\n    export_settings=export_settings, laser_data=laser_export_data,")
+        code = code.replace("    publication_tables,", "    publication_tables,\n    export_settings=export_settings,")
+        code = code.replace("    source_directory.parent /", "    output_path=source_directory.parent /")
+        publication["source"] = code.splitlines(keepends=True)
+        # Standalone ties must be available before the import/selection call.
+        tie = getattr(pipeline, "laser_tie", None)
+        if tie is not None:
+            tie_record = tie.to_dict()
+            if not settings.include_stage_coordinates:
+                tie_record = without_stage_coordinates(tie_record)
+            tie_json = json.dumps(tie_record, ensure_ascii=False)
+            cells[1]["source"] += [
+                "from UPbRPy.laser_tie import LaserTie, LaserTieRow\n",
+                f"laser_tie_record = json.loads({tie_json!r})\n",
+                "laser_tie_record['rows'] = {label: LaserTieRow(**row) for label, row in laser_tie_record['rows'].items()}\n",
+                "laser_tie = LaserTie(**laser_tie_record)\n",
+            ]
+            read_cell = next(cell for cell in cells if "read_options = dict" in "".join(cell["source"]))
+            code = "".join(read_cell["source"]).replace("    **read_options,",
+                "    laser_tie=laser_tie, laser_tie_confirmed=True,\n    **read_options,")
+            read_cell["source"] = code.splitlines(keepends=True)
+        pipeline_cell = next(cell for cell in cells if "pipeline = ReductionPipeline(" in "".join(cell["source"]))
+        pipeline_cell["source"].append("pipeline.laser_export_data = laser_export_data\n")
+        if tie is not None:
+            pipeline_cell["source"].append("pipeline.laser_tie = laser_tie\n")
     return {
         "cells": cells,
         "metadata": {
@@ -286,6 +343,7 @@ def write_reproducibility_notebook(
     *,
     include_concentrations: bool = True,
     include_depth_concentrations: bool = True,
+    export_settings: ExportSettings | None = None,
 ) -> Path:
     """Write a standards-compliant, unexecuted Jupyter notebook."""
     target = Path(output_path)
@@ -296,6 +354,7 @@ def write_reproducibility_notebook(
         pipeline,
         include_concentrations=include_concentrations,
         include_depth_concentrations=include_depth_concentrations,
+        export_settings=export_settings,
     )
     target.write_text(
         json.dumps(notebook, indent=1, ensure_ascii=False),
@@ -336,6 +395,11 @@ def export_reduction_bundle(
     if set(formats) - {"xlsx", "csv", "md", "si"}:
         raise ValueError("formats must contain only xlsx, csv, md, si")
     settings = export_settings or (table.settings if table is not None else pipeline.config.export_settings) or ExportSettings()
+    laser_data = pipeline_laser_export_data(pipeline)
+    if laser_data.source:
+        labels = pipeline.run_finalize().parallel_results.get("spot_name", pd.Series(dtype=str))
+        prefill, _ = laser_export_prefill(laser_data, labels, existing=settings.to_dict())
+        settings = replace(settings, **prefill)
     stem = file_stem or f"{Path(pipeline.source_directory).stem if pipeline.source_directory else 'session'}_results_table"
     if not stem.strip() or Path(stem).name != stem or stem in {".", ".."}:
         raise ValueError("file_stem must be a single file name")
@@ -360,6 +424,13 @@ def export_reduction_bundle(
                            ExportColumn("notes", "Analysis", "Notes"))
                 table = ExportTable(frame, columns, pd.DataFrame(), pd.DataFrame(), settings,
                     {"session_name": stem.removesuffix("_results_table"), "legacy_audit": True})
+        if table.settings != settings and not table.context.get("legacy_audit"):
+            table = update_export_settings(table, settings)
+        if table.context.get("legacy_audit"):
+            table = replace(table, settings=settings, context=dict(table.context))
+            table.rows, table.columns = _laser_columns(table.rows, table.columns, laser_data, settings)
+            if laser_data.source:
+                table.context["laser_export_data"] = laser_data
         supplement = None
         if "xlsx" in formats or "si" in formats:
             notes = _table_footnotes(table) if table.context.get("legacy_audit") else build_footnotes(table, pipeline)
@@ -385,7 +456,7 @@ def export_reduction_bundle(
     depth_profile = (
         pipeline.run_depth_profile() if include_depth_profile else None
     )
-    manifest = pipeline.manifest(hash_inputs=hash_inputs, metadata={"export_settings": settings.to_dict(),
+    manifest = export_manifest(pipeline, settings, laser_data=laser_data, hash_inputs=hash_inputs, metadata={"export_settings": settings.to_dict(),
         "excluded_spots": list(excluded_spots), "isochron_fits": isochron_fits})
     tables = build_publication_tables(
         finalized,
@@ -402,10 +473,11 @@ def export_reduction_bundle(
         depth_profile=depth_profile,
         include_concentrations=include_concentrations,
         include_depth_concentrations=include_depth_concentrations,
+        export_settings=settings, laser_data=laser_data,
     )
     workbook = root / "UPbRPy_publication_results.xlsx"
     try:
-        files.append(export_publication_tables(tables, workbook))
+        files.append(export_publication_tables(tables, workbook, export_settings=settings))
         files.extend(sorted(workbook.with_suffix("").glob("*.csv")))
     except ImportError as exc:
         warnings.append(str(exc))
@@ -415,19 +487,22 @@ def export_reduction_bundle(
             files.append(target)
 
     selections_path = root / "selection_windows.csv"
-    selection_export_frame(pipeline.experiment).to_csv(
+    selection_export_frame(pipeline.experiment,
+        include_stage_coordinates=settings.include_stage_coordinates).to_csv(
         selections_path,
         index=False,
     )
     files.append(selections_path)
 
     spot_path = root / "spot_mean_results.csv"
-    pipeline.run_spot_means().to_csv(spot_path, index=False)
+    laser_export_frame(pipeline.run_spot_means(), laser_data,
+        include_stage_coordinates=settings.include_stage_coordinates, headings=True).to_csv(spot_path, index=False)
     files.append(spot_path)
 
     if include_depth_profile:
         depth_path = root / "depth_profile_results.csv"
-        depth_profile.to_csv(depth_path, index=False)
+        depth_export = depth_profile if settings.include_stage_coordinates else without_stage_coordinates(depth_profile)
+        depth_export.to_csv(depth_path, index=False)
         files.append(depth_path)
 
     manifest_path = root / "reduction_manifest.json"
@@ -445,11 +520,20 @@ def export_reduction_bundle(
     notebook_path = write_reproducibility_notebook(
         pipeline,
         root / "UPbRPy_reproducible_workflow.ipynb",
+        export_settings=settings,
         include_concentrations=include_concentrations,
         include_depth_concentrations=include_depth_concentrations,
     )
     files.append(notebook_path)
     return ExportBundle(root, tuple(files), tuple(warnings))
+
+
+def write_export_project(pipeline, output_path, *, export_settings=None, **project_options):
+    """Write an export copy of a project, applying the coordinate opt-in."""
+    from .project import write_reduction_project
+    settings = export_settings or getattr(getattr(pipeline, "config", None), "export_settings", None) or ExportSettings()
+    return write_reduction_project(pipeline, output_path,
+        include_stage_coordinates=settings.include_stage_coordinates, **project_options)
 
 
 __all__ = [
@@ -459,4 +543,5 @@ __all__ = [
     "build_reproducibility_notebook",
     "write_reproducibility_notebook",
     "export_reduction_bundle",
+    "write_export_project",
 ]

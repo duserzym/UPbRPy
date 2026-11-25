@@ -174,7 +174,7 @@ def test_settings_schema_field_snapshot():
         "AutomaticFlagSettings": "flag_session_extrapolation maximum_discordance_percent maximum_primary_signal_rsd_percent maximum_ratio_rsd_percent maximum_relative_2e_percent maximum_u_mean_intercept_difference_percent minimum_204pb_detection_sigma minimum_radiogenic_206_fraction",
         "UncertaintySettings": "lambda_232_1s lambda_235_1s lambda_238_1s long_term_reproducibility_mode long_term_reproducibility_relative_1s propagate_baseline propagate_decay_constants propagate_u238_u235 u238_u235 u238_u235_1s",
         "LinearDepthCalibration": "coefficient_covariance depth_per_pulse_um force_zero geometry_1s_um intercept_um pulse_range repetition_rate_1s_hz repetition_rate_hz residual_1s_um",
-        "ExportSettings": "a_sio2 a_tio2 citation csv_full_precision discordance_definition discordance_threshold_percent excluded_columns excluded_sheets fluence_j_cm2 laboratory laser_system operator optional_columns pressure_gpa repetition_rate_hz rutile_calibration spot_diameter_um table_title",
+        "ExportSettings": "a_sio2 a_tio2 citation csv_full_precision discordance_definition discordance_threshold_percent excluded_columns excluded_sheets fluence_j_cm2 include_stage_coordinates laboratory laser_system operator optional_columns pressure_gpa repetition_rate_hz rutile_calibration spot_diameter_um table_title",
     }
     classes = (PipelineConfig, FitSettings, ReductionDecision, AutomaticFlagSettings,
                UncertaintySettings, LinearDepthCalibration, ExportSettings)
