@@ -12,6 +12,7 @@ from GUI.laser_log_dialog import LaserLogDialog, laser_log_start_path
 from UPbRPy.laser_tie import tie_laser_log
 from UPbRPy.laserlog import read_lase
 from UPbRPy.pipeline import PipelineStage
+from UPbRPy.reproducibility import selection_export_frame
 from test_laser_selection_gui import app, windows, idle
 from test_laser_tie import session_log
 
@@ -208,13 +209,63 @@ def test_tie_survives_reimport_and_spot_rename(windows, app):
     assert window.session.experiment.attrs["laser"]["source"] == "lase"
 
 
-def test_manual_windows_do_not_estimate_transport_delay(windows):
+def test_manual_windows_use_independent_transport_delay(windows):
     window = windows(laser=False)
     tie = make_tie(window)
     window.session.experiment.loc[0, "signal_start_times"] += 20.
     window.session.experiment.loc[0, "selection_manual"] = True
     before = window.session.experiment.signal_start_times.copy()
     window.apply_laser_log(tie)
-    assert window.session.experiment.attrs["laser"]["n_pairs"] == 3
+    assert window.session.experiment.attrs["laser"]["n_pairs"] == 4
     assert window.session.experiment.attrs["laser"]["transport_delay_s"] == 6.
     pd.testing.assert_series_equal(window.session.experiment.signal_start_times, before)
+
+
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("stored_tie", [False, True])
+def test_apply_tie_to_reviewed_session_preserves_selections_and_cache(
+    windows, tmp_path, monkeypatch, restored, stored_tie,
+):
+    window = windows(laser=False)
+    tie = make_tie(window)
+    if stored_tie:
+        window.apply_laser_log(tie)
+    experiment = window.session.experiment
+    experiment.loc[:, list(services.SELECTION_WINDOW_COLUMNS)] += 1.25
+    experiment["selection_manual"] = True
+    reviewed = selection_export_frame(experiment).to_json().encode()
+    if restored:
+        path = tmp_path / "reviewed.upbr"
+        window.save_project(path)
+        window = windows(project=path)
+        assert selection_export_frame(window.session.experiment).to_json().encode() == reviewed
+        if stored_tie:
+            # The reader must bypass its saved-selection shortcut with a tie.
+            assert window.session.experiment.attrs["laser"]["n_pairs"] == 4
+            assert window.session.experiment.attrs["laser"]["transport_delay_s"] == 6.
+            assert window.session.experiment.laser_detected_onset_time.eq(
+                window.session.experiment.spot_starting_times + 6.
+            ).all()
+    session = window.session
+    before = session.experiment.drop(columns=[c for c in session.experiment if c.startswith("laser_")]).copy()
+    sweeps = session.total_data.copy()
+    cache_value = object()
+    session.reduction_cache["baseline_subtracted_total_data"] = cache_value
+    session.pipeline.cache.set(PipelineStage.BASELINE, cache_value)
+    # Replacing timing must recompute even if a saved/reference onset exists.
+    if "laser_detected_onset_time" in session.experiment:
+        session.experiment["laser_detected_onset_time"] = -100.
+    monkeypatch.setattr(services, "read_experiment_data", lambda *a, **k: pytest.fail("Re-imported"))
+    monkeypatch.setattr(services, "autopick_signal_regions", lambda *a, **k: pytest.fail("Changed selections"))
+    services.apply_session_laser_tie(session, tie)
+    assert session.experiment.attrs["laser"]["n_pairs"] == 4
+    assert session.experiment.attrs["laser"]["transport_delay_s"] == 6.
+    assert session.experiment.laser_detected_onset_time.eq(session.experiment.spot_starting_times + 6.).all()
+    assert session.experiment.laser_onset_residual_s.eq(0.).all()
+    assert selection_export_frame(session.experiment).to_json().encode() == reviewed
+    analytical = session.experiment[before.columns].copy()
+    analytical.attrs = before.attrs
+    pd.testing.assert_frame_equal(analytical, before, check_exact=True)
+    pd.testing.assert_frame_equal(session.total_data, sweeps, check_exact=True)
+    assert session.reduction_cache["baseline_subtracted_total_data"] is cache_value
+    assert session.pipeline.cache.get(PipelineStage.BASELINE) is cache_value

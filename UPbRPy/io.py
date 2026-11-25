@@ -1470,6 +1470,42 @@ def read_spot_data(spot_path):
     spot_data = spot_data.apply(pd.to_numeric, errors='coerce')
     return spot_data
 
+def update_laser_detected_onsets(
+    experiment, total_data, primary_channel, *, selection_method='threshold',
+    selection_fallback_methods=(), **selection_kwargs,
+):
+    """Refresh independent laser-QC onsets without changing selections.
+
+    Use the active data detector, or the first non-laser fallback (threshold
+    if none), with the same parameters as ``auto_select_baseline_peak``.
+    Picks run on a copy, regardless of manual flags or saved windows. Only
+    ``laser_detected_onset_time`` and laser reference-method metadata change.
+    Failed data picks have no onset.
+    """
+    guided = resolve_method(selection_method) == 'laser_guided'
+    reference_method = next(
+        (resolve_method(method) for method in selection_fallback_methods
+         if resolve_method(method) != 'laser_guided'), 'threshold',
+    )
+    reference = experiment.drop(columns=[
+        c for c in experiment if c.startswith('laser_') and c != 'laser_duration_s'
+    ]).copy()
+    reference.attrs.pop('laser', None)
+    # Never retain a previous or reviewed onset when the data pick fails.
+    reference['signal_start_times'] = np.nan
+    reference = auto_select_baseline_peak(
+        reference, total_data, primary_channel,
+        selection_method=reference_method if guided else selection_method,
+        selection_fallback_methods=() if guided else (reference_method,),
+        **selection_kwargs,
+    )
+    experiment['laser_detected_onset_time'] = pd.to_numeric(
+        reference['signal_start_times'], errors='coerce',
+    ).where(reference['selection_error'].isna())
+    if 'laser' in experiment.attrs:
+        experiment.attrs['laser']['reference_method'] = reference_method
+
+
 def auto_select_baseline_peak(experiment,
                               total_data,
                               primary_channel,
@@ -1542,30 +1578,20 @@ def auto_select_baseline_peak(experiment,
         for method in selection_fallback_methods
     ))
     if has_laser and uses_guidance:
-        reference_method = next(
-            (resolve_method(method) for method in selection_fallback_methods
-             if resolve_method(method) != 'laser_guided'), 'threshold',
-        )
         # A separate data-only pass prevents guided predictions from entering
         # the delay estimate. Use the same channel and selection parameters.
-        reference = experiment.drop(columns=[
-            c for c in experiment if c.startswith('laser_') and c != 'laser_duration_s'
-        ]).copy()
-        reference.attrs.pop('laser', None)
-        reference = auto_select_baseline_peak(
-            reference, total_data, primary_channel, baseline_sweep_n, peak_sweep_n,
-            threshold, filter_percentile, baseline_offset, plateau_offset,
+        update_laser_detected_onsets(
+            experiment, total_data, primary_channel,
+            baseline_sweep_n=baseline_sweep_n, peak_sweep_n=peak_sweep_n,
+            threshold=threshold, filter_percentile=filter_percentile,
+            baseline_offset=baseline_offset, plateau_offset=plateau_offset,
             selection_channels=selection_channels,
-            selection_method=reference_method if guided else selection_method,
-            selection_fallback_methods=() if guided else (reference_method,),
+            selection_method=selection_method,
+            selection_fallback_methods=selection_fallback_methods,
             selection_options=method_options,
             signal_duration_limit_seconds=signal_duration_limit_seconds,
             signal_duration_limit_source=signal_duration_limit_source,
         )
-        experiment['laser_detected_onset_time'] = pd.to_numeric(
-            reference['signal_start_times'], errors='coerce',
-        ).where(reference['selection_error'].isna())
-        experiment.attrs['laser']['reference_method'] = reference_method
         update_laser_qc(experiment, threshold_s=laser_qc_threshold_s)
     elif has_laser:
         experiment['laser_detected_onset_time'] = np.nan
@@ -1747,6 +1773,7 @@ __all__ = [
     'resolve_session_manifest',
     'read_spot_data',
     'auto_select_baseline_peak',
+    'update_laser_detected_onsets',
     'subtract_baseline',
     'normalize_method_name',
     'resolve_method',

@@ -12,6 +12,7 @@ from UPbRPy import standard_archive
 from UPbRPy.io import (
     SelectionError, autopick_signal_regions, available_selection_methods,
     read_experiment_data, select_signal_regions, selection_method_label,
+    update_laser_detected_onsets,
 )
 import UPbRPy.io as engine_io
 from UPbRPy.laser_guidance import (
@@ -356,3 +357,54 @@ def test_guided_fallback_uses_delay_from_other_spots(tmp_path, monkeypatch):
     assert spot.signal_start_times == 6.
     assert spot.laser_detected_onset_time == 6.
     assert spot.laser_onset_residual_s == 0.
+
+
+@pytest.mark.parametrize('method, fallbacks, detector', [
+    ('rolling_sigma', ('laser_guided', 'threshold'), 'rolling_sigma'),
+    ('laser_guided', ('laser_guided', 'running_5sigma', 'threshold'), 'rolling_sigma'),
+    ('laser_guided', (), 'threshold'),
+])
+def test_reference_onsets_use_configured_data_detector(tmp_path, monkeypatch, method, fallbacks, detector):
+    experiment, _, total = import_bundle(tmp_path)
+    experiment['selection_manual'] = True
+    experiment['signal_start_times'] += 20.
+    before = analytical_frame(experiment)
+    calls = []
+    original = engine_io._SELECTORS[detector]
+
+    def record(values, **options):
+        calls.append((np.asarray(values).copy(), options))
+        return original(values, **options)
+
+    monkeypatch.setitem(engine_io._SELECTORS, detector, record)
+    monkeypatch.setitem(engine_io._SELECTORS, 'laser_guided',
+                        lambda *a, **k: pytest.fail('Laser prediction used for reference'))
+    update_laser_detected_onsets(
+        experiment, total, '44Ca', selection_method=method,
+        selection_fallback_methods=fallbacks, baseline_sweep_n=8,
+        selection_channels={'NIST612': '44Ca'},
+        selection_options={'rolling_window': 5, 'sigma_threshold': 4., 'consecutive': 2},
+    )
+    assert len(calls) == len(experiment)
+    assert all(options['baseline_sweep_n'] == 8 and options['sigma_threshold'] == 4.
+               for _, options in calls)
+    np.testing.assert_array_equal(calls[0][0], total.loc[total.spot_name == 'NIST612_1', '44Ca'])
+    np.testing.assert_allclose(experiment.laser_detected_onset_time, experiment.spot_starting_times + 6.)
+    pd.testing.assert_frame_equal(analytical_frame(experiment), before, check_exact=True)
+
+
+def test_failed_reference_pick_never_reuses_reviewed_onset(tmp_path, monkeypatch):
+    experiment, _, total = import_bundle(tmp_path)
+    experiment['selection_manual'] = True
+    before = analytical_frame(experiment)
+
+    def fail(*args, **kwargs):
+        raise SelectionError('synthetic data-only failure')
+
+    monkeypatch.setitem(engine_io._SELECTORS, 'threshold', fail)
+    update_laser_detected_onsets(experiment, total, '44Ca')
+    update_laser_qc(experiment)
+    assert experiment.laser_detected_onset_time.isna().all()
+    assert experiment.attrs['laser']['n_pairs'] == 0
+    assert experiment.attrs['laser']['transport_delay_s'] is None
+    pd.testing.assert_frame_equal(analytical_frame(experiment), before, check_exact=True)

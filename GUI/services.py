@@ -30,7 +30,7 @@ from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.io import (
     read_experiment_data, resolve_session_manifest, autopick_signal_regions,
-    SelectionError, resolve_method,
+    SelectionError, resolve_method, update_laser_detected_onsets,
 )
 from UPbRPy.laser_tie import LaserTie
 from UPbRPy.laser_guidance import laser_selection_options, update_laser_qc
@@ -845,11 +845,6 @@ def apply_session_laser_tie(session: ReductionSession, tie: LaserTie | None, *, 
     if tie is not None and tie.requires_confirmation and not confirmed:
         raise ValueError("Confirm the settings-only laser tie before applying it.")
     experiment = session.experiment
-    detected = experiment.get("laser_detected_onset_time")
-    if detected is None and "signal_start_times" in experiment:
-        detected = pd.to_numeric(experiment.signal_start_times, errors="coerce").where(
-            experiment.selection_error.isna() & experiment.selection_method.ne("laser_guided")
-            & ~experiment.get(MANUAL_SELECTION_COLUMN, pd.Series(False, index=experiment.index)).fillna(False))
     for column in list(experiment):
         if column.startswith("laser_"):
             del experiment[column]
@@ -862,7 +857,15 @@ def apply_session_laser_tie(session: ReductionSession, tie: LaserTie | None, *, 
     else:
         add_manifest_laser_timing(experiment, manifest)
     if "laser" in experiment.attrs:
-        experiment["laser_detected_onset_time"] = detected if detected is not None else np.nan
+        update_laser_detected_onsets(
+            experiment, session.total_data, session.primary_channel,
+            **{key: session.import_settings[key] for key in (
+                "baseline_sweep_n", "peak_sweep_n", "threshold", "filter_percentile",
+                "baseline_offset", "plateau_offset", "selection_channels",
+                "selection_method", "selection_fallback_methods", "selection_options",
+                "signal_duration_limit_seconds", "signal_duration_limit_source",
+            ) if key in session.import_settings},
+        )
         options = session.import_settings.get("selection_options", {})
         update_laser_qc(experiment, threshold_s=float(session.import_settings.get(
             "laser_qc_threshold_s", options.get("laser_qc_threshold_s", 2.0))))
@@ -1501,32 +1504,21 @@ def autopick_all_selection_regions(
         if method == "laser_guided" or "laser_guided" in fallbacks:
             # Estimate from all independent onsets before any guided picks,
             # so the first spot uses the same delay as the last spot.
-            from UPbRPy.io import auto_select_baseline_peak
-
-            reference_method = next((m for m in fallbacks if m != "laser_guided"), "threshold")
-            reference = session.experiment.drop(columns=[
-                c for c in session.experiment if c.startswith("laser_") and c != "laser_duration_s"
-            ]).copy()
-            reference.attrs.pop("laser", None)
             saved_options = session.import_settings.get("selection_options", {})
             options = dict(saved_options) if isinstance(saved_options, Mapping) else {}
             threshold_s = options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", 2.0))
             source = options.pop("signal_duration_limit_source", session.import_settings.get("signal_duration_limit_source", "fixed"))
             duration = session.import_settings.get("signal_duration_limit_seconds", options.pop("signal_duration_limit_seconds", None))
-            auto_select_baseline_peak(
-                reference, session.total_data, session.primary_channel,
+            update_laser_detected_onsets(
+                session.experiment, session.total_data, session.primary_channel,
                 **{key: session.import_settings[key] for key in (
                     "baseline_sweep_n", "peak_sweep_n", "threshold", "filter_percentile",
                     "baseline_offset", "plateau_offset", "selection_channels",
                 ) if key in session.import_settings},
-                selection_method=reference_method if method == "laser_guided" else method,
-                selection_fallback_methods=() if method == "laser_guided" else (reference_method,),
+                selection_method=method, selection_fallback_methods=fallbacks,
                 selection_options=options, signal_duration_limit_source=source,
                 signal_duration_limit_seconds=duration,
             )
-            session.experiment["laser_detected_onset_time"] = pd.to_numeric(
-                reference["signal_start_times"], errors="coerce",
-            ).where(reference["selection_error"].isna())
             update_laser_qc(session.experiment, threshold_s=threshold_s)
     failures: dict[str, str] = {}
     selected_count = 0

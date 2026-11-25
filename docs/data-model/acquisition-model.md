@@ -187,6 +187,20 @@ as the primary method or a fallback,
 delay and the QC onset independently of the guided edges. A failed reference
 pick supplies no pair, even if the guided pick succeeds.
 
+Applying or replacing laser timing in Studio recomputes these independent
+onsets from the loaded sweep data and import settings for every spot, including
+reviewed spots. Saved windows, manual flags and cached reduction results are
+preserved. Restoring a project with a saved laser tie also detects onsets for
+every spot before overlaying its saved selections.
+
+`UPbRPy.io.update_laser_detected_onsets(experiment, total_data, primary_channel,
+*, selection_method="threshold", selection_fallback_methods=(),
+**selection_kwargs)` performs this reference pass. It accepts the selection
+parameters of `auto_select_baseline_peak` and updates only
+`laser_detected_onset_time` and laser reference-method metadata. It uses the
+active data detector, or, when Laser-guided is active, the first non-laser
+fallback (threshold if none). Call `update_laser_qc` afterward to refresh QC.
+
 `read_experiment_data` and `auto_select_baseline_peak` accept
 `laser_qc_threshold_s=2.0` and `signal_duration_limit_source="fixed"`.
 The latter also accepts `"laser"`: use each finite positive firing duration,
