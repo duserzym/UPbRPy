@@ -123,7 +123,10 @@ class LaserOffer(QtCore.QObject):
     def offer(self, database):
         if not self.valid():
             return
-        dialog = LaserOfferDialog("tied in UPbDB" if database else Path(self.path).name, self.window)
+        from GUI.laser_upload import upload_server
+        allow_upload = not database and db.laser_upload_availability(upload_server(self.window))[0]
+        dialog = LaserOfferDialog("tied in UPbDB" if database else Path(self.path).name,
+                                 self.window, allow_upload=allow_upload)
         self.dialog = dialog
         dialog.finished.connect(lambda _result: self.answered(database))
         dialog.open()
@@ -137,7 +140,11 @@ class LaserOffer(QtCore.QObject):
         elif database:
             self.fetch_page()
         else:
-            self.ready(lambda: self.window._preview_laser_log(self.path))
+            also_upload = not self.dialog.upload_check.isHidden() and self.dialog.upload_check.isChecked()
+            if also_upload:
+                self.ready(lambda: self.window._preview_laser_log(self.path, also_upload=True))
+            else:
+                self.ready(lambda: self.window._preview_laser_log(self.path))
 
     def fetch_page(self):
         if not self.database_valid():

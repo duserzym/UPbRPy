@@ -5,3 +5,4 @@
 - Choose optional Laser-guided selection or use each spot's laser-on duration as its signal-duration limit. Existing projects and sessions without laser data keep their default results.
 - Export fields prefill from laser settings, with ranges and per-spot columns when settings vary. Reduction manifests record laser provenance and QC.
 - Stage coordinates are excluded from exports unless you enable **Include stage coordinates in exports**; the option defaults off for old and new projects.
+- Upload a loaded `.lase` to UPbDB after confirming the original file, lab and time zone. Duplicate uploads show the existing log id. Database session ties require a separate preview and confirmation; stale previews can be refreshed. Offline use and local reduction results are unchanged.

@@ -237,6 +237,13 @@ in a background worker. **Not now** is saved in the workspace; restored projects
 and sessions that already have laser data never offer again. The File menu
 remains available. See [saved ties](data-model/project-and-bundle.md#standalone-laser-log).
 
+Signed-in Studio can upload the original file through **File > Upload laser log
+to UPbDB…**, or choose **Also upload to UPbDB** during the fresh-import offer.
+A confirmation shows the destination lab and IANA time zone. Changed bytes are
+refused against the stored SHA-256. Uploading does not tie the database log:
+linked sessions have a separate revision-checked preview and confirmation.
+See [the upload workflow](lab_workflow_integration.md#laser-logs-chromium-lase).
+
 The script API is independent of Studio:
 
 ```python

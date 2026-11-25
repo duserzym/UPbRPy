@@ -544,6 +544,93 @@ def sign_out(server: str) -> None:
         forget_token(server)
 
 
+# --------------------------------------------------------------- laser writes
+_laser_upload_unsupported: set[str] = set()
+MAX_LASER_LOG_BYTES = 20 * 1024 * 1024
+
+
+def laser_upload_availability(server: str) -> tuple[bool, str]:
+    """Check local availability without contacting the server."""
+    available, reason = availability()
+    if not available:
+        return available, reason
+    if not server or not is_signed_in(server):
+        return False, "Sign in to UPbDB to upload a laser log."
+    if normalize_server(server) in _laser_upload_unsupported:
+        return False, "This UPbDB server cannot receive laser logs"
+    return True, ""
+
+
+def _laser_write(server, path, **kwargs):
+    try:
+        return _request("POST", server, path, action="save laser data", **kwargs)
+    except DatabaseError as exc:
+        if path == "laser-logs" and exc.status in (404, 405):
+            _laser_upload_unsupported.add(normalize_server(server))
+        if exc.status is not None:
+            excerpt = _summary([exc.details])[:300]
+            exc.message = f"HTTP {exc.status}: {exc.message}" + (f" Reply: {excerpt}" if excerpt else "")
+        raise
+
+
+def upload_laser_log(server, path, *, lab_id=None, time_zone=None) -> dict:
+    """Upload original bytes; return log detail plus HTTP ``status_code``.
+
+    The file digest and upload options determine the idempotency key.
+    Retries with the same file and options have identical wire bodies.
+    """
+    if not is_signed_in(server):
+        raise AuthenticationRequired("Sign in to UPbDB to upload a laser log.")
+    path = Path(path)
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(MAX_LASER_LOG_BYTES + 1)
+    except OSError as exc:
+        raise DatabaseError(f"Cannot read laser log {path.name}: {exc}") from exc
+    if len(data) > MAX_LASER_LOG_BYTES:
+        raise RequestRejected("Laser logs must be at most 20 MB.", status=413)
+    digest = hashlib.sha256(data).hexdigest()
+    if time_zone is not None:
+        try:
+            ZoneInfo(time_zone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise RequestRejected("Enter an IANA time zone, such as America/Boise.") from exc
+    fields = []
+    if lab_id is not None:
+        fields.append(("lab_id", str(lab_id)))
+    if time_zone is not None:
+        fields.append(("time_zone", time_zone))
+    fields.append(("file", (path.name, data, "application/octet-stream")))
+    # UPbDB hashes the wire body, including the multipart boundary.
+    _requests()
+    encode = importlib.import_module("urllib3.filepost").encode_multipart_formdata
+    body, content_type = encode(fields, boundary=f"upbrpy-{digest}")
+    options = hashlib.sha256(body).hexdigest()[:16]
+    response = _laser_write(server, "laser-logs", data=body,
+        headers={"Idempotency-Key": f"laser-log-{digest}-{options}", "Content-Type": content_type})
+    payload = _json(response, server, "upload the laser log")
+    if response.status_code not in (200, 201) or not isinstance(payload, Mapping) or not payload.get("id"):
+        raise ServerError("UPbDB returned no laser log id after upload.")
+    return {**payload, "status_code": response.status_code}
+
+
+def preview_laser_log_tie(server, log_id, session_id) -> dict:
+    """Preview one session using position and a 30 second threshold.
+
+    Only the first row page is requested; session counts cover all rows.
+    """
+    response = _laser_write(server, f"laser-logs/{quote(str(log_id), safe='')}/tie/preview",
+        params={"limit": 1}, json={"session_ids": [session_id], "spot_key": "position", "threshold_s": 30})
+    return _json(response, server, "preview the laser tie")
+
+
+def tie_laser_log(server, log_id, session_id, *, revision) -> dict:
+    """Save a user-confirmed preview for one session, checking its revision."""
+    response = _laser_write(server, f"laser-logs/{quote(str(log_id), safe='')}/tie",
+        json={"session_ids": [session_id], "spot_key": "position", "threshold_s": 30, "revision": revision})
+    return _json(response, server, "tie the laser log")
+
+
 # --------------------------------------------------------------- sessions
 class SessionPage(list):
     """One bounded session list page, compatible with existing list callers."""
@@ -1007,6 +1094,7 @@ __all__ = [
     "sign_out",
     "list_sessions",
     "get_session", "get_session_laser", "SessionLaserPage", "session_laser_tie",
+    "upload_laser_log", "laser_upload_availability", "preview_laser_log_tie", "tie_laser_log",
     "fetch_session_bundle",
     "zip_reduction_bundle",
     "submit_reduction",

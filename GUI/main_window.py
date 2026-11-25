@@ -451,6 +451,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.load_laser_log_action.triggered.connect(self.choose_laser_log)
         self.remove_laser_log_action = file_menu.addAction("Remove laser log")
         self.remove_laser_log_action.triggered.connect(self.remove_laser_log)
+        self.upload_laser_log_action = file_menu.addAction("Upload laser log to UPbDB…")
+        self.upload_laser_log_action.triggered.connect(self.upload_laser_log)
+        file_menu.aboutToShow.connect(self._sync_laser_controls)
         self.recent_sources_menu = file_menu.addMenu("Open Recent")
         self.recent_sources_menu.aboutToShow.connect(self._rebuild_recent_sources)
         self._rebuild_recent_sources()
@@ -6544,7 +6547,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                 return
         self._preview_laser_log(path)
 
-    def _preview_laser_log(self, path: str) -> None:
+    def _preview_laser_log(self, path: str, *, also_upload=False) -> None:
         """Use the same preview for the import offer and File menu."""
         from GUI.laser_log_dialog import LaserLogDialog
         from UPbRPy.laserlog import read_lase
@@ -6552,9 +6555,33 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         try:
             dialog = LaserLogDialog(read_lase(path), self.session.qtegra, self)
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                if not hasattr(self, "_laser_source_paths"):
+                    self._laser_source_paths = {}
+                self._laser_source_paths[dialog.tie.sha256] = str(Path(path).resolve())
+                self._laser_upload_after_apply = dialog.tie.sha256 if also_upload else None
                 self.apply_laser_log(dialog.tie, confirmed=dialog.confirm_check.isChecked())
         except Exception as exc:
             self._handle_action_error("Laser log failed", exc)
+
+    def upload_laser_log(self) -> None:
+        """Confirm an original file upload, without requiring database mode."""
+        from GUI.laser_upload import LaserUpload, upload_server
+        from UPbRPy.integration import upbdb
+
+        tie = self.session.laser_tie
+        if tie is None or tie.source != "lase" or self._active_worker is not None:
+            return
+        if not upbdb.laser_upload_availability(upload_server(self))[0]:
+            self._sync_laser_controls()
+            return
+        previous = getattr(self, "_laser_upload", None)
+        if previous is not None and (previous.busy or (hasattr(previous, "dialog") and previous.dialog.isVisible())):
+            return
+        try:
+            self._laser_upload = LaserUpload(self)
+            self._laser_upload.start()
+        except Exception as exc:
+            self._handle_action_error("Laser log upload failed", exc)
 
     def _laser_repick_required(self) -> bool:
         settings = self.session.import_settings
@@ -6607,6 +6634,22 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.refresh_view()
         self.update_project_window_title()
 
+        pending = getattr(self, "_laser_upload_after_apply", None)
+        self._laser_upload_after_apply = None
+        if pending and updated.laser_tie is not None and updated.laser_tie.sha256 == pending:
+            directory = updated.directory
+
+            def offer_upload():
+                tie = self.session.laser_tie
+                if self.session.directory != directory or tie is None or tie.sha256 != pending:
+                    return
+                if self._active_worker is not None:
+                    QtCore.QTimer.singleShot(100, self, offer_upload)
+                else:
+                    self.upload_laser_log()
+
+            QtCore.QTimer.singleShot(0, self, offer_upload)
+
     @confirm_change('Laser log: re-pick spots', 'repick_all_spots_button', 'baseline', replace_session=True, review=True, always=True)
     def request_laser_tie(self, tie, *, confirmed=False) -> None:
         """Apply a laser replacement and use the existing confirmed re-pick path."""
@@ -6625,6 +6668,17 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         timed = self._has_laser_times()
         self.load_laser_log_action.setEnabled(self.session.loaded and self._active_worker is None)
         self.remove_laser_log_action.setEnabled(self.session.laser_tie is not None and self._active_worker is None)
+        from GUI.laser_upload import upload_server
+        from UPbRPy.integration import upbdb
+
+        tie = self.session.laser_tie
+        visible = tie is not None and tie.source == "lase"
+        self.upload_laser_log_action.setVisible(visible)
+        if visible:
+            enabled, reason = upbdb.laser_upload_availability(upload_server(self))
+            busy = self._active_worker is not None or getattr(getattr(self, "_laser_upload", None), "busy", False)
+            self.upload_laser_log_action.setEnabled(enabled and not busy)
+            self.upload_laser_log_action.setToolTip(reason or ("A task is running." if busy else "Upload the original laser log."))
         available = timed or (self.session.loaded and self.session.laser_data_available)
         self.laser_marks_action.setVisible(available)
         self.laser_marks_action.setEnabled(timed)

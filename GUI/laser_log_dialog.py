@@ -20,9 +20,9 @@ def laser_log_start_path(source: str) -> str:
 
 
 class LaserOfferDialog(QtWidgets.QMessageBox):
-    """One compact offer; source-specific choices can be added here later."""
+    """Offer an import, with an optional separately confirmed upload."""
 
-    def __init__(self, source: str, parent=None):
+    def __init__(self, source: str, parent=None, *, allow_upload=False):
         super().__init__(parent)
         self.setWindowTitle("Import laser log?")
         self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
@@ -33,6 +33,73 @@ class LaserOfferDialog(QtWidgets.QMessageBox):
         self.not_now_button = self.addButton("Not now", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         self.setDefaultButton(self.not_now_button)
         self.setEscapeButton(self.not_now_button)
+        self.upload_check = QtWidgets.QCheckBox("Also upload to UPbDB")
+        self.setCheckBox(self.upload_check)
+        self.upload_check.setVisible(allow_upload)
+
+
+class LaserUploadDialog(QtWidgets.QDialog):
+    """Confirm the original file, destination lab and laser clock zone."""
+
+    def __init__(self, path, size, server, account, time_zone, parent=None):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        super().__init__(parent)
+        self.setWindowTitle("Upload laser log to UPbDB")
+        self.resize(540, 280)
+        layout = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        for title, text in (("File", Path(path).name), ("Size", f"{size:,} bytes"), ("Server", server)):
+            label = QtWidgets.QLabel(text)
+            label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            form.addRow(title, label)
+        labs = {}
+        for group in account.get("groups", []):
+            if group.get("lab_id"):
+                labs.setdefault(group["lab_id"], group.get("name") or group["lab_id"])
+        self.lab_combo = QtWidgets.QComboBox()
+        self.lab_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.lab_combo.setMinimumContentsLength(28)
+        for lab_id, name in labs.items():
+            self.lab_combo.addItem(f"{name} ({lab_id})", lab_id)
+        if len(labs) > 1:
+            form.addRow("Lab", self.lab_combo)
+        else:
+            self.lab_combo.hide()
+            lab_label = QtWidgets.QLabel(next(iter(labs.values()), "No lab membership"))
+            lab_label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            lab_label.setWordWrap(True)
+            form.addRow("Lab", lab_label)
+        self.zone_edit = QtWidgets.QLineEdit(time_zone)
+        form.addRow("Time zone", self.zone_edit)
+        layout.addLayout(form)
+        self.message = QtWidgets.QLabel()
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        self.buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok
+                                                 | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        self.upload_button = self.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        self.upload_button.setText("Upload")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        def validate():
+            try:
+                ZoneInfo(self.zone_edit.text().strip())
+                reason = "" if labs else "Your account must belong to a lab to upload."
+            except (ValueError, ZoneInfoNotFoundError):
+                reason = "Enter an IANA time zone, such as America/Boise."
+            self.message.setText(reason)
+            self.upload_button.setEnabled(not reason)
+
+        self.zone_edit.textChanged.connect(validate)
+        validate()
+
+    def accept(self):
+        if self.upload_button.isEnabled():
+            super().accept()
 
 
 class LaserLogDialog(QtWidgets.QDialog):

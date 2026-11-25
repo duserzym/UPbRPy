@@ -501,6 +501,42 @@ which reconcile the planned sequence with acquired labels.
 
 ## Laser logs (Chromium `.lase`)
 
+Studio can upload a loaded local log with **File > Upload laser log to UPbDB…**,
+or **Also upload to UPbDB** in the fresh-import offer. The upload confirmation
+shows the original filename, size, server, lab and editable IANA time zone.
+Accounts with several labs must choose one; accounts without a lab cannot upload.
+The session's recorded zone is preferred, otherwise the system zone is used.
+No upload happens until confirmed. The original bytes must still match the
+loaded tie's SHA-256; changed or missing files must be loaded again. The limit is
+20 MB. Studio remains usable without a database installation or sign-in.
+
+A successful upload shows **Uploaded** (201) or **Already in UPbDB** (200), with
+the log id. Uploading does not tie it. A linked database session offers a separate
+**Tie to this session in UPbDB…** step: preview Position matches at 30 s, review
+linked/doubtful/unlinked counts, then confirm saving that revision. HTTP 409
+requires a refreshed preview and another confirmation. Other sessions can be
+tied in UPb Lab's Laser logs page. These server writes do not replace local
+laser timing, selections or reduction results. Servers returning 404/405 on
+upload disable the action for that server until Studio restarts, without probes.
+
+The optional client API in `UPbRPy.integration.upbdb` is:
+
+```python
+upload_laser_log(server, path, *, lab_id=None, time_zone=None) -> dict
+preview_laser_log_tie(server, log_id, session_id) -> dict
+tie_laser_log(server, log_id, session_id, *, revision) -> dict
+laser_upload_availability(server) -> tuple[bool, str]
+```
+
+Upload returns server log detail plus `status_code`. Its file digest and options
+produce a stable Idempotency-Key; the multipart boundary is deterministic so
+retry bodies also match. Different labs or zones use distinct request keys.
+The caller must verify the file against the loaded tie before calling this API;
+Studio rechecks it before upload and sends a verified snapshot. Preview requests
+one row and uses the server's complete session counts, avoiding acquisition-sized
+downloads. Network operations run in workers and use connect/stall timeouts.
+
+
 UPbRPy reads UPbDB's version-2 `session_manifest.toml` laser metadata.
 Optional top-level `[[laser_log]]` rows carry identity, SHA-256, instrument,
 time zone, `spot_key`, `has_laser_times`, clock offset/spread and link counts;
