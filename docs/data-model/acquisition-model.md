@@ -152,6 +152,84 @@ Spot numbers always use a trailing underscore integer, independently of `sep`.
 `software`, `machine`, `acquisition_summary`, and `warnings`. It does not include every session
 field: threshold and unrounded clock offset remain on QtegraSession.
 
+### Optional laser guidance
+
+When a resolved version-2 manifest provides usable laser times, import adds
+these informational columns. A version-1 bundle, plain Qtegra input or log
+with settings only adds no columns or laser attrs. Default selections and
+reduction numbers remain unchanged.
+
+| Experiment column | Type / unit | Meaning |
+| --- | --- | --- |
+| `laser_on_time`, `laser_off_time` | Float, session s | Firing endpoints shifted by the log clock offset; missing endpoints are NaN |
+| `laser_duration_s` | Float, s | Off minus on; NaN without both endpoints |
+| `laser_scan_position` | Numeric | One-based position; NaN when missing |
+| `laser_detected_onset_time` | Float, session s | Independently detected signal start; NaN when detection fails |
+| `laser_onset_residual_s` | Float, s | Detected onset minus laser-on minus session transport delay; NaN without a delay or pair |
+| `laser_onset_flag` | Boolean | Absolute residual strictly above the QC threshold; false for missing residuals |
+
+Relative firing times use the manifest acquisition's `started_at`, because
+UPbDB estimated the clock correction against that instant. They are added
+to the reader's existing `spot_starting_times`, which places acquisitions
+and sweeps on the session axis. CSV starts can be rounded or use another
+clock convention; they do not replace `started_at` in the offset arithmetic.
+The session axis itself is unchanged, including reconstructed starts for
+Rich files without StartTime. Stage coordinates are not added to experiment.
+
+`experiment.attrs["laser"]` is a small JSON-safe object with
+`transport_delay_s` (median detected onset minus laser-on; null with fewer
+than three successful pairs), `n_pairs`, `qc_threshold_s` (default 2.0),
+`log_sha256` (list), `source` (`manifest` or `lase`), and `spot_key` (comma
+separated when logs use different keys). When `laser_guided` is configured
+as the primary method or a fallback,
+`reference_method` names the first non-laser configured fallback, or
+`threshold` when there is none. This detector supplies both the transport
+delay and the QC onset independently of the guided edges. A failed reference
+pick supplies no pair, even if the guided pick succeeds.
+
+`read_experiment_data` and `auto_select_baseline_peak` accept
+`laser_qc_threshold_s=2.0` and `signal_duration_limit_source="fixed"`.
+The latter also accepts `"laser"`: use each finite positive firing duration,
+falling back to `signal_duration_limit_seconds` (possibly None). The existing
+`selection_signal_duration_limit_seconds` records the limit actually used.
+The `laser_guided` method is opt-in and labelled “Laser-guided”. It uses the
+predicted on/off sweeps after adding session delay; unknown delay uses zero
+and sets `laser_delay_assumed_zero=1` in selection diagnostics. Baseline and
+plateau offsets and width modes follow the ordinary selection rules, with
+the plateau capped at predicted off. Missing off uses ordinary washout
+detection; missing on raises `SelectionError("no laser time for this spot")`
+and allows configured fallbacks. QC columns never control reduction.
+
+`available_selection_methods(*, include_laser=False)` preserves the existing
+detector list by default. Controls for a session with usable firing times
+can pass `include_laser=True` to include the registered `laser_guided` method.
+The registered low-level detector is
+`UPbRPy.io.laser_guided_onset(values, *, time=None,
+laser_predicted_on_time=None, **options)`, returning an index and diagnostics;
+normally callers use `select_signal_regions` or `autopick_signal_regions`.
+
+The source-independent engine API in `UPbRPy.laser_guidance` is:
+
+```python
+add_laser_timing(experiment, windows, acquisition_starts, *,
+                 scan_positions=None, source="manifest", log_sha256=(), spot_key="")
+estimate_transport_delay(experiment) -> float | None
+update_laser_qc(experiment, *, threshold_s=2.0)
+laser_selection_options(spot, transport_delay_s=None, *,
+                        signal_duration_limit_source="fixed",
+                        signal_duration_limit_seconds=None) -> dict
+```
+
+`windows` maps labels to `(on_s_after_start, off_s_after_start)` with None
+for missing endpoints. `acquisition_starts` maps labels to starts in session
+seconds. For a single-spot re-pick, pass an experiment row and
+`experiment.attrs["laser"]["transport_delay_s"]` to
+`laser_selection_options`, then expand the returned keywords into
+`autopick_signal_regions` with that spot's session-time trace. This helper
+does not re-estimate the session delay. Batch selection computes reference
+onsets before guided picking; subsequent manual edits and restoring saved
+selections retain their ordinary behavior.
+
 ## Counting dwell
 
 !!! warning "Multiply the rate by the dwell time before counting statistics"

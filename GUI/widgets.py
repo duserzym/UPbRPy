@@ -739,6 +739,8 @@ class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
         return super().helpEvent(event, view, option, index)
 
     def createEditor(self, parent, option, index):
+        if index.column() != 0:
+            return None
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QtWidgets.QLineEdit):
             theme = active_theme()
@@ -8576,6 +8578,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._legend_series = LegendSeries()
         self._region_overlays: dict[str, dict[str, object]] = {}
         self._signal_boundaries: dict[str, pg.InfiniteLine] = {}
+        self._laser_marks: dict[str, pg.InfiniteLine] = {}
         self._signal_markers: dict[str, pg.ScatterPlotItem] = {}
         self._hover_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._measurement_layers: dict[str, pg.PlotDataItem] = {}
@@ -8809,6 +8812,8 @@ class TracePlotWidget(RoundedPlotWidget):
         self._theme = theme
         self.setBackground(theme.plot_background)
         self._configure_plot()
+        for line in self._laser_marks.values():
+            line.setPen(pg.mkPen(theme.muted, width=1, style=QtCore.Qt.PenStyle.DashLine))
         if hasattr(self, "_spot_name_label"):
             self._spot_name_label.setStyleSheet(f"color: {theme.muted}; background: transparent; padding: 2px 6px; font-size: 11px;")
         self._position_signal_labels()
@@ -8866,6 +8871,7 @@ class TracePlotWidget(RoundedPlotWidget):
         self._series_items = {}
         self._region_overlays = {}
         self._signal_boundaries = {}
+        self._laser_marks = {}
         self._signal_markers = {}
         self._hover_series = {}
         self._hover_spans = _spot_time_spans(pd.DataFrame())
@@ -8876,6 +8882,32 @@ class TracePlotWidget(RoundedPlotWidget):
         self._configure_plot()
         _rounded_legend(self.plot_item, offset=(12, 8), labelTextColor=self._theme.axis_text, labelTextSize="10pt", colCount=2)
         self._layout_trace_legend()
+
+    def set_laser_marks(
+        self, on_time: float | None = None, off_time: float | None = None,
+        *, transport_delay_s: float | None = None,
+    ) -> None:
+        """Show noninteractive firing marks on the session time axis."""
+        for line in self._laser_marks.values():
+            self.plot_item.removeItem(line)
+        self._laser_marks.clear()
+        delay = 0.0 if transport_delay_s is None else transport_delay_s
+        for name, value in (("on", on_time), ("off", off_time)):
+            if value is None or not np.isfinite(value):
+                continue
+            text = "Laser on (+delay)" if name == "on" else "Laser off"
+            note = ("transport delay unknown; using 0 s" if transport_delay_s is None
+                    else f"transport delay {delay:.2f} s")
+            line = pg.InfiniteLine(
+                pos=float(value + delay), angle=90, movable=False,
+                pen=pg.mkPen(self._theme.muted, width=1, style=QtCore.Qt.PenStyle.DashLine),
+            )
+            line.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            line.setAcceptHoverEvents(False)
+            line.setZValue(1)
+            line.setToolTip(f"{text}: {value + delay:.2f} s ({note})")
+            self.plot_item.addItem(line, ignoreBounds=True)
+            self._laser_marks[name] = line
 
     def show_spot(
         self,
@@ -9802,6 +9834,10 @@ class TracePlotWidget(RoundedPlotWidget):
         spot = _spot_at_time(self._hover_spans, x_value) or self._hover_spot_name
         tooltip_lines = [f"Spot: {spot}"] if spot else []
         tooltip_lines.append(f"Time: {x_value:,.2f} s")
+        for line in self._laser_marks.values():
+            mark_x = self.plot_item.vb.mapViewToScene(QtCore.QPointF(line.value(), 0)).x()
+            if abs(mark_x - scene_position.x()) <= 6:
+                tooltip_lines.append(line.toolTip())
 
         for name, (x_values, y_values) in list(self._hover_series.items())[:6]:
             if len(x_values) == 0:

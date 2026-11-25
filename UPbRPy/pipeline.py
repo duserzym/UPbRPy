@@ -371,6 +371,8 @@ class PipelineConfig:
 
     def to_dict(self) -> dict[str, object]:
         """Return a deterministic, serialization-friendly configuration."""
+        from .laser_guidance import nondefault_laser_settings
+
         return {
             "workflow_key": self.workflow_key,
             "material": self.material,
@@ -378,7 +380,7 @@ class PipelineConfig:
             "internal_standard_channel": self.internal_standard_channel,
             "reference_overrides": {name: dict(values) for name, values in self.reference_overrides.items()},
             "selection_method": self.selection_method,
-            "selection_options": dict(self.selection_options),
+            "selection_options": nondefault_laser_settings(self.selection_options),
             "detector_calibration": dict(self.detector_calibration),
             "concentration_standards": list(self.concentration_standards),
             "primary_68_standard": self.primary_68_standard,

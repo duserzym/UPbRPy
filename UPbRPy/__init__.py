@@ -31,6 +31,7 @@ FOCUSED_SUBMODULES = frozenset(
         "io",
         "isochron",
         "isoplot",
+        "laser_guidance",
         "laserlog",
         "mpl_concordia",
         "naming",

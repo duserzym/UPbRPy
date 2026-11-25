@@ -86,9 +86,13 @@ def register_selection_method(
         _ALIASES[normalize_method_name(alias)] = canonical
 
 
-def available_selection_methods() -> tuple[str, ...]:
-    """Return canonical names for all registered onset detectors."""
-    return tuple(_SELECTORS)
+def available_selection_methods(*, include_laser: bool = False) -> tuple[str, ...]:
+    """Return detector names, optionally including timed laser guidance.
+
+    Session controls should request include_laser only when laser times are
+    available. Ordinary inputs retain their existing detector choices.
+    """
+    return tuple(name for name in _SELECTORS if include_laser or name != 'laser_guided')
 
 
 def selection_method_label(method: str) -> str:
@@ -98,6 +102,7 @@ def selection_method_label(method: str) -> str:
         "threshold": "Signal threshold",
         "rolling_sigma": "Running mean + σ threshold",
         "excel_expanding_sigma": "Excel expanding mean + σ threshold",
+        "laser_guided": "Laser-guided",
     }.get(canonical, canonical.replace("_", " ").title())
 
 
@@ -112,7 +117,7 @@ def resolve_method(method: str) -> str:
     try:
         return _ALIASES[normalized]
     except KeyError as exc:
-        choices = ", ".join(available_selection_methods())
+        choices = ", ".join(available_selection_methods(include_laser=True))
         raise ValueError(f"Unknown selection method {method!r}. Choose from: {choices}.") from exc
 
 
@@ -612,6 +617,20 @@ def excel_expanding_sigma_onset(
     )
 
 
+def laser_guided_onset(values, *, time=None, laser_predicted_on_time=None, **options):
+    """Locate the measured sweep nearest a predicted laser arrival time."""
+    if laser_predicted_on_time is None or not np.isfinite(laser_predicted_on_time):
+        raise SelectionError("no laser time for this spot")
+    if time is None:
+        raise SelectionError("time values are required for laser-guided selection")
+    if not time[0] <= laser_predicted_on_time <= time[-1]:
+        raise SelectionError("predicted laser-on is outside this spot")
+    return int(np.argmin(np.abs(time - laser_predicted_on_time))), {
+        "laser_predicted_on_time": float(laser_predicted_on_time),
+        "laser_delay_assumed_zero": int(options.get("laser_delay_assumed_zero", 0)),
+    }
+
+
 register_selection_method("threshold", threshold_onset, aliases=("percentile_threshold",))
 register_selection_method(
     "rolling_sigma",
@@ -623,6 +642,8 @@ register_selection_method(
     excel_expanding_sigma_onset,
     aliases=("excel_vba", "expanding_sigma"),
 )
+
+register_selection_method("laser_guided", laser_guided_onset)
 
 SELECTION_METHODS = available_selection_methods()
 
@@ -658,7 +679,12 @@ def select_signal_regions(
     ``rolling_sigma`` compares each candidate onset against the mean and sample
     standard deviation of the preceding ``rolling_window`` sweeps.
     ``excel_expanding_sigma`` reproduces the reference workbook's expanding
-    mean plus eight-standard-deviation onset detector. When
+    mean plus eight-standard-deviation onset detector. ``laser_guided`` uses
+    ``laser_predicted_on_time`` and optional ``laser_predicted_off_time`` on
+    the supplied ``time`` axis. The laser_guidance.laser_selection_options
+    helper prepares these per-spot options. With no off-time, the ordinary
+    washout detector supplies the end. Guided edges stay at predicted sweeps,
+    without the extra grab sweep used by ``autopick_signal_regions``. When
     ``signal_duration_limit_seconds`` is supplied, the freely selected signal
     end is capped at the measured sweep nearest that many seconds after the
     detected signal start. The default ``None`` leaves the end unconstrained.
@@ -700,12 +726,19 @@ def select_signal_regions(
     )
     baseline_sweep_n, peak_sweep_n, baseline_offset, plateau_offset = common
     canonical = resolve_method(method)
+    detector_options = dict(method_options)
+    laser_off_index = None
+    if canonical == "laser_guided":
+        detector_options["time"] = times
+        off = method_options.get("laser_predicted_off_time")
+        if off is not None and np.isfinite(off) and times is not None:
+            laser_off_index = int(np.argmin(np.abs(times - off)))
     detection_index, diagnostics = _SELECTORS[canonical](
         values,
         baseline_sweep_n=baseline_sweep_n,
         threshold=threshold,
         filter_percentile=filter_percentile,
-        **method_options,
+        **detector_options,
     )
     initial_windows = selection_windows(
         detection_index,
@@ -714,6 +747,7 @@ def select_signal_regions(
         peak_sweep_n=peak_sweep_n,
         baseline_offset=baseline_offset,
         plateau_offset=plateau_offset,
+        signal_end=laser_off_index,
     )
     plateau_start, plateau_end, baseline_start, baseline_end = initial_windows
     baseline_reference = values[baseline_start:baseline_end]
@@ -742,6 +776,9 @@ def select_signal_regions(
         sigma_threshold=signal_start_sigma_threshold,
         relative_increase=signal_start_relative_increase,
     )
+    if canonical == "laser_guided":
+        signal_start = detection_index
+        start_diagnostics = {"signal_start_source": "laser_guided"}
     signal_end, washout_start, end_diagnostics = find_signal_end(
         values,
         signal_start=signal_start,
@@ -756,6 +793,10 @@ def select_signal_regions(
         baseline_consecutive=signal_end_baseline_consecutive,
         minimum_signal_fraction=signal_end_minimum_signal_fraction,
     )
+    if laser_off_index is not None:
+        signal_end = laser_off_index
+        washout_start = signal_end + 1 if signal_end + 1 < values.size else None
+        end_diagnostics = {"signal_end_source": "laser_guided"}
     unrestricted_signal_end = int(signal_end)
     duration_limit_applied = False
     duration_limit_index = -1
@@ -886,8 +927,11 @@ def autopick_signal_regions(data, **options) -> SelectionResult:
     The detector's statistical boundaries and diagnostics remain available via
     ``select_signal_regions``. Use this entry point for import and re-picking;
     never apply it to saved or manually reviewed selections.
+    Laser-guided windows retain their predicted edges without grab gaps.
     """
     selection = select_signal_regions(data, **options)
+    if selection.method == "laser_guided":
+        return selection
     # Plateau [p, q) excludes sweep q; signal [s, e] includes sweep e.
     # A grab gap of one sweep AFTER the displayed exclusive boundary q means
     # e >= q + 1 (not q or q - 1). Before p means s <= p - 1. Both are local
@@ -980,6 +1024,8 @@ def read_experiment_data(
     detector_calibration=None,
     cycle_time_s=None,
     restored_selections=None,
+    laser_qc_threshold_s=2.0,
+    signal_duration_limit_source="fixed",
 ):
     """Read Qtegra exports or an in-memory session and initialize selections.
 
@@ -1050,6 +1096,12 @@ def read_experiment_data(
         import. When every generated field is saved, initialize the selection
         schema from one spot only. Incomplete records and other detectors keep
         full automatic selection.
+    laser_qc_threshold_s : float, keyword-only
+        Flag absolute onset residuals strictly above this threshold (default
+        2.0 s). Informational only; requires usable session laser times.
+    signal_duration_limit_source : str, keyword-only
+        'fixed' (default) uses signal_duration_limit_seconds. 'laser' uses
+        each spot's firing duration where available, otherwise the fixed limit.
 
     Returns
     -------
@@ -1111,12 +1163,51 @@ def read_experiment_data(
     )
     experiment.attrs["detector_calibration"] = calibration_record
 
+    # The axis itself remains the reader's recorded-start axis. Window offsets
+    # use manifest.started_at (not the potentially rounded CSV start), because
+    # UPbDB computed the log clock correction against that instant.
+    if manifest is not None and manifest.has_laser_data:
+        from .laser_guidance import add_laser_timing
+
+        windows = {
+            row.label: window for row in manifest.acquisitions
+            if (window := manifest.acquisition_laser_window(row.label)) is not None
+        }
+        # The manifest convenience method requires an on-time. Preserve an
+        # off-only incomplete firing for display, although it cannot guide a
+        # selection or contribute a transport-delay pair.
+        for row in manifest.acquisitions:
+            laser = row.laser
+            if row.label in windows or laser is None or laser.laser_off_at is None:
+                continue
+            log = manifest.laser_log(laser.log_sha256)
+            if log is None or log.clock_offset_s is None:
+                continue
+            try:
+                start = pd.Timestamp(row.started_at)
+                if pd.isna(start):
+                    continue
+                start = start.tz_localize('UTC') if start.tzinfo is None else start.tz_convert('UTC')
+                off = (pd.Timestamp(laser.laser_off_at) - start).total_seconds() + log.clock_offset_s
+            except (ValueError, OverflowError):
+                continue
+            windows[row.label] = (None, off)
+        add_laser_timing(
+            experiment, windows,
+            dict(zip(experiment.spot_names, experiment.spot_starting_times)),
+            scan_positions={row.label: row.laser.scan_position for row in manifest.acquisitions
+                            if row.laser is not None and row.laser.scan_position is not None},
+            log_sha256=tuple(log.sha256 for log in manifest.laser_logs if log.sha256),
+            spot_key=",".join(dict.fromkeys(log.spot_key for log in manifest.laser_logs if log.spot_key)),
+        )
+
     selection_data = total_data
     if restored_selections:
         from .project import _complete_threshold_selections, _restore_selection_inputs_valid
 
         if (
-            _SELECTORS.get('threshold') is threshold_onset
+            'laser' not in experiment.attrs
+            and _SELECTORS.get('threshold') is threshold_onset
             and _complete_threshold_selections(
                 experiment, restored_selections, selection_method, selection_fallback_methods,
             )
@@ -1138,6 +1229,8 @@ def read_experiment_data(
         selection_fallback_methods=selection_fallback_methods,
         selection_options=selection_options,
         signal_duration_limit_seconds=signal_duration_limit_seconds,
+        laser_qc_threshold_s=laser_qc_threshold_s,
+        signal_duration_limit_source=signal_duration_limit_source,
     )
     if selection_data is total_data:
         experiment = auto_select_baseline_peak(
@@ -1161,6 +1254,8 @@ def read_experiment_data(
     # auto-pick instead of silently falling back to the selector defaults.
     # These attrs contain only scalar values and a shallow options mapping, so
     # they remain safe for ordinary pandas slicing and concatenation.
+    from .laser_guidance import nondefault_laser_settings
+
     experiment.attrs['selection_parameters'] = {
         'baseline_sweep_n': int(baseline_sweep_n),
         'peak_sweep_n': int(peak_sweep_n),
@@ -1170,11 +1265,15 @@ def read_experiment_data(
         'plateau_offset': int(plateau_offset),
         'selection_method': str(selection_method),
         'selection_fallback_methods': tuple(selection_fallback_methods),
-        'selection_options': dict(selection_options or {}),
+        'selection_options': nondefault_laser_settings(selection_options or {}),
         'signal_duration_limit_seconds': signal_duration_limit_seconds,
         'selection_channels': dict(selection_channels or {}),
     }
 
+    experiment.attrs['selection_parameters'].update(nondefault_laser_settings({
+        'laser_qc_threshold_s': float(laser_qc_threshold_s),
+        'signal_duration_limit_source': signal_duration_limit_source,
+    }))
     return experiment, element_channels, total_data
 
 
@@ -1410,7 +1509,9 @@ def auto_select_baseline_peak(experiment,
                               selection_method='threshold',
                               selection_fallback_methods: tuple[str, ...] = (),
                               selection_options: Mapping[str, object] | None = None,
-                              signal_duration_limit_seconds: float | None = None):
+                              signal_duration_limit_seconds: float | None = None,
+                              laser_qc_threshold_s: float = 2.0,
+                              signal_duration_limit_source: str = "fixed"):
     """Initialize signal windows for every analysis in an experiment.
 
     Parameters
@@ -1433,6 +1534,12 @@ def auto_select_baseline_peak(experiment,
     signal_duration_limit_seconds : float, optional
         Nominal on-peak duration after detected signal start. Signal handles
         may extend one sweep beyond the resulting plateau boundary.
+    laser_qc_threshold_s : float, optional
+        Informational onset residual threshold in seconds, default 2.0.
+    signal_duration_limit_source : str, optional
+        'fixed' (default), or 'laser' to use per-spot firing durations with
+        the fixed limit as fallback. Laser timing columns and attrs can be
+        installed with UPbRPy.laser_guidance.add_laser_timing.
 
     Returns
     -------
@@ -1446,6 +1553,49 @@ def auto_select_baseline_peak(experiment,
     )
     if signal_duration_limit_seconds is None:
         signal_duration_limit_seconds = option_duration_limit
+    from .laser_guidance import laser_selection_options, update_laser_qc
+
+    laser_qc_threshold_s = method_options.pop('laser_qc_threshold_s', laser_qc_threshold_s)
+    signal_duration_limit_source = method_options.pop(
+        'signal_duration_limit_source', signal_duration_limit_source,
+    )
+    # Validate even if a session has no timed firings.
+    laser_selection_options({}, signal_duration_limit_source=signal_duration_limit_source)
+    has_laser = 'laser' in experiment.attrs
+    guided = resolve_method(selection_method) == 'laser_guided'
+    uses_guidance = has_laser and (guided or any(
+        _ALIASES.get(normalize_method_name(method)) == 'laser_guided'
+        for method in selection_fallback_methods
+    ))
+    if has_laser and uses_guidance:
+        reference_method = next(
+            (resolve_method(method) for method in selection_fallback_methods
+             if resolve_method(method) != 'laser_guided'), 'threshold',
+        )
+        # A separate data-only pass prevents guided predictions from entering
+        # the delay estimate. Use the same channel and selection parameters.
+        reference = experiment.drop(columns=[
+            c for c in experiment if c.startswith('laser_') and c != 'laser_duration_s'
+        ]).copy()
+        reference.attrs.pop('laser', None)
+        reference = auto_select_baseline_peak(
+            reference, total_data, primary_channel, baseline_sweep_n, peak_sweep_n,
+            threshold, filter_percentile, baseline_offset, plateau_offset,
+            selection_channels=selection_channels,
+            selection_method=reference_method if guided else selection_method,
+            selection_fallback_methods=() if guided else (reference_method,),
+            selection_options=method_options,
+            signal_duration_limit_seconds=signal_duration_limit_seconds,
+            signal_duration_limit_source=signal_duration_limit_source,
+        )
+        experiment['laser_detected_onset_time'] = pd.to_numeric(
+            reference['signal_start_times'], errors='coerce',
+        ).where(reference['selection_error'].isna())
+        experiment.attrs['laser']['reference_method'] = reference_method
+        update_laser_qc(experiment, threshold_s=laser_qc_threshold_s)
+    elif has_laser:
+        experiment['laser_detected_onset_time'] = np.nan
+        experiment.attrs['laser'].pop('reference_method', None)
     channels_by_sample = {
         str(sample).strip().casefold(): str(channel).strip()
         for sample, channel in (selection_channels or {}).items()
@@ -1475,6 +1625,16 @@ def auto_select_baseline_peak(experiment,
                 f"spot {spot_name!r}."
             )
         values = spot_data[selection_channel].tolist()
+        spot_options = {}
+        spot_duration_limit = signal_duration_limit_seconds
+        if has_laser or (signal_duration_limit_source == 'laser' and 'laser_duration_s' in experiment):
+            spot_options = laser_selection_options(
+                experiment.loc[row_mask].iloc[0],
+                experiment.attrs.get('laser', {}).get('transport_delay_s'),
+                signal_duration_limit_source=signal_duration_limit_source,
+                signal_duration_limit_seconds=signal_duration_limit_seconds,
+            )
+            spot_duration_limit = spot_options.pop('signal_duration_limit_seconds')
         attempted_methods = [
             selection_method,
             *selection_fallback_methods,
@@ -1482,6 +1642,9 @@ def auto_select_baseline_peak(experiment,
         selection = None
         selection_errors = []
         for candidate_method in attempted_methods:
+            candidate_options = dict(method_options)
+            if resolve_method(candidate_method) == 'laser_guided':
+                candidate_options.update(spot_options)
             try:
                 selection = autopick_signal_regions(
                     values,
@@ -1493,8 +1656,8 @@ def auto_select_baseline_peak(experiment,
                     filter_percentile=filter_percentile,
                     baseline_offset=baseline_offset,
                     plateau_offset=plateau_offset,
-                    signal_duration_limit_seconds=signal_duration_limit_seconds,
-                    **method_options,
+                    signal_duration_limit_seconds=spot_duration_limit,
+                    **candidate_options,
                 )
                 break
             except SelectionError as error:
@@ -1510,6 +1673,8 @@ def auto_select_baseline_peak(experiment,
                 selection_errors
             )
             continue
+        if has_laser and not guided and selection.method != 'laser_guided':
+            experiment.loc[row_mask, 'laser_detected_onset_time'] = spot_data.iloc[selection.signal_start]['Time']
         experiment.loc[row_mask, 'selection_error'] = None
         experiment.loc[row_mask, 'plateau_start_times'] = spot_data.iloc[selection.plateau_start]['Time']
         experiment.loc[row_mask, 'plateau_end_times'] = spot_data.iloc[selection.plateau_end]['Time']
@@ -1525,7 +1690,7 @@ def auto_select_baseline_peak(experiment,
             selection.diagnostics['signal_end_unrestricted_index']
         )
         experiment.loc[row_mask, 'selection_signal_duration_limit_seconds'] = (
-            signal_duration_limit_seconds
+            spot_duration_limit
         )
         experiment.loc[row_mask, 'selection_signal_duration_limit_applied'] = (
             selection.diagnostics['signal_duration_limit_applied']
@@ -1539,6 +1704,8 @@ def auto_select_baseline_peak(experiment,
             experiment.loc[row_mask, 'selection_sigma_threshold'] = selection.diagnostics['sigma_threshold']
         experiment.loc[row_mask, 'selection_error'] = None
 
+    if has_laser:
+        update_laser_qc(experiment, threshold_s=laser_qc_threshold_s)
     return experiment
 
 def subtract_baseline(experiment, channels, total_data):
@@ -1594,6 +1761,7 @@ __all__ = [
     'SelectionResult',
     'available_selection_methods',
     'register_selection_method',
+    'laser_guided_onset',
     'selection_method_label',
     'select_baseline_peak',
     'select_signal_regions',

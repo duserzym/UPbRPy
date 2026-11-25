@@ -555,6 +555,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
 
         selection_menu = workflow_menu.addMenu("Auto-pick Method")
         self.selection_menu_group = QtGui.QActionGroup(self)
+        self.selection_menu = selection_menu
         self.selection_menu_group.setExclusive(True)
         self.selection_menu_actions: dict[str, QtGui.QAction] = {}
         for method in SELECTION_METHODS:
@@ -649,6 +650,12 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         )
 
         view_menu = self.menuBar().addMenu("View")
+        self.laser_marks_action = view_menu.addAction("Laser marks")
+        self.laser_marks_action.setCheckable(True)
+        self.laser_marks_action.setChecked(True)
+        self.laser_marks_action.setVisible(False)
+        self.laser_marks_action.toggled.connect(lambda _checked: self.refresh_view())
+        self.laser_marks_action.toggled.connect(lambda _checked: self.update_project_window_title())
         theme_menu = view_menu.addMenu("Theme")
         self.theme_action_group = QtGui.QActionGroup(self)
         self.theme_action_group.setExclusive(True)
@@ -1319,6 +1326,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                 self.export_settings.to_dict(),
             ),
             "display_choices": {
+                **({"laser_marks": False} if self._has_laser_times() and not self.laser_marks_action.isChecked() else {}),
                 "visible_channels": self.checked_channels(),
                 "selected_stats_channel": self.selected_stats_channel,
                 "sigma_level": self.sigma_level,
@@ -2244,6 +2252,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         list_height = count * (item_height + 2 * self.workflow_step_list.spacing())
         self.workflow_step_list.setMinimumHeight(list_height)
         self.workflow_step_list.setMaximumHeight(list_height)
+        if self._has_laser_times():
+            # Fit the final tab layout after the optional rail copy has folded.
+            layout.invalidate()
+            overflow = rail.minimumSizeHint().height() - available
+            if overflow > 0:
+                gaps = max(1, sum(not layout.itemAt(i).isEmpty() for i in range(layout.count())) - 1)
+                layout.setSpacing(max(0, layout.spacing() - (overflow + gaps - 1) // gaps))
 
     def _build_workflow_rail(self) -> QtWidgets.QWidget:
         """Build the always-readable icon rail for ordered reduction stages."""
@@ -2436,7 +2451,49 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             "at the next re-pick."
         )
         self.on_peak_duration_spin.valueChanged.connect(self.on_on_peak_duration_changed)
-        plateau_width_layout.addRow("Nominal on-peak", self.on_peak_duration_spin)
+        duration_row = QtWidgets.QWidget()
+        duration_layout = QtWidgets.QHBoxLayout(duration_row)
+        duration_layout.setContentsMargins(0, 0, 0, 0)
+        duration_layout.setSpacing(4)
+        duration_layout.addWidget(self.on_peak_duration_spin, 1)
+        self.signal_duration_source_combo = StyledComboBox()
+        self.signal_duration_source_combo.addItem("Fixed", "fixed")
+        self.signal_duration_source_combo.addItem("Laser-on duration", "laser")
+        self.signal_duration_source_combo.setMinimumContentsLength(4)
+        self.signal_duration_source_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.signal_duration_source_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.signal_duration_source_combo.setToolTip(
+            "Use the firing duration for each spot; missing durations use the fixed limit. Applies at the next re-pick.")
+        self.signal_duration_source_combo.currentIndexChanged.connect(self.on_signal_duration_source_changed)
+        self.signal_duration_source_combo.hide()
+        self.signal_duration_source_combo.setEnabled(False)
+        duration_layout.addWidget(self.signal_duration_source_combo, 1)
+        plateau_width_layout.addRow("Nominal on-peak", duration_row)
+        plateau_width_layout.labelForField(duration_row).setToolTip(self.on_peak_duration_spin.toolTip())
+        self.laser_selection_controls = QtWidgets.QWidget()
+        laser_layout = QtWidgets.QVBoxLayout(self.laser_selection_controls)
+        laser_layout.setContentsMargins(0, 0, 0, 0)
+        laser_layout.setSpacing(4)
+        qc_row = QtWidgets.QHBoxLayout()
+        qc_row.addWidget(QtWidgets.QLabel("Laser QC limit"))
+        self.laser_qc_threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.laser_qc_threshold_spin.setRange(0.0, 1000000.0)
+        self.laser_qc_threshold_spin.setDecimals(2)
+        self.laser_qc_threshold_spin.setValue(2.0)
+        self.laser_qc_threshold_spin.setSuffix(" s")
+        self.laser_qc_threshold_spin.setKeyboardTracking(False)
+        self.laser_qc_threshold_spin.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.laser_qc_threshold_spin.valueChanged.connect(self.on_laser_qc_threshold_changed)
+        qc_row.addWidget(self.laser_qc_threshold_spin, 1)
+        laser_layout.addLayout(qc_row)
+        self.transport_delay_label = QtWidgets.QLabel()
+        self.transport_delay_label.setWordWrap(True)
+        laser_layout.addWidget(self.transport_delay_label)
+        self.laser_selection_controls.hide()
+        plateau_width_layout.addRow(self.laser_selection_controls)
         self.on_peak_detected_label = QtWidgets.QLabel()
         self.on_peak_detected_label.setObjectName("OnPeakDetectedLabel")
         self.on_peak_detected_label.setWordWrap(True)
@@ -2473,7 +2530,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         for form in (threshold_layout, sigma_layout, plateau_width_layout):
             for spin in form.parentWidget().findChildren(QtWidgets.QAbstractSpinBox):
                 spin.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-                form.labelForField(spin).setToolTip(spin.toolTip())
+                label = form.labelForField(spin)
+                if label is not None:
+                    label.setToolTip(spin.toolTip())
         self.autopick_duration_label = QtWidgets.QLabel()
         self.autopick_duration_label.setWordWrap(True)
         self.autopick_duration_label.setToolTip(
@@ -5319,6 +5378,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def project_workspace_state(self) -> dict[str, object]:
         """Return compact display context worth restoring with a reduction."""
         return {
+            **({"laser_marks": False} if self._has_laser_times() and not self.laser_marks_action.isChecked() else {}),
             "selected_spot": self.current_spot_name(),
             "visible_channels": self.checked_channels(),
             "selected_stats_channel": self.selected_stats_channel,
@@ -5681,6 +5741,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             restored.session.directory,
             project_path=restored.project_path,
         )
+        with QtCore.QSignalBlocker(self.laser_marks_action):
+            self.laser_marks_action.setChecked(bool(workspace.get("laser_marks", True)))
         self.spot_colours.restore(workspace.get("sample_colours", {}), workspace.get("spot_colours", {}))
         self._refresh_spot_colours()
         self.session.include_export_concentrations = bool(
@@ -6045,6 +6107,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             if str(directory) == self.session.directory and "detector_calibration" in self.session.import_settings
             else None
         )
+        if self.selection_method == "laser_guided" and str(directory) != self.session.directory:
+            self.selection_method = str(self.workflow_preset.read_kwargs.get("selection_method", "threshold"))
         calculation = lambda: load_session(
                 directory,
                 primary_channel=chosen_primary,
@@ -6089,6 +6153,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
         self.session = loaded_session
+        with QtCore.QSignalBlocker(self.laser_marks_action):
+            self.laser_marks_action.setChecked(True)
         self.spot_colours.sample_colours.clear()
         self.spot_colours.spot_colours.clear()
         self._set_colour_order()
@@ -6133,6 +6199,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if not getattr(self, "_installing_project", False):
             self._populate_selectors()
         self._sync_fit_controls()
+        self._sync_selection_method_combo()
         self._sync_selection_parameter_controls()
         self._sync_plateau_filter_control()
         self._set_default_ratio_for_preset()
@@ -6300,6 +6367,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             self._is_populating = False
 
     def _sync_selection_method_combo(self) -> None:
+        self._sync_laser_controls()
         self._is_populating = True
         try:
             for index in range(self.selection_method_combo.count()):
@@ -6317,6 +6385,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         """Show and populate the controls relevant to the onset method."""
         if not hasattr(self, "selection_parameter_stack"):
             return
+        self._sync_laser_controls()
         settings = (
             self.session.import_settings
             if self.session.loaded
@@ -6328,6 +6397,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.selection_parameter_stack.setCurrentIndex(
             0 if method == "threshold" else 1
         )
+        self.selection_parameter_stack.setVisible(method != "laser_guided")
         method_options = settings.get("selection_options", {})
         if not isinstance(method_options, dict):
             method_options = {}
@@ -6368,6 +6438,130 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._sync_on_peak_detected_label()
         if self.autopick_settings_toggle.isChecked():
             self._position_compact_panels()
+
+    def _has_laser_times(self) -> bool:
+        experiment = self.session.experiment
+        return self.session.loaded and any(
+            column in experiment and np.isfinite(pd.to_numeric(experiment[column], errors="coerce")).any()
+            for column in ("laser_on_time", "laser_off_time")
+        )
+
+    def _sync_laser_controls(self) -> None:
+        """Expose laser selection tools only for applicable sessions."""
+        timed = self._has_laser_times()
+        available = timed or (self.session.loaded and self.session.laser_data_available)
+        self.laser_marks_action.setVisible(available)
+        self.laser_marks_action.setEnabled(timed)
+        self.signal_duration_source_combo.setVisible(available)
+        self.signal_duration_source_combo.setEnabled(timed and self._active_worker is None)
+        self.laser_selection_controls.setVisible(available)
+        self.laser_qc_threshold_spin.setEnabled(timed and self._active_worker is None)
+        with QtCore.QSignalBlocker(self.selection_method_combo):
+            index = self.selection_method_combo.findData("laser_guided")
+            if timed and index < 0:
+                self.selection_method_combo.addItem("Laser-guided", "laser_guided")
+            elif not timed and index >= 0:
+                self.selection_method_combo.removeItem(index)
+        action = self.selection_menu_actions.get("laser_guided")
+        if timed and action is None:
+            action = self.selection_menu.addAction("Laser-guided")
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked: self.select_selection_method("laser_guided"))
+            self.selection_menu_group.addAction(action)
+            self.selection_menu_actions["laser_guided"] = action
+        elif not timed and action is not None:
+            self.selection_menu.removeAction(action)
+            self.selection_menu_group.removeAction(action)
+            del self.selection_menu_actions["laser_guided"]
+            action.deleteLater()
+        if timed:
+            selected = self.selection_menu_actions.get(str(self.session.import_settings.get(
+                "selection_method", self.selection_method)))
+            if selected is not None:
+                selected.setChecked(True)
+        settings = self.session.import_settings
+        options = settings.get("selection_options", {})
+        if not isinstance(options, dict):
+            options = {}
+        with QtCore.QSignalBlocker(self.laser_qc_threshold_spin):
+            self.laser_qc_threshold_spin.setValue(float(settings.get(
+                "laser_qc_threshold_s", options.get("laser_qc_threshold_s", 2.0))))
+        with QtCore.QSignalBlocker(self.signal_duration_source_combo):
+            self.signal_duration_source_combo.setCurrentIndex(max(0, self.signal_duration_source_combo.findData(
+                settings.get("signal_duration_limit_source", options.get("signal_duration_limit_source", "fixed")))))
+        laser = self.session.experiment.attrs.get("laser", {})
+        delay = laser.get("transport_delay_s")
+        text = f"{delay:.2f} s" if delay is not None else "unknown (using 0 s)"
+        self.transport_delay_label.setText(f"Transport delay: {text} ({laser.get('n_pairs', 0)} spots)")
+        self.transport_delay_label.setToolTip("Median detected onset minus laser-on; at least three spots are required.")
+
+    def on_laser_qc_threshold_changed(self, value: float) -> None:
+        """Refresh informational warnings using the loaded onset measurements."""
+        if self._is_populating or not self._has_laser_times():
+            return
+        from UPbRPy.laser_guidance import update_laser_qc
+
+        self._set_laser_setting("laser_qc_threshold_s", float(value), 2.0)
+        update_laser_qc(self.session.experiment, threshold_s=value)
+        self._sync_laser_controls()
+        self._sync_laser_spot_column()
+        self.update_project_window_title()
+
+    def _set_laser_setting(self, name: str, value: object, default: object) -> None:
+        settings = self.session.import_settings
+        options = settings.get("selection_options")
+        if isinstance(options, dict):
+            options.pop(name, None)
+        if value == default:
+            settings.pop(name, None)
+        else:
+            settings[name] = value
+
+    def on_signal_duration_source_changed(self, index: int) -> None:
+        """Choose the duration limit source for subsequent re-picks."""
+        if self._is_populating or not self._has_laser_times() or index < 0:
+            return
+        self.change_guard.clear()
+        self._set_laser_setting("signal_duration_limit_source", self.signal_duration_source_combo.itemData(index), "fixed")
+        self.statusBar().showMessage("Duration source updated; re-pick spots to apply it.")
+        self.update_project_window_title()
+
+    def _sync_laser_spot_column(self) -> None:
+        """Update the analysis list without rebuilding its groups or selection."""
+        available = self._has_laser_times() or (self.session.loaded and self.session.laser_data_available)
+        with QtCore.QSignalBlocker(self.spot_list):
+            if not available:
+                if self.spot_list.columnCount() != 1:
+                    self.spot_list.setColumnCount(1)
+                    self.spot_list.setHeaderHidden(True)
+                    self.spot_list.header().setStretchLastSection(True)
+                return
+            if self.spot_list.columnCount() != 2:
+                self.spot_list.setColumnCount(2)
+                self.spot_list.setHeaderLabels(["Analysis", "Laser Δ (s)"])
+                self.spot_list.setHeaderHidden(False)
+                self.spot_list.header().setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Ignored)
+                self.spot_list.header().setStretchLastSection(False)
+                self.spot_list.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+                self.spot_list.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                self.spot_list.setColumnWidth(1, 96)
+            rows = self.session.experiment.set_index("spot_names")
+            iterator = QtWidgets.QTreeWidgetItemIterator(self.spot_list)
+            while item := iterator.value():
+                name = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if name in rows.index:
+                    row = rows.loc[name]
+                    residual = row.get("laser_onset_residual_s", np.nan)
+                    flagged = bool(row.get("laser_onset_flag", False))
+                    item.setText(1, f"{residual:.2f}" if pd.notna(residual) else "")
+                    item.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    item.setIcon(1, self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+                                 if flagged else QtGui.QIcon())
+                    item.setToolTip(1, "Laser onset residual exceeds the QC limit." if flagged else
+                                    "Detected onset minus laser-on and transport delay." if pd.notna(residual) else
+                                    "Laser residual unavailable: missing onset or fewer than three delay pairs.")
+                iterator += 1
 
     @sync_change_controls
     def _sync_plateau_filter_control(self) -> None:
@@ -6555,7 +6749,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             selection_options = self.session.import_settings.setdefault(
                 "selection_options", {}
             )
-            if isinstance(selection_options, dict) and self.selection_method != "threshold":
+            if isinstance(selection_options, dict) and self.selection_method in {"rolling_sigma", "excel_expanding_sigma"}:
                 selection_options.setdefault(
                     "sigma_threshold",
                     8.0
@@ -8027,6 +8221,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if getattr(self, "_installing_project", False):
             return
         self.flush_selection_edits()
+        self._sync_laser_controls()
+        self._sync_laser_spot_column()
         self.trace_plot.apply_theme(active_theme(QtWidgets.QApplication.instance()))
         if not self.session.loaded:
             # Deferred details belong to a loaded view; drop them with it.
@@ -8087,6 +8283,16 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                     selected_spot
                 ),
             )
+        if (self._has_laser_times() and self.laser_marks_action.isChecked()
+                and self.session.plot_mode in {"raw", "baseline_subtracted"}):
+            laser_rows = self.session.experiment.loc[self.session.experiment["spot_names"].eq(selected_spot)]
+            row = laser_rows.iloc[0] if not laser_rows.empty else {}
+            self.trace_plot.set_laser_marks(
+                row.get("laser_on_time"), row.get("laser_off_time"),
+                transport_delay_s=self.session.experiment.attrs.get("laser", {}).get("transport_delay_s"),
+            )
+        else:
+            self.trace_plot.set_laser_marks()
         if should_focus_spot:
             self._focus_selected_spot(selected_spot)
         elif preserve_main_view and visible_channels:
@@ -8883,6 +9089,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             self.repick_all_spots_button.setEnabled(False)
             self.save_project_button.setEnabled(False)
             self.export_results_button.setEnabled(False)
+            if self._has_laser_times():
+                self._sync_laser_controls()
         self.statusBar().showMessage(f"{label}…")
         self._sync_selection_history_actions()
 
@@ -8942,6 +9150,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             self.repick_all_spots_button.setEnabled(self.session.loaded)
             self.save_project_button.setEnabled(self.session.loaded)
             self.export_results_button.setEnabled(self.session.loaded)
+            if self._has_laser_times():
+                self._sync_laser_controls()
             had_queued_edits = bool(self.pending_region_updates)
             self.flush_selection_edits()
             if succeeded and (quiet or label == "Updating reduction stages"):
@@ -8991,6 +9201,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             autopick_selection_regions(self.session, spot_name)
         except Exception as exc:
             self._handle_action_error("Auto-pick failed", exc)
+            if self._has_laser_times():
+                self.refresh_view()
             return
         self._push_selection_history(before, self._selection_snapshot([spot_name]))
         self._spots_edited_since_write.add(spot_name)

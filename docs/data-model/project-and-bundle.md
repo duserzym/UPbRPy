@@ -175,7 +175,7 @@ contents depend on the selected algorithm.
 | primary_channel | String | `29Si` | Default signal selection channel |
 | internal_standard_channel | String or null | `null` | Internal normalization element channel; null uses 29Si for zircon/titanite, 44Ca for apatite, 49Ti for rutile, independently of the picking channel |
 | reference_overrides | Object of standard → channel → number, µg/g | `{}` | Project-local total-element concentrations, finite and greater than zero; applied to a private copy of the reference archive; never written to the shared library |
-| selection_method | String | `threshold` | Selection algorithm |
+| selection_method | String | `threshold` | Selection algorithm, including opt-in `laser_guided` |
 | selection_options | Object | `{}` | Selection/import options; Studio restores normalized import settings from here |
 | detector_calibration | Object | `{}` | Mode/options for detector fitting; empty uses Qtegra Y |
 | concentration_standards | Array of strings | `[]` | Concentration calibrators |
@@ -196,6 +196,20 @@ contents depend on the selected algorithm.
 | common_pb_options | Object | `{}` | Common-Pb algorithm kwargs |
 | uncertainty | Object | See below | Explicit uncertainty components |
 | depth_calibration | Object or null | `null` | Optional linear pulse-to-depth calibration |
+
+The new import settings `laser_qc_threshold_s` and
+`signal_duration_limit_source` live in `PipelineConfig.selection_options`
+alongside existing reader options (or its nested detector `selection_options`
+mapping). Serialization omits values equal to their defaults, `2.0` and
+`"fixed"`, respectively. Older projects therefore load with these defaults,
+and existing configurations and reviewed selections serialize unchanged.
+`UPbRPy.laser_guidance.nondefault_laser_settings(settings) -> dict` performs
+this omission without mutating the supplied mapping.
+Nondefault values and `selection_method="laser_guided"` round-trip normally.
+`experiment.attrs["selection_parameters"]` also retains nondefault choices.
+Laser timing and QC columns are not saved as reviewed selection decisions;
+they are recomputed from input metadata on import. Restoring saved windows
+does not re-pick them.
 
 | Key within decision | Type / unit | Default | Meaning |
 | --- | --- | --- | --- |

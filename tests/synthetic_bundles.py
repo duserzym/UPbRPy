@@ -56,6 +56,7 @@ def manifest_toml(
     sep: str = "_",
     aliases: dict[str, str] | None = None,
     sample_labels: Mapping[str, str] | None = None,
+    laser: bool = False,
 ) -> str:
     """Return a session_manifest.toml in the WORKFLOW.md 3.2 layout."""
     aliases = {"MAD": "MADUCSB", "AFB": "AFB1"} if aliases is None else aliases
@@ -80,12 +81,31 @@ def manifest_toml(
         'secondary = ["AFB1"]',
         "",
     ]
+    if laser:
+        out = [
+            'format = "upbdb-session-bundle"', 'format_version = 2',
+            '[[laser_log]]', 'sha256 = "' + 'a' * 64 + '"',
+            'file_name = "synthetic.lase"', 'system_type = "Chromium"',
+            'serial_number = "DEMO-0001"', 'spot_key = "position"',
+            'has_laser_times = true', 'clock_offset_s = 3600.0',
+            'offset_pairs = 4', 'linked = 4', '',
+        ] + out
     for index, (label, path) in enumerate(zip(labels, raw_paths)):
         kind = "sample" if label.startswith("KD") else "primary_standard"
         sample_fields = (
             [f"sample_label = {json.dumps(sample_labels[label])}"]
             if sample_labels is not None and label in sample_labels else []
         )
+        started = datetime(2025, 3, 20, 21) + timedelta(minutes=index)
+        laser_fields = []
+        if laser:
+            laser_fields = [
+                'laser_log_sha256 = "' + 'a' * 64 + '"',
+                f'laser_scan_position = {index + 1}',
+                f'laser_on_at = {(started - timedelta(hours=1) + timedelta(seconds=4)).isoformat()}+00:00',
+                f'laser_off_at = {(started - timedelta(hours=1) + timedelta(seconds=14)).isoformat()}+00:00',
+                'laser_stage_um = [100.0, 200.0, 300.0]',
+            ]
         out += [
             "[[acquisition]]",
             f'label = "{label}"',
@@ -94,7 +114,8 @@ def manifest_toml(
             f'spot_id = "spot-{index}"',
             f'grain_id = "grain-{index}"',
             f'sample_id = "sample-{index}"',
-            f"started_at = {(datetime(2025, 3, 20, 21) + timedelta(minutes=index)).isoformat()}",
+            f"started_at = {started.isoformat()}{'+00:00' if laser else ''}",
+            *laser_fields,
             f'sha256 = "{sha256(path)}"',
             f'kind = "{kind}"',
             f'filename = "{path.name}"',
@@ -111,6 +132,7 @@ def write_session_bundle(
     server: str = "http://127.0.0.1:1",
     upbr: bool = True,
     sample_labels: Mapping[str, str] | None = None,
+    laser: bool = False,
 ) -> Path:
     """Write a session bundle folder ``root/<session_key>/`` and return it."""
     bundle = root / session_key
@@ -121,6 +143,7 @@ def write_session_bundle(
             session_key=session_key,
             raw_paths=raw_paths,
             sample_labels=sample_labels,
+            laser=laser,
         ),
         encoding="utf-8",
     )

@@ -28,7 +28,11 @@ from GUI.workflows import (
 from UPbRPy.calibration import evaluate_correction_result
 from UPbRPy.concentration import resolve_element_concentration
 from UPbRPy.export_table import ExportSettings, build_export_table
-from UPbRPy.io import read_experiment_data, resolve_session_manifest, autopick_signal_regions
+from UPbRPy.io import (
+    read_experiment_data, resolve_session_manifest, autopick_signal_regions,
+    SelectionError, resolve_method,
+)
+from UPbRPy.laser_guidance import laser_selection_options, update_laser_qc
 from UPbRPy.qtegra import QtegraSession, open_qtegra
 from UPbRPy.spot_edits import restore_spot_edits, spot_edit_metadata
 from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
@@ -783,6 +787,7 @@ def load_session(
     session = ReductionSession(
         directory=str(directory),
         qtegra=qtegra,
+        laser_data_available=bool(manifest is not None and manifest.has_laser_data),
         experiment=experiment,
         total_data=total_data,
         channels=clean_channels,
@@ -1197,6 +1202,15 @@ def autopick_selection_regions(
     )
     if selection_channel not in spot_data:
         selection_channel = session.primary_channel if session.primary_channel in spot_data else str(spot_data.columns[1])
+    if "laser" in session.experiment.attrs:
+        row = session.experiment.loc[session.experiment["spot_names"].eq(spot_name)].iloc[0]
+        channels = {
+            str(key).strip().casefold(): str(value).strip()
+            for key, value in session.import_settings.get("selection_channels", {}).items()
+        }
+        selection_channel = channels.get(spot_name.casefold(), channels.get(
+            str(row.get("sample", "")).casefold(), selection_channel,
+        ))
 
     selection_options = session.import_settings.get("selection_options", {})
     if not isinstance(selection_options, Mapping):
@@ -1208,10 +1222,21 @@ def autopick_selection_regions(
     duration_limit = session.import_settings.get(
         "signal_duration_limit_seconds", option_duration_limit
     )
-    selection = autopick_signal_regions(
-        spot_data[selection_channel].to_numpy(dtype=float),
+    threshold_s = selection_options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", 2.0))
+    duration_source = selection_options.pop("signal_duration_limit_source", session.import_settings.get("signal_duration_limit_source", "fixed"))
+    has_laser = "laser" in session.experiment.attrs
+    row_mask = session.experiment["spot_names"].eq(spot_name)
+    laser_options = {}
+    if has_laser:
+        laser_options = laser_selection_options(
+            session.experiment.loc[row_mask].iloc[0],
+            session.experiment.attrs["laser"].get("transport_delay_s"),
+            signal_duration_limit_source=duration_source,
+            signal_duration_limit_seconds=duration_limit,
+        )
+        duration_limit = laser_options.pop("signal_duration_limit_seconds")
+    pick_options = dict(
         time=spot_data["Time"].to_numpy(dtype=float),
-        method=str(session.import_settings.get("selection_method", "threshold")),
         baseline_sweep_n=int(session.import_settings.get("baseline_sweep_n", 10)),
         peak_sweep_n=int(session.import_settings.get("peak_sweep_n", 20)),
         threshold=float(session.import_settings.get("threshold", 0.1)),
@@ -1221,6 +1246,45 @@ def autopick_selection_regions(
         signal_duration_limit_seconds=duration_limit,
         **selection_options,
     )
+    values = spot_data[selection_channel].to_numpy(dtype=float)
+    method = str(session.import_settings.get("selection_method", "threshold"))
+    fallbacks = session.import_settings.get("selection_fallback_methods", ())
+    guided = resolve_method(method) == "laser_guided"
+    if has_laser and (guided or "laser_guided" in fallbacks):
+        reference_method = next((m for m in fallbacks if m != "laser_guided"), "threshold")
+        reference_methods = [reference_method] if guided else [method, reference_method]
+        detected = np.nan
+        for candidate in reference_methods:
+            try:
+                reference = autopick_signal_regions(values, method=candidate, **pick_options)
+                detected = float(spot_data.iloc[reference.signal_start]["Time"])
+                break
+            except SelectionError:
+                continue
+        session.experiment.loc[row_mask, "laser_detected_onset_time"] = detected
+        update_laser_qc(session.experiment, threshold_s=threshold_s)
+        # The independently measured onset can change the session median.
+        laser_options = laser_selection_options(
+            session.experiment.loc[row_mask].iloc[0],
+            session.experiment.attrs["laser"].get("transport_delay_s"),
+        )
+        laser_options.pop("signal_duration_limit_seconds")
+    errors = []
+    for candidate in (method, *fallbacks):
+        try:
+            selection = autopick_signal_regions(
+                values, method=candidate, **pick_options,
+                **(laser_options if resolve_method(candidate) == "laser_guided" else {}),
+            )
+            break
+        except SelectionError as exc:
+            errors.append(f"{candidate}: {exc}")
+    else:
+        if has_laser:
+            if not guided and "laser_guided" not in fallbacks:
+                session.experiment.loc[row_mask, "laser_detected_onset_time"] = np.nan
+            update_laser_qc(session.experiment, threshold_s=threshold_s)
+        raise SelectionError("; ".join(errors))
 
     max_index = max(0, len(spot_data) - 1)
     baseline = (
@@ -1260,7 +1324,7 @@ def autopick_selection_regions(
         selection.diagnostics["signal_end_unrestricted_index"]
     )
     session.experiment.loc[row_mask, "selection_signal_duration_limit_seconds"] = (
-        session.import_settings.get("signal_duration_limit_seconds")
+        duration_limit
     )
     session.experiment.loc[row_mask, "selection_signal_duration_limit_applied"] = (
         selection.diagnostics["signal_duration_limit_applied"]
@@ -1275,6 +1339,10 @@ def autopick_selection_regions(
         selection.diagnostics.get("signal_end_falling_edge_start", -1)
     )
     session.experiment.loc[row_mask, MANUAL_SELECTION_COLUMN] = False
+    if has_laser:
+        if not guided and selection.method != "laser_guided":
+            session.experiment.loc[row_mask, "laser_detected_onset_time"] = signal[0]
+        update_laser_qc(session.experiment, threshold_s=threshold_s)
     if refresh_pipeline:
         clear_reduction_cache(session)
     return {"baseline": baseline, "plateau": plateau, "signal": signal}
@@ -1354,6 +1422,39 @@ def autopick_all_selection_regions(
     manual = set() if overwrite_manual else manual_selection_spots(session)
     skipped = [name for name in all_names if name in manual]
     spot_names = [name for name in all_names if name not in manual]
+    if "laser" in session.experiment.attrs and spot_names:
+        method = str(session.import_settings.get("selection_method", "threshold"))
+        fallbacks = session.import_settings.get("selection_fallback_methods", ())
+        if method == "laser_guided" or "laser_guided" in fallbacks:
+            # Estimate from all independent onsets before any guided picks,
+            # so the first spot uses the same delay as the last spot.
+            from UPbRPy.io import auto_select_baseline_peak
+
+            reference_method = next((m for m in fallbacks if m != "laser_guided"), "threshold")
+            reference = session.experiment.drop(columns=[
+                c for c in session.experiment if c.startswith("laser_") and c != "laser_duration_s"
+            ]).copy()
+            reference.attrs.pop("laser", None)
+            saved_options = session.import_settings.get("selection_options", {})
+            options = dict(saved_options) if isinstance(saved_options, Mapping) else {}
+            threshold_s = options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", 2.0))
+            source = options.pop("signal_duration_limit_source", session.import_settings.get("signal_duration_limit_source", "fixed"))
+            duration = session.import_settings.get("signal_duration_limit_seconds", options.pop("signal_duration_limit_seconds", None))
+            auto_select_baseline_peak(
+                reference, session.total_data, session.primary_channel,
+                **{key: session.import_settings[key] for key in (
+                    "baseline_sweep_n", "peak_sweep_n", "threshold", "filter_percentile",
+                    "baseline_offset", "plateau_offset", "selection_channels",
+                ) if key in session.import_settings},
+                selection_method=reference_method if method == "laser_guided" else method,
+                selection_fallback_methods=() if method == "laser_guided" else (reference_method,),
+                selection_options=options, signal_duration_limit_source=source,
+                signal_duration_limit_seconds=duration,
+            )
+            session.experiment["laser_detected_onset_time"] = pd.to_numeric(
+                reference["signal_start_times"], errors="coerce",
+            ).where(reference["selection_error"].isna())
+            update_laser_qc(session.experiment, threshold_s=threshold_s)
     failures: dict[str, str] = {}
     selected_count = 0
     for spot_name in spot_names:
