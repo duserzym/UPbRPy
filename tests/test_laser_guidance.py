@@ -102,6 +102,9 @@ def test_default_identity_through_reduction_and_old_project(tmp_path, monkeypatc
             analytical_frame(getattr(finalized, attr)), check_exact=True,
         )
     new_project = build_reduction_project(second, project_file)
+    qc = new_project.pop('laser_qc')
+    assert qc['detected_onsets'] == dict(zip(timed.spot_names, timed.laser_detected_onset_time))
+    assert qc['computed'] is True
     new_project.pop('saved_utc')
     project.pop('saved_utc')
     assert json.dumps(new_project) == json.dumps(project)

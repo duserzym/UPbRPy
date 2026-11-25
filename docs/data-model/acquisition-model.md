@@ -180,7 +180,9 @@ Rich files without StartTime. Stage coordinates are not added to experiment.
 `transport_delay_s` (median detected onset minus laser-on; null with fewer
 than three successful pairs), `n_pairs`, `qc_threshold_s` (default 3.0 s),
 `log_sha256` (list), `source` (`manifest` or `lase`), and `spot_key` (comma
-separated when logs use different keys). When `laser_guided` is configured
+separated when logs use different keys). `qc_onsets_computed` is a boolean:
+false on reopening a project without stored QC, true after an onset pass.
+When `laser_guided` is configured
 as the primary method or a fallback,
 `reference_method` names the first non-laser configured fallback, or
 `threshold` when there is none. This detector supplies both the transport
@@ -190,8 +192,11 @@ pick supplies no pair, even if the guided pick succeeds.
 Applying or replacing laser timing in Studio recomputes these independent
 onsets from the loaded sweep data and import settings for every spot, including
 reviewed spots. Saved windows, manual flags and cached reduction results are
-preserved. Restoring a project with a saved laser tie also detects onsets for
-every spot before overlaying its saved selections.
+preserved. Restoring a project uses saved independent onsets from its optional
+`laser_qc` block. Complete successful threshold records use the ordinary one-spot
+template with QC disabled; other records use full selection, as for non-laser
+projects. Temporary QC from those picks is discarded. Older projects open with
+empty QC until **Compute laser QC** is requested; saving then retains the onsets.
 
 `UPbRPy.io.update_laser_detected_onsets(experiment, total_data, primary_channel,
 *, selection_method="threshold", selection_fallback_methods=(),

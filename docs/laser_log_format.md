@@ -289,3 +289,14 @@ same timing columns from a parsed manifest without re-reading sweeps or
 changing selections. Studio uses it when removing a standalone replacement.
 `read_experiment_data` also accepts optional keyword arguments `laser_tie=None`
 and `laser_tie_confirmed=False` to install a precomputed tie before selection.
+
+Studio projects retain independent QC onsets in an optional `laser_qc` block,
+separate from the tie and reviewed windows. Reopening restores timing and saved
+onsets. Selection restore follows the same checks as non-laser projects:
+complete successful threshold records use one template spot with QC disabled;
+other records use ordinary full selection. Temporary QC from those picks is
+discarded before saved onsets are restored. Older projects open with empty
+QC; **Compute laser QC** in the auto-pick panel performs the optional pass in a
+worker without changing selections, manual flags or cached reductions. Save
+afterward to retain the onsets. See
+[stored laser QC](data-model/project-and-bundle.md#stored-laser-qc).

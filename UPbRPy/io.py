@@ -1101,7 +1101,8 @@ def read_experiment_data(
         Complete saved threshold selections that the caller will overlay after
         import. When every generated field is saved, initialize the selection
         schema from one spot only. Incomplete records and other detectors keep
-        full automatic selection.
+        full automatic selection. Laser projects use the same checks; the
+        caller restores stored QC onsets separately after overlaying windows.
     laser_qc_threshold_s : float, keyword-only
         Flag absolute onset residuals strictly above this threshold (default
         3.0 s). Informational only; requires usable session laser times.
@@ -1181,8 +1182,7 @@ def read_experiment_data(
         from .project import _complete_threshold_selections, _restore_selection_inputs_valid
 
         if (
-            'laser' not in experiment.attrs
-            and _SELECTORS.get('threshold') is threshold_onset
+            _SELECTORS.get('threshold') is threshold_onset
             and _complete_threshold_selections(
                 experiment, restored_selections, selection_method, selection_fallback_methods,
             )
@@ -1212,9 +1212,13 @@ def read_experiment_data(
             experiment, total_data, *pick_args, **pick_options,
         )
     else:
-        picked = auto_select_baseline_peak(
-            experiment.copy(), selection_data, *pick_args, **pick_options,
-        )
+        template = experiment.copy()
+        # Only threshold without fallbacks reaches this branch. Retain laser
+        # durations for duration limits, but skip informational QC entirely.
+        laser = template.attrs.pop('laser', None)
+        picked = auto_select_baseline_peak(template, selection_data, *pick_args, **pick_options)
+        if laser is not None:
+            picked.attrs['laser'] = laser
         if picked['selection_error'].notna().any():
             # A failed first pick creates columns in a different order. Keep
             # the ordinary path if the raw trace no longer yields a template.
@@ -1223,6 +1227,15 @@ def read_experiment_data(
             )
         else:
             experiment = picked
+
+    if restored_selections and 'laser' in experiment.attrs:
+        # Fresh picks supply missing selection fields, never restored QC.
+        # Studio loads stored onsets after spot edits and the window overlay.
+        from .project import restore_project_laser_qc
+        from .laser_guidance import update_laser_qc
+
+        restore_project_laser_qc(experiment, None)
+        update_laser_qc(experiment, threshold_s=laser_qc_threshold_s)
 
     # Keep the parameters that produced the initial selections with the
     # experiment table. Interactive editors can then reproduce the same
@@ -1505,6 +1518,7 @@ def update_laser_detected_onsets(
     ).where(reference['selection_error'].isna())
     if 'laser' in experiment.attrs:
         experiment.attrs['laser']['reference_method'] = reference_method
+        experiment.attrs['laser']['qc_onsets_computed'] = True
 
 
 def auto_select_baseline_peak(experiment,
@@ -1706,6 +1720,7 @@ def auto_select_baseline_peak(experiment,
         experiment.loc[row_mask, 'selection_error'] = None
 
     if has_laser:
+        experiment.attrs['laser']['qc_onsets_computed'] = True
         update_laser_qc(experiment, threshold_s=laser_qc_threshold_s)
     return experiment
 

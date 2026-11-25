@@ -534,6 +534,16 @@ default 3 s limit (`laser_qc_threshold_s`, set by
 `UPbRPy.laser_guidance.DEFAULT_LASER_QC_THRESHOLD_S`). QC is informational and does not
 change reduction. Onsets are detected independently of guided selections.
 
+Projects store independent QC onsets in a compact `laser_qc` block. Cold reopen
+restores them and recomputes delay/residuals/flags. Complete successful threshold
+records use a one-spot template with QC disabled; other records use ordinary
+full selection, following the same checks as non-laser projects. Temporary QC
+from those picks is discarded. Older projects without this block show empty QC and **QC
+onsets are not computed**. Use **Compute laser QC** in the auto-pick panel to
+run the optional onset pass in a worker. It retains reviewed windows, manual
+flags and cached reductions; save the project to retain the computed onsets.
+Valid local cached results still take the existing warm restore path.
+
 **Laser-guided** (`laser_guided`) selection is off by default. When chosen,
 it uses laser-on/off plus the session delay; unknown delay uses zero and is
 recorded in diagnostics. Missing on allows configured detector fallbacks;

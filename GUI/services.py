@@ -54,6 +54,7 @@ from UPbRPy.project import (
     read_reduction_project,
     resolve_project_path,
     restore_project_selections,
+    restore_project_laser_qc,
 )
 from UPbRPy.results import ReductionDecision
 from UPbRPy.standards import (
@@ -877,6 +878,30 @@ def apply_session_laser_tie(session: ReductionSession, tie: LaserTie | None, *, 
         session.pipeline.laser_tie = tie
 
 
+def compute_session_laser_qc(session: ReductionSession) -> None:
+    """Compute independent QC onsets without changing windows or cached results."""
+    if "laser" not in session.experiment.attrs:
+        return
+    experiment = session.experiment.copy(deep=True)
+    update_laser_detected_onsets(
+        experiment, session.total_data, session.primary_channel,
+        **{key: session.import_settings[key] for key in (
+            "baseline_sweep_n", "peak_sweep_n", "threshold", "filter_percentile",
+            "baseline_offset", "plateau_offset", "selection_channels",
+            "selection_method", "selection_fallback_methods", "selection_options",
+            "signal_duration_limit_seconds", "signal_duration_limit_source",
+        ) if key in session.import_settings},
+    )
+    options = session.import_settings.get("selection_options", {})
+    update_laser_qc(experiment, threshold_s=float(session.import_settings.get(
+        "laser_qc_threshold_s", options.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))))
+    for column in ("laser_detected_onset_time", "laser_onset_residual_s", "laser_onset_flag"):
+        session.experiment[column] = experiment[column]
+    session.experiment.attrs["laser"] = experiment.attrs["laser"]
+    if session.pipeline is not None:
+        session.pipeline.update_laser_qc_metadata(session.experiment)
+
+
 def reimport_detector_calibration(
     session: ReductionSession,
     detector_calibration: Mapping[str, object],
@@ -1020,6 +1045,7 @@ def restore_session_from_project(
                 auto_picks, session.experiment
             )
     if "laser" in session.experiment.attrs:
+        restore_project_laser_qc(session.experiment, document.get("laser_qc"))
         nested_options = config.selection_options.get("selection_options") or {}
         update_laser_qc(session.experiment, threshold_s=float(config.selection_options.get(
             "laser_qc_threshold_s", nested_options.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))))

@@ -1,5 +1,6 @@
 - Open Chromium `.lase` laser logs beside a session, review spot matches, and keep the confirmed log in your project. Linked laser data loads automatically from version-2 database bundles.
 - Review laser onset QC with a default 3 s limit and a session delay estimate from at least three spots. The delay includes Qtegra's start-to-fire interval. Explicitly saved thresholds, including 2 s, are retained; projects without a threshold use 3 s.
+- Laser projects save independent QC onsets and use the same restore checks as non-laser projects: complete successful threshold selections need one template spot with QC disabled; other selections use the normal full pick. Restored QC comes only from saved onsets. Older projects leave QC empty until Compute laser QC is requested; selections and cached reductions are preserved.
 - Choose optional Laser-guided selection or use each spot's laser-on duration as its signal-duration limit. Existing projects and sessions without laser data keep their default results.
 - Export fields prefill from laser settings, with ranges and per-spot columns when settings vary. Reduction manifests record laser provenance and QC.
 - Stage coordinates are excluded from exports unless you enable **Include stage coordinates in exports**; the option defaults off for old and new projects.

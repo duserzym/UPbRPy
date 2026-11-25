@@ -124,7 +124,7 @@ from UPbRPy.io import SELECTION_METHODS, selection_method_label
 from UPbRPy.autosave import selection_autosave_path
 from UPbRPy.export_table import ExportSettings, build_export_table
 from UPbRPy.pipeline import PIPELINE_STAGE_BY_ID, PipelineStage
-from UPbRPy.project import write_reduction_project
+from UPbRPy.project import laser_qc_record, write_reduction_project
 from UPbRPy.qtegra import companion_folder, detect_format, UnsupportedQtegraFormat
 from UPbRPy.reproducibility import (
     export_reduction_bundle,
@@ -1291,6 +1291,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             return ""
         payload = {
             **({"laser_log": self.session.laser_tie.to_dict()} if self.session.laser_tie is not None else {}),
+            **({"laser_qc": laser_qc_record(self.session.experiment)}
+               if "laser" in self.session.experiment.attrs else {}),
             "origin": self.session.origin,
             "workflow_key": self.workflow_preset.key,
             "primary_channel": self.session.primary_channel,
@@ -2494,6 +2496,9 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         self.laser_qc_threshold_spin.valueChanged.connect(self.on_laser_qc_threshold_changed)
         qc_row.addWidget(self.laser_qc_threshold_spin, 1)
+        self.compute_laser_qc_button = QtWidgets.QPushButton("Compute laser QC")
+        self.compute_laser_qc_button.clicked.connect(self.compute_laser_qc)
+        qc_row.addWidget(self.compute_laser_qc_button)
         laser_layout.addLayout(qc_row)
         self.transport_delay_label = QtWidgets.QLabel()
         self.transport_delay_label.setWordWrap(True)
@@ -6552,6 +6557,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.signal_duration_source_combo.setEnabled(timed and self._active_worker is None)
         self.laser_selection_controls.setVisible(available)
         self.laser_qc_threshold_spin.setEnabled(timed and self._active_worker is None)
+        self.compute_laser_qc_button.setEnabled(timed and self._active_worker is None)
         with QtCore.QSignalBlocker(self.selection_method_combo):
             index = self.selection_method_combo.findData("laser_guided")
             if timed and index < 0:
@@ -6589,7 +6595,24 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         delay = laser.get("transport_delay_s")
         text = f"{delay:.2f} s" if delay is not None else "unknown (using 0 s)"
         self.transport_delay_label.setText(f"Transport delay: {text} ({laser.get('n_pairs', 0)} spots)")
+        if timed and not laser.get("qc_onsets_computed", True):
+            self.transport_delay_label.setText("Transport delay: QC onsets are not computed")
         self.transport_delay_label.setToolTip("Median detected onset minus laser-on; at least three spots are required.")
+
+    def compute_laser_qc(self) -> None:
+        """Run the optional independent onset pass in the shared worker slot."""
+        from GUI.services import compute_session_laser_qc
+
+        if not self._has_laser_times() or self._active_worker is not None:
+            return
+
+        def finished(_result):
+            self.refresh_view()
+            self.update_project_window_title()
+
+        self.run_background(
+            "Computing laser QC", lambda: compute_session_laser_qc(self.session), finished,
+        )
 
     def on_laser_qc_threshold_changed(self, value: float) -> None:
         """Refresh informational warnings using the loaded onset measurements."""

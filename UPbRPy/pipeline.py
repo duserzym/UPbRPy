@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from enum import Enum
@@ -807,6 +808,17 @@ class ReductionPipeline:
             and _experiment_fingerprint(experiment)
             == self._source_experiment_fingerprint
         )
+
+    def update_laser_qc_metadata(self, experiment: pd.DataFrame) -> None:
+        """Sync informational QC without replacing or invalidating cache entries.
+
+        The caller must preserve all selection decisions and sweep inputs.
+        """
+        for column in ("laser_detected_onset_time", "laser_onset_residual_s", "laser_onset_flag"):
+            self.experiment[column] = experiment[column].to_numpy(copy=True)
+        self.experiment.attrs["laser"] = deepcopy(experiment.attrs["laser"])
+        self._source_experiment = experiment
+        self._source_experiment_fingerprint = _experiment_fingerprint(experiment)
 
     def update_experiment(self, experiment: pd.DataFrame) -> None:
         """Replace selection metadata and invalidate every calculated stage."""

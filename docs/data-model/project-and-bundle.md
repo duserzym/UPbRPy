@@ -58,12 +58,55 @@ settings and stage coordinates. It is separate from pipeline configuration
 and reduction manifests. Projects without a loaded log omit this object and
 retain their existing serialization.
 
-Reopening applies the stored tie before selection, even if the original file
+Reopening applies the stored tie before restoring selections, even if the original file
 has moved. A different SHA-256 in a same-named file beside the session (or in
 its parent) warns and keeps the saved tie, including when cached results load.
 Removing the standalone log removes this object on the next save and restores
 manifest laser timing when available. Stage coordinates remain project data;
 they are absent from analytical columns and reduction exports.
+
+### Stored laser QC
+
+Timed laser projects also write an optional top-level `laser_qc` object:
+
+```json
+{
+  "detected_onsets": {"Synthetic_1": 6.0, "Synthetic_2": null},
+  "computed": true,
+  "reference_method": "threshold"
+}
+```
+
+`detected_onsets` maps current spot names to independently detected onsets in
+session seconds; failed or unavailable detections are null. `computed` records
+whether the onset pass has run, including a pass with no successful detections.
+`reference_method` is optional and retains the detector metadata when present.
+This block keeps QC measurements separate from reviewed selection decisions,
+without repeating session metadata in every selection record. It contains no
+stage coordinates. Projects without timed laser data omit it and retain their
+existing bytes. No format or settings-schema version changes are needed.
+
+Cold reopening reads laser times from the manifest or stored tie, overlays saved
+selections after spot edits, restores these onsets by current spot name, and
+recomputes transport delay, residuals and flags with arithmetic only. Selection
+restore uses the same checks as non-laser projects: complete successful threshold
+records use one template spot, with QC disabled; incomplete or failed records,
+other detectors, configured fallbacks, or invalid inputs use ordinary full
+selection. A failed template also falls back to full selection. Any temporary
+QC from selection is discarded before stored onsets are restored. Reopening
+runs no separate pass to recover QC. Projects without `laser_qc` open with empty
+QC and the label **QC onsets are not computed**. **Compute laser QC** in the
+auto-pick panel runs the independent onset pass in a worker, retaining windows,
+manual/review flags and existing cache entries. Saving then stores the onsets.
+The valid local results-cache path and its key rules are unchanged.
+
+`UPbRPy.project.laser_qc_record(experiment)` returns this JSON-safe object or
+`None`. `restore_project_laser_qc(experiment, record)` restores its onset column
+and metadata in place; call `update_laser_qc` afterward to recompute QC.
+`GUI.services.compute_session_laser_qc(session)` performs the explicit pass.
+`ReductionPipeline.update_laser_qc_metadata(experiment)` synchronizes only QC
+columns and laser attrs without replacing or invalidating cached stages; its
+caller must preserve selection decisions and sweep inputs.
 
 ### Studio spot edits
 
@@ -226,9 +269,10 @@ configurations and reviewed selections serialize unchanged.
 this omission without mutating the supplied mapping.
 Nondefault values and `selection_method="laser_guided"` round-trip normally.
 `experiment.attrs["selection_parameters"]` also retains nondefault choices.
-Laser timing and QC columns are not saved as reviewed selection decisions;
-they are recomputed from input metadata on import. Restoring saved windows
-does not re-pick them.
+Laser timing and QC columns are not saved as reviewed selection decisions.
+Timing comes from input metadata; independent onsets are stored in `laser_qc`.
+Saved window fields overlay the imported selections. Missing QC onsets remain
+uncomputed, including when full selection was needed to recover missing fields.
 
 | Key within decision | Type / unit | Default | Meaning |
 | --- | --- | --- | --- |

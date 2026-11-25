@@ -200,6 +200,35 @@ def selection_records(experiment: pd.DataFrame) -> list[dict[str, object]]:
     ]
 
 
+def laser_qc_record(experiment: pd.DataFrame) -> dict[str, object] | None:
+    """Return stored independent onsets, separate from reviewed selections."""
+    if "laser" not in experiment.attrs or "laser_detected_onset_time" not in experiment:
+        return None
+    laser = experiment.attrs["laser"]
+    record = {
+        "detected_onsets": dict(zip(experiment.spot_names, experiment.laser_detected_onset_time)),
+        "computed": laser.get("qc_onsets_computed", True),
+    }
+    if "reference_method" in laser:
+        record["reference_method"] = laser["reference_method"]
+    return json_safe_value(record)
+
+
+def restore_project_laser_qc(experiment: pd.DataFrame, record: Mapping | None) -> None:
+    """Restore onsets after spot edits; missing records leave QC uncomputed."""
+    if "laser" not in experiment.attrs:
+        return
+    laser = experiment.attrs["laser"]
+    laser.pop("reference_method", None)
+    onsets = record.get("detected_onsets", {}) if record is not None else {}
+    experiment["laser_detected_onset_time"] = pd.to_numeric(
+        experiment.spot_names.map(onsets), errors="coerce",
+    ).astype(float)
+    laser["qc_onsets_computed"] = bool(record is not None and record.get("computed", True))
+    if record is not None and "reference_method" in record:
+        laser["reference_method"] = record["reference_method"]
+
+
 def completed_project_stages(
     values: Sequence[str | PipelineStage],
 ) -> tuple[PipelineStage, ...]:
@@ -281,6 +310,9 @@ def build_reduction_project(
     tie = getattr(pipeline, "laser_tie", None)
     if tie is not None:
         document["laser_log"] = tie.to_dict()
+    qc = laser_qc_record(pipeline.experiment)
+    if qc is not None:
+        document["laser_qc"] = qc
     return document
 
 
@@ -316,6 +348,20 @@ def validate_reduction_project(
         raise ValueError("Project selection records are missing or invalid.")
     if not isinstance(workspace, Mapping):
         raise ValueError("Project workspace settings are invalid.")
+    if "laser_qc" in document:
+        qc = document["laser_qc"]
+        if not isinstance(qc, Mapping) or not isinstance(qc.get("detected_onsets"), Mapping):
+            raise ValueError("Project laser QC must contain a detected_onsets object.")
+        if "computed" in qc and not isinstance(qc["computed"], bool):
+            raise ValueError("Project laser QC computed flag must be boolean.")
+        if "reference_method" in qc and not isinstance(qc["reference_method"], str):
+            raise ValueError("Project laser QC reference method must be a string.")
+        if any(
+            not isinstance(name, str) or (value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value)
+            )) for name, value in qc["detected_onsets"].items()
+        ):
+            raise ValueError("Project laser QC onsets must be finite numbers or null, keyed by spot name.")
 
     stage_values = pipeline.get("completed_stages", ())
     if not isinstance(stage_values, (list, tuple)):
@@ -510,6 +556,8 @@ __all__ = [
     "project_path_record",
     "resolve_project_path",
     "selection_records",
+    "laser_qc_record",
+    "restore_project_laser_qc",
     "completed_project_stages",
     "default_resume_stage",
     "build_reduction_project",
