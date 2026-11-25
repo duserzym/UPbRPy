@@ -111,6 +111,7 @@ nav:
       - Export table: data-model/export-table.md
       - Publication table contract: export_table_spec.md
       - Qtegra exports decision: qtegra_export_formats.md
+      - Chromium laser logs: laser_log_format.md
       - Python API: reference/python-api.md
   - Development:
       - Building Studio: development/building.md
