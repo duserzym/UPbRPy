@@ -8,6 +8,8 @@ import re
 
 import pandas as pd
 
+from .laser_guidance import DEFAULT_LASER_QC_THRESHOLD_S
+
 
 ABLATION_FIELDS = ("fluence_j_cm2", "rep_rate_hz", "spot_um", "spot_shape", "shot_count", "output_pct")
 LASER_COLUMNS = (
@@ -158,9 +160,12 @@ def laser_export_manifest(pipeline, data: LaserExportData, *, include_stage_coor
     combinations = Counter(tuple(row.get(key) for key in ABLATION_FIELDS) for row in spots.values())
     qc = experiment.attrs.get("laser", {})
     options = {**experiment.attrs.get("selection_parameters", {}), **pipeline.config.selection_options}
+    nested_options = options.get("selection_options") or {}
+    threshold_s = options.get("laser_qc_threshold_s", nested_options.get(
+        "laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))
     record = dict(source=data.source, logs=list(data.logs),
         transport_delay_s=qc.get("transport_delay_s"),
-        qc_threshold_s=qc.get("qc_threshold_s", options.get("laser_qc_threshold_s", 2.0)),
+        qc_threshold_s=qc.get("qc_threshold_s", threshold_s),
         flagged_count=int(experiment.loc[experiment.spot_names.isin(labels)].get(
             "laser_onset_flag", pd.Series(dtype=bool)).fillna(False).sum()),
         signal_duration_limit_source=options.get("signal_duration_limit_source", "fixed"),

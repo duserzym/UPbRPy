@@ -33,7 +33,9 @@ from UPbRPy.io import (
     SelectionError, resolve_method, update_laser_detected_onsets,
 )
 from UPbRPy.laser_tie import LaserTie
-from UPbRPy.laser_guidance import laser_selection_options, update_laser_qc
+from UPbRPy.laser_guidance import (
+    DEFAULT_LASER_QC_THRESHOLD_S, laser_selection_options, update_laser_qc,
+)
 from UPbRPy.qtegra import QtegraSession, open_qtegra
 from UPbRPy.spot_edits import restore_spot_edits, spot_edit_metadata
 from UPbRPy.session_manifest import find_session_manifest, raw_directory_for
@@ -868,7 +870,7 @@ def apply_session_laser_tie(session: ReductionSession, tie: LaserTie | None, *, 
         )
         options = session.import_settings.get("selection_options", {})
         update_laser_qc(experiment, threshold_s=float(session.import_settings.get(
-            "laser_qc_threshold_s", options.get("laser_qc_threshold_s", 2.0))))
+            "laser_qc_threshold_s", options.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))))
     session.laser_file_warnings = ()
     if session.pipeline is not None:
         session.pipeline.update_inputs(experiment, session.total_data, invalidate_from=None)
@@ -1018,7 +1020,9 @@ def restore_session_from_project(
                 auto_picks, session.experiment
             )
     if "laser" in session.experiment.attrs:
-        update_laser_qc(session.experiment, threshold_s=float(config.selection_options.get("laser_qc_threshold_s", 2.0)))
+        nested_options = config.selection_options.get("selection_options") or {}
+        update_laser_qc(session.experiment, threshold_s=float(config.selection_options.get(
+            "laser_qc_threshold_s", nested_options.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))))
     # else: a project fresh from a session bundle has no reviewed windows
     # yet; the auto-picked windows of this import are the starting point.
     session.origin = project_origin(document) or session.origin
@@ -1298,7 +1302,7 @@ def autopick_selection_regions(
     duration_limit = session.import_settings.get(
         "signal_duration_limit_seconds", option_duration_limit
     )
-    threshold_s = selection_options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", 2.0))
+    threshold_s = selection_options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))
     duration_source = selection_options.pop("signal_duration_limit_source", session.import_settings.get("signal_duration_limit_source", "fixed"))
     has_laser = "laser" in session.experiment.attrs
     row_mask = session.experiment["spot_names"].eq(spot_name)
@@ -1506,7 +1510,7 @@ def autopick_all_selection_regions(
             # so the first spot uses the same delay as the last spot.
             saved_options = session.import_settings.get("selection_options", {})
             options = dict(saved_options) if isinstance(saved_options, Mapping) else {}
-            threshold_s = options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", 2.0))
+            threshold_s = options.pop("laser_qc_threshold_s", session.import_settings.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))
             source = options.pop("signal_duration_limit_source", session.import_settings.get("signal_duration_limit_source", "fixed"))
             duration = session.import_settings.get("signal_duration_limit_seconds", options.pop("signal_duration_limit_seconds", None))
             update_laser_detected_onsets(

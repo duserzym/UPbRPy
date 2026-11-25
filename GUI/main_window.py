@@ -17,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import shiboken6
 
 from UPbRPy.notices import ReductionError
+from UPbRPy.laser_guidance import DEFAULT_LASER_QC_THRESHOLD_S
 from UPbRPy.naming import natural_sort_key
 from UPbRPy.spot_edits import spot_edit_metadata
 
@@ -2486,7 +2487,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.laser_qc_threshold_spin = QtWidgets.QDoubleSpinBox()
         self.laser_qc_threshold_spin.setRange(0.0, 1000000.0)
         self.laser_qc_threshold_spin.setDecimals(2)
-        self.laser_qc_threshold_spin.setValue(2.0)
+        self.laser_qc_threshold_spin.setValue(DEFAULT_LASER_QC_THRESHOLD_S)
         self.laser_qc_threshold_spin.setSuffix(" s")
         self.laser_qc_threshold_spin.setKeyboardTracking(False)
         self.laser_qc_threshold_spin.setSizePolicy(
@@ -6580,7 +6581,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             options = {}
         with QtCore.QSignalBlocker(self.laser_qc_threshold_spin):
             self.laser_qc_threshold_spin.setValue(float(settings.get(
-                "laser_qc_threshold_s", options.get("laser_qc_threshold_s", 2.0))))
+                "laser_qc_threshold_s", options.get("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S))))
         with QtCore.QSignalBlocker(self.signal_duration_source_combo):
             self.signal_duration_source_combo.setCurrentIndex(max(0, self.signal_duration_source_combo.findData(
                 settings.get("signal_duration_limit_source", options.get("signal_duration_limit_source", "fixed")))))
@@ -6596,7 +6597,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             return
         from UPbRPy.laser_guidance import update_laser_qc
 
-        self._set_laser_setting("laser_qc_threshold_s", float(value), 2.0)
+        self._set_laser_setting("laser_qc_threshold_s", float(value), DEFAULT_LASER_QC_THRESHOLD_S)
         update_laser_qc(self.session.experiment, threshold_s=value)
         self._sync_laser_controls()
         self._sync_laser_spot_column()

@@ -17,7 +17,7 @@ from GUI import main_window, services
 from GUI.main_window import MainWindow
 from GUI.theme import build_application
 from GUI.workflows import get_workflow_preset
-from UPbRPy.laser_guidance import update_laser_qc
+from UPbRPy.laser_guidance import DEFAULT_LASER_QC_THRESHOLD_S, update_laser_qc
 from synthetic_bundles import write_session_bundle
 
 
@@ -120,6 +120,7 @@ def test_marks_use_delay_and_do_not_capture_selection_drag(windows):
 
 def test_method_presence_menu_repick_and_single_spot(windows, app):
     window = windows()
+    window.laser_qc_threshold_spin.setValue(2.0)
     combo = window.selection_method_combo
     assert combo.findData("laser_guided") >= 0
     assert combo.currentData() == "threshold"
@@ -158,17 +159,19 @@ def test_qc_threshold_updates_without_reading_or_changing_picks(windows, monkeyp
     window.refresh_view()
     assert window.spot_list.headerItem().text(1) == "Laser Δ (s)"
     item = spot_item(window, experiment.spot_names.iloc[0])
-    assert item.text(1) == "3.00" and not item.icon(1).isNull()
+    assert window.laser_qc_threshold_spin.value() == DEFAULT_LASER_QC_THRESHOLD_S
+    assert item.text(1) == "3.00" and item.icon(1).isNull()
     assert window.transport_delay_label.text() == "Transport delay: 2.00 s (4 spots)"
     before = experiment[["baseline_start_times", "plateau_start_times", "signal_end_times"]].copy()
     monkeypatch.setattr(services, "read_experiment_data", lambda *a, **k: pytest.fail("Re-read data"))
     monkeypatch.setattr(services, "autopick_signal_regions", lambda *a, **k: pytest.fail("Re-picked data"))
-    window.laser_qc_threshold_spin.setValue(3.0)
+    window.laser_qc_threshold_spin.setValue(2.0)
+    assert not item.icon(1).isNull()
+    assert window.session.import_settings["laser_qc_threshold_s"] == 2.0
+    window.laser_qc_threshold_spin.setValue(DEFAULT_LASER_QC_THRESHOLD_S)
     assert item.icon(1).isNull() and not experiment.laser_onset_flag.any()
     assert item.text(1) == "3.00"
     pd.testing.assert_frame_equal(before, experiment[before.columns])
-    window.laser_qc_threshold_spin.setValue(2.0)
-    assert not item.icon(1).isNull()
     assert "laser_qc_threshold_s" not in window.session.import_settings
 
 
@@ -268,6 +271,34 @@ def test_project_roundtrip_and_default_omission(windows, app, tmp_path):
     assert reopened.selection_method_combo.currentData() == "laser_guided"
     assert not reopened.laser_marks_action.isChecked()
     assert not reopened.trace_plot._laser_marks
+
+
+@pytest.mark.parametrize("saved_threshold, nested", [
+    (None, False), (2.0, False), (DEFAULT_LASER_QC_THRESHOLD_S, False), (2.0, True),
+])
+def test_project_loads_saved_qc_threshold_or_new_default(windows, tmp_path, saved_threshold, nested):
+    window = windows()
+    path = tmp_path / "threshold.upbr"
+    window.save_project(path)
+    document = json.loads(path.read_text())
+    options = document["pipeline"]["config"]["selection_options"]
+    assert "laser_qc_threshold_s" not in options
+    if saved_threshold is not None:
+        target = options.setdefault("selection_options", {}) if nested else options
+        target["laser_qc_threshold_s"] = saved_threshold
+    path.write_text(json.dumps(document))
+
+    reopened = windows(project=path)
+    expected = DEFAULT_LASER_QC_THRESHOLD_S if saved_threshold is None else saved_threshold
+    assert reopened.laser_qc_threshold_spin.value() == expected
+    assert reopened.session.experiment.attrs["laser"]["qc_threshold_s"] == expected
+    reopened.save_project(path)
+    saved = json.loads(path.read_text())["pipeline"]["config"]["selection_options"]
+    if expected == DEFAULT_LASER_QC_THRESHOLD_S:
+        assert "laser_qc_threshold_s" not in json.dumps(saved)
+    else:
+        target = saved["selection_options"] if nested else saved
+        assert target["laser_qc_threshold_s"] == expected
 
 
 def test_no_laser_ui_and_project_bytes_stay_identical(windows, tmp_path, monkeypatch):

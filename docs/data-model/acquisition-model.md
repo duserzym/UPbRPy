@@ -178,7 +178,7 @@ Rich files without StartTime. Stage coordinates are not added to experiment.
 
 `experiment.attrs["laser"]` is a small JSON-safe object with
 `transport_delay_s` (median detected onset minus laser-on; null with fewer
-than three successful pairs), `n_pairs`, `qc_threshold_s` (default 2.0),
+than three successful pairs), `n_pairs`, `qc_threshold_s` (default 3.0 s),
 `log_sha256` (list), `source` (`manifest` or `lase`), and `spot_key` (comma
 separated when logs use different keys). When `laser_guided` is configured
 as the primary method or a fallback,
@@ -202,7 +202,8 @@ active data detector, or, when Laser-guided is active, the first non-laser
 fallback (threshold if none). Call `update_laser_qc` afterward to refresh QC.
 
 `read_experiment_data` and `auto_select_baseline_peak` accept
-`laser_qc_threshold_s=2.0` and `signal_duration_limit_source="fixed"`.
+`laser_qc_threshold_s=DEFAULT_LASER_QC_THRESHOLD_S` (3.0 s) and
+`signal_duration_limit_source="fixed"`.
 The latter also accepts `"laser"`: use each finite positive firing duration,
 falling back to `signal_duration_limit_seconds` (possibly None). The existing
 `selection_signal_duration_limit_seconds` records the limit actually used.
@@ -225,10 +226,11 @@ normally callers use `select_signal_regions` or `autopick_signal_regions`.
 The source-independent engine API in `UPbRPy.laser_guidance` is:
 
 ```python
+DEFAULT_LASER_QC_THRESHOLD_S = 3.0
 add_laser_timing(experiment, windows, acquisition_starts, *,
                  scan_positions=None, source="manifest", log_sha256=(), spot_key="")
 estimate_transport_delay(experiment) -> float | None
-update_laser_qc(experiment, *, threshold_s=2.0)
+update_laser_qc(experiment, *, threshold_s=DEFAULT_LASER_QC_THRESHOLD_S)
 laser_selection_options(spot, transport_delay_s=None, *,
                         signal_duration_limit_source="fixed",
                         signal_duration_limit_seconds=None) -> dict

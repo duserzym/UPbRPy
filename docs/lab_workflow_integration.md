@@ -334,7 +334,7 @@ def read_experiment_data(
     selection_method='threshold', selection_fallback_methods=(),
     selection_options=None, signal_duration_limit_seconds=None,
     session_manifest=None, *, detector_calibration=None, cycle_time_s=None,
-    restored_selections=None, laser_qc_threshold_s=2.0,
+    restored_selections=None, laser_qc_threshold_s=DEFAULT_LASER_QC_THRESHOLD_S,
     signal_duration_limit_source="fixed", laser_tie=None,
     laser_tie_confirmed=False,
 ): ...
@@ -530,7 +530,8 @@ laser-on with median acquisition start, this delay also absorbs Qtegra's
 start-to-fire interval: it is a combined shift, not a pure transport time.
 Studio's **Laser Δ (s)** QC column shows the onset residual after subtracting that
 delay; `laser_onset_flag` marks absolute residuals strictly above the
-default 2 s limit (`laser_qc_threshold_s`). QC is informational and does not
+default 3 s limit (`laser_qc_threshold_s`, set by
+`UPbRPy.laser_guidance.DEFAULT_LASER_QC_THRESHOLD_S`). QC is informational and does not
 change reduction. Onsets are detected independently of guided selections.
 
 **Laser-guided** (`laser_guided`) selection is off by default. When chosen,

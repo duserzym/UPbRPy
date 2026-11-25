@@ -18,6 +18,7 @@ from UPbRPy.laser_exports import (
     laser_export_prefill, export_manifest,
 )
 from UPbRPy.laser_tie import LaserTie, LaserTieRow
+from UPbRPy.laser_guidance import DEFAULT_LASER_QC_THRESHOLD_S
 from UPbRPy.pipeline import PipelineStage
 from UPbRPy.project import write_reduction_project, read_reduction_project
 from UPbRPy.reproducibility import (
@@ -180,6 +181,19 @@ def test_laser_manifest_settings_counts_qc_and_no_identifiers(source):
     assert log["clock_offset_s"] is None and log["pairs"] == 0
     assert "serial_number" not in log and "software_version" not in log
     assert "stage" not in json.dumps(laser).lower()
+
+
+@pytest.mark.parametrize("threshold, nested", [
+    (None, False), (2.0, False), (DEFAULT_LASER_QC_THRESHOLD_S, False), (2.0, True),
+])
+def test_manifest_qc_threshold_fallback(threshold, nested):
+    pipeline = laser_pipeline()
+    pipeline.experiment.attrs.pop("laser", None)
+    options = {} if threshold is None else {"laser_qc_threshold_s": threshold}
+    pipeline.config = replace(pipeline.config, selection_options=(
+        {"selection_options": options} if nested else options))
+    expected = DEFAULT_LASER_QC_THRESHOLD_S if threshold is None else threshold
+    assert export_manifest(pipeline, ExportSettings())["laser"]["qc_threshold_s"] == expected
 
 
 def test_settings_old_dict_and_bool_validation():

@@ -16,6 +16,7 @@ from UPbRPy.io import (
 )
 import UPbRPy.io as engine_io
 from UPbRPy.laser_guidance import (
+    DEFAULT_LASER_QC_THRESHOLD_S,
     add_laser_timing, estimate_transport_delay, laser_selection_options, update_laser_qc,
 )
 from UPbRPy.pipeline import FitSettings, PipelineConfig, ReductionPipeline, pipeline_config_from_dict
@@ -137,6 +138,7 @@ def test_source_independent_windows_and_no_times_are_inert():
     assert np.isnan(experiment.laser_duration_s.iloc[1])
     assert np.isnan(experiment.laser_on_time.iloc[2])
     assert experiment.attrs['laser']['source'] == 'lase'
+    assert experiment.attrs['laser']['qc_threshold_s'] == DEFAULT_LASER_QC_THRESHOLD_S
 
 
 @pytest.mark.parametrize('missing', ['on', 'off', 'both'])
@@ -171,6 +173,8 @@ def test_settings_only_manifest_is_inert(tmp_path):
 
 def test_delay_residual_threshold_and_failed_spots(tmp_path):
     experiment, _, _ = import_bundle(tmp_path)
+    assert DEFAULT_LASER_QC_THRESHOLD_S == 3.0
+    assert experiment.attrs['laser']['qc_threshold_s'] == DEFAULT_LASER_QC_THRESHOLD_S
     assert estimate_transport_delay(experiment) == 2.
     assert experiment.attrs['laser']['n_pairs'] == 4
     assert (experiment.laser_onset_residual_s == 0.).all()
@@ -179,6 +183,8 @@ def test_delay_residual_threshold_and_failed_spots(tmp_path):
     experiment.loc[0, 'laser_detected_onset_time'] += 3.
     update_laser_qc(experiment)
     assert experiment.laser_onset_residual_s.iloc[0] == 3.
+    assert not experiment.laser_onset_flag.any()
+    update_laser_qc(experiment, threshold_s=2.)
     assert experiment.laser_onset_flag.tolist() == [True, False, False, False]
     update_laser_qc(experiment, threshold_s=3.)
     assert not experiment.laser_onset_flag.any()  # Strictly greater.
@@ -280,16 +286,16 @@ def test_settings_roundtrip_defaults_and_per_spot_api(tmp_path):
     assert 'laser_guided' not in available_selection_methods()
     assert 'laser_guided' in available_selection_methods(include_laser=True)
     default = PipelineConfig().to_dict()
-    explicit = PipelineConfig(selection_options={'laser_qc_threshold_s': 2., 'signal_duration_limit_source': 'fixed'}).to_dict()
+    explicit = PipelineConfig(selection_options={'laser_qc_threshold_s': DEFAULT_LASER_QC_THRESHOLD_S, 'signal_duration_limit_source': 'fixed'}).to_dict()
     assert explicit == default
     nested = PipelineConfig(selection_options={'selection_options': {
-        'laser_qc_threshold_s': 2., 'signal_duration_limit_source': 'fixed',
+        'laser_qc_threshold_s': DEFAULT_LASER_QC_THRESHOLD_S, 'signal_duration_limit_source': 'fixed',
     }}).to_dict()
     assert nested == default
     plain_bundle = write_session_bundle(tmp_path / 'plain')
     plain, _, _ = read_experiment_data(plain_bundle)
     explicit_defaults, _, _ = read_experiment_data(plain_bundle, selection_options={
-        'laser_qc_threshold_s': 2., 'signal_duration_limit_source': 'fixed',
+        'laser_qc_threshold_s': DEFAULT_LASER_QC_THRESHOLD_S, 'signal_duration_limit_source': 'fixed',
     })
     pd.testing.assert_frame_equal(explicit_defaults, plain, check_exact=True)
     assert explicit_defaults.attrs == plain.attrs
@@ -330,7 +336,8 @@ def test_guided_qc_is_independent_of_predicted_onset(tmp_path):
         row = manifest.acquisitions[0]
         laser = replace(row.laser, laser_on_at=row.laser.laser_on_at - timedelta(seconds=3))
         return replace(manifest, acquisitions=(replace(row, laser=laser), *manifest.acquisitions[1:]))
-    experiment, _, _ = import_bundle(tmp_path, manifest_edit=edit, selection_method='laser_guided')
+    experiment, _, _ = import_bundle(tmp_path, manifest_edit=edit, selection_method='laser_guided',
+                                     laser_qc_threshold_s=2.)
     spot = experiment.set_index('spot_names').loc['NIST612_1']
     assert experiment.attrs['laser']['transport_delay_s'] == 2.
     assert spot.selection_error is None

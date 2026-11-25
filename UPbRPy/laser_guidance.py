@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 
 
+DEFAULT_LASER_QC_THRESHOLD_S = 3.0
+
+
 def add_laser_timing(
     experiment: pd.DataFrame,
     windows: Mapping[str, tuple[float | None, float | None]],
@@ -47,7 +50,7 @@ def add_laser_timing(
     experiment.attrs["laser"] = {
         "transport_delay_s": None,
         "n_pairs": 0,
-        "qc_threshold_s": 2.0,
+        "qc_threshold_s": DEFAULT_LASER_QC_THRESHOLD_S,
         "log_sha256": list(log_sha256),
         "source": source,
         "spot_key": spot_key,
@@ -123,7 +126,9 @@ def estimate_transport_delay(experiment: pd.DataFrame) -> float | None:
     return float(pairs.median()) if len(pairs) >= 3 else None
 
 
-def update_laser_qc(experiment: pd.DataFrame, *, threshold_s: float = 2.0) -> None:
+def update_laser_qc(
+    experiment: pd.DataFrame, *, threshold_s: float = DEFAULT_LASER_QC_THRESHOLD_S,
+) -> None:
     """Refresh delay and informational residuals without changing selections."""
     if "laser" not in experiment.attrs:
         return
@@ -176,7 +181,8 @@ def nondefault_laser_settings(settings: Mapping) -> dict:
     """Omit new default settings when serializing existing projects."""
     result = dict(settings)
     for name, default in (
-        ("laser_qc_threshold_s", 2.0), ("signal_duration_limit_source", "fixed"),
+        ("laser_qc_threshold_s", DEFAULT_LASER_QC_THRESHOLD_S),
+        ("signal_duration_limit_source", "fixed"),
     ):
         if result.get(name) == default:
             result.pop(name)
@@ -193,6 +199,7 @@ def nondefault_laser_settings(settings: Mapping) -> dict:
 
 
 __all__ = [
+    "DEFAULT_LASER_QC_THRESHOLD_S",
     "add_laser_timing", "add_manifest_laser_timing", "estimate_transport_delay", "update_laser_qc",
     "laser_selection_options", "nondefault_laser_settings",
 ]

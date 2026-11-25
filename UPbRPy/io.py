@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .qtegra import QtegraSession, counting_dwell, open_qtegra
+from .laser_guidance import DEFAULT_LASER_QC_THRESHOLD_S
 
 
 class SelectionError(ValueError):
@@ -1024,7 +1025,7 @@ def read_experiment_data(
     detector_calibration=None,
     cycle_time_s=None,
     restored_selections=None,
-    laser_qc_threshold_s=2.0,
+    laser_qc_threshold_s=DEFAULT_LASER_QC_THRESHOLD_S,
     signal_duration_limit_source="fixed",
     laser_tie=None,
     laser_tie_confirmed=False,
@@ -1103,7 +1104,7 @@ def read_experiment_data(
         full automatic selection.
     laser_qc_threshold_s : float, keyword-only
         Flag absolute onset residuals strictly above this threshold (default
-        2.0 s). Informational only; requires usable session laser times.
+        3.0 s). Informational only; requires usable session laser times.
     signal_duration_limit_source : str, keyword-only
         'fixed' (default) uses signal_duration_limit_seconds. 'laser' uses
         each spot's firing duration where available, otherwise the fixed limit.
@@ -1520,7 +1521,7 @@ def auto_select_baseline_peak(experiment,
                               selection_fallback_methods: tuple[str, ...] = (),
                               selection_options: Mapping[str, object] | None = None,
                               signal_duration_limit_seconds: float | None = None,
-                              laser_qc_threshold_s: float = 2.0,
+                              laser_qc_threshold_s: float = DEFAULT_LASER_QC_THRESHOLD_S,
                               signal_duration_limit_source: str = "fixed"):
     """Initialize signal windows for every analysis in an experiment.
 
@@ -1545,7 +1546,7 @@ def auto_select_baseline_peak(experiment,
         Nominal on-peak duration after detected signal start. Signal handles
         may extend one sweep beyond the resulting plateau boundary.
     laser_qc_threshold_s : float, optional
-        Informational onset residual threshold in seconds, default 2.0.
+        Informational onset residual threshold in seconds, default 3.0.
     signal_duration_limit_source : str, optional
         'fixed' (default), or 'laser' to use per-spot firing durations with
         the fixed limit as fallback. Laser timing columns and attrs can be

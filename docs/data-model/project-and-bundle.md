@@ -217,9 +217,11 @@ contents depend on the selected algorithm.
 The new import settings `laser_qc_threshold_s` and
 `signal_duration_limit_source` live in `PipelineConfig.selection_options`
 alongside existing reader options (or its nested detector `selection_options`
-mapping). Serialization omits values equal to their defaults, `2.0` and
-`"fixed"`, respectively. Older projects therefore load with these defaults,
-and existing configurations and reviewed selections serialize unchanged.
+mapping). Serialization omits values equal to their defaults,
+`DEFAULT_LASER_QC_THRESHOLD_S` (3.0 s, from `UPbRPy.laser_guidance`) and
+`"fixed"`, respectively. Projects without the threshold key load with 3.0 s;
+an explicitly saved value, including 2.0 s, is retained. Existing default
+configurations and reviewed selections serialize unchanged.
 `UPbRPy.laser_guidance.nondefault_laser_settings(settings) -> dict` performs
 this omission without mutating the supplied mapping.
 Nondefault values and `selection_method="laser_guided"` round-trip normally.
