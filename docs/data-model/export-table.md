@@ -325,7 +325,7 @@ coordinate-free tie copies because they can quote malformed positions. Disabling
 stage names from provenance.
 
 `reduction_manifest.json` gains `laser` only when laser metadata is present.
-It records source (`manifest` or `lase`), log hashes and names, system/instrument,
+It records source (`manifest`, `lase` or `database`), available log hashes and names, system/instrument,
 spot key, clock offset/spread/pairs, transport delay, QC threshold and flagged
 count, duration-limit source, use of laser-guided selection, and distinct
 ablation combinations with acquisition counts. Coordinate mappings occur only

@@ -295,6 +295,11 @@ class StudioWindowController(QtCore.QObject):
             window = self.open_directory_in_window(str(bundle.raw_directory))
         if window is None:
             return None
+        if bundle.project_file is not None:
+            from GUI.laser_offer import is_fresh_bundle
+
+            if is_fresh_bundle(bundle):
+                window._offer_laser_for_fresh_bundle(bundle.project_file)
         note = "cached copy is current" if bundle.reused else "fetched"
         window.append_log(
             f"Session bundle {bundle.session_key} ({note}): {bundle.path}"

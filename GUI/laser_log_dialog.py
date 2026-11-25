@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from UPbRPy.laser_tie import tie_laser_log
 
@@ -17,6 +17,22 @@ def laser_log_start_path(source: str) -> str:
         if len(candidates) == 1:
             return str(candidates[0])
     return str(folder)
+
+
+class LaserOfferDialog(QtWidgets.QMessageBox):
+    """One compact offer; source-specific choices can be added here later."""
+
+    def __init__(self, source: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Import laser log?")
+        self.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        self.setText(f"A laser log is available for this session ({source}).\n\n"
+                     "Import it to help with selections? Laser data never changes "
+                     "reduction numbers unless you choose a laser method.")
+        self.import_button = self.addButton("Import…", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        self.not_now_button = self.addButton("Not now", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        self.setDefaultButton(self.not_now_button)
+        self.setEscapeButton(self.not_now_button)
 
 
 class LaserLogDialog(QtWidgets.QDialog):

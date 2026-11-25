@@ -1290,6 +1290,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         if not self.session.loaded:
             return ""
         payload = {
+            **({"laser_offer_declined": True} if self.session.laser_offer_declined else {}),
             **({"laser_log": self.session.laser_tie.to_dict()} if self.session.laser_tie is not None else {}),
             **({"laser_qc": laser_qc_record(self.session.experiment)}
                if "laser" in self.session.experiment.attrs else {}),
@@ -5389,6 +5390,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def project_workspace_state(self) -> dict[str, object]:
         """Return compact display context worth restoring with a reduction."""
         return {
+            **({"laser_offer_declined": True} if self.session.laser_offer_declined else {}),
             **({"laser_marks": False} if self._has_laser_times() and not self.laser_marks_action.isChecked() else {}),
             "selected_spot": self.current_spot_name(),
             "visible_channels": self.checked_channels(),
@@ -5747,6 +5749,8 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             [name for name in collapsed if isinstance(name, str)]
             if isinstance(collapsed, list) else []
         )
+        restored.session.laser_offer_declined = bool(workspace.get("laser_offer_declined", False))
+        restored.session.laser_offer_checked = True
         self.install_loaded_session(
             restored.session,
             restored.session.directory,
@@ -5910,9 +5914,34 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def _open_session_bundle_here(self, bundle):
         if bundle.project_file is not None:
             self.load_project_file(bundle.project_file)
+            from GUI.laser_offer import is_fresh_bundle
+
+            if is_fresh_bundle(bundle):
+                self._offer_laser_for_fresh_bundle(bundle.project_file)
         else:
             self.load_experiment_directory(str(bundle.raw_directory))
         return self
+
+    def _offer_laser_for_fresh_bundle(self, project_file: str | Path) -> None:
+        """Offer after loading the database's empty export project, once."""
+        from GUI.laser_offer import LaserOffer
+
+        path = Path(project_file).resolve()
+
+        def loaded():
+            if not shiboken6.isValid(self):
+                return
+            if (not self.session.loaded or self.project_path != path or self._laser_offer is not None
+                    or self.session.laser_offer_declined):
+                return
+            self.session.laser_offer_checked = False
+            self._laser_offer = LaserOffer(self)
+            QtCore.QTimer.singleShot(0, self._laser_offer, self._laser_offer.start)
+
+        if self._active_worker is None:
+            loaded()
+        else:
+            self._active_worker.signals.finished.connect(loaded)
 
     def _refresh_database_status(self) -> None:
         """Show who is signed in, and offer Sign In… or Sign Out accordingly."""
@@ -6172,6 +6201,15 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self._selection_redo.clear()
         self._selection_recompute_stages.clear()
         self._selection_autosave_pending = False
+        if self.session.directory == loaded_session.directory:
+            loaded_session.laser_offer_checked |= self.session.laser_offer_checked
+            loaded_session.laser_offer_declined |= self.session.laser_offer_declined
+        previous_offer = getattr(self, "_laser_offer", None)
+        self._laser_offer = None
+        if previous_offer is not None and hasattr(previous_offer, "dialog"):
+            previous_offer.dialog.close()
+        if previous_offer is not None:
+            previous_offer.deleteLater()
         self.session = loaded_session
         with QtCore.QSignalBlocker(self.laser_marks_action):
             self.laser_marks_action.setChecked(True)
@@ -6239,6 +6277,11 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             else None
         )
         self.statusBar().showMessage(f"Loaded {len(self.session.spot_names)} spots from {Path(directory).name}")
+        if project_path is None and not getattr(self, "_installing_project", False):
+            from GUI.laser_offer import LaserOffer
+
+            self._laser_offer = LaserOffer(self)
+            QtCore.QTimer.singleShot(0, self._laser_offer, self._laser_offer.start)
 
     def _sync_qtegra_controls(self) -> None:
         qtegra = self.session.qtegra
@@ -6460,9 +6503,29 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             self._position_compact_panels()
 
     def choose_laser_log(self) -> None:
+        """Load a log, including a database offer previously declined."""
+        from GUI.laser_offer import LaserOffer
+        from UPbRPy.integration import upbdb
+
+        if not self._require_loaded() or self._active_worker is not None:
+            return
+        origin = self.session.origin or {}
+        if (not self.session.laser_data_available and origin.get("server")
+                and origin.get("session_id") and upbdb.is_signed_in(origin["server"])):
+            previous = getattr(self, "_laser_offer", None)
+            self._laser_offer = None
+            if previous is not None:
+                if hasattr(previous, "dialog"):
+                    previous.dialog.close()
+                previous.deleteLater()
+            self._laser_offer = LaserOffer(self, manual=True)
+            self._laser_offer.start()
+        else:
+            self._choose_local_laser_log()
+
+    def _choose_local_laser_log(self) -> None:
         """Preview and apply a standalone Chromium log to the active session."""
-        from GUI.laser_log_dialog import LaserLogDialog, laser_log_start_path
-        from UPbRPy.laserlog import read_lase
+        from GUI.laser_log_dialog import laser_log_start_path
 
         if not self._require_loaded() or self._active_worker is not None:
             return
@@ -6479,6 +6542,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.StandardButton.No)
             if answer != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
+        self._preview_laser_log(path)
+
+    def _preview_laser_log(self, path: str) -> None:
+        """Use the same preview for the import offer and File menu."""
+        from GUI.laser_log_dialog import LaserLogDialog
+        from UPbRPy.laserlog import read_lase
+
         try:
             dialog = LaserLogDialog(read_lase(path), self.session.qtegra, self)
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -6521,8 +6591,13 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
     def _apply_laser_tie(self, tie, *, confirmed=False) -> None:
         from GUI.services import apply_session_laser_tie
 
-        self.session = copy_session(self.session)
-        apply_session_laser_tie(self.session, tie, confirmed=confirmed)
+        updated = copy_session(self.session)
+        apply_session_laser_tie(updated, tie, confirmed=confirmed)
+        self._install_laser_tie_session(updated)
+
+    def _install_laser_tie_session(self, updated: ReductionSession) -> None:
+        """Install prepared timing and QC while retaining the current selections."""
+        self.session = updated
         if not self._has_laser_times():
             if self.session.import_settings.get("selection_method", self.selection_method) == "laser_guided":
                 self.session.import_settings["selection_method"] = "threshold"

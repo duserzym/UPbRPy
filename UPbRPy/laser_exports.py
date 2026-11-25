@@ -37,11 +37,11 @@ def laser_export_data(experiment, *, manifest=None, laser_tie=None) -> LaserExpo
     """
     renames = experiment.attrs.get("spot_renames", {})
     if laser_tie is not None:
-        logs = ({name: getattr(laser_tie, name) for name in (
+        logs = laser_tie.logs or ({name: getattr(laser_tie, name) for name in (
             "sha256", "file_name", "system_type", "laser_instrument", "spot_key",
             "clock_offset_s", "clock_offset_spread_s", "pairs")},)
         raw = {label: row for label, row in laser_tie.rows.items() if row.status == "linked"}
-        source = "lase"
+        source = laser_tie.source
     elif manifest is not None and manifest.has_laser_data:
         logs = tuple({**{name: getattr(log, name) for name in (
             "sha256", "file_name", "system_type", "laser_instrument", "spot_key",

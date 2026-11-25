@@ -51,10 +51,18 @@ class LaserTie:
     warnings: tuple[str, ...]
     rows: dict[str, LaserTieRow]
     requires_confirmation: bool = False
+    source: str = "lase"
+    logs: tuple[dict, ...] = ()
 
     def to_dict(self) -> dict:
         """Return JSON-safe values, including the complete per-label tie."""
         result = asdict(self)
+        if self.source == "lase":
+            result.pop("source")
+        if not self.logs:
+            result.pop("logs")
+        else:
+            result["logs"] = list(result["logs"])
         result["warnings"] = list(self.warnings)
         for row in result["rows"].values():
             if row["stage_um"] is not None:
@@ -65,6 +73,7 @@ class LaserTie:
     def from_dict(cls, value: dict) -> "LaserTie":
         """Restore a tie saved by to_dict, without needing the source file."""
         data = dict(value)
+        data["logs"] = tuple(data.get("logs", ()))
         data["warnings"] = tuple(data["warnings"])
         data["rows"] = {
             label: LaserTieRow(**{**row, "stage_um": tuple(row["stage_um"])
@@ -92,7 +101,7 @@ class LaserTie:
             dict(zip(experiment.spot_names, experiment.spot_starting_times)),
             scan_positions={label: self.rows[renames.get(label, label)].scan_position
                             for label in experiment.spot_names if renames.get(label, label) in windows},
-            source="lase", log_sha256=(self.sha256,), spot_key=self.spot_key,
+            source=self.source, log_sha256=(self.sha256,) if self.sha256 else (), spot_key=self.spot_key,
         )
 
 

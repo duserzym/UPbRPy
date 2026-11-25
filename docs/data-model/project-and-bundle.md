@@ -51,12 +51,20 @@ or changes meaning in `PipelineConfig` or its nested settings dataclasses.
 ### Standalone laser log
 
 An optional top-level `laser_log` object stores the complete
-`UPbRPy.laser_tie.LaserTie.to_dict()` only when an analyst has loaded a `.lase`.
+`UPbRPy.laser_tie.LaserTie.to_dict()` when an analyst has loaded a `.lase` or
+accepted a saved database tie.
 It includes file name, SHA-256 of the original bytes, spot key, threshold,
 clock evidence, warnings and per-label matches with relative laser times,
 settings and stage coordinates. It is separate from pipeline configuration
 and reduction manifests. Projects without a loaded log omit this object and
 retain their existing serialization.
+
+Database ties add `source="database"` and a `logs` array with database log ids,
+names, spot keys and clock offsets/spreads. The session laser route supplies
+neither original-byte hashes nor instrument identities; those fields stay empty
+and offset-pair counts stay unavailable. Each row's relative window already
+includes its own log's saved clock offset. Old ties omit `source` and `logs`
+and retain source `lase`. Database ties need no original `.lase` on disk.
 
 Reopening applies the stored tie before restoring selections, even if the original file
 has moved. A different SHA-256 in a same-named file beside the session (or in
@@ -325,10 +333,11 @@ in the lightweight project structural validator.
 ### Studio workspace keys
 
 The engine accepts any workspace mapping. Studio currently writes these
-optional display keys; absence uses the current/default display state.
+optional workspace keys; absence uses the current/default state.
 
 | Key within workspace | Type | Meaning |
 | --- | --- | --- |
+| laser_offer_declined | Bool, only true is written | Analyst chose Not now for the fresh-session laser offer; File > Load laser log remains available |
 | selected_spot | String | Selected acquisition label |
 | visible_channels | Array of strings | Checked trace channels |
 | selected_stats_channel | String | Statistics panel channel |

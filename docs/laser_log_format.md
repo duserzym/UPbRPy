@@ -231,6 +231,12 @@ with manual-window protection and Undo. **Remove laser log** restores bundle
 laser timing if present, otherwise removes timing. Loading over database laser
 data first asks whether to replace it for this project.
 
+A fresh import offers the single nearby log once, using the same preview.
+Signed-in sessions linked to UPbDB first check for tied logs with firing times
+in a background worker. **Not now** is saved in the workspace; restored projects
+and sessions that already have laser data never offer again. The File menu
+remains available. See [saved ties](data-model/project-and-bundle.md#standalone-laser-log).
+
 The script API is independent of Studio:
 
 ```python

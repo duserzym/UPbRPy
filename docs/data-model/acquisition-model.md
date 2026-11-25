@@ -179,7 +179,7 @@ Rich files without StartTime. Stage coordinates are not added to experiment.
 `experiment.attrs["laser"]` is a small JSON-safe object with
 `transport_delay_s` (median detected onset minus laser-on; null with fewer
 than three successful pairs), `n_pairs`, `qc_threshold_s` (default 3.0 s),
-`log_sha256` (list), `source` (`manifest` or `lase`), and `spot_key` (comma
+`log_sha256` (list), `source` (`manifest`, `lase` or `database`), and `spot_key` (comma
 separated when logs use different keys). `qc_onsets_computed` is a boolean:
 false on reopening a project without stored QC, true after an onset pass.
 When `laser_guided` is configured

@@ -11,6 +11,8 @@ Endpoints (all under ``<server>/v1/``, bearer token unless noted)::
     POST auth/logout
     GET  accounts/me                            -> account
     GET  sessions?q=                            -> [session]
+    GET  sessions/{id}                          -> session detail
+    GET  sessions/{id}/laser                    -> {rows, logs, logs_next_cursor}
     GET  sessions/{id}/export/upbrpy            -> zip (X-Export-SHA256)
     GET  sessions/{id}/reductions               -> [run]
     POST sessions/{id}/runs/import  multipart "bundle" (zip) [+ "supersedes"]
@@ -45,6 +47,7 @@ from typing import Any, Protocol
 from types import SimpleNamespace
 from threading import RLock
 from urllib.parse import quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import zipfile
 
 from .. import tls
@@ -290,6 +293,10 @@ def forget_token(server: str) -> None:
     for key in list(_session_pages):
         if key[0] == base:
             del _session_pages[key]
+    with _laser_lock:
+        for key in list(_laser_responses):
+            if key[0] == base:
+                del _laser_responses[key]
 
 
 def is_signed_in(server: str) -> bool:
@@ -582,6 +589,159 @@ def list_sessions(server: str, query: str | None = None, *, limit: int = 100,
     return SessionPage(page, next_cursor=page.next_cursor)
 
 
+_laser_lock = RLock()
+_laser_responses: OrderedDict = OrderedDict()
+
+
+def _laser_read(server, path, params=None):
+    """Revalidate one bounded detail or laser page per server and account."""
+    base = normalize_server(server)
+    token = stored_token(base)
+    account = hashlib.sha256((token or "").encode()).hexdigest()
+    key = (base, account, path, tuple(sorted((params or {}).items())))
+    with _laser_lock:
+        cached = _laser_responses.get(key)
+    response = _request("GET", base, path, action="read session laser data", params=params,
+                        headers={"If-None-Match": cached[0]} if cached and cached[0] else {})
+    if response.status_code == 304:
+        if cached is None:
+            raise ServerError(f"{base} returned HTTP 304 without cached laser data.")
+        return cached[1], cached[2]
+    payload = _json(response, base, "read session laser data")
+    if (not isinstance(payload, dict) or (path.endswith("/laser") and any(
+            not isinstance(payload.get(name, []), list)
+            or any(not isinstance(row, dict) for row in payload.get(name, []))
+            for name in ("rows", "logs")))):
+        raise ServerError(
+            f"{base} returned HTTP {response.status_code} with invalid session laser data: "
+            f"{response.text[:200]}", status=response.status_code,
+        )
+    cursor = response.headers.get("X-Next-Cursor") or None
+    with _laser_lock:
+        if stored_token(base) == token:
+            _laser_responses[key] = (response.headers.get("ETag"), payload, cursor)
+            _laser_responses.move_to_end(key)
+            while len(_laser_responses) > 128:
+                _laser_responses.popitem(last=False)
+    return payload, cursor
+
+
+def get_session(server: str, session_id: str) -> dict:
+    """Read and revalidate session detail, including optional laser indicators."""
+    return _laser_read(server, f"sessions/{quote(session_id, safe='')}")[0]
+
+
+@dataclass(frozen=True)
+class SessionLaserPage:
+    """Independent bounded acquisition and tied-log pages."""
+
+    rows: list[dict]
+    logs: list[dict]
+    next_cursor: str | None = None
+    logs_next_cursor: str | None = None
+
+
+def get_session_laser(server: str, session_id: str, *, limit: int = 500,
+                      cursor: str | None = None, logs_cursor: str | None = None) -> SessionLaserPage:
+    """Read one laser page; follow both cursors, revalidating with ETag."""
+    params = {"limit": max(1, min(int(limit), 500)), "logs_limit": 500}
+    if cursor:
+        params["after"] = cursor
+    if logs_cursor:
+        params["logs_after"] = logs_cursor
+    payload, following = _laser_read(server, f"sessions/{quote(session_id, safe='')}/laser", params)
+    return SessionLaserPage(payload.get("rows", []), payload.get("logs", []),
+                            following, payload.get("logs_next_cursor") or None)
+
+
+def session_laser_tie(rows: list[dict], logs: list[dict], acquisition_starts: Mapping,
+                      *, time_zone: str | None = None):
+    """Convert saved database ties to portable acquisition-relative windows.
+
+    Aware starts retain their instants. Naive instrument starts require the
+    session's IANA time zone, using fold=0 at an ambiguous local time. Raise
+    ValueError if that zone is unavailable or more than half the timed links
+    have corrected on-times over one hour from their acquisition starts.
+    Other such links are dropped and counted as clock_mismatch. This is a
+    clock sanity check, not the standalone 30 s matching rule.
+    """
+    from ..laser_tie import LaserTie, LaserTieRow
+
+    def utc(value):
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    starts = {}
+    zone = None
+    for label, value in acquisition_starts.items():
+        try:
+            start = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if start.tzinfo is None:
+            if zone is None:
+                try:
+                    zone = ZoneInfo(time_zone)
+                except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+                    raise ValueError(
+                        "Laser data unavailable: naive acquisition starts need a valid "
+                        "session time zone from UPbDB."
+                    ) from exc
+            start = start.replace(tzinfo=zone, fold=0)
+        starts[label] = start.astimezone(timezone.utc)
+
+    by_id = {str(log["id"]): log for log in logs}
+    tied = {}
+    candidates = set()
+    mismatched = set()
+    for row in rows:
+        label = row["label"]
+        log = by_id.get(str(row.get("log_id")))
+        if (log is None or log.get("clock_offset_s") is None or label not in starts
+                or label in candidates):
+            continue
+        try:
+            start = starts[label]
+            endpoints = [((utc(row[key]) - start).total_seconds() + float(log["clock_offset_s"]))
+                         if row.get(key) else None for key in ("laser_on_at", "laser_off_at")]
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if all(value is None for value in endpoints):
+            continue
+        on, off = endpoints
+        candidates.add(label)
+        if on is not None and abs(on) > 3600.:
+            mismatched.add(label)
+            continue
+        tied.setdefault(label, LaserTieRow(
+            status="linked", laser_on=on, laser_off=off,
+            duration=off - on if on is not None and off is not None else None,
+            fluence_j_cm2=row.get("fluence_j_cm2"), rep_rate_hz=row.get("rep_rate_hz"),
+            spot_um=row.get("spot_size_um"), spot_shape=row.get("spot_shape"),
+            shot_count=row.get("shot_count"), output_pct=row.get("output_pct"),
+            stage_um=tuple(row["stage_um"]) if row.get("stage_um") else None))
+    warning = (f"Laser clock or zone mismatch: dropped {len(mismatched)} of {len(candidates)} "
+               "timed links with laser-on more than one hour from acquisition start.")
+    if len(mismatched) * 2 > len(candidates):
+        raise ValueError(warning + " Laser timing was not applied.")
+    provenance = tuple({
+        "id": log["id"], "sha256": "", "file_name": log.get("file_name", ""),
+        "system_type": "", "laser_instrument": "", "spot_key": log.get("spot_key", ""),
+        "clock_offset_s": log.get("clock_offset_s"),
+        "clock_offset_spread_s": log.get("clock_offset_spread_s"), "pairs": None,
+    } for log in logs)
+    return LaserTie(
+        sha256="", file_name=", ".join(log.get("file_name", "") for log in logs),
+        system_type="", laser_instrument="", spot_key=",".join(dict.fromkeys(
+            log.get("spot_key", "") for log in logs)), threshold_s=0., has_laser_times=bool(tied),
+        clock_offset_s=None, clock_offset_spread_s=None, pairs=0,
+        counts={"linked": len(tied), "doubtful": 0,
+                "unlinked": len(acquisition_starts) - len(tied) - len(mismatched),
+                **({"clock_mismatch": len(mismatched)} if mismatched else {})},
+        warnings=(warning,) if mismatched else (), rows=tied, source="database", logs=provenance,
+    )
+
+
 def fetch_session_bundle(
     server: str,
     session_id: str,
@@ -846,6 +1006,7 @@ __all__ = [
     "whoami",
     "sign_out",
     "list_sessions",
+    "get_session", "get_session_laser", "SessionLaserPage", "session_laser_tie",
     "fetch_session_bundle",
     "zip_reduction_bundle",
     "submit_reduction",

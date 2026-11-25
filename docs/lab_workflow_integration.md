@@ -563,6 +563,31 @@ has no time fallback for unmatched numbers. See
 [standalone session ties](laser_log_format.md#standalone-session-ties)
 for matching, review and project persistence.
 
+After importing a fresh session, Studio offers laser data once when it is
+available. A saved project never triggers this check, and sessions with manifest
+or loaded laser data are skipped. For a database origin, Studio checks only when
+signed in to that server: tied logs with times take priority over the single
+nearby `.lase` found by the File-menu lookup. The database check and paged fetch
+run in workers, revalidating cached responses with ETag. Older servers without
+the laser indicators or route are skipped silently. Database ties use their
+saved clock offsets without repeating the standalone 30 s matching rule.
+For local sessions without a manifest instant, naive acquisition starts use the
+database session's IANA `timezone`, with `fold=0` at a repeated local time.
+Aware starts retain their instants. A naive clock without a valid zone suppresses
+the offer and logs the reason. Corrected laser-on times over one hour from the
+acquisition start are dropped and counted as `clock_mismatch`; if more than half
+the timed links fail this check, Studio leaves the tie unapplied and reports a
+clock or zone mismatch.
+Opening a database bundle's empty export project counts as a fresh import;
+its prefilled import settings are retained. Saved selections, workspace state
+or a reduction-run origin identify existing work and suppress the offer.
+
+**Import…** opens the ordinary preview for a local log or loads the saved
+database tie. **Not now** keeps the session as imported and saves
+`workspace.laser_offer_declined=true` with the project. File > Load laser log…
+remains available. Importing laser data preserves default selections and
+reduction numbers; a laser method or duration source remains an explicit choice.
+
 Exports prefill empty laser-system, diameter, repetition-rate and fluence
 fields, preserving analyst entries. Varying numeric settings show ranges
 and per-spot columns; constant settings need no extra columns. Stage

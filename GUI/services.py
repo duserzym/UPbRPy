@@ -824,7 +824,7 @@ def check_stored_laser_file(session: ReductionSession) -> None:
     import hashlib
 
     session.laser_file_warnings = ()
-    if session.laser_tie is None:
+    if session.laser_tie is None or session.laser_tie.source != "lase":
         return
     folder = Path(session.directory)
     folder = folder.parent if folder.is_file() else folder
