@@ -2629,6 +2629,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         layout.addWidget(self.save_project_button)
 
         self.export_results_button = QtWidgets.QPushButton("Export results…")
+        self.export_results_button.setObjectName("ExportResultsAction")
         self.export_results_button.setProperty("accent", True)
         self.export_results_button.setToolTip(
             "Export publication-ready spot and depth-profile tables, audit "
@@ -3512,6 +3513,7 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
             button = QtWidgets.QToolButton()
             button.setText(text)
             button.setToolTip(tip)
+            button.setAccessibleName(tip)
             button.setObjectName("CompactHeaderButton")
             button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
             if row is spots_toolbar:
@@ -3534,6 +3536,11 @@ class MainWindow(SpotEditing, QtWidgets.QMainWindow):
         self.spot_tree_expand_button.clicked.connect(self._toggle_spot_tree_groups)
         spots_toolbar.addWidget(self.spot_tree_expand_button)
         _add_folder_btn = compact("+ Folder", "Add a new custom folder under Unknowns", filter_row)
+        _add_folder_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogNewFolder))
+        _add_folder_btn.setIconSize(QtCore.QSize(18, 18))
+        _add_folder_btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+        _add_folder_btn.setFixedWidth(30)
+        _add_folder_btn.setStyleSheet("padding: 3px;")
         _add_folder_btn.clicked.connect(self._on_spot_add_folder)
         self.spot_tree_actions_button = compact("⋯", "Selection actions", filter_row)
         self.spot_tree_actions_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)

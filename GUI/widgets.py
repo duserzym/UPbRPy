@@ -619,11 +619,17 @@ class SegmentButton(QtWidgets.QToolButton):
 
 
 class _WorkflowRailDelegate(QtWidgets.QStyledItemDelegate):
-    """Keep stage icons and number badges readable in the compact rail."""
+    """Connect existing stage icons without changing their labels or state."""
 
     def paint(self, painter, option, index):
         if not self.parent().property("compactRail"):
-            return super().paint(painter, option, index)
+            super().paint(painter, option, index)
+            styled = QtWidgets.QStyleOptionViewItem(option)
+            self.initStyleOption(styled, index)
+            icon_rect = self.parent().style().subElementRect(
+                QtWidgets.QStyle.SubElement.SE_ItemViewItemDecoration, styled, self.parent())
+            self._paint_connector(painter, option.rect, icon_rect, index)
+            return
         theme = active_theme()
         painter.save()
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
@@ -632,7 +638,8 @@ class _WorkflowRailDelegate(QtWidgets.QStyledItemDelegate):
         if selected or option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
             painter.setPen(QtCore.Qt.PenStyle.NoPen)
             painter.setBrush(theme_color(theme.accent_soft if selected else theme.row_hover))
-            painter.drawRoundedRect(QtCore.QRectF(rect), 9, 9)
+            painter.drawRoundedRect(QtCore.QRectF(rect), 7, 7)
+        self._paint_connector(painter, option.rect, QtCore.QRect(rect.left()+5, rect.center().y()-10, 20, 20), index)
         icon = index.data(QtCore.Qt.ItemDataRole.DecorationRole)
         icon.paint(painter, QtCore.QRect(rect.left()+5, rect.center().y()-10, 20, 20))
         font = option.font
@@ -640,6 +647,17 @@ class _WorkflowRailDelegate(QtWidgets.QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(QtGui.QColor(theme.accent if selected else theme.muted))
         painter.drawText(rect.adjusted(27, 0, -2, 0), QtCore.Qt.AlignmentFlag.AlignCenter, str(index.row()+1))
+        painter.restore()
+
+    def _paint_connector(self, painter, row_rect, icon_rect, index):
+        """Paint only the line between neighbouring stage icons."""
+        painter.save()
+        painter.setPen(QtGui.QPen(theme_color(active_theme().input_border), 1))
+        x = icon_rect.center().x()
+        if index.row() > 0:
+            painter.drawLine(x, row_rect.top(), x, icon_rect.top()-1)
+        if index.row() < index.model().rowCount()-1:
+            painter.drawLine(x, icon_rect.bottom()+1, x, row_rect.bottom())
         painter.restore()
 
 
@@ -693,13 +711,17 @@ class SegmentedBar(QtWidgets.QFrame):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self._pill.isEmpty():
-            return
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setPen(QtGui.QPen(theme_color(active_theme().input_border), 1))
+        for button in self.findChildren(SegmentButton)[1:]:
+            rect = button.geometry()
+            painter.drawLine(rect.left(), rect.top()+5, rect.left(), rect.bottom()-5)
+        if self._pill.isEmpty():
+            return
+        painter.setPen(QtGui.QPen(theme_color(active_theme().accent), 1))
         painter.setBrush(theme_color(active_theme().accent_soft))
-        painter.drawRoundedRect(self._pill, 9, 9)
+        painter.drawRoundedRect(self._pill.adjusted(.5, .5, -.5, -.5), 7, 7)
 
 
 # -- SpotTree --------------------------------------------------------------
@@ -799,14 +821,18 @@ class _SpotTreeDelegate(QtWidgets.QStyledItemDelegate):
         count = index.data(SPOT_TREE_COUNT_ROLE)
         if not count:
             return super().paint(painter, option, index)
-        width = option.fontMetrics.horizontalAdvance(count) + 8
+        width = option.fontMetrics.horizontalAdvance(count) + 12
         name_option = QtWidgets.QStyleOptionViewItem(option)
         name_option.rect = option.rect.adjusted(0, 0, -width, 0)
         super().paint(painter, name_option, index)
         painter.save()
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        badge = QtCore.QRectF(option.rect.right()-width, option.rect.center().y()-8, width-2, 16)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(theme_color(active_theme().input_border))
+        painter.drawRoundedRect(badge, 7, 7)
         painter.setPen(theme_color(active_theme().muted))
-        painter.drawText(option.rect.adjusted(0, 0, -4, 0),
-                         int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter), count)
+        painter.drawText(badge, int(QtCore.Qt.AlignmentFlag.AlignCenter), count)
         painter.restore()
 
 

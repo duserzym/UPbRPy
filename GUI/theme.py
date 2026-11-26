@@ -50,32 +50,32 @@ class ThemeSpec:
 THEMES: dict[str, ThemeSpec] = {
     "light": ThemeSpec(
         name="light", window="#eef2f8", window_alt="#eef2f8",
-        surface="#ffffff", surface_soft="#ffffff", input_bg="#f8fafd",
-        input_border="rgba(23,32,46,0.10)", text="#17202e", muted="#556172",
-        accent="#2f6fde", accent_soft="rgba(47,111,222,0.12)",
-        accent_hover="rgba(47,111,222,0.18)", accent_strong="#255fc4",
+        surface="#ffffff", surface_soft="#f8fafd", input_bg="#f8fafd",
+        input_border="rgba(23,32,46,0.11)", text="#17202e", muted="#556172",
+        accent="#7760ab", accent_soft="rgba(119,96,171,0.12)",
+        accent_hover="rgba(119,96,171,0.18)", accent_strong="#654c99",
         success="#1d8a5b", success_soft="rgba(29,138,91,0.12)",
-        plot_background="#ffffff", axis_text="#556172", axis_line="#e6e9ef",
-        grid_alpha=0.55, shadow_light="#ffffff", shadow_dark="#1f2d50",
-        on_accent="#ffffff", glass="rgba(255,255,255,0.55)",
+        plot_background="#f8fafd", axis_text="#556172", axis_line="#e6e9ef",
+        grid_alpha=0.25, shadow_light="#ffffff", shadow_dark="#1f2d50",
+        on_accent="#ffffff", glass="rgba(255,255,255,0.72)",
         glass_strong="rgba(255,255,255,0.72)", glass_border="rgba(255,255,255,0.75)",
         glass_edge="rgba(23,32,46,0.08)", faint="#7d8899", danger="#c2413b",
-        row_hover="rgba(47,111,222,0.07)", plot_grid="#e6e9ef",
+        row_hover="rgba(119,96,171,0.07)", plot_grid="#e6e9ef",
         wallpaper=("#c9dbff", "#c7f0e6", "#f3d9f7"),
     ),
     "dark": ThemeSpec(
         name="dark", window="#0c111b", window_alt="#0c111b",
-        surface="#161d2b", surface_soft="#1c2638", input_bg="#121926",
-        input_border="rgba(255,255,255,0.10)", text="#e7ecf4", muted="#a3aec0",
-        accent="#7aa7ff", accent_soft="rgba(122,167,255,0.16)",
-        accent_hover="rgba(122,167,255,0.24)", accent_strong="#a5c3ff",
+        surface="#161d2b", surface_soft="#141b29", input_bg="#141b29",
+        input_border="rgba(255,255,255,0.12)", text="#e7ecf4", muted="#a3aec0",
+        accent="#bca8ed", accent_soft="rgba(188,168,237,0.16)",
+        accent_hover="rgba(188,168,237,0.24)", accent_strong="#cbb9f4",
         success="#56d364", success_soft="rgba(86,211,100,0.12)",
-        plot_background="#121926", axis_text="#a3aec0", axis_line="#263043",
-        grid_alpha=0.55, shadow_light="#ffffff", shadow_dark="#000000",
-        on_accent="#0c111b", glass="rgba(255,255,255,0.08)",
-        glass_strong="rgba(22,29,43,0.78)", glass_border="rgba(255,255,255,0.14)",
+        plot_background="#141b29", axis_text="#a3aec0", axis_line="#263043",
+        grid_alpha=0.25, shadow_light="#ffffff", shadow_dark="#000000",
+        on_accent="#0c111b", glass="rgba(22,29,43,0.82)",
+        glass_strong="rgba(22,29,43,0.82)", glass_border="rgba(255,255,255,0.12)",
         glass_edge="rgba(0,0,0,0.40)", faint="#7a879b", danger="#ff7b72",
-        row_hover="rgba(122,167,255,0.10)", plot_grid="#263043",
+        row_hover="rgba(188,168,237,0.10)", plot_grid="#263043",
         wallpaper=("#1d3263", "#0f4a45", "#3d1f4a"),
     ),
 }
@@ -157,7 +157,7 @@ class NeumorphicFrame(QtWidgets.QFrame):
         body = QtCore.QRectF(self.rect()).adjusted(7, 7, -7, -7)
         if body.width() <= 0 or body.height() <= 0:
             return
-        radius = 16.0
+        radius = 10.0
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         # Paint the shadow inside the frame, without capturing its children.
         for width, alpha in ((12, 2), (9, 3), (6, 5), (3, 7)):
@@ -335,8 +335,8 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: 8px; }}
     QMenuBar::item:selected {{ background: {theme.accent_soft}; }}
     QStatusBar::item {{ border: none; }}
-    QDialog, QMessageBox {{ background: {theme.surface}; border-radius: 16px; }}
-    QMenu, QToolTip {{ background: {theme.surface}; color: {theme.text}; border: 1px solid {theme.input_border}; border-radius: 12px; padding: 6px; }}
+    QDialog, QMessageBox {{ background: {theme.surface}; border-radius: 10px; }}
+    QMenu, QToolTip {{ background: {theme.surface}; color: {theme.text}; border: 1px solid {theme.input_border}; border-radius: 10px; padding: 6px; }}
     QMenu::item {{ padding: 7px 28px 7px 12px; border-radius: 8px; }}
     QMenu::item:selected {{ background: {theme.accent_soft}; color: {theme.accent}; }}
     QMenu::separator {{ height: 1px; background: {theme.input_border}; margin: 5px 10px; }}
@@ -345,7 +345,7 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QFrame[neumorphic="true"] {{ background: transparent; border: none; }}
     #WorkflowHintCard, #WorkflowActionsCard, #SelectorCard, #WorkflowCard,
     #PlotControlBar, #StageSegmentBar, #ChannelsCard {{
-        background: {theme.glass}; border: 1px solid {theme.glass_border}; border-radius: 16px;
+        background: {theme.glass}; border: 1px solid {theme.input_border}; border-radius: 10px;
     }}
     #WorkflowActionsInline {{ background: transparent; border: none; }}
     #HeroTitle {{ font-size: 19px; font-weight: 700; }}
@@ -359,19 +359,25 @@ def _stylesheet(theme: ThemeSpec) -> str:
     #ControlBarDivider {{ background: {theme.input_border}; border: none; }}
     #SecondaryText, #PanelBody, #ControlBarLabel {{ color: {theme.muted}; font-size: 11px; }}
     #InspectorHint, #WorkflowStatusCompact {{ color: {theme.muted}; font-size: 9px; }}
-    #Pill, #StatusPill {{ padding: 4px 10px; border-radius: 10px; background: {theme.accent_soft}; }}
+    #Pill, #StatusPill {{ padding: 2px 8px; border-radius: 7px; background: {theme.input_border}; color: {theme.muted}; }}
     #StatusPill {{ background: {theme.success_soft}; color: {theme.success}; }}
+    #WorkflowStatusCompact {{ background: {theme.input_border}; border-radius: 4px; padding: 0 3px; }}
     QPushButton, QToolButton {{
         background: {theme.glass_strong}; border: 1px solid {theme.input_border};
-        border-radius: 11px; padding: 7px 11px; font-weight: 600;
+        border-radius: 7px; padding: 7px 11px; font-weight: 600;
     }}
     QPushButton:hover, QToolButton:hover {{ background: {theme.row_hover}; border-color: {theme.accent}; }}
     QPushButton:pressed, QToolButton:pressed {{ background: {theme.accent_soft}; }}
     QPushButton[accent="true"] {{ background: {theme.accent}; color: {theme.on_accent}; border-color: {theme.accent}; }}
     QPushButton[accent="true"]:hover {{ background: {theme.accent_strong}; }}
+    #WorkflowRail QPushButton[accent="true"] {{ background: {theme.accent_soft}; color: {theme.accent}; border-color: {theme.input_border}; }}
+    #WorkflowRail QPushButton[accent="true"]:hover {{ background: {theme.accent_hover}; }}
+    #WorkflowRail QPushButton#ExportResultsAction:enabled {{ background: {theme.accent}; color: {theme.on_accent}; border-color: {theme.accent}; }}
+    #WorkflowRail QPushButton#ExportResultsAction:enabled:hover {{ background: {theme.accent_strong}; }}
+    #WorkflowRail QPushButton:disabled {{ color: {theme.faint}; background: {theme.glass}; border-color: {theme.input_border}; }}
     QPushButton[tertiary="true"] {{ background: transparent; border-color: transparent; }}
     QPushButton[tertiary="true"]:hover {{ background: {theme.row_hover}; }}
-    QToolButton[modeToggle="true"] {{ border: none; background: transparent; padding: 5px 6px; border-radius: 9px; font-size: 11px; }}
+    QToolButton[modeToggle="true"] {{ border: none; background: transparent; padding: 5px 6px; border-radius: 7px; font-size: 11px; }}
     QToolButton[modeToggle="true"]:hover {{ background: {theme.row_hover}; }}
     QToolButton:checked, QToolButton[modeToggle="true"]:checked {{ background: {theme.accent_soft}; color: {theme.accent}; }}
 
@@ -381,8 +387,8 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QToolButton[segmentChild="true"], QToolButton[segmentChild="true"]:checked, QToolButton[segmentChild="true"]:disabled {{ background: transparent; border: none; padding: 5px 4px; }}
     QPushButton:focus, QToolButton:focus {{ border: 1px solid {theme.accent}; }}
     QTabWidget::pane {{ border: none; }}
-    QTabBar {{ background: {theme.glass}; border-radius: 12px; }}
-    QTabBar::tab {{ background: transparent; color: {theme.muted}; border: none; border-radius: 10px; padding: 7px 8px; margin: 3px; }}
+    QTabBar {{ background: {theme.glass}; border-radius: 7px; }}
+    QTabBar::tab {{ background: transparent; color: {theme.muted}; border: none; border-radius: 7px; padding: 7px 8px; margin: 3px; }}
     QTabBar::tab:selected {{ background: {theme.accent_soft}; color: {theme.accent}; font-weight: 600; }}
     QTabBar::tab:hover {{ background: {theme.row_hover}; }}
     QTabBar::close-button {{ width: 18px; height: 18px; border-radius: 9px; background: transparent; }}
@@ -391,7 +397,7 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QTabBar QToolButton::right-arrow {{ image: {icon("right")}; width: 12px; height: 12px; }}
     QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QTextBrowser {{
         background: {theme.glass_strong}; border: 1px solid {theme.input_border};
-        border-radius: 10px; padding: 6px 9px; selection-background-color: {theme.accent_soft}; selection-color: {theme.accent};
+        border-radius: 7px; padding: 6px 9px; selection-background-color: {theme.accent_soft}; selection-color: {theme.accent};
     }}
     QComboBox {{ combobox-popup: 0; padding-right: 28px; min-height: 22px; }}
     QSpinBox, QDoubleSpinBox {{ padding-right: 26px; min-height: 22px; }}
@@ -404,15 +410,15 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QComboBox QAbstractItemView {{ background: {theme.surface}; border: 1px solid {theme.input_border}; border-radius: 12px; padding: 6px; outline: none; selection-background-color: {theme.accent_soft}; selection-color: {theme.accent}; }}
     QComboBox QAbstractItemView::item {{ padding: 7px 10px; min-height: 20px; border-radius: 8px; }}
     QComboBox QAbstractItemView::item:selected {{ background: {theme.accent_soft}; color: {theme.accent}; }}
-    QListView, QTreeView, QTableView {{ background: {theme.glass_strong}; border: 1px solid {theme.input_border}; border-radius: 12px; padding: 4px; outline: none; alternate-background-color: {theme.row_hover}; gridline-color: {theme.input_border}; }}
-    QListView::item, QTreeView::item {{ border: none; padding: 4px; border-radius: 8px; }}
+    QListView, QTreeView, QTableView {{ background: {theme.glass_strong}; border: 1px solid {theme.input_border}; border-radius: 10px; padding: 4px; outline: none; alternate-background-color: {theme.row_hover}; gridline-color: {theme.input_border}; }}
+    QListView::item, QTreeView::item {{ border: none; padding: 4px; border-radius: 4px; }}
     QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {{ background: {theme.row_hover}; }}
     QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {{ background: {theme.accent_soft}; color: {theme.accent}; }}
     QTreeView::branch, QTreeView::branch:selected, QTreeView::branch:hover {{ background: transparent; border-image: none; }}
     QTreeView::branch:has-children:closed {{ image: {icon("right")}; }}
     QTreeView::branch:has-children:open {{ image: {icon("down")}; }}
     #WorkflowStepRail {{ background: transparent; border: none; padding: 0; font-size: 12px; font-weight: 600; }}
-    #WorkflowStepRail::item {{ padding: 2px 4px; margin: 1px 0; border-radius: 9px; }}
+    #WorkflowStepRail::item {{ padding: 2px 4px; margin: 1px 0; border-radius: 7px; }}
     QHeaderView {{ background: transparent; }}
     QHeaderView::section {{ background: {theme.surface}; color: {theme.muted}; border: none; border-bottom: 1px solid {theme.input_border}; padding: 6px; }}
     QHeaderView::up-arrow {{ image: {icon("up")}; width: 12px; height: 12px; }}
@@ -445,9 +451,9 @@ def _stylesheet(theme: ThemeSpec) -> str:
     QSlider::handle:horizontal {{ width: 16px; margin: -6px 0; border-radius: 8px; background: {theme.surface}; border: 1px solid {theme.accent}; }}
     QSlider::groove:vertical {{ width: 5px; border-radius: 2px; background: {theme.input_border}; }}
     QSlider::handle:vertical {{ height: 16px; margin: 0 -6px; border-radius: 8px; background: {theme.surface}; border: 1px solid {theme.accent}; }}
-    QProgressBar {{ background: {theme.accent_soft}; border: none; border-radius: 6px; text-align: center; min-height: 12px; }}
-    QProgressBar::chunk {{ background: {theme.accent}; border-radius: 6px; }}
-    QGroupBox {{ background: {theme.glass}; border: 1px solid {theme.input_border}; border-radius: 16px; margin-top: 16px; padding: 12px; }}
+    QProgressBar {{ background: {theme.input_border}; border: none; border-radius: 3px; text-align: center; min-height: 5px; }}
+    QProgressBar::chunk {{ background: {theme.accent}; border-radius: 3px; }}
+    QGroupBox {{ background: {theme.glass}; border: 1px solid {theme.input_border}; border-radius: 10px; margin-top: 16px; padding: 12px; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 5px; color: {theme.muted}; }}
     QSplitter::handle {{ background: transparent; border: none; border-radius: 3px; }}
     QSplitter::handle:hover {{ background: {theme.accent_soft}; }}
